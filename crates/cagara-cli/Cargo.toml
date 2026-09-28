@@ -1,0 +1,13 @@
+[package]
+name = "cagara-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cagara"
+path = "src/main.rs"
+
+[dependencies]
+cagara-hir.workspace = true
+cagara-sql.workspace = true

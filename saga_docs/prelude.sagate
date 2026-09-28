@@ -1,0 +1,100 @@
+# Standard library prelude: the public language surface.
+#
+# Every relational operation is an ordinary Sagate definition over the core
+# prelude's foreign declarations, so user code can alias, partially apply,
+# or override them like any other function. Scalar operators are overloaded
+# SQL template functions; numeric operations intentionally keep int and
+# float signatures separate.
+
+# SQL functions use positional `$1`, `$2`, ... argument placeholders. Their
+# expression syntax is parsed into SQL ASTs and rendered for the selected dialect.
+lower : string -> string = sql "LOWER($1)"
+upper : string -> string = sql "UPPER($1)"
+length : string -> int = sql "LENGTH($1)"
+
+table : string -> string -> query r = schemaName => tableName => __table schemaName tableName
+
+_+_ : int -> int -> int = sql "$1 + $2"
+_+_ : float -> float -> float = sql "$1 + $2"
+_-_ : int -> int -> int = sql "$1 - $2"
+_-_ : float -> float -> float = sql "$1 - $2"
+_*_ : int -> int -> int = sql "$1 * $2"
+_/_ : float -> float -> float = sql "$1 / $2"
+_%_ : int -> int -> int = sql "$1 % $2"
+_==_ : int -> int -> bool = sql "$1 = $2"
+_==_ : float -> float -> bool = sql "$1 = $2"
+_==_ : string -> string -> bool = sql "$1 = $2"
+_==_ : bool -> bool -> bool = sql "$1 = $2"
+_==_ : date -> date -> bool = sql "$1 = $2"
+_==_ : timestamp -> timestamp -> bool = sql "$1 = $2"
+_!=_ : int -> int -> bool = sql "$1 <> $2"
+_!=_ : float -> float -> bool = sql "$1 <> $2"
+_!=_ : string -> string -> bool = sql "$1 <> $2"
+_!=_ : bool -> bool -> bool = sql "$1 <> $2"
+_!=_ : date -> date -> bool = sql "$1 <> $2"
+_!=_ : timestamp -> timestamp -> bool = sql "$1 <> $2"
+_<_ : int -> int -> bool = sql "$1 < $2"
+_<_ : float -> float -> bool = sql "$1 < $2"
+_<_ : string -> string -> bool = sql "$1 < $2"
+_<_ : date -> date -> bool = sql "$1 < $2"
+_<_ : timestamp -> timestamp -> bool = sql "$1 < $2"
+_<=_ : int -> int -> bool = sql "$1 <= $2"
+_<=_ : float -> float -> bool = sql "$1 <= $2"
+_<=_ : string -> string -> bool = sql "$1 <= $2"
+_<=_ : date -> date -> bool = sql "$1 <= $2"
+_<=_ : timestamp -> timestamp -> bool = sql "$1 <= $2"
+_>_ : int -> int -> bool = sql "$1 > $2"
+_>_ : float -> float -> bool = sql "$1 > $2"
+_>_ : string -> string -> bool = sql "$1 > $2"
+_>_ : date -> date -> bool = sql "$1 > $2"
+_>_ : timestamp -> timestamp -> bool = sql "$1 > $2"
+_>=_ : int -> int -> bool = sql "$1 >= $2"
+_>=_ : float -> float -> bool = sql "$1 >= $2"
+_>=_ : string -> string -> bool = sql "$1 >= $2"
+_>=_ : date -> date -> bool = sql "$1 >= $2"
+_>=_ : timestamp -> timestamp -> bool = sql "$1 >= $2"
+_&&_ : bool -> bool -> bool = sql "$1 AND $2"
+_||_ : bool -> bool -> bool = sql "$1 OR $2"
+
+_&_ = value => function => function value
+_$_ = function => value => function value
+_>>>_ = first => second => value => second (first value)
+_<<<_ = second => first => value => second (first value)
+compose = _>>>_
+flip = function => first => second => function second first
+constant = value => ignored => value
+
+where : (row r -> bool) -> query r -> query r = predicate => relation => __where predicate relation
+select : (row r -> row s) -> query r -> query s = projection => relation => __select projection relation
+mapKey : keymapper m -> query r -> query (mapkey m r) = mapper => relation => __mapKey mapper relation
+mapValue : valuemapper m -> query r -> query (mapvalue m r) = mapper => relation => __mapValue mapper relation
+merge : query r -> query s -> query (merge r s) = older => newer => __merge older newer
+agg : (row r -> row s) -> query r -> query s = projection => relation => __agg projection relation
+inner = right_relation => predicate => left_relation => __joinInner right_relation predicate left_relation
+left = right_relation => predicate => left_relation => __joinLeft right_relation predicate left_relation
+right = right_relation => predicate => left_relation => __joinRight right_relation predicate left_relation
+full = right_relation => predicate => left_relation => __joinFull right_relation predicate left_relation
+
+# Sort keys tag each key value with its direction; the key function maps a
+# row to that tagged list.
+asc : a -> direction = value => __asc value
+desc : a -> direction = value => __desc value
+order : (row r -> list direction) -> query r -> query r = keys => relation => __order keys relation
+limit : int -> query r -> query r = n => relation => __limit n relation
+
+group : a -> group a = field => __group field
+count : a -> agg int = field => __count field
+sum : a -> agg a = field => __sum field
+avg : a -> agg float = field => __avg field
+min : a -> agg a = field => __min field
+max : a -> agg a = field => __max field
+
+identity : a -> a = x => x
+id = identity
+snake : keymapper = __snake
+kebab : keymapper = __kebab
+camel : keymapper = __camel
+prefix : string -> keymapper = value => __prefix value
+suffix : string -> keymapper = value => __suffix value
+maybe : valuemapper = __maybe
+list : valuemapper = __list

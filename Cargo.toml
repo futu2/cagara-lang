@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+rowan = "=0.17.0"
+salsa = "=0.28.5"
+sqlglot-rust = "=0.10.30"
+cagara-syntax = { path = "crates/cagara-syntax" }
+cagara-hir = { path = "crates/cagara-hir" }
+cagara-sql = { path = "crates/cagara-sql" }

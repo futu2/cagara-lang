@@ -1,0 +1,37 @@
+# Filtering, projection, ordering and paging.
+# The prelude is imported automatically.
+
+users : query { id = int, name = string, age = int, active = bool } =
+  table "public" "users"
+
+orders : query { id = int, user_id = int, amount = float, status = string, created_at = date } =
+  table "public" "orders"
+
+adults = users
+  & where (.age >= 18 && .active)
+  & select { id = .id, label = upper .name, next_age = .age + 1 }
+  & order [asc .label]
+  & limit 10
+
+# Aggregation: filtering after `agg` becomes an outer query.
+revenue = orders
+  & where (.status == "paid")
+  & agg { user_id = group .user_id, revenue = sum .amount, n = count }
+  & where (.n >= 5)
+  & order [desc .revenue]
+
+# Window functions: latest three orders per user.
+spec = { partition = [.user_id], order = [desc .created_at] }
+
+latest = orders
+  & select { id = .id, user_id = .user_id, rn = rowNumber spec }
+  & where (.rn <= 3)
+
+running = orders
+  & select { id = .id, total = sumOver { partition = [.user_id], order = [asc .created_at], frame = runningFrame } .amount }
+
+# Joins name the side each column comes from.
+order_names = orders
+  & rename { id = "order_id" }
+  & inner users (.<user_id == .>id)
+  & select { order_id = .order_id, name = .name, amount = .amount }

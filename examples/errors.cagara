@@ -1,0 +1,7 @@
+# Each query here is rejected at compile time.
+
+users : query { id = int, name = string, age = int } = table "public" "users"
+
+nested = users & agg { t = sum (sum .age) }
+ungrouped = users & agg { n = count, name = .name }
+missing = users & where (.salary > 1)

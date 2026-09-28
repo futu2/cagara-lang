@@ -1,0 +1,6 @@
+# Module import with an alias; pick / omit / rename are all keyMap.
+import "schema.cagara" as s
+
+public_users = s.users
+  & omit ["password_hash"]
+  & rename { name = "display_name" }

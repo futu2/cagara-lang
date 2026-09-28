@@ -1,0 +1,107 @@
+# Cagara prelude — imported into every module automatically.
+#
+# The Rust core provides only the `__` primitives (relational operators, key
+# mappers, window frames) and the `sql "..."` template mechanism. Everything
+# below is ordinary Cagara. Type signatures on `sql` templates are required:
+# they give the arity and whether the result is a scalar (`expr`), an
+# aggregate (`agg`), or a window function (`win`). Other signatures are
+# documentation until the type checker lands.
+
+# ── combinators ────────────────────────────────────────────────────────────
+
+_&_ = x => f => f x
+_$_ = f => x => f x
+_>>>_ = f => g => x => g (f x)
+id = x => x
+
+# ── query pipeline ─────────────────────────────────────────────────────────
+
+table = __table
+where = __where
+select = __select
+agg = __agg
+order = __order
+limit = __limit
+offset = __offset
+asc = __asc
+desc = __desc
+group = __group
+
+# `left & inner right (.<k == .>k)`
+inner = __join "inner"
+leftJoin = __join "left"
+rightJoin = __join "right"
+fullJoin = __join "full"
+
+# ── key mapping: pick / omit / rename are all keyMap ──────────────────────
+
+keyMap = __keyMap
+only = __only
+drop = __drop
+replace = __replace
+prefix = __prefix
+suffix = __suffix
+
+pick = keys => keyMap (only keys)
+omit = keys => keyMap (drop keys)
+rename = mapping => keyMap (replace mapping)
+
+# ── aggregates (depth 1: arguments must be row expressions) ───────────────
+
+count : agg r int = sql "COUNT(*)"
+countOf : expr r a -> agg r int = sql "COUNT($1)"
+countDistinct : expr r a -> agg r int = sql "COUNT(DISTINCT $1)"
+sum : expr r a -> agg r a = sql "SUM($1)"
+avg : expr r a -> agg r float = sql "AVG($1)"
+min : expr r a -> agg r a = sql "MIN($1)"
+max : expr r a -> agg r a = sql "MAX($1)"
+
+# ── window functions (depth 1) ────────────────────────────────────────────
+# spec = { partition = [..], order = [asc .x, desc .y], frame = .. }
+
+rowNumber : winspec r -> win r int = sql "ROW_NUMBER()"
+rank : winspec r -> win r int = sql "RANK()"
+denseRank : winspec r -> win r int = sql "DENSE_RANK()"
+lag : winspec r -> expr r a -> win r a = sql "LAG($1)"
+lead : winspec r -> expr r a -> win r a = sql "LEAD($1)"
+sumOver : winspec r -> expr r a -> win r a = sql "SUM($1)"
+avgOver : winspec r -> expr r a -> win r float = sql "AVG($1)"
+countOver : winspec r -> win r int = sql "COUNT(*)"
+
+rows = __rows
+unboundedPreceding = __unboundedPreceding
+unboundedFollowing = __unboundedFollowing
+currentRow = __currentRow
+preceding = __preceding
+following = __following
+wholePartition = rows unboundedPreceding unboundedFollowing
+runningFrame = rows unboundedPreceding currentRow
+
+# ── scalar operators and functions ────────────────────────────────────────
+
+_==_ : expr r a -> expr r a -> expr r bool = sql "$1 = $2"
+_!=_ : expr r a -> expr r a -> expr r bool = sql "$1 <> $2"
+_<_ : expr r a -> expr r a -> expr r bool = sql "$1 < $2"
+_<=_ : expr r a -> expr r a -> expr r bool = sql "$1 <= $2"
+_>_ : expr r a -> expr r a -> expr r bool = sql "$1 > $2"
+_>=_ : expr r a -> expr r a -> expr r bool = sql "$1 >= $2"
+_&&_ : expr r bool -> expr r bool -> expr r bool = sql "$1 AND $2"
+_||_ : expr r bool -> expr r bool -> expr r bool = sql "$1 OR $2"
+not : expr r bool -> expr r bool = sql "NOT $1"
+
+_+_ : expr r a -> expr r a -> expr r a = sql "$1 + $2"
+_-_ : expr r a -> expr r a -> expr r a = sql "$1 - $2"
+_*_ : expr r a -> expr r a -> expr r a = sql "$1 * $2"
+_/_ : expr r a -> expr r a -> expr r a = sql "$1 / $2"
+_%_ : expr r int -> expr r int -> expr r int = sql "$1 % $2"
+negate : expr r a -> expr r a = sql "-$1"
+
+concat : expr r string -> expr r string -> expr r string = sql "$1 || $2"
+upper : expr r string -> expr r string = sql "UPPER($1)"
+lower : expr r string -> expr r string = sql "LOWER($1)"
+trim : expr r string -> expr r string = sql "TRIM($1)"
+length : expr r string -> expr r int = sql "LENGTH($1)"
+like : expr r string -> expr r string -> expr r bool = sql "$1 LIKE $2"
+coalesce : expr r (maybe a) -> expr r a -> expr r a = sql "COALESCE($1, $2)"
+isNull : expr r (maybe a) -> expr r bool = sql "$1 IS NULL"
+isNotNull : expr r (maybe a) -> expr r bool = sql "$1 IS NOT NULL"

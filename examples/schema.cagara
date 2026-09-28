@@ -1,0 +1,4 @@
+# Shared table definitions, imported by public.cagara.
+
+users : query { id = int, name = string, password_hash = string } =
+  table "public" "users"

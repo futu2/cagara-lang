@@ -530,8 +530,10 @@ struct Checker<'w> {
     /// Input row of the `PROBE_FIELD` column being checked.
     probe: Option<Ty>,
     probe_fields: Option<Vec<(String, String)>>,
-    /// Name uses of the definition being checked, with their instance types.
-    uses: Vec<(Span, Ty)>,
+    /// Names, column references, and literals of the definition being
+    /// checked, with their types there. A literal also keeps its own type,
+    /// printed if the type it was lifted to stays open.
+    uses: Vec<(Span, Ty, Option<&'static str>)>,
     use_types: HashMap<(usize, u32, u32), String>,
 }
 fn row_or_tail(fs: Vec<(String, Ty)>, tail: Ty) -> Ty {
@@ -811,8 +813,11 @@ impl<'w> Checker<'w> {
         let saved_uses = std::mem::take(&mut self.uses);
         let r = self.check_def(i);
         // Use types as far as checking got, even if it failed later on.
-        for (sp, t) in std::mem::replace(&mut self.uses, saved_uses) {
-            let shown = self.show(&t);
+        for (sp, t, lit) in std::mem::replace(&mut self.uses, saved_uses) {
+            let shown = match (lit, self.resolve(&t)) {
+                (Some(l), Ty::Var(_)) => l.to_string(),
+                _ => self.show(&t),
+            };
             self.use_types.insert((m, sp.start, sp.end), shown);
         }
         if let Some(p) = self.probe.take() {
@@ -1312,15 +1317,14 @@ impl<'w> Checker<'w> {
                     Some((_, t)) => t.clone(),
                     None => self.lookup(n, e.id, sp).map_err(at(sp))?,
                 };
-                self.uses.push((sp, t.clone()));
+                self.uses.push((sp, t.clone(), None));
                 Ok(t)
             }
-            ExprKind::Lit(l) => Ok(con(match l {
-                ast::Lit::Int(_) => "int",
-                ast::Lit::Float(_) => "float",
-                ast::Lit::Str(_) => "string",
-                ast::Lit::Bool(_) => "bool",
-            })),
+            ExprKind::Lit(l) => {
+                let t = con(lit_name(l));
+                self.uses.push((sp, t.clone(), None));
+                Ok(t)
+            }
             ExprKind::Field(side, n) => {
                 let phase = self.fresh_col_phase();
                 let (tail, a) = (self.fresh(), self.fresh());
@@ -1336,6 +1340,8 @@ impl<'w> Checker<'w> {
                     Side::Left => Ty::Con("join", vec![r, self.fresh()]),
                     Side::Right => Ty::Con("join", vec![self.fresh(), r]),
                 };
+                // Hover shows the column's value type, not the whole row.
+                self.uses.push((sp, a.clone(), None));
                 Ok(expr(phase, input, a))
             }
             ExprKind::Proj(base, f) => {
@@ -1358,7 +1364,7 @@ impl<'w> Checker<'w> {
                                     })
                                 }
                             };
-                            self.uses.push((sp, t.clone()));
+                            self.uses.push((sp, t.clone(), None));
                             return Ok(t);
                         }
                     }
@@ -1379,6 +1385,15 @@ impl<'w> Checker<'w> {
                     ft = match self.resolve(&ft) {
                         Ty::Fun(p, r) => {
                             self.coerce(&at_, &p).map_err(at(arg.span))?;
+                            if let ExprKind::Lit(l) = &arg.kind {
+                                // A lifted literal (`18` in `.age >= 18`) has
+                                // the value type it was lifted to.
+                                let v = match self.resolve(&p) {
+                                    Ty::Con("expr", a) => a[2].clone(),
+                                    o => o,
+                                };
+                                self.uses.push((arg.span, v, Some(lit_name(l))));
+                            }
                             *r
                         }
                         Ty::Var(_) => {
@@ -2034,6 +2049,15 @@ impl<'w> Checker<'w> {
             ..Printer::default()
         };
         p.ty(&s.ty, 0)
+    }
+}
+
+fn lit_name(l: &ast::Lit) -> &'static str {
+    match l {
+        ast::Lit::Int(_) => "int",
+        ast::Lit::Float(_) => "float",
+        ast::Lit::Str(_) => "string",
+        ast::Lit::Bool(_) => "bool",
     }
 }
 

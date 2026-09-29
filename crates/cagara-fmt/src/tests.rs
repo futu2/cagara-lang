@@ -190,3 +190,19 @@ fn crlf_input() {
 fn line_col_counts_chars() {
     assert_eq!(line_col("ab\ncé d", 7), (2, 4));
 }
+
+#[test]
+fn types_break_at_the_width() {
+    assert_eq!(format_type("f", "int -> int", 80), "f : int -> int");
+    let t = "{ n = string, m = int } -> query { id = int, name = string, email = string } -> query { n = string }";
+    assert_eq!(
+        format_type("select", t, 40),
+        "select : { n = string, m = int }\n  -> query {\n    id = int,\n    name = string,\n    email = string\n  }\n  -> query { n = string }"
+    );
+    // Operator names are kept; what does not parse stays on one line.
+    assert!(
+        format_type("_+_", "expr r int -> expr r int -> expr r int", 20)
+            .starts_with("_+_ : expr r int\n")
+    );
+    assert_eq!(format_type("x", "(type error)", 80), "x : (type error)");
+}

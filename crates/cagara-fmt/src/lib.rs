@@ -62,6 +62,42 @@ pub fn format(src: &str) -> Result<Formatted, FmtError> {
     })
 }
 
+/// `name : ty` laid out like a signature within `width`: flat if it fits,
+/// else records one field per line and `->` chains one arrow per line.
+/// `ty` is printed type syntax (as the checker shows it); anything that
+/// does not parse as a type is returned on one line, unchanged.
+pub fn format_type(name: &str, ty: &str, width: usize) -> String {
+    let flat = format!("{name} : {ty}");
+    // Parse under a placeholder name: operators (`_+_`) are not identifiers.
+    let src = format!("x : {ty} = x\n");
+    let parsed = parse(&src);
+    if !parsed.errors.is_empty() {
+        return flat;
+    }
+    let f = Fmt {
+        errors: &parsed.errors,
+        skip_leading: Cell::new(None),
+    };
+    let root = parsed.syntax();
+    let ann = root
+        .descendants()
+        .find(|n| n.kind() == K::Definition)
+        .and_then(|d| d.children().next())
+        .and_then(|a| a.children().next());
+    let Some(Ok(doc)) = ann.map(|t| f.ty(&t)) else {
+        return flat;
+    };
+    let out = doc::print(&concat(vec![text(format!("{name} : ")), doc]), width);
+    let out = out.trim_end().to_string();
+    // Only whitespace may change.
+    let squash = |s: &str| s.split_whitespace().collect::<String>();
+    if squash(&out) == squash(&flat) {
+        out
+    } else {
+        flat
+    }
+}
+
 /// 1-based line and column (in chars) of a byte offset.
 pub fn line_col(src: &str, offset: usize) -> (usize, usize) {
     let before = src.get(..offset.min(src.len())).unwrap_or(src);

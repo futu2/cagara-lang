@@ -231,42 +231,95 @@ fn root_range(ws: &Workspace, start: usize, end: usize) -> Range {
 /// when that differs.
 pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
     let text = &ws.modules[ws.root].text;
+    let offset = offset_at(text, pos)?;
     let occs = occurrences(ws);
-    let o = occ_at(&occs, offset_at(text, pos)?)?;
+    let Some(o) = occ_at(&occs, offset) else {
+        return atom_hover(ws, offset);
+    };
     let name = &text[o.start..o.end];
     let tc = check(ws);
     let here = o.site.and_then(|sp| tc.use_type(ws.root, sp));
     let Target::Global(b) = &o.target else {
-        let head = here.map_or_else(|| name.to_string(), |t| format!("{name} : {t}"));
+        let head = here.map_or_else(|| name.to_string(), |t| sig(name, t));
         return Some(format!("```cagara\n{head}\n```\nlambda parameter"));
     };
-    let (lines, def_name) = match b {
-        Binding::Def(m, i) => (
-            vec![def_line(&tc, ws, *m, *i)],
-            ws.modules[*m].module.defs[*i].name.as_str(),
-        ),
-        Binding::Overloads(m, is) => {
-            let lines = is.iter().map(|&i| def_line(&tc, ws, *m, i)).collect();
-            (
-                lines,
-                is.first()
-                    .map_or(name, |&i| ws.modules[*m].module.defs[i].name.as_str()),
-            )
-        }
+    // (name, type) of the definition, or of every candidate.
+    let def_ty = |m: usize, i: usize| {
+        let d = &ws.modules[m].module.defs[i];
+        (d.name.as_str(), tc.type_of(m, i).unwrap_or("(type error)"))
+    };
+    let defs: Vec<(&str, &str)> = match b {
+        Binding::Def(m, i) => vec![def_ty(*m, *i)],
+        Binding::Overloads(m, is) => is.iter().map(|&i| def_ty(*m, i)).collect(),
         Binding::Module(t) => {
             return Some(format!(
                 "```cagara\nmodule {}\n```",
                 ws.modules[*t].path.display()
             ))
         }
-        Binding::Prim(_) => (vec![format!("{name} : primitive")], name),
+        Binding::Prim(_) => vec![(name, "primitive")],
     };
-    let general = format!("```cagara\n{}\n```", lines.join("\n"));
-    match here.map(|t| format!("{def_name} : {t}")) {
-        Some(line) if lines != [line.as_str()] => Some(format!(
-            "```cagara\n{line}\n```\n---\ndefined as\n{general}"
+    let general = defs
+        .iter()
+        .map(|(n, t)| sig(n, t))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let general = format!("```cagara\n{general}\n```");
+    match here {
+        Some(t) if !(defs.len() == 1 && defs[0].1 == t) => Some(format!(
+            "```cagara\n{}\n```\n---\ndefined as\n{general}",
+            sig(defs[0].0, t)
         )),
         _ => Some(general),
+    }
+}
+
+/// Width hover signatures are laid out in; popups are narrower than files.
+const HOVER_WIDTH: usize = 72;
+
+/// `name : ty`, broken over lines like a signature when it is long.
+fn sig(name: &str, ty: &str) -> String {
+    cagara_fmt::format_type(name, ty, HOVER_WIDTH)
+}
+
+/// Hover for a column reference (`.age`, `.<id`) or a literal under the
+/// cursor: its type there. A column shows its value type; a literal, the
+/// type it was lifted to (`18` against a `float` column is `float`).
+fn atom_hover(ws: &Workspace, offset: usize) -> Option<String> {
+    let md = &ws.modules[ws.root];
+    let mut found = None;
+    for d in &md.module.defs {
+        atom_at(&md.text, &d.body, offset, &mut found);
+    }
+    let (span, (start, end)) = found?;
+    let ty = check(ws).use_type(ws.root, span)?.to_string();
+    Some(format!(
+        "```cagara\n{}\n```",
+        sig(&md.text[start..end], &ty)
+    ))
+}
+
+/// The column reference or literal whose trimmed range contains `offset`
+/// (or ends at it, as for names).
+fn atom_at(text: &str, e: &Expr, offset: usize, found: &mut Option<(Span, (usize, usize))>) {
+    match &e.kind {
+        ExprKind::Lit(_) | ExprKind::Field(..) => {
+            if let Some((s, t)) = trimmed(text, e.span) {
+                let inside = s <= offset && offset < t;
+                if inside || (offset == t && found.is_none()) {
+                    *found = Some((e.span, (s, t)));
+                }
+            }
+        }
+        ExprKind::Proj(inner, _) => atom_at(text, inner, offset, found),
+        ExprKind::App(f, args) => {
+            atom_at(text, f, offset, found);
+            args.iter().for_each(|a| atom_at(text, a, offset, found));
+        }
+        ExprKind::Lambda(_, body) => atom_at(text, body, offset, found),
+        ExprKind::Record(fs) => fs.iter().for_each(|(_, v)| atom_at(text, v, offset, found)),
+        ExprKind::List(xs) => xs.iter().for_each(|x| atom_at(text, x, offset, found)),
+        ExprKind::Name(_) | ExprKind::Sql(_) | ExprKind::Error => {}
     }
 }
 
@@ -569,12 +622,6 @@ fn item(ws: &Workspace, tc: &TypeCheck, name: &str, b: &Binding) -> CompletionIt
     }
 }
 
-/// A definition's hover line, under its own name (`_+_` for `+`).
-fn def_line(tc: &TypeCheck, ws: &Workspace, m: usize, i: usize) -> String {
-    let name = &ws.modules[m].module.defs[i].name;
-    format!("{name} : {}", tc.type_of(m, i).unwrap_or("(type error)"))
-}
-
 fn is_ident(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
@@ -730,6 +777,11 @@ mod tests {
         assert!(line.is_char_boundary(byte), "{r:?}");
     }
 
+    /// Hover text with line breaks and indentation collapsed to spaces.
+    fn one_line(h: String) -> String {
+        h.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
     #[test]
     fn hover_shows_types_and_overloads() {
         let ws = ws();
@@ -737,7 +789,7 @@ mod tests {
         let h = hover(&ws, pos(2, 19)).unwrap();
         assert!(h.contains("adult : expr { age = a | b } bool"), "{h}");
         // `sum` is an overload set in the prelude.
-        let h = hover(&ws, pos(2, 37)).unwrap();
+        let h = one_line(hover(&ws, pos(2, 37)).unwrap());
         let (here, general) = h.split_once("defined as").unwrap();
         assert!(
             here.contains("sum : expr { age = int, id = int, name = string } int -> "),
@@ -747,8 +799,9 @@ mod tests {
         // Operators hover at their symbol, under their definition name.
         let h = hover(&ws, pos(4, 15)).unwrap();
         assert!(h.contains("_+_ : "), "{h}");
-        // A column reference has no binding.
-        assert!(hover(&ws, pos(1, 10)).is_none());
+        // A column reference: its value type, open where `adult` is general.
+        let h = hover(&ws, pos(1, 10)).unwrap();
+        assert!(h.contains(".age : "), "{h}");
         // A lambda parameter shadows the table.
         let h = hover(&ws, pos(5, 19)).unwrap();
         assert!(h.contains("lambda parameter"), "{h}");
@@ -761,7 +814,7 @@ mod tests {
                    twice = x => x + x\n";
         let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
         // `select` at its use: instantiated, then the general scheme.
-        let h = hover(&ws, pos(1, 14)).unwrap();
+        let h = one_line(hover(&ws, pos(1, 14)).unwrap());
         let (here, general) = h.split_once("defined as").unwrap();
         assert!(
             here.contains("select : { n = expr { name = string, id = int } string } -> "),
@@ -781,6 +834,35 @@ mod tests {
             h.contains("x : expr ") && h.contains("lambda parameter"),
             "{h}"
         );
+    }
+
+    #[test]
+    fn hover_shows_columns_and_literals() {
+        let src = "users : query { id = int, name = string, score = float } = table \"p\" \"users\"\n\
+                   q = users & where (.score >= 18 && .name == \"a\") & select { s = .score, k = 1 }\n";
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        let at = |c| hover(&ws, pos(1, c)).unwrap_or_default();
+        // `.score` and its value type from the table.
+        assert!(at(20).contains(".score : float"), "{}", at(20));
+        // `18` lifted to the column's type.
+        assert!(at(30).contains("18 : float"), "{}", at(30));
+        assert!(at(36).contains(".name : string"), "{}", at(36));
+        assert!(at(45).contains("\"a\" : string"), "{}", at(45));
+        // A literal in a record keeps its own type.
+        assert!(at(76).contains("1 : int"), "{}", at(76));
+    }
+
+    #[test]
+    fn hover_breaks_long_types() {
+        let src = "users : query { id = int, name = string, email = string, created = timestamp, score = float } = table \"p\" \"users\"\n\
+                   q = users & where (.score >= 1)\n";
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        let h = hover(&ws, pos(1, 5)).unwrap();
+        assert!(h.lines().all(|l| l.chars().count() <= HOVER_WIDTH), "{h}");
+        assert!(h.contains("users : query {\n  id = int,\n"), "{h}");
+        // `where` at its use: one arrow per line.
+        let h = hover(&ws, pos(1, 12)).unwrap();
+        assert!(h.contains("\n  -> query {"), "{h}");
     }
 
     #[test]

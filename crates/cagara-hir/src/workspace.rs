@@ -103,19 +103,31 @@ impl Workspace {
     }
 
     pub fn open(path: &Path) -> Self {
-        let mut ws = Self::empty();
         let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         match std::fs::read_to_string(&p) {
-            Ok(text) => ws.root = ws.add(p, text),
-            Err(e) => ws.import_diags.push(Diag {
-                path: p.display().to_string(),
-                line: 1,
-                col: 1,
-                message: format!("cannot read file: {e}"),
-                source: String::new(),
-                width: 0,
-            }),
+            Ok(text) => Self::open_with(&p, text),
+            Err(e) => {
+                let mut ws = Self::empty();
+                ws.import_diags.push(Diag {
+                    path: p.display().to_string(),
+                    line: 1,
+                    col: 1,
+                    message: format!("cannot read file: {e}"),
+                    source: String::new(),
+                    width: 0,
+                });
+                ws.rebuild_diags();
+                ws
+            }
         }
+    }
+
+    /// Workspace whose root is the file `path` with the given (possibly
+    /// unsaved) contents; imports resolve relative to `path` and are read
+    /// from disk. Used by the language server.
+    pub fn open_with(path: &Path, text: String) -> Self {
+        let mut ws = Self::empty();
+        ws.root = ws.add(path.to_path_buf(), text);
         ws.rebuild_diags();
         ws
     }

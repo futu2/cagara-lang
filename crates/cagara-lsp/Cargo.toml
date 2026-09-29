@@ -1,0 +1,18 @@
+[package]
+name = "cagara-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "cagara-lsp"
+path = "src/main.rs"
+
+[dependencies]
+cagara-hir = { path = "../cagara-hir" }
+lsp-server = "=0.10.0"
+lsp-types = "=0.97.0"
+serde_json = "=1.0.151"

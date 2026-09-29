@@ -749,8 +749,48 @@ impl<'w> Checker<'w> {
                     return Err(TyErr { span: sp, msg });
                 }
             }
+        } else {
+            // A non-query definition is not evaluated, so its overloads may
+            // stay open for its users. One that no candidate can satisfy is an
+            // error already, though: without this it stays hidden until
+            // something uses the definition (`.a + "x"`). Leftover literals
+            // stay polymorphic (`.age >= 18` keeps its type), so this only
+            // reports, and never narrows, what the definition inferred.
+            for (c, sp) in self.pending.clone() {
+                if let Cons::Overload { name, module, cands, target, .. } = c {
+                    if self.unsatisfiable(&module, &cands, &target) {
+                        let shown: Vec<String> = cands.iter().map(|&i| self.cand_shown(module, i)).collect();
+                        let msg = format!(
+                            "no overload of `{}` matches {}; candidates: {}",
+                            op_name(&name),
+                            self.show(&target),
+                            shown.join(", ")
+                        );
+                        return Err(TyErr { span: sp, msg });
+                    }
+                }
+            }
         }
         Ok(t)
+    }
+
+    /// Are no candidates left for this open overload, once leftover literals
+    /// are defaulted? Leaves the checker as it found it.
+    fn unsatisfiable(&mut self, module: &usize, cands: &[usize], target: &Ty) -> bool {
+        let (trail, nvars) = (self.trail.len(), self.vars.len());
+        let saved = self.pending.clone();
+        self.default_lits();
+        let _ = self.solve();
+        let empty = self.fitting(*module, cands, target).is_empty();
+        while self.trail.len() > trail {
+            let (v, old) = self.trail.pop().expect("trail entry");
+            if (v as usize) < nvars {
+                self.vars[v as usize] = old;
+            }
+        }
+        self.vars.truncate(nvars);
+        self.pending = saved;
+        empty
     }
 
     fn default_lits(&mut self) {
@@ -958,8 +998,9 @@ impl<'w> Checker<'w> {
     }
 
     /// Fresh copy of a scheme; its deferred constraints join the pending set.
-    /// Its holes become overload uses at `site`.
-    fn instantiate(&mut self, s: &Scheme, span: Span, site: Option<u32>) -> Ty {
+    /// Its holes become overload uses at `site`. Fails when the definition
+    /// leaves more open overloads than an encoded origin can hold.
+    fn instantiate(&mut self, s: &Scheme, span: Span, site: Option<u32>) -> Result<Ty, String> {
         let mut map = HashMap::new();
         let t = self.inst(&s.ty, &mut map, &s.gens);
         for c in &s.cons {
@@ -967,12 +1008,17 @@ impl<'w> Checker<'w> {
             if let (Cons::Overload { origin, .. }, Some(site)) = (&mut c, site) {
                 if let Origin::Hole(k) = *origin {
                     // Resolved as hole `k` of the definition used at `site`.
-                    *origin = Origin::Site(encode(site, k));
+                    let encoded = encode(site, k).ok_or_else(|| {
+                        "too many open overloads: this definition is used where it would need more \
+                         than 256 unresolved overloaded names; give it a type signature"
+                            .to_string()
+                    })?;
+                    *origin = Origin::Site(encoded);
                 }
             }
             self.pending.push((c, span));
         }
-        t
+        Ok(t)
     }
 
     /// Fresh arena variables for a scheme's `Gen` variables.
@@ -1074,7 +1120,7 @@ impl<'w> Checker<'w> {
                         if let Some(Binding::Module(t)) = scope.get(n) {
                             let own = self.env.owns[t];
                             return match own.get(f).cloned() {
-                                Some(Binding::Def(dm, i)) => Ok(self.def_type(dm, i, e.id, sp)),
+                                Some(Binding::Def(dm, i)) => self.def_type(dm, i, e.id, sp).map_err(at(sp)),
                                 Some(Binding::Overloads(om, is)) => Ok(self.overload_type(f, om, &is, e.id, sp)),
                                 _ => Err(TyErr {
                                     span: sp,
@@ -1179,7 +1225,7 @@ impl<'w> Checker<'w> {
 
     fn lookup(&mut self, n: &str, site: u32, sp: Span) -> Result<Ty, String> {
         match self.env.scope.get(n).cloned() {
-            Some(Binding::Def(dm, di)) => Ok(self.def_type(dm, di, site, sp)),
+            Some(Binding::Def(dm, di)) => self.def_type(dm, di, site, sp),
             Some(Binding::Overloads(om, is)) => Ok(self.overload_type(n, om, &is, site, sp)),
             Some(Binding::Prim(p)) => Ok(self.prim_type(p, sp)),
             Some(Binding::Module(_)) => Err(format!("`{n}` is a module; refer to a definition as `{n}.name`")),
@@ -1187,10 +1233,10 @@ impl<'w> Checker<'w> {
         }
     }
 
-    fn def_type(&mut self, m: usize, i: usize, site: u32, sp: Span) -> Ty {
+    fn def_type(&mut self, m: usize, i: usize, site: u32, sp: Span) -> Result<Ty, String> {
         match self.def_scheme(m, i) {
             Some(s) => self.instantiate(&s, sp, Some(site)),
-            None => self.fresh(),
+            None => Ok(self.fresh()),
         }
     }
 
@@ -1373,7 +1419,7 @@ impl<'w> Checker<'w> {
                     }
                     [i] => {
                         let s = self.cand_scheme(*module, *i);
-                        let t = self.instantiate(&s, sp, None);
+                        let t = self.instantiate(&s, sp, None)?;
                         self.unify(&t, target)?;
                         let Origin::Site(site) = *origin else { unreachable!("holes are instantiated first") };
                         let (use_site, k) = decode(site);
@@ -1614,10 +1660,13 @@ fn op_name(n: &str) -> &str {
 }
 
 /// An overload's origin names the use site and which hole of the used
-/// definition it is (0 for a direct use of an overload set).
-fn encode(site: u32, k: usize) -> u32 {
-    assert!(k < 256 && site < (1 << 23), "too many overload holes");
-    (site << 8) | k as u32 | (1 << 31)
+/// definition it is (0 for a direct use of an overload set). `site` and the
+/// hole index share one `u32`, so both are bounded.
+fn encode(site: u32, k: usize) -> Option<u32> {
+    if k >= 256 || site >= (1 << 23) {
+        return None;
+    }
+    Some((site << 8) | k as u32 | (1 << 31))
 }
 
 fn decode(origin: u32) -> (u32, usize) {

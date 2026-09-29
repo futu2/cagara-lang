@@ -7,7 +7,3 @@ license.workspace = true
 [dependencies]
 salsa.workspace = true
 cagara-syntax.workspace = true
-rustc-hash = "2.1"
-
-[dev-dependencies]
-insta = { version = "1.41", features = ["yaml"] }

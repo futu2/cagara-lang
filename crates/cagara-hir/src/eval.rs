@@ -17,11 +17,19 @@ pub struct Evaluator<'w> {
     tc: &'w TypeCheck,
     cache: HashMap<Inst, Value>,
     active: Vec<(usize, usize)>,
+    /// Application depth, so a self-applying closure (`f = x => f x`) is
+    /// rejected instead of recursing until the stack overflows.
+    depth: usize,
 }
 
 /// The pipe and its stage shorthands: a query built by `q op x` is located
 /// at `x` (the stage), not the whole pipeline.
 const PIPES: &[&str] = &["_&_", "_&=_", "_&?_", "_&*_", "_&._", "_&-_"];
+
+/// Deepest application nesting. `active` already catches recursion between
+/// definitions; this catches a definition that applies *itself* as a value
+/// (`f = x => f x`), which is not a definition cycle but still never ends.
+const MAX_DEPTH: usize = 256;
 
 /// Attach a location to an error that does not have one yet.
 fn at<T>(r: EResult<T>, module: usize, span: Span) -> EResult<T> {
@@ -36,7 +44,7 @@ fn at<T>(r: EResult<T>, module: usize, span: Span) -> EResult<T> {
 
 impl<'w> Evaluator<'w> {
     pub fn new(ws: &'w Workspace, tc: &'w TypeCheck) -> Self {
-        Evaluator { ws, tc, cache: HashMap::new(), active: Vec::new() }
+        Evaluator { ws, tc, cache: HashMap::new(), active: Vec::new(), depth: 0 }
     }
 
     /// Value of a definition with no open overloads.
@@ -196,8 +204,16 @@ impl<'w> Evaluator<'w> {
     pub fn apply(&mut self, f: Value, x: Value) -> EResult<Value> {
         match f {
             Value::Closure(c) => {
+                if self.depth >= MAX_DEPTH {
+                    let d = &self.ws.modules[c.module].module.defs[c.inst.def.1];
+                    let msg = format!("`{}` applies itself without terminating; recursion is not supported", d.name);
+                    return at(err(msg), c.module, c.body.span);
+                }
+                self.depth += 1;
                 let env = c.env.bind(c.param.clone(), x);
-                self.eval(c.module, &c.inst, &env, &c.body)
+                let r = self.eval(c.module, &c.inst, &env, &c.body);
+                self.depth -= 1;
+                r
             }
             Value::Prim(p, mut args) => {
                 args.push(x);
@@ -344,4 +360,59 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::root_queries_checked;
+    use crate::workspace::Workspace;
+
+    /// Diagnostics the whole pipeline produces for a root-only source file.
+    fn errors(src: &str) -> Vec<String> {
+        let ws = Workspace::from_source(src);
+        let tc = crate::check::check(&ws);
+        let mut out: Vec<String> = ws.diags.iter().map(|d| d.message.clone()).collect();
+        out.extend(tc.errors.iter().map(|e| e.diag.message.clone()));
+        out.extend(root_queries_checked(&ws, &tc).into_iter().filter_map(|(_, r)| r.err()).map(|d| d.message));
+        out
+    }
+
+    #[test]
+    fn self_application_is_reported_instead_of_overflowing() {
+        // `f` returns a closure, so the definition cycle check does not fire:
+        // each application re-enters `f` for ever. This used to overflow the
+        // stack (and take the language server down with it).
+        let e = errors("f = x => f x\nq = f 1\n");
+        assert!(e.iter().any(|m| m.contains("applies itself")), "{e:?}");
+    }
+
+    #[test]
+    fn mutual_application_is_reported_too() {
+        let e = errors("f = x => g x\ng = x => f x\nq = f 1\n");
+        assert!(!e.is_empty(), "expected a recursion error");
+    }
+
+    #[test]
+    fn deep_but_finite_helpers_still_evaluate() {
+        // A chain of ordinary helpers is not recursion.
+        let mut src = String::from("id = x => x\n");
+        for i in 0..64 {
+            src.push_str(&format!("h{i} = x => id x\n"));
+        }
+        src.push_str("q = h0 1\n");
+        assert!(errors(&src).is_empty(), "{:?}", errors(&src));
+    }
+
+    #[test]
+    fn too_many_open_overloads_is_a_diagnostic_not_a_panic() {
+        // A definition leaving more open overloads than an encoded origin can
+        // hold used to `panic!`. 257 is one past the limit.
+        let fields: Vec<String> = (0..257).map(|i| format!("f{i} = x + x")).collect();
+        let src = format!(
+            "h = x => {{ {} }}\nt : query {{ a = int }} = table \"p\" \"t\"\nr = h 1\nq = t & select {{ v = .a }}\n",
+            fields.join(", ")
+        );
+        let e = errors(&src);
+        assert!(e.iter().any(|m| m.contains("too many open overloads")), "{e:?}");
+    }
 }

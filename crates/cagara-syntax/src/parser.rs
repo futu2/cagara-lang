@@ -30,6 +30,7 @@ pub fn parse(input: &str) -> Parse {
         b: GreenNodeBuilder::new(),
         errors: Vec::new(),
         end: input.len(),
+        depth: 0,
     };
     p.file();
     Parse {
@@ -44,7 +45,14 @@ struct Parser<'a> {
     b: GreenNodeBuilder<'static>,
     errors: Vec<ParseError>,
     end: usize,
+    /// Nesting depth of `expr`, so pathological input is rejected instead of
+    /// overflowing the stack.
+    depth: usize,
 }
+
+/// Deepest expression nesting accepted. Well below what overflows the stack
+/// on a default 8 MiB thread, and far beyond any hand-written query.
+const MAX_DEPTH: usize = 256;
 
 impl<'a> Parser<'a> {
     // ── token cursor ─────────────────────────────────────────
@@ -268,6 +276,15 @@ impl<'a> Parser<'a> {
     }
 
     fn expr(&mut self) {
+        // Bail out on runaway nesting: report once, then consume to the next
+        // item boundary so the rest of the file still parses.
+        if self.depth >= MAX_DEPTH {
+            if !self.at_boundary() && self.depth == MAX_DEPTH {
+                self.recover("expression is nested too deeply");
+            }
+            return;
+        }
+        self.depth += 1;
         if self.at_lambda() {
             self.start(K::Lambda);
             self.bump(); // param
@@ -277,12 +294,17 @@ impl<'a> Parser<'a> {
         } else {
             self.bin(0);
         }
+        self.depth -= 1;
     }
 
     /// Pratt loop over the operator table in `SyntaxKind::infix`.
     fn bin(&mut self, min_bp: u8) {
         let cp = self.checkpoint();
         self.unary();
+        // A left-associative chain (`1 + 1 + 1 + ...`) stays at one level of
+        // parser recursion but still deepens the AST, so count its length
+        // against the same budget.
+        let mut chain = 0usize;
         loop {
             if self.at_boundary() {
                 break;
@@ -292,12 +314,19 @@ impl<'a> Parser<'a> {
             if l_bp < min_bp {
                 break;
             }
+            chain += 1;
+            if self.depth + chain >= MAX_DEPTH {
+                self.recover("expression is too long");
+                break;
+            }
             self.bump();
             if self.at_lambda() {
                 // allow `q & x => ...` style right operands
                 self.expr();
             } else {
+                self.depth += 1;
                 self.bin(r_bp);
+                self.depth -= 1;
             }
             self.wrap(cp, K::BinExpr);
         }
@@ -305,10 +334,18 @@ impl<'a> Parser<'a> {
 
     fn unary(&mut self) {
         if self.at(Token::Minus) {
+            if self.depth >= MAX_DEPTH {
+                if !self.at_boundary() && self.depth == MAX_DEPTH {
+                    self.recover("expression is nested too deeply");
+                }
+                return;
+            }
+            self.depth += 1;
             self.start(K::NegExpr);
             self.bump();
             self.unary();
             self.finish();
+            self.depth -= 1;
         } else {
             self.app();
         }
@@ -563,5 +600,32 @@ mod tests {
             "(BinExpr (BinExpr (NameRef a) (BinExpr (NameRef b) (Literal 0))) (Literal 1))"
         );
         assert_eq!(body("x = f a ?? 0"), "(BinExpr (App (NameRef f) (NameRef a)) (Literal 0))");
+    }
+
+    #[test]
+    fn runaway_nesting_is_a_syntax_error_not_a_crash() {
+        // Each of these used to overflow the stack while parsing or checking.
+        let deep_parens = format!("x = {}1{}\n", "(".repeat(4000), ")".repeat(4000));
+        let deep_neg = format!("x = {}1\n", "-".repeat(4000));
+        let long_chain = format!("x = 1{}\n", " + 1".repeat(4000));
+        for src in [deep_parens, deep_neg, long_chain] {
+            let p = parse(&src);
+            assert!(!p.errors.is_empty(), "expected a depth error");
+            assert!(
+                p.errors.iter().any(|e| e.message.contains("too ")),
+                "{:?}",
+                p.errors
+            );
+            // The tree stays lossless, so the editor can still work on it.
+            assert_eq!(p.syntax().text().to_string(), src);
+        }
+    }
+
+    #[test]
+    fn deeply_nested_but_reasonable_input_still_parses() {
+        // Well inside the limit, and far deeper than any real query.
+        let src = format!("x = {}1{}\n", "(".repeat(100), ")".repeat(100));
+        let p = parse(&src);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
     }
 }

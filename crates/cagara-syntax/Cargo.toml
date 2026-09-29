@@ -9,6 +9,3 @@ rowan.workspace = true
 logos = "0.15.1"
 num-derive = "0.4"
 num-traits = "0.2"
-
-[dev-dependencies]
-insta = { version = "1.41", features = ["yaml"] }

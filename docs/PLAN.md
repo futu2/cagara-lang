@@ -75,9 +75,11 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 79 tests, no clippy warnings):
+Done and tested (`cargo test --workspace`: 87 tests, no clippy warnings):
 
-- Lexer, parser, AST lowering (15 tests), including recovery and losslessness.
+- Lexer, parser, AST lowering (21 tests), including recovery, losslessness,
+  and a nesting / chain-length limit that reports a syntax error instead of
+  overflowing the stack on pathological input.
 - Salsa parse query with re-parse on edit (3 tests).
 - Per-module type checking as a salsa query (`module_check` over a
   `ModuleInput`): type schemes are self-contained (scheme-local variables
@@ -107,7 +109,7 @@ Done and tested (`cargo test --workspace`: 79 tests, no clippy warnings):
   open predicate outside a query only knows the columns used beside it. Prelude definitions have no
   location. Imported files are read from disk, and edits to them are not
   watched.
-- Type checker (23 tests): HM with let-polymorphism for top-level definitions,
+- Type checker (24 tests): HM with let-polymorphism for top-level definitions,
   monomorphic lambdas, Rémy-style rows, rigid (checked) signatures, constant
   lifting into `expr` with deferred int→float / string→date / timestamp
   widening,
@@ -143,6 +145,12 @@ Done and tested (`cargo test --workspace`: 79 tests, no clippy warnings):
 - Evaluator, prelude, imports with aliases, cycle and duplicate detection.
 - IR validation: missing columns, join sides, key-mapper collisions, nested
   aggregates, ungrouped columns, filtering on aggregates/windows.
+- No input aborts the compiler. Every failure is a diagnostic: nesting and
+  chain length in the parser, application depth in the evaluator (so
+  `f = x => f x` is reported instead of recursing for ever), and the open
+  overload count in the checker. A definition that nothing uses is still
+  rejected when its overloads cannot be satisfied for any type
+  (`bad = .age + "x"`), while leftover literals keep their polymorphic type.
 - SQL lowering for where/select/agg/order/limit/offset/keyMap/joins/windows,
   frames, constant-only global aggregates, join-input inlining, dialect
   rewriting (postgres, mysql, sqlite, duckdb, tsql, bigquery, snowflake),

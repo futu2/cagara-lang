@@ -301,3 +301,40 @@ fn edits_update_names_checks_and_diagnostics() {
     // Changing imports needs a reload.
     assert!(!ws.set_source(root, format!("import \"other.cagara\"\n{TABLES}")));
 }
+
+#[test]
+fn unused_definitions_still_report_impossible_overloads() {
+    // Nothing uses `bad`, so it is never evaluated; its `+` cannot be resolved
+    // for any type, and that must be reported anyway.
+    let e = err("bad = .age + \"x\"\n", "bad");
+    assert!(e.contains("no overload of `+`"), "{e}");
+    assert!(e.contains("int") && e.contains("float"), "{e}");
+    // A helper that *can* be instantiated keeps its open overloads, and stays
+    // usable at more than one type.
+    let poly = "twice = x => x + x\n";
+    assert_eq!(ty(poly, "twice"), "expr a b -> expr a b");
+    ty(&format!("{poly}q = users & select {{ a = twice .age }}\n"), "q");
+    let both = format!(
+        "{poly}q = users & orders ? (.<id == .>user_id) & select {{ a = twice .age, b = twice .amount }}\n"
+    );
+    assert!(
+        ty(&both, "q").contains("a = int") && ty(&both, "q").contains("b = float"),
+        "{}",
+        ty(&both, "q")
+    );
+}
+
+#[test]
+fn constants_keep_their_polymorphic_type_when_unused() {
+    // `.age >= 18` may be int or float; checking it must not narrow the
+    // literal, so the definition stays usable at both widths.
+    let src = "adult = .age >= 18\n";
+    assert_eq!(ty(src, "adult"), "expr { age = a | b } bool");
+    // Used on an int column.
+    ty(&format!("{src}q = users & where (adult) & select {{ a = .age }}\n"), "q");
+    // Used on a float column of the same name.
+    let widths = "metrics : query { age = float } = table \"p\" \"metrics\"\n";
+    ty(&format!("{src}{widths}q = metrics & where (adult) & select {{ a = .age }}\n"), "q");
+    // A column that does not exist is still an error.
+    assert!(err(&format!("{src}q = orders & where (adult)\n"), "q").contains("no column `age`"));
+}

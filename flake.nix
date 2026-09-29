@@ -1,5 +1,5 @@
 {
-  description = "Cara: a small typed query language compiling to SQL";
+  description = "Cagara: a small typed query language compiling to SQL";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -19,18 +19,17 @@
             clippy
             rustfmt
             rust-analyzer
-            cargo-insta
             sqlite
           ];
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         };
 
         packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "cara";
+          pname = "cagara";
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
-          cargoBuildFlags = [ "-p" "cara-cli" ];
+          cargoBuildFlags = [ "-p" "cagara-cli" ];
         };
       });
 }

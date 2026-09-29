@@ -282,3 +282,22 @@ fn editing_the_root_rechecks_only_the_root() {
     assert_eq!(super::check_runs(), runs + 1, "only the edited root is rechecked, not the prelude");
     assert!(after.errors.iter().any(|e| e.module == ws.root && e.diag.message.contains("type mismatch")), "{:?}", after.errors);
 }
+
+#[test]
+fn edits_update_names_checks_and_diagnostics() {
+    let mut ws = Workspace::from_source(&format!("{TABLES}q = users & where (.age > 1)\n"));
+    let root = ws.root;
+    // A new definition is visible to later ones (scope is a query, not a
+    // snapshot from load time), to the checker, and to the evaluator.
+    assert!(ws.set_source(root, format!("{TABLES}adult = .age >= 18\nq = users & where adult\n")));
+    assert!(check(&ws).errors.is_empty(), "{:?}", check(&ws).errors);
+    let q = crate::root_queries(&ws).into_iter().find(|(n, _)| n == "q").unwrap().1;
+    assert!(q.is_ok(), "{q:?}");
+    // Syntax errors appear and disappear with the text.
+    assert!(ws.set_source(root, format!("{TABLES}q = (\n")));
+    assert!(ws.diags.iter().any(|d| d.message.starts_with("syntax error")), "{:?}", ws.diags);
+    assert!(ws.set_source(root, format!("{TABLES}q = users\n")));
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    // Changing imports needs a reload.
+    assert!(!ws.set_source(root, format!("import \"other.cagara\"\n{TABLES}")));
+}

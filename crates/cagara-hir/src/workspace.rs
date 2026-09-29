@@ -2,8 +2,9 @@
 //! Parsing goes through the salsa `parse_module` query.
 
 use crate::db::{Database, ModuleInput, SourceFile};
-use crate::lower::parse_module;
-use crate::value::{EvalError, Prim, PRIMS};
+use crate::lower::{parse_module, ParsedModule};
+use crate::resolve::{module_own, module_scope};
+use crate::value::{EvalError, Prim};
 use cagara_syntax::ast::{Import, Module, Span};
 use std::collections::HashMap;
 use std::fmt;
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 pub const PRELUDE_SRC: &str = include_str!("../../../prelude.cagara");
 pub const PRELUDE_PATH: &str = "<prelude>";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Binding {
     /// (module index, definition index)
     Def(usize, usize),
@@ -66,6 +67,10 @@ pub struct Workspace {
     pub diags: Vec<Diag>,
     /// Salsa input of each module (same indices as `modules`).
     pub inputs: Vec<ModuleInput>,
+    /// Import errors, and each module's own diagnostics (syntax, overloads);
+    /// `diags` is their concatenation, rebuilt after an edit.
+    import_diags: Vec<Diag>,
+    file_diags: Vec<Vec<Diag>>,
     by_path: HashMap<PathBuf, usize>,
     stack: Vec<PathBuf>,
 }
@@ -79,6 +84,8 @@ impl Workspace {
             root: 0,
             diags: Vec::new(),
             inputs: Vec::new(),
+            import_diags: Vec::new(),
+            file_diags: Vec::new(),
             by_path: HashMap::new(),
             stack: Vec::new(),
         };
@@ -91,6 +98,7 @@ impl Workspace {
     pub fn from_source(src: &str) -> Self {
         let mut ws = Self::empty();
         ws.root = ws.add(PathBuf::from("<input>"), src.to_string());
+        ws.rebuild_diags();
         ws
     }
 
@@ -99,7 +107,7 @@ impl Workspace {
         let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         match std::fs::read_to_string(&p) {
             Ok(text) => ws.root = ws.add(p, text),
-            Err(e) => ws.diags.push(Diag {
+            Err(e) => ws.import_diags.push(Diag {
                 path: p.display().to_string(),
                 line: 1,
                 col: 1,
@@ -108,6 +116,7 @@ impl Workspace {
                 width: 0,
             }),
         }
+        ws.rebuild_diags();
         ws
     }
 
@@ -116,68 +125,57 @@ impl Workspace {
         let file = SourceFile::new(&self.db, text.clone());
         self.files.insert(path.clone(), file);
         let parsed = parse_module(&self.db, file).clone();
-        for e in &parsed.errors {
-            self.diags.push(make_diag(&path, &text, e.offset, format!("syntax error: {}", e.message)));
-        }
 
-        let mut scope = HashMap::new();
-        if self.modules.is_empty() {
-            for (n, p) in PRIMS {
-                scope.insert(n.to_string(), Binding::Prim(*p));
-            }
-        } else {
-            scope.extend(self.modules[0].own.clone());
-        }
-
-        let mut deps: Vec<usize> = if self.modules.is_empty() { vec![] } else { vec![0] };
+        let prelude = if self.modules.is_empty() { None } else { Some(self.inputs[0]) };
+        let mut imports = Vec::new();
         for imp in &parsed.module.imports {
             let Some(target) = self.import(&path, &text, imp) else { continue };
-            deps.push(target);
-            match &imp.alias {
-                Some(a) => {
-                    scope.insert(a.clone(), Binding::Module(target));
-                }
-                None => scope.extend(self.modules[target].own.clone()),
-            }
+            imports.push((imp.alias.clone(), self.inputs[target]));
         }
-
-        // A module's own definitions shadow imports; a name defined more
-        // than once is an overload set, which needs a signature on each.
-        let m = self.modules.len();
-        let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-        for (i, d) in parsed.module.defs.iter().enumerate() {
-            match groups.iter_mut().find(|(n, _)| *n == d.name) {
-                Some((_, is)) => is.push(i),
-                None => groups.push((d.name.clone(), vec![i])),
-            }
-        }
-        let mut own = HashMap::new();
-        for (name, is) in groups {
-            let b = if is.len() == 1 {
-                Binding::Def(m, is[0])
-            } else {
-                for &i in &is {
-                    let d = &parsed.module.defs[i];
-                    if d.ty.is_none() {
-                        let msg = format!("`{name}` is defined more than once, so each definition needs a type signature (overloading)");
-                        self.diags.push(make_diag(&path, &text, d.span.start as usize, msg));
-                    }
-                }
-                Binding::Overloads(m, is)
-            };
-            own.insert(name, b);
-        }
-        scope.extend(own.clone());
 
         self.stack.pop();
+        let m = self.modules.len();
         self.by_path.insert(path.clone(), m);
-        let mut owns: Vec<HashMap<String, Binding>> = self.modules.iter().map(|x| x.own.clone()).collect();
-        owns.push(own.clone());
-        let deps = deps.iter().map(|&d| self.inputs[d]).collect();
-        let input = ModuleInput::new(&self.db, m, path.clone(), file, scope.clone(), owns, deps);
+        let input = ModuleInput::new(&self.db, m, path.clone(), file, prelude, imports);
+        let own = module_own(&self.db, input).clone();
+        let scope = module_scope(&self.db, input).clone();
+        self.file_diags.push(file_diags(&path, &text, &parsed, &own));
         self.inputs.push(input);
         self.modules.push(LoadedModule { path, text, module: parsed.module, scope, own });
         m
+    }
+
+    /// Replace the text of loaded module `m`. Parsing, name resolution, and
+    /// type checking are salsa queries, so only what depends on the file is
+    /// recomputed. Returns `false` if its imports changed; the workspace
+    /// must then be reloaded, since loading files is outside salsa.
+    pub fn set_source(&mut self, m: usize, text: String) -> bool {
+        let imports = |md: &Module| md.imports.iter().map(|i| (i.path.clone(), i.alias.clone())).collect::<Vec<_>>();
+        let before = imports(&self.modules[m].module);
+        let file = *self.inputs[m].file(&self.db);
+        file.set_contents(&mut self.db, text.clone());
+        let parsed = parse_module(&self.db, file).clone();
+        if imports(&parsed.module) != before {
+            return false;
+        }
+        let path = self.modules[m].path.clone();
+        // Exports of `m` feed the scopes of its importers: refresh all
+        // modules (the queries recompute only what changed).
+        for k in 0..self.modules.len() {
+            let input = self.inputs[k];
+            self.modules[k].own = module_own(&self.db, input).clone();
+            self.modules[k].scope = module_scope(&self.db, input).clone();
+        }
+        self.file_diags[m] = file_diags(&path, &text, &parsed, &self.modules[m].own);
+        let md = &mut self.modules[m];
+        md.text = text;
+        md.module = parsed.module;
+        self.rebuild_diags();
+        true
+    }
+
+    fn rebuild_diags(&mut self) {
+        self.diags = self.import_diags.iter().chain(self.file_diags.iter().flatten()).cloned().collect();
     }
 
     fn import(&mut self, from: &Path, text: &str, imp: &Import) -> Option<usize> {
@@ -190,14 +188,14 @@ impl Workspace {
         let offset = imp.span.start as usize;
         if self.stack.contains(&target) {
             let msg = format!("import cycle: `{}` is already being loaded", imp.path);
-            self.diags.push(make_diag(from, text, offset, msg));
+            self.import_diags.push(make_diag(from, text, offset, msg));
             return None;
         }
         match std::fs::read_to_string(&target) {
             Ok(t) => Some(self.add(target, t)),
             Err(e) => {
                 let msg = format!("cannot import `{}`: {e}", imp.path);
-                self.diags.push(make_diag(from, text, offset, msg));
+                self.import_diags.push(make_diag(from, text, offset, msg));
                 None
             }
         }
@@ -220,6 +218,27 @@ impl Workspace {
             None => self.diag(e.module, 0, e.message.clone()),
         }
     }
+}
+
+/// Syntax errors of a file, and overloads missing a signature.
+fn file_diags(path: &Path, text: &str, parsed: &ParsedModule, own: &HashMap<String, Binding>) -> Vec<Diag> {
+    let mut out: Vec<Diag> = parsed
+        .errors
+        .iter()
+        .map(|e| make_diag(path, text, e.offset, format!("syntax error: {}", e.message)))
+        .collect();
+    let mut missing: Vec<(usize, &str)> = Vec::new();
+    for (name, b) in own {
+        if let Binding::Overloads(_, is) = b {
+            missing.extend(is.iter().filter(|&&i| parsed.module.defs[i].ty.is_none()).map(|&i| (i, name.as_str())));
+        }
+    }
+    missing.sort();
+    for (i, name) in missing {
+        let msg = format!("`{name}` is defined more than once, so each definition needs a type signature (overloading)");
+        out.push(make_diag(path, text, parsed.module.defs[i].span.start as usize, msg));
+    }
+    out
 }
 
 /// A diagnostic underlining `span` in the file `path` with contents `text`.

@@ -22,21 +22,19 @@ impl SourceFile {
     }
 }
 
-/// Input: one loaded module. `scope` and `owns` come from name resolution
-/// in the workspace; `deps` are the modules it imports (and the prelude).
-/// Its definitions are read through `parse_module(file)`, so editing a file
-/// invalidates only the checks that depend on it.
+/// Input: one loaded module: its file and the modules its imports resolved
+/// to (loading files is outside salsa). Its exports and scope are the
+/// `module_own` / `module_scope` queries, and its definitions come from
+/// `parse_module(file)`, so an edit recomputes only what depends on it.
 #[salsa::input]
 pub struct ModuleInput {
     pub index: usize,
     #[returns(ref)]
     pub path: std::path::PathBuf,
     pub file: SourceFile,
+    /// The prelude (`None` for the prelude itself).
+    pub prelude: Option<ModuleInput>,
+    /// `import "path" [as alias]`, in source order.
     #[returns(ref)]
-    pub scope: std::collections::HashMap<String, crate::workspace::Binding>,
-    /// Exports of every module loaded up to this one (for `alias.name`).
-    #[returns(ref)]
-    pub owns: Vec<std::collections::HashMap<String, crate::workspace::Binding>>,
-    #[returns(ref)]
-    pub deps: Vec<ModuleInput>,
+    pub imports: Vec<(Option<String>, ModuleInput)>,
 }

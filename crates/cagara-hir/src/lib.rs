@@ -4,6 +4,7 @@ pub mod diagnostics;
 pub mod eval;
 pub mod ir;
 pub mod lower;
+pub mod resolve;
 pub mod prims;
 pub mod schema;
 pub mod value;

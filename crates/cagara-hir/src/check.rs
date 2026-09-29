@@ -45,6 +45,7 @@
 use crate::db::ModuleInput;
 use crate::ir::{JoinKind, KeyMapper};
 use crate::lower::parse_module;
+use crate::resolve::{module_own, module_scope};
 use crate::value::Prim;
 use crate::workspace::{diag_in, Binding, Diag, Workspace};
 use cagara_syntax::ast::{self, ExprKind, Side, Span, TypeExpr};
@@ -266,7 +267,8 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> ModuleCheck {
     #[cfg(test)]
     CHECK_RUNS.with(|c| c.set(c.get() + 1));
     let mut deps = HashMap::new();
-    for d in input.deps(db) {
+    let imported: Vec<ModuleInput> = input.prelude(db).iter().copied().chain(input.imports(db).iter().map(|(_, t)| *t)).collect();
+    for d in &imported {
         deps.extend(module_check(db, *d).schemes.clone());
     }
     let file = *input.file(db);
@@ -276,8 +278,8 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> ModuleCheck {
         path: input.path(db),
         text: file.text(db),
         defs: &parsed.module.defs,
-        scope: input.scope(db),
-        owns: input.owns(db).iter().collect(),
+        scope: module_scope(db, input),
+        owns: imported.iter().map(|t| (*t.index(db), module_own(db, *t))).collect(),
     };
     check_module(env, &deps)
 }
@@ -312,7 +314,8 @@ pub struct ModuleEnv<'w> {
     pub text: &'w str,
     pub defs: &'w [ast::Def],
     pub scope: &'w HashMap<String, Binding>,
-    pub owns: Vec<&'w HashMap<String, Binding>>,
+    /// Exports of the modules it imports, by module index.
+    pub owns: HashMap<usize, &'w HashMap<String, Binding>>,
 }
 
 impl<'w> ModuleEnv<'w> {
@@ -324,7 +327,7 @@ impl<'w> ModuleEnv<'w> {
             text: &md.text,
             defs: &md.module.defs,
             scope: &md.scope,
-            owns: ws.modules.iter().map(|x| &x.own).collect(),
+            owns: ws.modules.iter().enumerate().map(|(i, x)| (i, &x.own)).collect(),
         }
     }
 }
@@ -1028,7 +1031,7 @@ impl<'w> Checker<'w> {
                     let scope = self.env.scope;
                     if !env.iter().any(|(k, _)| k == n) {
                         if let Some(Binding::Module(t)) = scope.get(n) {
-                            let own = self.env.owns[*t];
+                            let own = self.env.owns[t];
                             return match own.get(f).cloned() {
                                 Some(Binding::Def(dm, i)) => Ok(self.def_type(dm, i, e.id, sp)),
                                 Some(Binding::Overloads(om, is)) => Ok(self.overload_type(f, om, &is, e.id, sp)),

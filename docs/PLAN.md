@@ -80,8 +80,12 @@ Done and tested (`cargo test --workspace`: 55 tests, no clippy warnings):
   `ModuleInput`): type schemes are self-contained (scheme-local variables
   with their own flags), each module is checked against its imports'
   schemes only, and editing a file re-checks it and its dependents, not the
-  prelude (1 test counts query runs). Name resolution and import loading
-  still run in the workspace, outside salsa.
+  prelude (1 test counts query runs).
+- Name resolution as salsa queries: `module_own` (exports, overload sets)
+  and `module_scope` are derived from the parsed file and resolved imports,
+  so an edit that adds or removes a definition updates scopes, checks, and
+  evaluation. `Workspace::set_source` applies an edit; it returns `false`
+  when the imports changed, since loading files stays outside salsa.
 - Type checker (23 tests): HM with let-polymorphism for top-level definitions,
   monomorphic lambdas, Rémy-style rows, rigid (checked) signatures, constant
   lifting into `expr` with deferred int→float / string→date widening,
@@ -145,8 +149,8 @@ Known gaps:
 2. ~~Overloading~~ (done; see Status).
 3. ~~Nullability~~ (done; see Status).
 4. ~~Precise error spans~~ (done; see Status).
-5. **Salsa beyond parsing:** type checking per module is done; name
-   resolution and import loading are next.
+5. ~~Salsa beyond parsing~~ (done for parsing, name resolution, and type
+   checking; loading imported files still needs a reload).
 6. ~~Tidy-ups~~ (done: `cagara-core` removed, join inputs inlined,
    `--optimize`, dialect rewriting and tests).
 7. **Later:** language server on top of the salsa db.

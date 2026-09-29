@@ -135,7 +135,7 @@ fn errors() {
     assert!(error("q = users & pick [\"nope\"]\n", "q").contains("no column `nope`"));
     assert!(error("q = table \"s\" \"t\"\n", "q").contains("unknown"));
     assert!(error("q = q\n", "q").contains("refers to itself"));
-    assert!(error("q = users & agg { x = coalesce (sum .age) 0 + .age }\n", "q").contains("ungrouped"));
+    assert!(error("q = users & agg { x = coalesce 0 (sum .age) + .age }\n", "q").contains("ungrouped"));
     let w = error("q = users & where (rowNumber { order = [.id] } <= 3)\n", "q");
     assert!(w.contains("window"), "{w}");
 }
@@ -164,13 +164,13 @@ fn overloads_dispatch_to_sql() {
 #[test]
 fn nulls_and_outer_joins() {
     let s = sql(
-        "q = orders & leftJoin users (.<user_id == .>id)\n  & select { id = .id, who = coalesce .name \"?\", known = isNotNull .name }\n",
+        "q = orders & leftJoin users (.<user_id == .>id)\n  & select { id = .id, who = coalesce \"?\" .name, known = isNotNull .name }\n",
         "q",
     );
     assert!(s.contains("LEFT JOIN public.users"), "{s}");
     assert!(s.contains("COALESCE(t2.name, '?') AS who"), "{s}");
     assert!(s.contains("t2.name IS NOT NULL AS known"), "{s}");
-    let s = sql("q = orders & agg { total = coalesce (sum .amount) 0.0 }\n", "q");
+    let s = sql("q = orders & agg { total = coalesce 0.0 (sum .amount) }\n", "q");
     assert!(s.contains("COALESCE(SUM(amount), 0.0) AS total"), "{s}");
     assert!(error("q = orders & leftJoin users (.<user_id == .>id) & where (.name == \"x\")\n", "q").contains("maybe"));
 }
@@ -212,7 +212,7 @@ fn dialects_rewrite_every_block() {
     assert!(ts.contains("TOP 3") && ts.contains("CONCAT(name, name)"), "{ts}");
     assert!(dialect(q, "q", "tsql").unwrap_err().contains("needs an `order` before `offset`"));
     // Joins and windows go through every dialect.
-    let j = "q = orders & leftJoin users (.<user_id == .>id) & select { n = coalesce .name \"?\" <> \"!\", rn = rowNumber { order = [desc .amount] } }\n";
+    let j = "q = orders & leftJoin users (.<user_id == .>id) & select { n = coalesce \"?\" .name <> \"!\", rn = rowNumber { order = [desc .amount] } }\n";
     for d in ["postgres", "mysql", "sqlite", "duckdb", "tsql", "bigquery", "snowflake"] {
         let s = dialect(j, "q", d).unwrap_or_else(|e| panic!("{d}: {e}"));
         assert!(s.contains("ROW_NUMBER() OVER (ORDER BY t1.amount DESC)"), "{d}: {s}");
@@ -249,4 +249,189 @@ fn validator_errors_point_at_the_stage() {
     assert!(d.message.contains("unknown"), "{d}");
     assert_eq!((d.col, d.width), (5, "table \"s\" \"t\"".len()), "{d}");
     assert!(d.to_string().contains("^^^^^"), "{d}");
+}
+
+const EVENTS: &str = "ev : query { id = int, at = timestamp, d = date, s = string } = table \"public\" \"ev\"\n";
+
+/// Compile `select { x = <e> }` over `ev` for each dialect.
+fn ev(e: &str, d: &str) -> String {
+    let q = format!("{EVENTS}q = ev & select {{ x = {e} }}\n");
+    dialect(&q, "q", d).unwrap_or_else(|err| panic!("{d}: {err}"))
+}
+
+#[test]
+fn date_arithmetic_per_dialect() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        ("addDays 7 .d", &[
+            ("ansi", "CAST((d + 7 * INTERVAL '1' DAY) AS DATE)"),
+            ("postgres", "(d + 7 * INTERVAL '1' DAY)::DATE"),
+            ("mysql", "DATE_ADD(d, INTERVAL 7 DAY)"),
+            ("sqlite", "DATE(d, 7 || ' days')"),
+            ("duckdb", "CAST((d + TO_DAYS(7)) AS DATE)"),
+            ("tsql", "DATEADD(DAY, 7, d)"),
+            ("bigquery", "DATE_ADD(d, INTERVAL 7 DAY)"),
+            ("snowflake", "DATEADD(DAY, 7, d)"),
+        ]),
+        ("addWeeks 2 .d", &[("mysql", "DATE_ADD(d, INTERVAL (2 * 7) DAY)")]),
+        ("addQuarters 1 .d", &[("tsql", "DATEADD(MONTH, (1 * 3), d)")]),
+        ("addMonths 2 .at", &[
+            ("postgres", "(at + 2 * INTERVAL '1' MONTH)::TIMESTAMP"),
+            ("sqlite", "DATETIME(at, 2 || ' months')"),
+            ("bigquery", "CAST(DATETIME_ADD(CAST(at AS DATETIME), INTERVAL 2 MONTH) AS TIMESTAMP)"),
+        ]),
+        ("addHours 3 .at", &[("bigquery", "TIMESTAMP_ADD(at, INTERVAL 3 HOUR)")]),
+        ("daysBetween .d currentDate", &[
+            ("postgres", "(CURRENT_DATE - d)"),
+            ("mysql", "DATEDIFF(CURRENT_DATE(), d)"),
+            ("sqlite", "CAST((JULIANDAY(CURRENT_DATE) - JULIANDAY(d)) AS INT)"),
+            ("duckdb", "DATE_DIFF('day', d, CURRENT_DATE)"),
+            ("tsql", "DATEDIFF(DAY, d, CAST(GETDATE() AS DATE))"),
+            ("bigquery", "DATE_DIFF(CURRENT_DATE, d, DAY)"),
+        ]),
+        ("now", &[("ansi", "CURRENT_TIMESTAMP AS x"), ("sqlite", "DATETIME('now')"), ("tsql", "GETDATE()")]),
+        ("toTimestamp .d", &[("mysql", "CAST(d AS DATETIME)"), ("sqlite", "DATETIME(d)"), ("tsql", "CAST(d AS DATETIME2)")]),
+    ];
+    for (e, want) in cases {
+        for (d, sql) in *want {
+            let s = ev(e, d);
+            assert!(s.contains(sql), "{e} / {d}: {s}");
+        }
+    }
+}
+
+#[test]
+fn date_trunc_and_parts_per_dialect() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        ("truncMonth .d", &[
+            ("postgres", "DATE_TRUNC('MONTH', d)::DATE"),
+            ("mysql", "CAST(DATE_FORMAT(d, '%Y-%m-01') AS DATE)"),
+            ("sqlite", "DATE(d, 'start of month')"),
+            ("tsql", "DATETRUNC(MONTH, d)"),
+            ("bigquery", "DATE_TRUNC(d, MONTH)"),
+            ("snowflake", "DATE_TRUNC('MONTH', d)"),
+        ]),
+        ("truncWeek .d", &[
+            ("mysql", "CAST(DATE_SUB(DATE(d), INTERVAL WEEKDAY(d) DAY) AS DATE)"),
+            ("sqlite", "DATE(d, 'start of day', '-' || ((CAST(STRFTIME('%w', d) AS INT) + 6) % 7) || ' days')"),
+            ("tsql", "DATETRUNC(ISO_WEEK, d)"),
+            ("bigquery", "DATE_TRUNC(d, ISOWEEK)"),
+        ]),
+        ("truncQuarter .d", &[("mysql", "CAST(DATE_ADD(MAKEDATE(YEAR(d), 1), INTERVAL ((QUARTER(d) - 1) * 3) MONTH) AS DATE)")]),
+        ("truncHour .at", &[("sqlite", "STRFTIME('%Y-%m-%d %H:00:00', at)"), ("bigquery", "TIMESTAMP_TRUNC(at, HOUR)")]),
+        ("year .d", &[("postgres", "EXTRACT(YEAR FROM d)::INT"), ("sqlite", "CAST(STRFTIME('%Y', d) AS INT)"), ("tsql", "DATEPART(YEAR, d)")]),
+        ("dayOfWeek .d", &[
+            ("postgres", "EXTRACT(DOW FROM d)::INT"),
+            ("mysql", "(DAYOFWEEK(d) - 1)"),
+            ("sqlite", "CAST(STRFTIME('%w', d) AS INT)"),
+            ("bigquery", "CAST(FORMAT_DATE('%w', d) AS BIGINT)"),
+        ]),
+        ("quarter .d", &[("sqlite", "((CAST(STRFTIME('%m', d) AS INT) + 2) / 3)")]),
+    ];
+    for (e, want) in cases {
+        for (d, sql) in *want {
+            let s = ev(e, d);
+            assert!(s.contains(sql), "{e} / {d}: {s}");
+        }
+    }
+}
+
+#[test]
+fn string_functions_per_dialect() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        ("left 3 .s", &[("postgres", "LEFT(s, 3)"), ("sqlite", "SUBSTR(s, 1, 3)")]),
+        ("right 2 .s", &[("tsql", "RIGHT(s, 2)"), ("sqlite", "CASE WHEN 2 <= 0 THEN '' ELSE SUBSTR(s, -2, 2) END")]),
+        ("strpos \"x\" .s", &[
+            ("postgres", "STRPOS(s, 'x')"),
+            ("mysql", "LOCATE('x', s)"),
+            ("sqlite", "INSTR(s, 'x')"),
+            ("tsql", "CHARINDEX('x', s)"),
+            ("snowflake", "CHARINDEX('x', s)"),
+        ]),
+        ("length .s", &[("mysql", "CHAR_LENGTH(s)"), ("tsql", "LEN(s)"), ("bigquery", "LENGTH(s)")]),
+        ("endsWith \"z\" .s", &[("postgres", "RIGHT(s, LENGTH('z')) = 'z'")]),
+        ("substring 2 3 .s", &[("postgres", "SUBSTRING(s, 2, 3)"), ("mysql", "SUBSTR(s, 2, 3)")]),
+        ("replaceAll \"a\" \"b\" .s", &[("ansi", "REPLACE(s, 'a', 'b')")]),
+        ("ilike \"A%\" .s", &[("postgres", "s ILIKE 'A%'"), ("mysql", "LOWER(s) LIKE LOWER('A%')")]),
+        ("toString .id", &[("mysql", "CAST(id AS CHAR)"), ("bigquery", "CAST(id AS STRING)")]),
+    ];
+    for (e, want) in cases {
+        for (d, sql) in *want {
+            let s = ev(e, d);
+            assert!(s.contains(sql), "{e} / {d}: {s}");
+        }
+    }
+}
+
+#[test]
+fn date_functions_compose_and_type_check() {
+    // Nesting keeps precedence; string literals widen to dates and timestamps.
+    let q = format!(
+        "{EVENTS}q = ev & where (.at >= \"2024-01-01 00:00:00\" && .d < addDays 1 (truncMonth currentDate))\n\
+         & agg {{ m = group (truncMonth .d), n = count }}\n"
+    );
+    let s = dialect(&q, "q", "postgres").unwrap();
+    assert!(s.contains("(DATE_TRUNC('MONTH', CURRENT_DATE)::DATE + 1 * INTERVAL '1' DAY)::DATE"), "{s}");
+    assert!(s.contains("GROUP BY DATE_TRUNC('MONTH', d)::DATE"), "{s}");
+    // Sub-day units need a timestamp.
+    let q = format!("{EVENTS}q = ev & select {{ x = addHours 1 .d }}\n");
+    let e = dialect(&q, "q", "ansi").unwrap_err();
+    assert!(e.contains("timestamp"), "{e}");
+}
+
+#[test]
+fn data_last_functions_compose() {
+    // Partial applications are reusable transformations.
+    let q = format!(
+        "{EVENTS}nextWeek = addDays 7 >>> truncWeek\n\
+         clean = trim >>> lower >>> replaceAll \"-\" \"\"\n\
+         q = ev & where (contains \"@\" .s) & select {{ w = nextWeek .d, c = clean .s, t = .s & left 3 }}\n"
+    );
+    let s = dialect(&q, "q", "postgres").unwrap();
+    assert!(s.contains("STRPOS(s, '@') > 0"), "{s}");
+    assert!(s.contains("DATE_TRUNC('WEEK', (d + 7 * INTERVAL '1' DAY)::DATE)::DATE AS w"), "{s}");
+    assert!(s.contains("REPLACE(LOWER(TRIM(s)), '-', '') AS c"), "{s}");
+}
+
+#[test]
+fn operator_shorthands_match_the_long_forms() {
+    let pairs = [
+        ("q = users &? (.age >= 18) &= { id = .id, n = .name } &. [asc .n] &- 5\n",
+         "q = users & where (.age >= 18) & select { id = .id, n = .name } & order [asc .n] & limit 5\n"),
+        ("q = orders &* { u = group .user_id, total = sum .amount ?? 0.0 }\n",
+         "q = orders & agg { u = group .user_id, total = coalesce 0.0 (sum .amount) }\n"),
+        ("q = orders & users ? .<user_id == .>id &= { a = .amount, n = .name }\n",
+         "q = orders & inner users (.<user_id == .>id) & select { a = .amount, n = .name }\n"),
+        ("q = orders & users <? .<user_id == .>id &= { n = .name ?? \"?\" }\n",
+         "q = orders & leftJoin users (.<user_id == .>id) & select { n = coalesce \"?\" .name }\n"),
+        ("q = orders & users ?> .<user_id == .>id\n", "q = orders & rightJoin users (.<user_id == .>id)\n"),
+        ("q = orders & users <?> .<user_id == .>id && .>active\n",
+         "q = orders & fullJoin users (.<user_id == .>id && .>active)\n"),
+    ];
+    for (short, long) in pairs {
+        assert_eq!(sql(short, "q"), sql(long, "q"), "{short}");
+    }
+    let s = sql("q = orders & users <? .<user_id == .>id &= { n = .name ?? \"?\" }\n", "q");
+    assert!(s.contains("LEFT JOIN public.users AS t2 ON t1.user_id = t2.id"), "{s}");
+    assert!(s.contains("COALESCE(t2.name, '?') AS n"), "{s}");
+}
+
+#[test]
+fn coalesce_operator_types() {
+    // Chains and precedence: `.a ?? .b ?? 0`, `x ?? 0 + 1` is `(x ?? 0) + 1`.
+    // In a full join both sides are nullable.
+    let s = sql("q = orders & users <?> .<user_id == .>id &= { a = .age ?? .user_id ?? 0, b = .age ?? 0 + 1 }\n", "q");
+    assert!(s.contains("COALESCE(t2.age, COALESCE(t1.user_id, 0)) AS a"), "{s}");
+    assert!(s.contains("COALESCE(t2.age, 0) + 1 AS b"), "{s}");
+    // The left side must be nullable, the default must not be.
+    assert!(error("q = users &= { a = .age ?? 0 }\n", "q").contains("maybe"));
+    assert!(error("q = orders & users <? .<user_id == .>id &= { a = .age ?? .user_id ?? 0 }\n", "q").contains("maybe"));
+}
+
+#[test]
+fn shorthand_errors_point_at_the_stage() {
+    let src = format!("{USERS}q = users\n  &? (.salary > 1)\n");
+    let ws = Workspace::from_source(&src);
+    let d = root_queries(&ws).into_iter().find(|(k, _)| k == "q").unwrap().1.unwrap_err();
+    assert!(d.message.contains("salary"), "{d}");
+    assert_eq!(d.source.trim(), "&? (.salary > 1)", "{d}");
 }

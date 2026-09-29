@@ -19,6 +19,10 @@ pub struct Evaluator<'w> {
     active: Vec<(usize, usize)>,
 }
 
+/// The pipe and its stage shorthands: a query built by `q op x` is located
+/// at `x` (the stage), not the whole pipeline.
+const PIPES: &[&str] = &["_&_", "_&=_", "_&?_", "_&*_", "_&._", "_&-_"];
+
 /// Attach a location to an error that does not have one yet.
 fn at<T>(r: EResult<T>, module: usize, span: Span) -> EResult<T> {
     r.map_err(|mut e| {
@@ -150,7 +154,8 @@ impl<'w> Evaluator<'w> {
                 // Prelude (module 0) stages are tagged at their user call site.
                 if m != 0 {
                     if let Value::Query(r) = v {
-                        let pipe = matches!(&f.kind, ExprKind::Name(n) if n == "_&_") && args.len() == 2;
+                        let pipe = args.len() == 2
+                            && matches!(&f.kind, ExprKind::Name(n) if PIPES.contains(&n.as_str()));
                         let span = if pipe { args[1].span } else { e.span };
                         v = Value::Query(match r {
                             r @ Rel::At(..) => r,

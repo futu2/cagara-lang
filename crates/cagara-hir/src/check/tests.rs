@@ -126,7 +126,7 @@ fn schema_errors() {
 fn phase_errors() {
     assert!(err("q = users & agg { t = sum (sum .age) }\n", "q").contains("cannot nest"));
     assert!(err("q = users & agg { n = count, name = .name }\n", "q").contains("not grouped"));
-    assert!(err("q = users & agg { x = coalesce (sum .age) 0 + .age }\n", "q").contains("ungrouped"));
+    assert!(err("q = users & agg { x = coalesce 0 (sum .age) + .age }\n", "q").contains("ungrouped"));
     assert!(err("q = users & agg { x = .age + sum .age }\n", "q").contains("ungrouped"));
     assert!(err("q = users & where (count >= 1)\n", "q").contains("aggregate"));
     assert!(err("q = users & select { n = count }\n", "q").contains("belong in `agg`"));
@@ -227,7 +227,7 @@ fn nullable_columns_are_explicit() {
     let q = |body: &str| format!("{NULLABLE}q = people & {body}\n");
     assert_eq!(ty(&q("select { e = .email }"), "q"), "query { e = maybe string }");
     assert_eq!(
-        ty(&q("where (isNotNull .email) & select { e = coalesce .email \"-\", s = coalesce .score 0 + 1 }"), "q"),
+        ty(&q("where (isNotNull .email) & select { e = coalesce \"-\" .email, s = coalesce 0 .score + 1 }"), "q"),
         "query { e = string, s = int }"
     );
     let e = err(&q("where (.email == \"x\")"), "q");
@@ -236,8 +236,8 @@ fn nullable_columns_are_explicit() {
     // `just` makes a value nullable explicitly; there is no implicit lift.
     assert_eq!(ty(&q("select { m = just .id }"), "q"), "query { m = maybe int }");
     // `coalesce`'s default is non-null (like Haskell's `fromMaybe`).
-    assert!(err(&q("select { m = coalesce .score (just .id) }"), "q").contains("non-null"));
-    let e = err(&q("select { m = coalesce .id 0 }"), "q");
+    assert!(err(&q("select { m = coalesce (just .id) .score }"), "q").contains("non-null"));
+    let e = err(&q("select { m = coalesce 0 .id }"), "q");
     assert!(e.contains("field `id`") && e.contains("only one side is nullable"), "{e}");
     // `where` needs `bool`; `isTrue` treats NULL as false.
     let src = format!("{NULLABLE}flags : query {{ ok = maybe bool }} = table \"p\" \"f\"\nq = flags & where .ok\nr = flags & where (isTrue .ok)\n");
@@ -261,11 +261,11 @@ fn outer_joins_make_the_missing_side_maybe() {
 
 #[test]
 fn aggregates_are_nullable() {
-    let src = format!("{NULLABLE}q = people & agg {{ n = count, c = countOf .email, s = sum .score, t = coalesce (max .email) \"\" }}\n");
+    let src = format!("{NULLABLE}q = people & agg {{ n = count, c = countOf .email, s = sum .score, t = coalesce \"\" (max .email) }}\n");
     assert_eq!(ty(&src, "q"), "query { n = int, c = int, s = maybe int, t = string }");
     let e = err("q = orders & agg { r = sum .amount } & where (.r > 100.0)\n", "q");
     assert!(e.contains("maybe float") && e.contains("nullable"), "{e}");
-    ty("q = orders & agg { r = coalesce (sum .amount) 0.0 } & where (.r > 100.0)\n", "q");
+    ty("q = orders & agg { r = coalesce 0.0 (sum .amount) } & where (.r > 100.0)\n", "q");
     assert!(err("q = orders & agg { u = group .user_id } & select { x = sum .u }\n", "q").contains("belong in `agg`"));
 }
 

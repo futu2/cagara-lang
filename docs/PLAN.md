@@ -96,7 +96,8 @@ Done and tested (`cargo test --workspace`: 61 tests, no clippy warnings):
   Imported files are read from disk, and edits to them are not watched.
 - Type checker (23 tests): HM with let-polymorphism for top-level definitions,
   monomorphic lambdas, Rémy-style rows, rigid (checked) signatures, constant
-  lifting into `expr` with deferred int→float / string→date widening,
+  lifting into `expr` with deferred int→float / string→date / timestamp
+  widening,
   expressions as sort keys, records as window specs. Rejects scalar type
   errors (`.name + 1`), missing/removed columns, phase errors, join-side
   errors, and bad window spec fields before evaluation, with the error at the
@@ -108,7 +109,11 @@ Done and tested (`cargo test --workspace`: 61 tests, no clippy warnings):
   types keep declaration order.
 - Overloading: a name defined more than once, each with a signature, is an
   overload set (prelude: `+ - * / negate sum avg` on int and float).
-  Strings concatenate with `<>` (`infixr 6`, as in Haskell). Uses are resolved by trial unification against each
+  Strings concatenate with `<>` (`infixr 6`, as in Haskell). Pipeline
+  shorthands at the level of `&`: `&?` where, `&=` select, `&*` agg, `&.`
+  order, `&-` limit. Join operators sit between `&` and `$`: `?` inner, `<?`
+  left, `?>` right, `<?>` full (`users & teachers ? .<a == .>b`). `x ?? d`
+  is `coalesce d x` (right-assoc, tightest). Uses are resolved by trial unification against each
   candidate. A helper whose overloads stay open (`twice = x => x + x`) keeps
   them as holes in its scheme; every use fills them, and the evaluator
   follows the recorded choices, so one helper can be used at int and float
@@ -128,7 +133,17 @@ Done and tested (`cargo test --workspace`: 61 tests, no clippy warnings):
 - SQL lowering for where/select/agg/order/limit/offset/keyMap/joins/windows,
   frames, constant-only global aggregates, join-input inlining, dialect
   rewriting (postgres, mysql, sqlite, duckdb, tsql, bigquery, snowflake),
-  and `--optimize` (15 end-to-end tests).
+  and `--optimize` (19 end-to-end tests).
+- Date and string prelude: `currentDate`, `now`, `add{Days,Weeks,Months,
+  Quarters,Years,Hours,Minutes,Seconds}`, `trunc{Year,Quarter,Month,Week,
+  Day,Hour,Minute}`, `year` / `month` / `dayOfWeek` / ..., `daysBetween`,
+  `toDate` / `toTimestamp` / `toString`; `substring`, `left`, `right`,
+  `strpos`, `contains`, `startsWith`, `endsWith`, `replaceAll`, `ltrim`,
+  `rtrim`, `ilike`. Templates call `CAGARA_*` intrinsics that
+  `cagara-sql/src/intrinsics.rs` spells per dialect, since sqlglot's typed
+  date functions do not transpile reliably. Prelude functions take their
+  subject last (`addDays 7 .d`, `coalesce 0 x`, `contains "@" .email`), so
+  partial applications compose with `>>>`.
 - Precise error locations: query stages built in user code are tagged with
   their source span (`Rel::At`, transparent to schema and lowering), so an
   IR-validator error points at the innermost failing stage. Diagnostics show

@@ -541,4 +541,27 @@ mod tests {
         assert!(p.errors.is_empty(), "{:?}", p.errors);
         assert!(p.syntax().descendants().any(|n| n.kind() == K::SqlExpr));
     }
+
+    #[test]
+    fn join_binds_between_pipe_and_expressions() {
+        // `a & (b ? (x == y))`, then the stage shorthand applies to the join.
+        assert_eq!(
+            body("q = a & b ? .<x == .>y &= r"),
+            "(BinExpr (BinExpr (NameRef a) (BinExpr (NameRef b) (BinExpr (FieldExpr) (FieldExpr)))) (NameRef r))"
+        );
+        // Stage shorthands are left-assoc at the level of `&`.
+        assert_eq!(
+            body("q = a &? p && r &- 3"),
+            "(BinExpr (BinExpr (NameRef a) (BinExpr (NameRef p) (NameRef r))) (Literal 3))"
+        );
+    }
+
+    #[test]
+    fn coalesce_is_right_assoc_and_tightest() {
+        assert_eq!(
+            body("x = a ?? b ?? 0 + 1"),
+            "(BinExpr (BinExpr (NameRef a) (BinExpr (NameRef b) (Literal 0))) (Literal 1))"
+        );
+        assert_eq!(body("x = f a ?? 0"), "(BinExpr (App (NameRef f) (NameRef a)) (Literal 0))");
+    }
 }

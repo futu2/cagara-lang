@@ -40,4 +40,14 @@ order_names = orders
 # `sum` / `avg` / `min` / `max`. Operators need non-null values.
 user_totals = users
   & leftJoin orders (.<id == .>user_id)
-  & agg { id = group .id, total = coalesce (sum .amount) 0.0, orders = countOf .user_id }
+  & agg { id = group .id, total = coalesce 0.0 (sum .amount), orders = countOf .user_id }
+
+# Operator shorthands: `&?` where, `&=` select, `&*` agg, `&.` order,
+# `&-` limit; joins `?` inner, `<?` left, `?>` right, `<?>` full; `??`
+# coalesce. The same report as `user_totals`, for active users:
+active_totals = users
+  &? .active
+  & orders <? .<id == .>user_id
+  &* { id = group .id, name = group .name, total = sum .amount ?? 0.0 }
+  &. [desc .total]
+  &- 20

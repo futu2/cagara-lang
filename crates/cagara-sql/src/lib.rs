@@ -1,6 +1,7 @@
 //! SQL backend: validated relational IR to SQL text via sqlglot-rust.
 
 pub mod dialect;
+pub mod intrinsics;
 pub mod lower;
 pub mod stage;
 

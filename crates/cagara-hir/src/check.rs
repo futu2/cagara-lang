@@ -11,7 +11,8 @@
 //! - Column references (`.x`) get a phase variable that may become `row` or
 //!   `win` but never `agg`, which is how ungrouped columns are rejected.
 //! - Scalar constants lift into `expr` at call sites; int literals widen to
-//!   float and strings to date when the expected value type is already known.
+//!   float and strings to date / timestamp when the expected value type is
+//!   already known.
 //! - Query stages (`where`, `select`, `agg`, joins) create deferred
 //!   constraints that are solved once their inputs are known. Unsolved ones
 //!   travel with the definition's type scheme and are re-instantiated at use.
@@ -95,7 +96,7 @@ fn row(fs: Vec<(String, Ty)>, tail: Ty) -> Ty {
     Ty::Row(fs, Box::new(tail))
 }
 
-const SCALARS: &[&str] = &["int", "float", "string", "bool", "date"];
+const SCALARS: &[&str] = &["int", "float", "string", "bool", "date", "timestamp"];
 
 /// Type constructors usable in signatures, with their arities.
 const CONS: &[(&str, usize)] = &[
@@ -104,6 +105,7 @@ const CONS: &[(&str, usize)] = &[
     ("string", 0),
     ("bool", 0),
     ("date", 0),
+    ("timestamp", 0),
     ("maybe", 1),
     ("list", 1),
     ("query", 1),
@@ -117,7 +119,7 @@ const CONS: &[(&str, usize)] = &[
 ];
 
 const JOIN_ONLY: &str = "`.<x` and `.>x` refer to the inputs of a join and can only be used in a join predicate";
-const NULLABLE: &str = "expected a non-null value, found a `maybe`; use `coalesce x default` \
+const NULLABLE: &str = "expected a non-null value, found a `maybe`; use `coalesce default x` \
                         (or `isNull` / `isNotNull` to test it)";
 const UNGROUPED: &str = "mixes an aggregate with an ungrouped column; wrap the column in `group`";
 
@@ -133,7 +135,7 @@ enum Cons {
     /// `nullable`: whether the left / right columns become `maybe`.
     JoinOut { left: Ty, right: Ty, out: Ty, nullable: (bool, bool) },
     /// A literal of scalar type `lit` used where `target` is expected, once
-    /// `target` is known (int widens to float, string to date).
+    /// `target` is known (int widens to float, string to date / timestamp).
     Lit { lit: &'static str, target: Ty },
     /// `keyMap mapper`: output row from the input row, once both are known.
     KeyMap { mapper: Ty, input: Ty, output: Ty },
@@ -618,7 +620,7 @@ impl<'w> Checker<'w> {
         }
         let maybe = |t: &Ty| matches!(t, Ty::Con("maybe", _));
         let hint = if maybe(a) != maybe(e) {
-            "; only one side is nullable: `coalesce x default` takes a `maybe`, `just x` makes one"
+            "; only one side is nullable: `coalesce default x` takes a `maybe`, `just x` makes one"
         } else {
             ""
         };
@@ -1156,7 +1158,7 @@ impl<'w> Checker<'w> {
     // ── coercions at expectations ──────────────────────────────────────────
 
     /// Unify `actual` with `expected`, allowing constant lifting into `expr`,
-    /// int → float and string → date widening, expressions as sort keys, and
+    /// int → float and string → date / timestamp widening, expressions as sort keys, and
     /// records as window specs (also inside lists).
     fn coerce(&mut self, actual: &Ty, expected: &Ty) -> U {
         let (a, e) = (self.resolve(actual), self.resolve(expected));
@@ -1191,7 +1193,7 @@ impl<'w> Checker<'w> {
                 self.pending.push((Cons::Lit { lit: s, target: target.clone() }, self.span));
                 Ok(())
             }
-            Ty::Con(t, args) if args.is_empty() && matches!((s, t), ("int", "float") | ("string", "date")) => Ok(()),
+            Ty::Con(t, args) if args.is_empty() && matches!((s, t), ("int", "float") | ("string", "date" | "timestamp")) => Ok(()),
             _ => self.unify(&con(s), target),
         }
     }

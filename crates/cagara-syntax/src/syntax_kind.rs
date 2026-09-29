@@ -29,6 +29,16 @@ pub enum SyntaxKind {
     Slash,
     Percent,
     Amp,
+    AmpEq,
+    AmpQuestion,
+    AmpStar,
+    AmpDot,
+    AmpMinus,
+    QuestionQuestion,
+    Question,
+    LtQuestion,
+    QuestionGt,
+    LtQuestionGt,
     Dollar,
     Bar,
     LParen,
@@ -127,6 +137,16 @@ impl From<Token> for SyntaxKind {
             Token::Slash => K::Slash,
             Token::Percent => K::Percent,
             Token::Amp => K::Amp,
+            Token::AmpEq => K::AmpEq,
+            Token::AmpQuestion => K::AmpQuestion,
+            Token::AmpStar => K::AmpStar,
+            Token::AmpDot => K::AmpDot,
+            Token::AmpMinus => K::AmpMinus,
+            Token::QuestionQuestion => K::QuestionQuestion,
+            Token::Question => K::Question,
+            Token::LtQuestion => K::LtQuestion,
+            Token::QuestionGt => K::QuestionGt,
+            Token::LtQuestionGt => K::LtQuestionGt,
             Token::Dollar => K::Dollar,
             Token::Bar => K::Bar,
             Token::LParen => K::LParen,
@@ -157,23 +177,37 @@ impl SyntaxKind {
     pub fn infix(self) -> Option<(u8, u8, &'static str)> {
         use SyntaxKind as K;
         Some(match self {
-            K::Amp => (1, 2, "_&_"),          // left-assoc pipe
-            K::Dollar => (4, 3, "_$_"),       // right-assoc apply
-            K::ComposeRight => (5, 6, "_>>>_"),
-            K::OrOr => (7, 8, "_||_"),
-            K::AndAnd => (9, 10, "_&&_"),
-            K::EqEq => (11, 12, "_==_"),
-            K::NotEq => (11, 12, "_!=_"),
-            K::Lt => (11, 12, "_<_"),
-            K::LtEq => (11, 12, "_<=_"),
-            K::Gt => (11, 12, "_>_"),
-            K::GtEq => (11, 12, "_>=_"),
-            K::Plus => (13, 14, "_+_"),
-            K::Diamond => (14, 13, "_<>_"),   // right-assoc, like Haskell's infixr 6
-            K::Minus => (13, 14, "_-_"),
-            K::Star => (15, 16, "_*_"),
-            K::Slash => (15, 16, "_/_"),
-            K::Percent => (15, 16, "_%_"),
+            // Left-assoc pipe and its stage shorthands (`q &? p` = `q & where p`).
+            K::Amp => (1, 2, "_&_"),
+            K::AmpEq => (1, 2, "_&=_"),
+            K::AmpQuestion => (1, 2, "_&?_"),
+            K::AmpStar => (1, 2, "_&*_"),
+            K::AmpDot => (1, 2, "_&._"),
+            K::AmpMinus => (1, 2, "_&-_"),
+            // Joins: looser than every expression operator, tighter than the
+            // pipe, so `users & teachers ? .<a == .>b` needs no parentheses.
+            K::Question => (3, 4, "_?_"),
+            K::LtQuestion => (3, 4, "_<?_"),
+            K::QuestionGt => (3, 4, "_?>_"),
+            K::LtQuestionGt => (3, 4, "_<?>_"),
+            K::Dollar => (6, 5, "_$_"),       // right-assoc apply
+            K::ComposeRight => (7, 8, "_>>>_"),
+            K::OrOr => (9, 10, "_||_"),
+            K::AndAnd => (11, 12, "_&&_"),
+            K::EqEq => (13, 14, "_==_"),
+            K::NotEq => (13, 14, "_!=_"),
+            K::Lt => (13, 14, "_<_"),
+            K::LtEq => (13, 14, "_<=_"),
+            K::Gt => (13, 14, "_>_"),
+            K::GtEq => (13, 14, "_>=_"),
+            K::Plus => (15, 16, "_+_"),
+            K::Diamond => (16, 15, "_<>_"),   // right-assoc, like Haskell's infixr 6
+            K::Minus => (15, 16, "_-_"),
+            K::Star => (17, 18, "_*_"),
+            K::Slash => (17, 18, "_/_"),
+            K::Percent => (17, 18, "_%_"),
+            // Right-assoc, tightest: `.a ?? .b ?? 0`, `.score ?? 0 + 1`.
+            K::QuestionQuestion => (20, 19, "_??_"),
             _ => return None,
         })
     }

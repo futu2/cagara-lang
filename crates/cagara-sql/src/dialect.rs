@@ -6,14 +6,13 @@
 //! slot (including ORDER BY and join ON), applying sqlglot's expression
 //! rewrites to each. String concatenation is lowered here: `||` means OR in
 //! MySQL, so the MySQL and T-SQL families get `CONCAT(a, b, ...)`.
+//! Cagara's date and string intrinsics (`CAGARA_*`) are lowered here too,
+//! for every dialect including ANSI.
 
 use sqlglot_rust::ast::{BinaryOperator, Expr, SelectItem, SelectStatement, TableSource};
 use sqlglot_rust::{Dialect, Statement};
 
 pub fn rewrite(stmt: Statement, to: Dialect) -> Result<Statement, String> {
-    if to == Dialect::Ansi {
-        return Ok(stmt);
-    }
     let Statement::Select(mut sel) = stmt else { return Ok(stmt) };
     block(&mut sel, to)?;
     Ok(Statement::Select(sel))
@@ -70,6 +69,9 @@ fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
 
     // Statement-level rewrites (LIMIT → TOP / FETCH, quoting) for this block.
     // Expressions are already rewritten; sqlglot's pass over them is a no-op.
+    if to == Dialect::Ansi {
+        return Ok(());
+    }
     let t = sqlglot_rust::dialects::transform(&Statement::Select(std::mem::replace(sel, empty())), Dialect::Ansi, to);
     if let Statement::Select(s) = t {
         *sel = s;
@@ -86,9 +88,13 @@ fn source(src: &mut TableSource, to: Dialect) -> Result<(), String> {
     Ok(())
 }
 
-/// One expression: concat lowering, then sqlglot's per-expression rewrites
-/// (reached by wrapping the expression in a one-column SELECT).
+/// One expression: intrinsics, concat lowering, then sqlglot's
+/// per-expression rewrites (reached by wrapping it in a one-column SELECT).
 fn expr(e: Expr, to: Dialect) -> Expr {
+    let e = crate::intrinsics::lower(e, to);
+    if to == Dialect::Ansi {
+        return e;
+    }
     let e = if concat_as_function(to) { e.transform(&concat) } else { e };
     let mut sel = empty();
     sel.columns = vec![SelectItem::Expr { expr: e.clone(), alias: None, alias_quote_style: Default::default() }];

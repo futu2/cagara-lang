@@ -52,6 +52,36 @@ pub enum Token {
     Percent,
     #[token("&")]
     Amp,
+    /// `q &= fields` — `q & select fields`
+    #[token("&=")]
+    AmpEq,
+    /// `q &? pred` — `q & where pred`
+    #[token("&?")]
+    AmpQuestion,
+    /// `q &* fields` — `q & agg fields`
+    #[token("&*")]
+    AmpStar,
+    /// `q &. keys` — `q & order keys`
+    #[token("&.")]
+    AmpDot,
+    /// `q &- n` — `q & limit n`
+    #[token("&-")]
+    AmpMinus,
+    /// `x ?? default` — `coalesce default x`
+    #[token("??")]
+    QuestionQuestion,
+    /// `right ? on` — `inner right on`
+    #[token("?")]
+    Question,
+    /// `right <? on` — `leftJoin right on`
+    #[token("<?")]
+    LtQuestion,
+    /// `right ?> on` — `rightJoin right on`
+    #[token("?>")]
+    QuestionGt,
+    /// `right <?> on` — `fullJoin right on`
+    #[token("<?>")]
+    LtQuestionGt,
     #[token("$")]
     Dollar,
     #[token("|")]
@@ -88,7 +118,7 @@ pub enum Token {
 
     /// Plain identifiers and operator names such as `_+_` or `_&_`.
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
-    #[regex(r"_[+\-*/%<>=!&|$]+_")]
+    #[regex(r"_[+\-*/%<>=!&|$?.]+_")]
     Ident,
 
     #[regex(r"[0-9]+")]
@@ -187,5 +217,17 @@ mod tests {
             .map(|l| l.text)
             .collect();
         assert_eq!(toks, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn stage_join_and_coalesce_operators() {
+        use Token::*;
+        assert_eq!(
+            kinds("&= &? &* &. &- ?? ? <? ?> <?> && <= <>"),
+            vec![AmpEq, AmpQuestion, AmpStar, AmpDot, AmpMinus, QuestionQuestion, Question, LtQuestion, QuestionGt, LtQuestionGt, AndAnd, LtEq, Diamond]
+        );
+        // Join operators next to join-side fields, and operator names.
+        assert_eq!(kinds("<?.<a ?>.>b"), vec![LtQuestion, LeftField, QuestionGt, RightField]);
+        assert_eq!(kinds("_&?_ _<?>_ _??_ _&._"), vec![Ident, Ident, Ident, Ident]);
     }
 }

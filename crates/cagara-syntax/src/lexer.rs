@@ -154,8 +154,8 @@ pub fn lex(input: &str) -> Vec<Lexeme<'_>> {
     while let Some(tok) = lexer.next() {
         let span = lexer.span();
         let kind = tok.unwrap_or(Token::Error);
-        let line_start = !kind.is_trivia()
-            && (span.start == 0 || input.as_bytes()[span.start - 1] == b'\n');
+        let line_start =
+            !kind.is_trivia() && (span.start == 0 || input.as_bytes()[span.start - 1] == b'\n');
         out.push(Lexeme {
             kind,
             text: &input[span.clone()],
@@ -171,7 +171,11 @@ mod tests {
     use super::*;
 
     fn kinds(s: &str) -> Vec<Token> {
-        lex(s).into_iter().filter(|l| !l.kind.is_trivia()).map(|l| l.kind).collect()
+        lex(s)
+            .into_iter()
+            .filter(|l| !l.kind.is_trivia())
+            .map(|l| l.kind)
+            .collect()
     }
 
     #[test]
@@ -196,7 +200,13 @@ mod tests {
     fn fields_and_operator_idents() {
         assert_eq!(
             kinds(".id .<user_id .>id _+_ _&_"),
-            vec![Token::Field, Token::LeftField, Token::RightField, Token::Ident, Token::Ident]
+            vec![
+                Token::Field,
+                Token::LeftField,
+                Token::RightField,
+                Token::Ident,
+                Token::Ident
+            ]
         );
     }
 
@@ -224,10 +234,30 @@ mod tests {
         use Token::*;
         assert_eq!(
             kinds("&= &? &* &. &- ?? ? <? ?> <?> && <= <>"),
-            vec![AmpEq, AmpQuestion, AmpStar, AmpDot, AmpMinus, QuestionQuestion, Question, LtQuestion, QuestionGt, LtQuestionGt, AndAnd, LtEq, Diamond]
+            vec![
+                AmpEq,
+                AmpQuestion,
+                AmpStar,
+                AmpDot,
+                AmpMinus,
+                QuestionQuestion,
+                Question,
+                LtQuestion,
+                QuestionGt,
+                LtQuestionGt,
+                AndAnd,
+                LtEq,
+                Diamond
+            ]
         );
         // Join operators next to join-side fields, and operator names.
-        assert_eq!(kinds("<?.<a ?>.>b"), vec![LtQuestion, LeftField, QuestionGt, RightField]);
-        assert_eq!(kinds("_&?_ _<?>_ _??_ _&._"), vec![Ident, Ident, Ident, Ident]);
+        assert_eq!(
+            kinds("<?.<a ?>.>b"),
+            vec![LtQuestion, LeftField, QuestionGt, RightField]
+        );
+        assert_eq!(
+            kinds("_&?_ _<?>_ _??_ _&._"),
+            vec![Ident, Ident, Ident, Ident]
+        );
     }
 }

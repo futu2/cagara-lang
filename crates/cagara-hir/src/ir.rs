@@ -84,9 +84,12 @@ impl Expr {
         match self {
             Expr::Col(..) => Ok(Phase::Row),
             Expr::Lit(_) => Ok(Phase::Const),
-            Expr::Tpl(_, args) => args.iter().try_fold(Phase::Const, |acc, a| join(acc, a.phase()?)),
+            Expr::Tpl(_, args) => args
+                .iter()
+                .try_fold(Phase::Const, |acc, a| join(acc, a.phase()?)),
             Expr::Agg(_, args) => {
-                args.iter().try_for_each(|a| row_only(a, "an aggregate argument"))?;
+                args.iter()
+                    .try_for_each(|a| row_only(a, "an aggregate argument"))?;
                 Ok(Phase::Agg)
             }
             Expr::Group(k) => {
@@ -94,7 +97,9 @@ impl Expr {
                 Ok(Phase::Agg)
             }
             Expr::Win(..) => {
-                self.children().into_iter().try_for_each(|a| row_only(a, "a window argument"))?;
+                self.children()
+                    .into_iter()
+                    .try_for_each(|a| row_only(a, "a window argument"))?;
                 Ok(Phase::Win)
             }
         }
@@ -156,7 +161,8 @@ fn join(a: Phase, b: Phase) -> Result<Phase, String> {
             Err("mixes an aggregate with an ungrouped column; wrap the column in `group`".into())
         }
         (Agg, Win) | (Win, Agg) => Err(
-            "mixes an aggregate with a window function; use `agg` first, then `select` the window".into(),
+            "mixes an aggregate with a window function; use `agg` first, then `select` the window"
+                .into(),
         ),
     }
 }
@@ -181,7 +187,11 @@ pub enum KeyMapper {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Rel {
-    Table { schema: String, name: String, columns: Option<Vec<String>> },
+    Table {
+        schema: String,
+        name: String,
+        columns: Option<Vec<String>>,
+    },
     Where(Box<Rel>, Expr),
     Select(Box<Rel>, Vec<(String, Expr)>),
     Agg(Box<Rel>, Vec<(String, Expr)>),
@@ -190,7 +200,12 @@ pub enum Rel {
     Offset(Box<Rel>, i64),
     KeyMap(Box<Rel>, KeyMapper),
     /// `left & inner right on`; output columns are left-wins on collision.
-    Join { kind: JoinKind, left: Box<Rel>, right: Box<Rel>, on: Expr },
+    Join {
+        kind: JoinKind,
+        left: Box<Rel>,
+        right: Box<Rel>,
+        on: Expr,
+    },
     /// The stage written at `Loc` (transparent for schema and lowering).
     At(Loc, Box<Rel>),
 }

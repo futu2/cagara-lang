@@ -190,7 +190,7 @@ impl SyntaxKind {
             K::LtQuestion => (3, 4, "_<?_"),
             K::QuestionGt => (3, 4, "_?>_"),
             K::LtQuestionGt => (3, 4, "_<?>_"),
-            K::Dollar => (6, 5, "_$_"),       // right-assoc apply
+            K::Dollar => (6, 5, "_$_"), // right-assoc apply
             K::ComposeRight => (7, 8, "_>>>_"),
             K::OrOr => (9, 10, "_||_"),
             K::AndAnd => (11, 12, "_&&_"),
@@ -201,7 +201,7 @@ impl SyntaxKind {
             K::Gt => (13, 14, "_>_"),
             K::GtEq => (13, 14, "_>=_"),
             K::Plus => (15, 16, "_+_"),
-            K::Diamond => (16, 15, "_<>_"),   // right-assoc, like Haskell's infixr 6
+            K::Diamond => (16, 15, "_<>_"), // right-assoc, like Haskell's infixr 6
             K::Minus => (15, 16, "_-_"),
             K::Star => (17, 18, "_*_"),
             K::Slash => (17, 18, "_/_"),

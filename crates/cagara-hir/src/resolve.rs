@@ -22,7 +22,11 @@ pub fn module_own(db: &dyn salsa::Database, input: ModuleInput) -> HashMap<Strin
     groups
         .into_iter()
         .map(|(n, is)| {
-            let b = if is.len() == 1 { Binding::Def(m, is[0]) } else { Binding::Overloads(m, is) };
+            let b = if is.len() == 1 {
+                Binding::Def(m, is[0])
+            } else {
+                Binding::Overloads(m, is)
+            };
             (n, b)
         })
         .collect()

@@ -13,7 +13,9 @@ use sqlglot_rust::ast::{BinaryOperator, Expr, SelectItem, SelectStatement, Table
 use sqlglot_rust::{Dialect, Statement};
 
 pub fn rewrite(stmt: Statement, to: Dialect) -> Result<Statement, String> {
-    let Statement::Select(mut sel) = stmt else { return Ok(stmt) };
+    let Statement::Select(mut sel) = stmt else {
+        return Ok(stmt);
+    };
     block(&mut sel, to)?;
     Ok(Statement::Select(sel))
 }
@@ -23,7 +25,10 @@ fn tsql(d: Dialect) -> bool {
 }
 
 fn mysql(d: Dialect) -> bool {
-    matches!(d, Dialect::Mysql | Dialect::Doris | Dialect::SingleStore | Dialect::StarRocks)
+    matches!(
+        d,
+        Dialect::Mysql | Dialect::Doris | Dialect::SingleStore | Dialect::StarRocks
+    )
 }
 
 fn concat_as_function(d: Dialect) -> bool {
@@ -72,7 +77,11 @@ fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
     if to == Dialect::Ansi {
         return Ok(());
     }
-    let t = sqlglot_rust::dialects::transform(&Statement::Select(std::mem::replace(sel, empty())), Dialect::Ansi, to);
+    let t = sqlglot_rust::dialects::transform(
+        &Statement::Select(std::mem::replace(sel, empty())),
+        Dialect::Ansi,
+        to,
+    );
     if let Statement::Select(s) = t {
         *sel = s;
     }
@@ -95,9 +104,17 @@ fn expr(e: Expr, to: Dialect) -> Expr {
     if to == Dialect::Ansi {
         return e;
     }
-    let e = if concat_as_function(to) { e.transform(&concat) } else { e };
+    let e = if concat_as_function(to) {
+        e.transform(&concat)
+    } else {
+        e
+    };
     let mut sel = empty();
-    sel.columns = vec![SelectItem::Expr { expr: e.clone(), alias: None, alias_quote_style: Default::default() }];
+    sel.columns = vec![SelectItem::Expr {
+        expr: e.clone(),
+        alias: None,
+        alias_quote_style: Default::default(),
+    }];
     match sqlglot_rust::dialects::transform(&Statement::Select(sel), Dialect::Ansi, to) {
         Statement::Select(s) => match s.columns.into_iter().next() {
             Some(SelectItem::Expr { expr, .. }) => expr,
@@ -110,7 +127,10 @@ fn expr(e: Expr, to: Dialect) -> Expr {
 /// `a || b || c` (any nesting, parenthesized or not) → `CONCAT(a, b, c)`.
 fn concat(e: Expr) -> Expr {
     match e {
-        Expr::BinaryOp { op: BinaryOperator::Concat, .. } => {
+        Expr::BinaryOp {
+            op: BinaryOperator::Concat,
+            ..
+        } => {
             let mut args = Vec::new();
             flatten(e, &mut args);
             Expr::Function {
@@ -129,11 +149,25 @@ fn concat(e: Expr) -> Expr {
 
 fn flatten(e: Expr, out: &mut Vec<Expr>) {
     match e {
-        Expr::BinaryOp { left, op: BinaryOperator::Concat, right } => {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Concat,
+            right,
+        } => {
             flatten(*left, out);
             flatten(*right, out);
         }
-        Expr::Nested(inner) if matches!(*inner, Expr::BinaryOp { op: BinaryOperator::Concat, .. }) => flatten(*inner, out),
+        Expr::Nested(inner)
+            if matches!(
+                *inner,
+                Expr::BinaryOp {
+                    op: BinaryOperator::Concat,
+                    ..
+                }
+            ) =>
+        {
+            flatten(*inner, out)
+        }
         Expr::Function { name, args, .. } if name == "CONCAT" => out.extend(args),
         other => out.push(other),
     }

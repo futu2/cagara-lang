@@ -11,7 +11,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
+const USAGE: &str =
+    "usage: cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
        cagara fmt [--check] <files...>   format files in place (`-` for stdin to stdout)
        cagara lsp    run the language server over stdio";
 
@@ -67,7 +68,9 @@ fn compile(mut args: impl Iterator<Item = String>) -> ExitCode {
             other => return usage(&format!("unexpected argument `{other}`")),
         }
     }
-    let Some(file) = file else { return usage("missing input file") };
+    let Some(file) = file else {
+        return usage("missing input file");
+    };
     let Some(dialect) = cagara_sql::dialect(&dialect_name) else {
         return usage(&format!("unknown dialect `{dialect_name}`"));
     };
@@ -103,7 +106,11 @@ fn compile(mut args: impl Iterator<Item = String>) -> ExitCode {
                 (None, None) => println!("{} : ?", d.name),
             }
         }
-        return if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS };
+        return if failed {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        };
     }
 
     let mut printed = 0;
@@ -112,7 +119,15 @@ fn compile(mut args: impl Iterator<Item = String>) -> ExitCode {
             continue;
         }
         match result.map_err(|d| d.to_string()).and_then(|rel| {
-            cagara_sql::compile(&rel, cagara_sql::Options { dialect, pretty, optimize }).map_err(|m| format!("{}: error in `{name}`: {m}", file.display()))
+            cagara_sql::compile(
+                &rel,
+                cagara_sql::Options {
+                    dialect,
+                    pretty,
+                    optimize,
+                },
+            )
+            .map_err(|m| format!("{}: error in `{name}`: {m}", file.display()))
         }) {
             Ok(sql) => {
                 if printed > 0 {
@@ -131,7 +146,11 @@ fn compile(mut args: impl Iterator<Item = String>) -> ExitCode {
         eprintln!("no query definition named `{o}`");
         failed = true;
     }
-    if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 /// `cagara fmt`: rewrite files in place, or with `--check` list the files
@@ -179,7 +198,10 @@ fn fmt(args: impl Iterator<Item = String>) -> ExitCode {
             Ok(f) => {
                 for e in &f.errors {
                     let (line, col) = cagara_fmt::line_col(&src, e.offset);
-                    eprintln!("{name}:{line}:{col}: error: {} (file not formatted)", e.message);
+                    eprintln!(
+                        "{name}:{line}:{col}: error: {} (file not formatted)",
+                        e.message
+                    );
                 }
                 None
             }
@@ -190,7 +212,11 @@ fn fmt(args: impl Iterator<Item = String>) -> ExitCode {
         };
         failed |= out.is_none();
         if stdin {
-            let text = if check { None } else { Some(out.as_deref().unwrap_or(&src)) };
+            let text = if check {
+                None
+            } else {
+                Some(out.as_deref().unwrap_or(&src))
+            };
             if let Some(t) = text {
                 if std::io::stdout().write_all(t.as_bytes()).is_err() {
                     return ExitCode::FAILURE;
@@ -211,7 +237,11 @@ fn fmt(args: impl Iterator<Item = String>) -> ExitCode {
             }
         }
     }
-    if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn usage(msg: &str) -> ExitCode {

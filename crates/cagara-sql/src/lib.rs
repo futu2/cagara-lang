@@ -25,7 +25,11 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { dialect: Dialect::Ansi, pretty: false, optimize: false }
+        Options {
+            dialect: Dialect::Ansi,
+            pretty: false,
+            optimize: false,
+        }
     }
 }
 

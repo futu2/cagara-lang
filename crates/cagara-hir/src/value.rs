@@ -176,5 +176,9 @@ pub struct EvalError {
 pub type EResult<T> = Result<T, EvalError>;
 
 pub fn err<T>(message: impl Into<String>) -> EResult<T> {
-    Err(EvalError { module: 0, span: None, message: message.into() })
+    Err(EvalError {
+        module: 0,
+        span: None,
+        message: message.into(),
+    })
 }

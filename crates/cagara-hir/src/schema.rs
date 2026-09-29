@@ -88,13 +88,17 @@ fn projection(fs: &[(String, Expr)], cols: &[String], agg: bool) -> Result<Vec<S
         let phase = e.phase().map_err(|m| format!("field `{n}`: {m}"))?;
         match (agg, phase) {
             (false, Phase::Agg) => {
-                return Err(format!("field `{n}` is an aggregate; aggregates belong in `agg`, not `select`"))
+                return Err(format!(
+                    "field `{n}` is an aggregate; aggregates belong in `agg`, not `select`"
+                ))
             }
-            (true, Phase::Row) => {
-                return Err(format!("field `{n}` uses a column that is not grouped; wrap it in `group` or aggregate it"))
-            }
+            (true, Phase::Row) => return Err(format!(
+                "field `{n}` uses a column that is not grouped; wrap it in `group` or aggregate it"
+            )),
             (true, Phase::Win) => {
-                return Err(format!("field `{n}` is a window function; use it in a `select` stage after `agg`"))
+                return Err(format!(
+                    "field `{n}` is a window function; use it in a `select` stage after `agg`"
+                ))
             }
             _ => {}
         }
@@ -106,10 +110,15 @@ fn refs(e: &Expr, cols: &[String], ctx: &str) -> Result<(), String> {
     for (side, n) in e.columns() {
         match side {
             Side::Single if !cols.contains(&n) => {
-                return Err(format!("no column `{n}` in the input of `{ctx}`; available: {}", cols.join(", ")))
+                return Err(format!(
+                    "no column `{n}` in the input of `{ctx}`; available: {}",
+                    cols.join(", ")
+                ))
             }
             Side::Left | Side::Right => {
-                return Err(format!("`.<{n}` / `.>{n}` can only be used in a join predicate"))
+                return Err(format!(
+                    "`.<{n}` / `.>{n}` can only be used in a join predicate"
+                ))
             }
             _ => {}
         }
@@ -146,13 +155,22 @@ impl KeyMapper {
                 srcs.iter().try_for_each(exists)?;
                 cols.iter()
                     .map(|c| {
-                        let new = ps.iter().find(|p| &p.0 == c).map_or_else(|| c.clone(), |p| p.1.clone());
+                        let new = ps
+                            .iter()
+                            .find(|p| &p.0 == c)
+                            .map_or_else(|| c.clone(), |p| p.1.clone());
                         (c.clone(), new)
                     })
                     .collect()
             }
-            KeyMapper::Prefix(p) => cols.iter().map(|c| (c.clone(), format!("{p}{c}"))).collect(),
-            KeyMapper::Suffix(s) => cols.iter().map(|c| (c.clone(), format!("{c}{s}"))).collect(),
+            KeyMapper::Prefix(p) => cols
+                .iter()
+                .map(|c| (c.clone(), format!("{p}{c}")))
+                .collect(),
+            KeyMapper::Suffix(s) => cols
+                .iter()
+                .map(|c| (c.clone(), format!("{c}{s}")))
+                .collect(),
         };
         let names: Vec<String> = out.iter().map(|p| p.1.clone()).collect();
         match first_dup(&names) {
@@ -163,7 +181,10 @@ impl KeyMapper {
 }
 
 fn first_dup(xs: &[String]) -> Option<&String> {
-    xs.iter().enumerate().find(|(i, x)| xs[..*i].contains(x)).map(|(_, x)| x)
+    xs.iter()
+        .enumerate()
+        .find(|(i, x)| xs[..*i].contains(x))
+        .map(|(_, x)| x)
 }
 
 fn distinct(ks: &[String]) -> Result<(), String> {

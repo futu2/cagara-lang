@@ -8,7 +8,8 @@ use cagara_hir::root_queries_checked;
 use cagara_hir::workspace::{Binding, Diag, Workspace};
 use cagara_syntax::ast::{Expr, ExprKind, Span};
 use lsp_types::{
-    CompletionItem, CompletionItemKind, DocumentHighlightKind, DocumentSymbol, Position, Range, SymbolKind, TextEdit,
+    CompletionItem, CompletionItemKind, DocumentHighlightKind, DocumentSymbol, Position, Range,
+    SymbolKind, TextEdit,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -20,7 +21,11 @@ pub fn diagnostics(ws: &Workspace) -> Vec<(Range, String)> {
     let root = ws.modules[ws.root].path.display().to_string();
     let mut all: Vec<Diag> = ws.diags.clone();
     all.extend(tc.errors.iter().map(|e| e.diag.clone()));
-    all.extend(root_queries_checked(ws, &tc).into_iter().filter_map(|(_, r)| r.err()));
+    all.extend(
+        root_queries_checked(ws, &tc)
+            .into_iter()
+            .filter_map(|(_, r)| r.err()),
+    );
     let mut out: Vec<(Range, String)> = Vec::new();
     for d in all.iter().filter(|d| d.path == root) {
         let item = (diag_range(d), d.message.clone());
@@ -60,14 +65,25 @@ struct Occ {
 /// are skipped; operators count where their symbol is written.
 fn occurrences(ws: &Workspace) -> Vec<Occ> {
     let md = &ws.modules[ws.root];
-    let mut w = Walk { ws, out: Vec::new(), env: Vec::new() };
+    let mut w = Walk {
+        ws,
+        out: Vec::new(),
+        env: Vec::new(),
+    };
     for d in &md.module.defs {
         let start = d.span.start as usize;
         let spelled = md.text.get(start..).is_some_and(|t| t.starts_with(&d.name));
         if let (true, Some(b)) = (spelled, md.scope.get(&d.name)) {
             let end = start + d.name.len();
             let target = Target::Global(b.clone());
-            w.out.push(Occ { start, end, target, decl: true, scope_end: end, site: None });
+            w.out.push(Occ {
+                start,
+                end,
+                target,
+                decl: true,
+                scope_end: end,
+                site: None,
+            });
         }
         w.expr(&d.body);
     }
@@ -87,7 +103,9 @@ impl Walk<'_> {
         let md = &ws.modules[ws.root];
         match &e.kind {
             ExprKind::Name(n) => {
-                let Some((start, end)) = spelled(&md.text, e.span, n) else { return };
+                let Some((start, end)) = spelled(&md.text, e.span, n) else {
+                    return;
+                };
                 let target = match self.env.iter().rev().find(|(p, _)| p == n) {
                     Some(&(_, at)) => Target::Local(at),
                     None => match md.scope.get(n) {
@@ -95,22 +113,44 @@ impl Walk<'_> {
                         None => return,
                     },
                 };
-                self.out.push(Occ { start, end, target, decl: false, scope_end: end, site: Some(e.span) });
+                self.out.push(Occ {
+                    start,
+                    end,
+                    target,
+                    decl: false,
+                    scope_end: end,
+                    site: Some(e.span),
+                });
             }
             ExprKind::Proj(inner, field) => {
                 self.expr(inner);
                 // `alias.name`: the field resolves in the imported module.
-                let ExprKind::Name(a) = &inner.kind else { return };
+                let ExprKind::Name(a) = &inner.kind else {
+                    return;
+                };
                 if self.env.iter().any(|(p, _)| p == a) {
                     return;
                 }
-                let Some(Binding::Module(t)) = md.scope.get(a) else { return };
-                let Some(b) = ws.modules[*t].own.get(field) else { return };
-                let Some((_, end)) = trimmed(&md.text, e.span) else { return };
+                let Some(Binding::Module(t)) = md.scope.get(a) else {
+                    return;
+                };
+                let Some(b) = ws.modules[*t].own.get(field) else {
+                    return;
+                };
+                let Some((_, end)) = trimmed(&md.text, e.span) else {
+                    return;
+                };
                 if md.text[..end].ends_with(field.as_str()) {
                     let start = end - field.len();
                     let target = Target::Global(b.clone());
-                    self.out.push(Occ { start, end, target, decl: false, scope_end: end, site: Some(e.span) });
+                    self.out.push(Occ {
+                        start,
+                        end,
+                        target,
+                        decl: false,
+                        scope_end: end,
+                        site: Some(e.span),
+                    });
                 }
             }
             ExprKind::App(f, args) => {
@@ -119,11 +159,24 @@ impl Walk<'_> {
             }
             ExprKind::Lambda(p, body) => {
                 // A lambda's span starts at its parameter.
-                let Some((start, scope_end)) = trimmed(&md.text, e.span) else { return };
-                let at = if md.text[start..].starts_with(p.as_str()) { start } else { usize::MAX };
+                let Some((start, scope_end)) = trimmed(&md.text, e.span) else {
+                    return;
+                };
+                let at = if md.text[start..].starts_with(p.as_str()) {
+                    start
+                } else {
+                    usize::MAX
+                };
                 if at != usize::MAX {
                     let end = start + p.len();
-                    self.out.push(Occ { start, end, target: Target::Local(at), decl: true, scope_end, site: None });
+                    self.out.push(Occ {
+                        start,
+                        end,
+                        target: Target::Local(at),
+                        decl: true,
+                        scope_end,
+                        site: None,
+                    });
                 }
                 self.env.push((p.clone(), at));
                 self.expr(body);
@@ -150,18 +203,24 @@ fn trimmed(text: &str, span: Span) -> Option<(usize, usize)> {
 fn spelled(text: &str, span: Span, name: &str) -> Option<(usize, usize)> {
     let (s, e) = trimmed(text, span)?;
     let t = &text[s..e];
-    (t == name || name.strip_prefix('_').and_then(|n| n.strip_suffix('_')) == Some(t)).then_some((s, e))
+    (t == name || name.strip_prefix('_').and_then(|n| n.strip_suffix('_')) == Some(t))
+        .then_some((s, e))
 }
 
 /// The occurrence under the cursor; at a boundary (`a|+`), the one ending
 /// there if none starts there.
 fn occ_at(occs: &[Occ], offset: usize) -> Option<&Occ> {
-    occs.iter().find(|o| o.start <= offset && offset < o.end).or_else(|| occs.iter().find(|o| o.end == offset))
+    occs.iter()
+        .find(|o| o.start <= offset && offset < o.end)
+        .or_else(|| occs.iter().find(|o| o.end == offset))
 }
 
 fn root_range(ws: &Workspace, start: usize, end: usize) -> Range {
     let text = &ws.modules[ws.root].text;
-    Range { start: position_of(text, start), end: position_of(text, end) }
+    Range {
+        start: position_of(text, start),
+        end: position_of(text, end),
+    }
 }
 
 // ── requests ─────────────────────────────────────────────────
@@ -182,17 +241,31 @@ pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
         return Some(format!("```cagara\n{head}\n```\nlambda parameter"));
     };
     let (lines, def_name) = match b {
-        Binding::Def(m, i) => (vec![def_line(&tc, ws, *m, *i)], ws.modules[*m].module.defs[*i].name.as_str()),
+        Binding::Def(m, i) => (
+            vec![def_line(&tc, ws, *m, *i)],
+            ws.modules[*m].module.defs[*i].name.as_str(),
+        ),
         Binding::Overloads(m, is) => {
             let lines = is.iter().map(|&i| def_line(&tc, ws, *m, i)).collect();
-            (lines, is.first().map_or(name, |&i| ws.modules[*m].module.defs[i].name.as_str()))
+            (
+                lines,
+                is.first()
+                    .map_or(name, |&i| ws.modules[*m].module.defs[i].name.as_str()),
+            )
         }
-        Binding::Module(t) => return Some(format!("```cagara\nmodule {}\n```", ws.modules[*t].path.display())),
+        Binding::Module(t) => {
+            return Some(format!(
+                "```cagara\nmodule {}\n```",
+                ws.modules[*t].path.display()
+            ))
+        }
         Binding::Prim(_) => (vec![format!("{name} : primitive")], name),
     };
     let general = format!("```cagara\n{}\n```", lines.join("\n"));
     match here.map(|t| format!("{def_name} : {t}")) {
-        Some(line) if lines != [line.as_str()] => Some(format!("```cagara\n{line}\n```\n---\ndefined as\n{general}")),
+        Some(line) if lines != [line.as_str()] => Some(format!(
+            "```cagara\n{line}\n```\n---\ndefined as\n{general}"
+        )),
         _ => Some(general),
     }
 }
@@ -203,11 +276,16 @@ pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
 pub fn definition(ws: &Workspace, pos: Position) -> Vec<(PathBuf, Range)> {
     let text = &ws.modules[ws.root].text;
     let occs = occurrences(ws);
-    let Some(o) = offset_at(text, pos).and_then(|off| occ_at(&occs, off)) else { return vec![] };
+    let Some(o) = offset_at(text, pos).and_then(|off| occ_at(&occs, off)) else {
+        return vec![];
+    };
     let (m, is) = match &o.target {
         Target::Local(at) => {
             let root = &ws.modules[ws.root];
-            return vec![(root.path.clone(), root_range(ws, *at, *at + (o.end - o.start)))];
+            return vec![(
+                root.path.clone(),
+                root_range(ws, *at, *at + (o.end - o.start)),
+            )];
         }
         Target::Global(Binding::Def(m, i)) => (*m, vec![*i]),
         Target::Global(Binding::Overloads(m, is)) => (*m, is.clone()),
@@ -221,7 +299,10 @@ pub fn definition(ws: &Workspace, pos: Position) -> Vec<(PathBuf, Range)> {
         .map(|&i| {
             let d = &md.module.defs[i];
             let start = d.span.start as usize;
-            let range = Range { start: position_of(&md.text, start), end: position_of(&md.text, start + d.name.len()) };
+            let range = Range {
+                start: position_of(&md.text, start),
+                end: position_of(&md.text, start + d.name.len()),
+            };
             (md.path.clone(), range)
         })
         .collect()
@@ -242,11 +323,17 @@ pub fn references(ws: &Workspace, pos: Position, include_declaration: bool) -> V
 pub fn highlights(ws: &Workspace, pos: Position) -> Vec<(Range, DocumentHighlightKind)> {
     let text = &ws.modules[ws.root].text;
     let occs = occurrences(ws);
-    let Some(o) = offset_at(text, pos).and_then(|off| occ_at(&occs, off)) else { return vec![] };
+    let Some(o) = offset_at(text, pos).and_then(|off| occ_at(&occs, off)) else {
+        return vec![];
+    };
     occs.iter()
         .filter(|x| x.target == o.target)
         .map(|x| {
-            let kind = if x.decl { DocumentHighlightKind::WRITE } else { DocumentHighlightKind::READ };
+            let kind = if x.decl {
+                DocumentHighlightKind::WRITE
+            } else {
+                DocumentHighlightKind::READ
+            };
             (root_range(ws, x.start, x.end), kind)
         })
         .collect()
@@ -258,15 +345,17 @@ pub fn highlights(ws: &Workspace, pos: Position) -> Vec<(Range, DocumentHighligh
 pub fn symbols(ws: &Workspace) -> Vec<DocumentSymbol> {
     let tc = check(ws);
     let md = &ws.modules[ws.root];
-    let sym = |name: String, detail: Option<String>, kind, range: Range, selection_range: Range| DocumentSymbol {
-        name,
-        detail,
-        kind,
-        tags: None,
-        deprecated: None,
-        range,
-        selection_range,
-        children: None,
+    let sym = |name: String, detail: Option<String>, kind, range: Range, selection_range: Range| {
+        DocumentSymbol {
+            name,
+            detail,
+            kind,
+            tags: None,
+            deprecated: None,
+            range,
+            selection_range,
+            children: None,
+        }
     };
     let mut out: Vec<DocumentSymbol> = md
         .module
@@ -275,15 +364,33 @@ pub fn symbols(ws: &Workspace) -> Vec<DocumentSymbol> {
         .filter_map(|imp| {
             let (s, e) = trimmed(&md.text, imp.span)?;
             let r = root_range(ws, s, e);
-            Some(sym(imp.path.clone(), imp.alias.clone(), SymbolKind::MODULE, r, r))
+            Some(sym(
+                imp.path.clone(),
+                imp.alias.clone(),
+                SymbolKind::MODULE,
+                r,
+                r,
+            ))
         })
         .collect();
     for (i, d) in md.module.defs.iter().enumerate() {
-        let Some((s, e)) = trimmed(&md.text, d.span) else { continue };
+        let Some((s, e)) = trimmed(&md.text, d.span) else {
+            continue;
+        };
         let name_end = (s + d.name.len()).min(e);
         let ty = tc.type_of(ws.root, i).map(str::to_string);
-        let kind = if ty.as_deref().is_some_and(|t| t.contains("->")) { SymbolKind::FUNCTION } else { SymbolKind::VARIABLE };
-        out.push(sym(d.name.clone(), ty, kind, root_range(ws, s, e), root_range(ws, s, name_end)));
+        let kind = if ty.as_deref().is_some_and(|t| t.contains("->")) {
+            SymbolKind::FUNCTION
+        } else {
+            SymbolKind::VARIABLE
+        };
+        out.push(sym(
+            d.name.clone(),
+            ty,
+            kind,
+            root_range(ws, s, e),
+            root_range(ws, s, name_end),
+        ));
     }
     out
 }
@@ -298,15 +405,23 @@ pub fn symbols(ws: &Workspace) -> Vec<DocumentSymbol> {
 /// the text and then restores it.
 pub fn completion(ws: &mut Workspace, pos: Position) -> Vec<CompletionItem> {
     let text = &ws.modules[ws.root].text;
-    let Some(offset) = offset_at(text, pos) else { return vec![] };
+    let Some(offset) = offset_at(text, pos) else {
+        return vec![];
+    };
     match dot_context(text, offset) {
         Dot::Column(start, end) => field_completion(ws, start, end),
         Dot::Member(alias) => {
             let ws: &Workspace = ws;
-            let Some(Binding::Module(t)) = ws.modules[ws.root].scope.get(&alias) else { return vec![] };
+            let Some(Binding::Module(t)) = ws.modules[ws.root].scope.get(&alias) else {
+                return vec![];
+            };
             let tc = check(ws);
-            let mut items: Vec<CompletionItem> =
-                ws.modules[*t].own.iter().filter(|(n, _)| is_name(n)).map(|(n, b)| item(ws, &tc, n, b)).collect();
+            let mut items: Vec<CompletionItem> = ws.modules[*t]
+                .own
+                .iter()
+                .filter(|(n, _)| is_name(n))
+                .map(|(n, b)| item(ws, &tc, n, b))
+                .collect();
             items.sort_by(|x, y| x.label.cmp(&y.label));
             items
         }
@@ -390,7 +505,12 @@ fn name_completion(ws: &Workspace, offset: usize) -> Vec<CompletionItem> {
     let text = &md.text;
     let mut locals: Vec<CompletionItem> = occurrences(ws)
         .into_iter()
-        .filter(|o| o.decl && matches!(o.target, Target::Local(_)) && o.start < offset && offset <= o.scope_end)
+        .filter(|o| {
+            o.decl
+                && matches!(o.target, Target::Local(_))
+                && o.start < offset
+                && offset <= o.scope_end
+        })
         .map(|o| CompletionItem {
             label: text[o.start..o.end].to_string(),
             kind: Some(CompletionItemKind::VARIABLE),
@@ -416,18 +536,37 @@ fn item(ws: &Workspace, tc: &TypeCheck, name: &str, b: &Binding) -> CompletionIt
     let (detail, kind) = match b {
         Binding::Def(m, i) => {
             let ty = tc.type_of(*m, *i).unwrap_or("(type error)").to_string();
-            let k = if ty.contains("->") { CompletionItemKind::FUNCTION } else { CompletionItemKind::VARIABLE };
+            let k = if ty.contains("->") {
+                CompletionItemKind::FUNCTION
+            } else {
+                CompletionItemKind::VARIABLE
+            };
             (ty, k)
         }
         Binding::Overloads(m, is) => {
-            let first = is.first().and_then(|&i| tc.type_of(*m, i)).unwrap_or("(type error)");
-            let more = if is.len() > 1 { format!(" (+{} overloads)", is.len() - 1) } else { String::new() };
+            let first = is
+                .first()
+                .and_then(|&i| tc.type_of(*m, i))
+                .unwrap_or("(type error)");
+            let more = if is.len() > 1 {
+                format!(" (+{} overloads)", is.len() - 1)
+            } else {
+                String::new()
+            };
             (format!("{first}{more}"), CompletionItemKind::FUNCTION)
         }
-        Binding::Module(t) => (format!("module {}", ws.modules[*t].path.display()), CompletionItemKind::MODULE),
+        Binding::Module(t) => (
+            format!("module {}", ws.modules[*t].path.display()),
+            CompletionItemKind::MODULE,
+        ),
         Binding::Prim(_) => ("primitive".into(), CompletionItemKind::FUNCTION),
     };
-    CompletionItem { label: name.to_string(), kind: Some(kind), detail: Some(detail), ..Default::default() }
+    CompletionItem {
+        label: name.to_string(),
+        kind: Some(kind),
+        detail: Some(detail),
+        ..Default::default()
+    }
 }
 
 /// A definition's hover line, under its own name (`_+_` for `+`).
@@ -443,7 +582,10 @@ fn is_ident(b: u8) -> bool {
 /// A user-facing identifier: not an operator (`_+_`) or a `__` primitive.
 fn is_name(n: &str) -> bool {
     let b = n.as_bytes();
-    !b.is_empty() && b.iter().all(|&c| is_ident(c)) && !b[0].is_ascii_digit() && !n.starts_with("__")
+    !b.is_empty()
+        && b.iter().all(|&c| is_ident(c))
+        && !b[0].is_ascii_digit()
+        && !n.starts_with("__")
 }
 
 /// Formatting edits for the root file: one edit replacing the whole text, or
@@ -455,8 +597,17 @@ pub fn format(ws: &Workspace) -> Result<Vec<TextEdit>, cagara_fmt::FmtError> {
     if &out == text {
         return Ok(vec![]);
     }
-    let range = Range { start: Position { line: 0, character: 0 }, end: position_of(text, text.len()) };
-    Ok(vec![TextEdit { range, new_text: out }])
+    let range = Range {
+        start: Position {
+            line: 0,
+            character: 0,
+        },
+        end: position_of(text, text.len()),
+    };
+    Ok(vec![TextEdit {
+        range,
+        new_text: out,
+    }])
 }
 
 /// Byte offset of an LSP position (UTF-16 columns).
@@ -465,7 +616,9 @@ pub fn offset_at(text: &str, pos: Position) -> Option<usize> {
     for _ in 0..pos.line {
         line_start += text[line_start..].find('\n')? + 1;
     }
-    let line_end = text[line_start..].find('\n').map_or(text.len(), |i| line_start + i);
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |i| line_start + i);
     let mut units = 0;
     for (i, c) in text[line_start..line_end].char_indices() {
         if units >= pos.character {
@@ -481,16 +634,37 @@ pub fn position_of(text: &str, offset: usize) -> Position {
     let offset = offset.min(text.len());
     let before = &text[..offset];
     let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-    Position { line: before.matches('\n').count() as u32, character: before[line_start..].encode_utf16().count() as u32 }
+    Position {
+        line: before.matches('\n').count() as u32,
+        character: before[line_start..].encode_utf16().count() as u32,
+    }
 }
 
 /// A diagnostic's range from its line, byte column, and width in chars.
 fn diag_range(d: &Diag) -> Range {
     let line = d.line.saturating_sub(1) as u32;
     let col = d.col.saturating_sub(1);
-    let start = d.source.get(..col).map_or(col, |s| s.encode_utf16().count()) as u32;
-    let width = d.source.get(col..).map_or(1, |s| s.chars().take(d.width.max(1)).map(char::len_utf16).sum::<usize>().max(1)) as u32;
-    Range { start: Position { line, character: start }, end: Position { line, character: start + width } }
+    let start = d
+        .source
+        .get(..col)
+        .map_or(col, |s| s.encode_utf16().count()) as u32;
+    let width = d.source.get(col..).map_or(1, |s| {
+        s.chars()
+            .take(d.width.max(1))
+            .map(char::len_utf16)
+            .sum::<usize>()
+            .max(1)
+    }) as u32;
+    Range {
+        start: Position {
+            line,
+            character: start,
+        },
+        end: Position {
+            line,
+            character: start + width,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -498,7 +672,8 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    const SRC: &str = "users : query { id = int, name = string, age = int } = table \"p\" \"users\"\n\
+    const SRC: &str =
+        "users : query { id = int, name = string, age = int } = table \"p\" \"users\"\n\
                        adult = .age >= 18\n\
                        q = users & where adult & agg { s = sum .age }\n\
                        bad = users & select { x = \"é\" <> .age }\n\
@@ -514,16 +689,30 @@ mod tests {
     }
 
     fn range(line: u32, start: u32, end: u32) -> Range {
-        Range { start: pos(line, start), end: pos(line, end) }
+        Range {
+            start: pos(line, start),
+            end: pos(line, end),
+        }
     }
 
     #[test]
     fn formatting_replaces_the_whole_document() {
         let edits = format(&ws()).unwrap();
-        let [edit] = edits.as_slice() else { panic!("{edits:?}") };
-        assert_eq!(edit.range, Range { start: pos(0, 0), end: pos(6, 0) });
-        assert!(edit.new_text.contains("q = users\n  & where adult\n  & agg { s = sum .age }\n"));
-        let formatted = Workspace::open_with(Path::new("/nonexistent/main.cagara"), edit.new_text.clone());
+        let [edit] = edits.as_slice() else {
+            panic!("{edits:?}")
+        };
+        assert_eq!(
+            edit.range,
+            Range {
+                start: pos(0, 0),
+                end: pos(6, 0)
+            }
+        );
+        assert!(edit
+            .new_text
+            .contains("q = users\n  & where adult\n  & agg { s = sum .age }\n"));
+        let formatted =
+            Workspace::open_with(Path::new("/nonexistent/main.cagara"), edit.new_text.clone());
         assert!(format(&formatted).unwrap().is_empty());
     }
 
@@ -550,7 +739,10 @@ mod tests {
         // `sum` is an overload set in the prelude.
         let h = hover(&ws, pos(2, 37)).unwrap();
         let (here, general) = h.split_once("defined as").unwrap();
-        assert!(here.contains("sum : expr { age = int, id = int, name = string } int -> "), "{h}");
+        assert!(
+            here.contains("sum : expr { age = int, id = int, name = string } int -> "),
+            "{h}"
+        );
         assert_eq!(general.matches("sum : ").count(), 4, "{h}");
         // Operators hover at their symbol, under their definition name.
         let h = hover(&ws, pos(4, 15)).unwrap();
@@ -571,15 +763,24 @@ mod tests {
         // `select` at its use: instantiated, then the general scheme.
         let h = hover(&ws, pos(1, 14)).unwrap();
         let (here, general) = h.split_once("defined as").unwrap();
-        assert!(here.contains("select : { n = expr { name = string, id = int } string } -> "), "{h}");
+        assert!(
+            here.contains("select : { n = expr { name = string, id = int } string } -> "),
+            "{h}"
+        );
         assert!(here.contains("-> query { n = string }"), "{h}");
         assert!(general.contains("select : a -> query b -> query c"), "{h}");
         // A monomorphic use shows its type once.
         let h = hover(&ws, pos(1, 5)).unwrap();
-        assert!(!h.contains("defined as") && h.contains("users : query { id = int, name = string }"), "{h}");
+        assert!(
+            !h.contains("defined as") && h.contains("users : query { id = int, name = string }"),
+            "{h}"
+        );
         // A lambda parameter shows its inferred type.
         let h = hover(&ws, pos(2, 13)).unwrap();
-        assert!(h.contains("x : expr ") && h.contains("lambda parameter"), "{h}");
+        assert!(
+            h.contains("x : expr ") && h.contains("lambda parameter"),
+            "{h}"
+        );
     }
 
     #[test]
@@ -608,8 +809,18 @@ mod tests {
         // `x` in `twice`: the parameter and both uses.
         let hs = highlights(&ws, pos(4, 13));
         let kinds: Vec<_> = hs.iter().map(|(_, k)| *k).collect();
-        assert_eq!(hs.iter().map(|(r, _)| *r).collect::<Vec<_>>(), vec![range(4, 8, 9), range(4, 13, 14), range(4, 17, 18)]);
-        assert_eq!(kinds, vec![DocumentHighlightKind::WRITE, DocumentHighlightKind::READ, DocumentHighlightKind::READ]);
+        assert_eq!(
+            hs.iter().map(|(r, _)| *r).collect::<Vec<_>>(),
+            vec![range(4, 8, 9), range(4, 13, 14), range(4, 17, 18)]
+        );
+        assert_eq!(
+            kinds,
+            vec![
+                DocumentHighlightKind::WRITE,
+                DocumentHighlightKind::READ,
+                DocumentHighlightKind::READ
+            ]
+        );
     }
 
     #[test]
@@ -627,7 +838,12 @@ mod tests {
     fn fields(src: &str, p: Position) -> Vec<String> {
         let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
         let items = completion(&mut ws, p);
-        assert!(items.iter().all(|i| i.kind == Some(CompletionItemKind::FIELD)), "{items:?}");
+        assert!(
+            items
+                .iter()
+                .all(|i| i.kind == Some(CompletionItemKind::FIELD)),
+            "{items:?}"
+        );
         // The probe leaves no trace.
         assert_eq!(ws.modules[ws.root].text, src);
         items.into_iter().map(|i| i.label).collect()
@@ -664,7 +880,12 @@ mod tests {
     #[test]
     fn completion_lists_scope_and_parameters() {
         let mut ws = ws();
-        let mut labels = |p| completion(&mut ws, p).into_iter().map(|i| i.label).collect::<Vec<_>>();
+        let mut labels = |p| {
+            completion(&mut ws, p)
+                .into_iter()
+                .map(|i| i.label)
+                .collect::<Vec<_>>()
+        };
         // Inside `twice`'s body: its parameter, top-level names, the prelude.
         let ls = labels(pos(4, 13));
         for n in ["x", "adult", "users", "sum", "where"] {
@@ -700,7 +921,10 @@ mod tests {
         assert_eq!(d.len(), 1);
         assert!(d[0].0.ends_with("lib.cagara"), "{d:?}");
         assert_eq!(d[0].1, range(0, 0, 6));
-        let ls: Vec<String> = completion(&mut ws, pos(2, 8)).into_iter().map(|i| i.label).collect();
+        let ls: Vec<String> = completion(&mut ws, pos(2, 8))
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
         assert_eq!(ls, ["helper"]);
         let ss = symbols(&ws);
         assert_eq!(ss[0].kind, SymbolKind::MODULE);

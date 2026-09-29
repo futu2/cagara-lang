@@ -45,7 +45,10 @@ mod tests {
     fn round_trip() {
         let p = Path::new("/home/me/my queries/réport.cagara");
         let u = from_path(p).unwrap();
-        assert_eq!(u.as_str(), "file:///home/me/my%20queries/r%C3%A9port.cagara");
+        assert_eq!(
+            u.as_str(),
+            "file:///home/me/my%20queries/r%C3%A9port.cagara"
+        );
         assert_eq!(to_path(&u).unwrap(), p);
     }
 }

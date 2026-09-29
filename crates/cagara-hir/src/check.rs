@@ -118,7 +118,8 @@ const CONS: &[(&str, usize)] = &[
     ("bound", 0),
 ];
 
-const JOIN_ONLY: &str = "`.<x` and `.>x` refer to the inputs of a join and can only be used in a join predicate";
+const JOIN_ONLY: &str =
+    "`.<x` and `.>x` refer to the inputs of a join and can only be used in a join predicate";
 const NULLABLE: &str = "expected a non-null value, found a `maybe`; use `coalesce default x` \
                         (or `isNull` / `isNotNull` to test it)";
 const UNGROUPED: &str = "mixes an aggregate with an ungrouped column; wrap the column in `group`";
@@ -128,12 +129,22 @@ enum Cons {
     /// `where pred`: pred is a row-phase bool expression over `row`.
     Filter { pred: Ty, row: Ty },
     /// `select` / `agg` record over `input`, producing the `output` row.
-    Project { fields: Ty, input: Ty, output: Ty, agg: bool },
+    Project {
+        fields: Ty,
+        input: Ty,
+        output: Ty,
+        agg: bool,
+    },
     /// Join predicate over `join left right`.
     JoinOn { pred: Ty, left: Ty, right: Ty },
     /// Output columns of a join: left, then right columns not on the left.
     /// `nullable`: whether the left / right columns become `maybe`.
-    JoinOut { left: Ty, right: Ty, out: Ty, nullable: (bool, bool) },
+    JoinOut {
+        left: Ty,
+        right: Ty,
+        out: Ty,
+        nullable: (bool, bool),
+    },
     /// A literal of scalar type `lit` used where `target` is expected, once
     /// `target` is known (int widens to float, string to date / timestamp).
     Lit { lit: &'static str, target: Ty },
@@ -143,7 +154,13 @@ enum Cons {
     /// known (so the query's column order is kept).
     Within { req: Ty, row: Ty },
     /// Use of an overload set at type `target`.
-    Overload { name: String, module: usize, cands: Vec<usize>, target: Ty, origin: Origin },
+    Overload {
+        name: String,
+        module: usize,
+        cands: Vec<usize>,
+        target: Ty,
+        origin: Origin,
+    },
 }
 
 /// Where an overload's choice is recorded.
@@ -166,20 +183,61 @@ pub enum Choice {
 impl Cons {
     fn map(&self, f: &mut impl FnMut(&Ty) -> Ty) -> Cons {
         match self {
-            Cons::Filter { pred, row } => Cons::Filter { pred: f(pred), row: f(row) },
-            Cons::Project { fields, input, output, agg } => {
-                Cons::Project { fields: f(fields), input: f(input), output: f(output), agg: *agg }
-            }
-            Cons::JoinOn { pred, left, right } => Cons::JoinOn { pred: f(pred), left: f(left), right: f(right) },
-            Cons::JoinOut { left, right, out, nullable } => {
-                Cons::JoinOut { left: f(left), right: f(right), out: f(out), nullable: *nullable }
-            }
-            Cons::Lit { lit, target } => Cons::Lit { lit, target: f(target) },
-            Cons::KeyMap { mapper, input, output } => {
-                Cons::KeyMap { mapper: f(mapper), input: f(input), output: f(output) }
-            }
-            Cons::Within { req, row } => Cons::Within { req: f(req), row: f(row) },
-            Cons::Overload { name, module, cands, target, origin } => Cons::Overload {
+            Cons::Filter { pred, row } => Cons::Filter {
+                pred: f(pred),
+                row: f(row),
+            },
+            Cons::Project {
+                fields,
+                input,
+                output,
+                agg,
+            } => Cons::Project {
+                fields: f(fields),
+                input: f(input),
+                output: f(output),
+                agg: *agg,
+            },
+            Cons::JoinOn { pred, left, right } => Cons::JoinOn {
+                pred: f(pred),
+                left: f(left),
+                right: f(right),
+            },
+            Cons::JoinOut {
+                left,
+                right,
+                out,
+                nullable,
+            } => Cons::JoinOut {
+                left: f(left),
+                right: f(right),
+                out: f(out),
+                nullable: *nullable,
+            },
+            Cons::Lit { lit, target } => Cons::Lit {
+                lit,
+                target: f(target),
+            },
+            Cons::KeyMap {
+                mapper,
+                input,
+                output,
+            } => Cons::KeyMap {
+                mapper: f(mapper),
+                input: f(input),
+                output: f(output),
+            },
+            Cons::Within { req, row } => Cons::Within {
+                req: f(req),
+                row: f(row),
+            },
+            Cons::Overload {
+                name,
+                module,
+                cands,
+                target,
+                origin,
+            } => Cons::Overload {
                 name: name.clone(),
                 module: *module,
                 cands: cands.clone(),
@@ -257,11 +315,16 @@ impl TypeCheck {
 
     /// Printed type of the name use whose expression spans `span` in `module`.
     pub fn use_type(&self, module: usize, span: Span) -> Option<&str> {
-        self.use_types.get(&(module, span.start, span.end)).map(String::as_str)
+        self.use_types
+            .get(&(module, span.start, span.end))
+            .map(String::as_str)
     }
 
     pub fn error_for(&self, module: usize, def: usize) -> Option<&Diag> {
-        self.errors.iter().find(|e| e.module == module && e.def == def).map(|e| &e.diag)
+        self.errors
+            .iter()
+            .find(|e| e.module == module && e.def == def)
+            .map(|e| &e.diag)
     }
 }
 
@@ -299,7 +362,12 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> ModuleCheck {
     #[cfg(test)]
     CHECK_RUNS.with(|c| c.set(c.get() + 1));
     let mut deps = HashMap::new();
-    let imported: Vec<ModuleInput> = input.prelude(db).iter().copied().chain(input.imports(db).iter().map(|(_, t)| *t)).collect();
+    let imported: Vec<ModuleInput> = input
+        .prelude(db)
+        .iter()
+        .copied()
+        .chain(input.imports(db).iter().map(|(_, t)| *t))
+        .collect();
     for d in &imported {
         deps.extend(module_check(db, *d).schemes.clone());
     }
@@ -311,7 +379,10 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> ModuleCheck {
         text: file.text(db),
         defs: &parsed.module.defs,
         scope: module_scope(db, input),
-        owns: imported.iter().map(|t| (*t.index(db), module_own(db, *t))).collect(),
+        owns: imported
+            .iter()
+            .map(|t| (*t.index(db), module_own(db, *t)))
+            .collect(),
     };
     check_module(env, &deps)
 }
@@ -361,7 +432,12 @@ impl<'w> ModuleEnv<'w> {
             text: &md.text,
             defs: &md.module.defs,
             scope: &md.scope,
-            owns: ws.modules.iter().enumerate().map(|(i, x)| (i, &x.own)).collect(),
+            owns: ws
+                .modules
+                .iter()
+                .enumerate()
+                .map(|(i, x)| (i, &x.own))
+                .collect(),
         }
     }
 }
@@ -390,11 +466,28 @@ fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> M
     for i in 0..c.env.defs.len() {
         c.def_scheme(m, i);
     }
-    let schemes: HashMap<_, _> = c.schemes.iter().filter(|(k, _)| k.0 == m).map(|(k, s)| (*k, s.clone())).collect();
-    let types = schemes.iter().filter(|(k, _)| !c.failed.contains(k)).map(|(k, s)| (*k, c.show_scheme(s))).collect();
+    let schemes: HashMap<_, _> = c
+        .schemes
+        .iter()
+        .filter(|(k, _)| k.0 == m)
+        .map(|(k, s)| (*k, s.clone()))
+        .collect();
+    let types = schemes
+        .iter()
+        .filter(|(k, _)| !c.failed.contains(k))
+        .map(|(k, s)| (*k, c.show_scheme(s)))
+        .collect();
     let probe_fields = c.probe_fields.map(|fs| (m, fs));
     let use_types = c.use_types;
-    ModuleCheck { schemes, errors: c.errors, types, holes: c.holes, choices: c.choices, probe_fields, use_types }
+    ModuleCheck {
+        schemes,
+        errors: c.errors,
+        types,
+        holes: c.holes,
+        choices: c.choices,
+        probe_fields,
+        use_types,
+    }
 }
 
 struct TyErr {
@@ -461,12 +554,16 @@ fn missing(l: &str, have: &[(String, Ty)]) -> String {
 fn phase_clash(a: &str, b: &str) -> String {
     match (a, b) {
         ("agg", "win") | ("win", "agg") => {
-            "mixes an aggregate with a window function; use `agg` first, then `select` the window".into()
+            "mixes an aggregate with a window function; use `agg` first, then `select` the window"
+                .into()
         }
-        ("agg", _) | (_, "agg") => "aggregates cannot nest or mix with plain row values; wrap columns in \
+        ("agg", _) | (_, "agg") => {
+            "aggregates cannot nest or mix with plain row values; wrap columns in \
                                     `group`, or aggregate in an earlier `agg` stage"
+                .into()
+        }
+        _ => "window functions cannot nest; compute the inner window in an earlier `select` stage"
             .into(),
-        _ => "window functions cannot nest; compute the inner window in an earlier `select` stage".into(),
     }
 }
 
@@ -478,7 +575,11 @@ impl<'w> Checker<'w> {
     }
 
     fn fresh_with(&mut self, row_or_win: bool, nonnull: bool) -> u32 {
-        self.vars.push(VarInfo { bound: None, row_or_win, nonnull });
+        self.vars.push(VarInfo {
+            bound: None,
+            row_or_win,
+            nonnull,
+        });
         self.vars.len() as u32 - 1
     }
 
@@ -551,7 +652,10 @@ impl<'w> Checker<'w> {
             return Ok(());
         }
         if self.occurs(v, &t) {
-            return Err(format!("infinite type: a type would contain itself ({})", self.show(&t)));
+            return Err(format!(
+                "infinite type: a type would contain itself ({})",
+                self.show(&t)
+            ));
         }
         self.trail.push((v, self.vars[v as usize].clone()));
         if self.vars[v as usize].row_or_win {
@@ -562,7 +666,12 @@ impl<'w> Checker<'w> {
                 }
                 Ty::Con("row" | "win", _) => {}
                 Ty::Con("agg", _) => return Err(UNGROUPED.into()),
-                o => return Err(format!("a column expression cannot have phase {}", self.show(o))),
+                o => {
+                    return Err(format!(
+                        "a column expression cannot have phase {}",
+                        self.show(o)
+                    ))
+                }
             }
         }
         if self.vars[v as usize].nonnull {
@@ -587,7 +696,10 @@ impl<'w> Checker<'w> {
             (_, Ty::Var(v)) => self.bind(*v, a.clone()),
             (Ty::Rigid(x, _), Ty::Rigid(y, _)) if x == y => Ok(()),
             (Ty::Empty, Ty::Empty) => Ok(()),
-            (Ty::Row(..) | Ty::Renames(..), Ty::Row(..) | Ty::Empty | Ty::Rigid(..) | Ty::Renames(..))
+            (
+                Ty::Row(..) | Ty::Renames(..),
+                Ty::Row(..) | Ty::Empty | Ty::Rigid(..) | Ty::Renames(..),
+            )
             | (Ty::Empty | Ty::Rigid(..), Ty::Row(..) | Ty::Renames(..)) => self.unify_rows(&a, &e),
             (Ty::Labels(_), Ty::Labels(_)) => Ok(()),
             (Ty::Labels(ls), Ty::Con("list", x)) | (Ty::Con("list", x), Ty::Labels(ls)) => {
@@ -621,8 +733,16 @@ impl<'w> Checker<'w> {
                 self.unify(t, u).map_err(|m| format!("field `{l}`: {m}"))?;
             }
         }
-        let only_a: Vec<(String, Ty)> = fa.iter().filter(|(l, _)| !fe.iter().any(|(k, _)| k == l)).cloned().collect();
-        let only_e: Vec<(String, Ty)> = fe.iter().filter(|(l, _)| !fa.iter().any(|(k, _)| k == l)).cloned().collect();
+        let only_a: Vec<(String, Ty)> = fa
+            .iter()
+            .filter(|(l, _)| !fe.iter().any(|(k, _)| k == l))
+            .cloned()
+            .collect();
+        let only_e: Vec<(String, Ty)> = fe
+            .iter()
+            .filter(|(l, _)| !fa.iter().any(|(k, _)| k == l))
+            .cloned()
+            .collect();
         let closed = |t: &Ty| !matches!(t, Ty::Var(_));
         if let Some((l, _)) = only_a.first() {
             if closed(&te) {
@@ -668,7 +788,11 @@ impl<'w> Checker<'w> {
         } else {
             ""
         };
-        format!("type mismatch: expected {}, found {}{hint}", self.show(e), self.show(a))
+        format!(
+            "type mismatch: expected {}, found {}{hint}",
+            self.show(e),
+            self.show(a)
+        )
     }
 
     // ── definitions and schemes ────────────────────────────────────────────
@@ -723,7 +847,11 @@ impl<'w> Checker<'w> {
             }
             Err(e) => {
                 let diag = diag_in(self.env.path, self.env.text, e.span, e.msg);
-                self.errors.push(TypeError { module: m, def: i, diag });
+                self.errors.push(TypeError {
+                    module: m,
+                    def: i,
+                    diag,
+                });
                 self.failed.insert((m, i));
                 let v = self.fresh();
                 self.generalize(&v, vec![])
@@ -760,9 +888,17 @@ impl<'w> Checker<'w> {
             self.default_lits();
             self.solve()?;
             for (c, sp) in self.pending.clone() {
-                if let Cons::Overload { name, module, cands, target, .. } = c {
+                if let Cons::Overload {
+                    name,
+                    module,
+                    cands,
+                    target,
+                    ..
+                } = c
+                {
                     let fits = self.fitting(module, &cands, &target);
-                    let shown: Vec<String> = fits.iter().map(|&i| self.cand_shown(module, i)).collect();
+                    let shown: Vec<String> =
+                        fits.iter().map(|&i| self.cand_shown(module, i)).collect();
                     let msg = format!(
                         "ambiguous use of `{}` at type {}; candidates: {}",
                         op_name(&name),
@@ -779,8 +915,19 @@ impl<'w> Checker<'w> {
             // something uses the definition (`.a + "x"`). Leftover literals
             // stay polymorphic (`.age >= 18` keeps its type), so this only
             // reports, and never narrows, what the definition inferred.
-            if let Some((Cons::Overload { name, module, cands, target, .. }, sp)) = self.first_unsatisfiable() {
-                let shown: Vec<String> = cands.iter().map(|&i| self.cand_shown(module, i)).collect();
+            if let Some((
+                Cons::Overload {
+                    name,
+                    module,
+                    cands,
+                    target,
+                    ..
+                },
+                sp,
+            )) = self.first_unsatisfiable()
+            {
+                let shown: Vec<String> =
+                    cands.iter().map(|&i| self.cand_shown(module, i)).collect();
                 let msg = format!(
                     "no overload of `{}` matches {}; candidates: {}",
                     op_name(&name),
@@ -803,7 +950,13 @@ impl<'w> Checker<'w> {
         let _ = self.solve();
         let mut found = None;
         for (c, sp) in &saved {
-            if let Cons::Overload { module, cands, target, .. } = c {
+            if let Cons::Overload {
+                module,
+                cands,
+                target,
+                ..
+            } = c
+            {
                 if self.fitting(*module, cands, target).is_empty() {
                     found = Some((c.clone(), *sp));
                     break;
@@ -846,7 +999,11 @@ impl<'w> Checker<'w> {
             return s;
         }
         let defs = self.env.defs;
-        let ann = if m == self.module { defs[i].ty.as_ref().map(|t| self.annotation(t)) } else { None };
+        let ann = if m == self.module {
+            defs[i].ty.as_ref().map(|t| self.annotation(t))
+        } else {
+            None
+        };
         match ann {
             Some(Ok(t)) => self.generalize(&t, vec![]),
             _ => {
@@ -907,7 +1064,11 @@ impl<'w> Checker<'w> {
     fn skeleton(&mut self, ts: &[Ty], memo: &mut HashMap<String, Ty>) -> Ty {
         let ts: Vec<Ty> = ts.iter().map(|t| self.resolve(t)).collect();
         match &ts[0] {
-            Ty::Con(n, args) if ts.iter().all(|t| matches!(t, Ty::Con(m, a) if m == n && a.len() == args.len())) => {
+            Ty::Con(n, args)
+                if ts
+                    .iter()
+                    .all(|t| matches!(t, Ty::Con(m, a) if m == n && a.len() == args.len())) =>
+            {
                 let (n, arity) = (*n, args.len());
                 let args = (0..arity)
                     .map(|k| {
@@ -964,7 +1125,12 @@ impl<'w> Checker<'w> {
         self.conv(t, &phase, &mut names)
     }
 
-    fn conv(&mut self, t: &TypeExpr, phase: &Ty, names: &mut HashMap<String, Ty>) -> Result<Ty, String> {
+    fn conv(
+        &mut self,
+        t: &TypeExpr,
+        phase: &Ty,
+        names: &mut HashMap<String, Ty>,
+    ) -> Result<Ty, String> {
         match t {
             TypeExpr::App { head, args, .. } => {
                 let Some(&(name, arity)) = CONS.iter().find(|(n, _)| *n == head.as_str()) else {
@@ -974,7 +1140,10 @@ impl<'w> Checker<'w> {
                     return Err(format!("unknown type constructor `{head}`"));
                 };
                 if args.len() != arity {
-                    return Err(format!("`{name}` takes {arity} type argument(s), got {}", args.len()));
+                    return Err(format!(
+                        "`{name}` takes {arity} type argument(s), got {}",
+                        args.len()
+                    ));
                 }
                 match name {
                     "expr" => {
@@ -983,15 +1152,22 @@ impl<'w> Checker<'w> {
                         Ok(expr(phase.clone(), r, a))
                     }
                     "agg" | "win" => match &args[0] {
-                        TypeExpr::App { head, args: inner, .. } if head == "expr" && inner.len() == 2 => {
+                        TypeExpr::App {
+                            head, args: inner, ..
+                        } if head == "expr" && inner.len() == 2 => {
                             let r = self.conv(&inner[0], phase, names)?;
                             let a = self.conv(&inner[1], phase, names)?;
                             Ok(expr(con(name), r, a))
                         }
-                        _ => Err(format!("`{name}` wraps an expression type, e.g. `{name} (expr r int)`")),
+                        _ => Err(format!(
+                            "`{name}` wraps an expression type, e.g. `{name} (expr r int)`"
+                        )),
                     },
                     _ => {
-                        let args = args.iter().map(|a| self.conv(a, phase, names)).collect::<Result<_, _>>()?;
+                        let args = args
+                            .iter()
+                            .map(|a| self.conv(a, phase, names))
+                            .collect::<Result<_, _>>()?;
                         Ok(Ty::Con(name, args))
                     }
                 }
@@ -1011,7 +1187,10 @@ impl<'w> Checker<'w> {
                 };
                 Ok(row_or_tail(fs, tail))
             }
-            TypeExpr::Fun(a, b) => Ok(fun(self.conv(a, phase, names)?, self.conv(b, phase, names)?)),
+            TypeExpr::Fun(a, b) => Ok(fun(
+                self.conv(a, phase, names)?,
+                self.conv(b, phase, names)?,
+            )),
             TypeExpr::Error(_) => Ok(self.fresh()),
         }
     }
@@ -1064,7 +1243,10 @@ impl<'w> Checker<'w> {
             Ty::Con(n, args) => Ty::Con(n, args.iter().map(|a| self.inst(a, map, gens)).collect()),
             Ty::Fun(a, b) => fun(self.inst(&a, map, gens), self.inst(&b, map, gens)),
             Ty::Row(fs, tail) => {
-                let fs = fs.iter().map(|(k, v)| (k.clone(), self.inst(v, map, gens))).collect();
+                let fs = fs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), self.inst(v, map, gens)))
+                    .collect();
                 row(fs, self.inst(&tail, map, gens))
             }
             t @ (Ty::Var(_) | Ty::Rigid(..) | Ty::Empty | Ty::Labels(_) | Ty::Renames(_)) => t,
@@ -1081,7 +1263,11 @@ impl<'w> Checker<'w> {
         for c in &cons {
             out.push(c.map(&mut |t| self.gen(t, &mut map, &mut gens)));
         }
-        Scheme { ty, cons: out, gens }
+        Scheme {
+            ty,
+            cons: out,
+            gens,
+        }
     }
 
     fn gen(&self, t: &Ty, map: &mut HashMap<u32, u32>, gens: &mut Vec<GenInfo>) -> Ty {
@@ -1094,7 +1280,11 @@ impl<'w> Checker<'w> {
                 };
                 let k = *map.entry(v).or_insert_with(|| {
                     let info = &self.vars[v as usize];
-                    gens.push(GenInfo { row_or_win: info.row_or_win, nonnull: info.nonnull, name });
+                    gens.push(GenInfo {
+                        row_or_win: info.row_or_win,
+                        nonnull: info.nonnull,
+                        name,
+                    });
                     gens.len() as u32 - 1
                 });
                 Ty::Gen(k)
@@ -1102,7 +1292,10 @@ impl<'w> Checker<'w> {
             Ty::Con(n, args) => Ty::Con(n, args.iter().map(|a| self.gen(a, map, gens)).collect()),
             Ty::Fun(a, b) => fun(self.gen(&a, map, gens), self.gen(&b, map, gens)),
             Ty::Row(fs, tail) => {
-                let fs = fs.iter().map(|(k, v)| (k.clone(), self.gen(v, map, gens))).collect();
+                let fs = fs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), self.gen(v, map, gens)))
+                    .collect();
                 row(fs, self.gen(&tail, map, gens))
             }
             t @ (Ty::Gen(_) | Ty::Empty | Ty::Labels(_) | Ty::Renames(_)) => t,
@@ -1152,8 +1345,12 @@ impl<'w> Checker<'w> {
                         if let Some(Binding::Module(t)) = scope.get(n) {
                             let own = self.env.owns[t];
                             let t = match own.get(f).cloned() {
-                                Some(Binding::Def(dm, i)) => self.def_type(dm, i, e.id, sp).map_err(at(sp))?,
-                                Some(Binding::Overloads(om, is)) => self.overload_type(f, om, &is, e.id, sp),
+                                Some(Binding::Def(dm, i)) => {
+                                    self.def_type(dm, i, e.id, sp).map_err(at(sp))?
+                                }
+                                Some(Binding::Overloads(om, is)) => {
+                                    self.overload_type(f, om, &is, e.id, sp)
+                                }
                                 _ => {
                                     return Err(TyErr {
                                         span: sp,
@@ -1169,7 +1366,9 @@ impl<'w> Checker<'w> {
                 let bt = self.infer(env, base)?;
                 let (a, tail) = (self.fresh(), self.fresh());
                 let want = row(vec![(f.clone(), a.clone())], tail);
-                self.unify(&bt, &want).map_err(|msg| format!("cannot take `.{f}`: {msg}")).map_err(at(sp))?;
+                self.unify(&bt, &want)
+                    .map_err(|msg| format!("cannot take `.{f}`: {msg}"))
+                    .map_err(at(sp))?;
                 Ok(a)
             }
             ExprKind::App(f, args) => {
@@ -1184,12 +1383,19 @@ impl<'w> Checker<'w> {
                         }
                         Ty::Var(_) => {
                             let r = self.fresh();
-                            self.unify(&ft, &fun(at_, r.clone())).map_err(at(arg.span))?;
+                            self.unify(&ft, &fun(at_, r.clone()))
+                                .map_err(at(arg.span))?;
                             r
                         }
                         o => {
-                            let msg = format!("cannot apply a value of type {} to an argument", self.show(&o));
-                            return Err(TyErr { span: arg.span, msg });
+                            let msg = format!(
+                                "cannot apply a value of type {} to an argument",
+                                self.show(&o)
+                            );
+                            return Err(TyErr {
+                                span: arg.span,
+                                msg,
+                            });
                         }
                     };
                     self.solve()?;
@@ -1207,7 +1413,10 @@ impl<'w> Checker<'w> {
                 let mut out: Vec<(String, Ty)> = Vec::new();
                 for (k, v) in fs {
                     if out.iter().any(|(o, _)| o == k) {
-                        return Err(TyErr { span: sp, msg: format!("field `{k}` appears twice") });
+                        return Err(TyErr {
+                            span: sp,
+                            msg: format!("field `{k}` appears twice"),
+                        });
                     }
                     let t = self.infer(env, v)?;
                     out.push((k.clone(), t));
@@ -1239,7 +1448,9 @@ impl<'w> Checker<'w> {
                 for x in xs {
                     ts.push((self.infer(env, x)?, x.span));
                 }
-                let Some((first, _)) = ts.first() else { unreachable!("empty lists are `Labels`") };
+                let Some((first, _)) = ts.first() else {
+                    unreachable!("empty lists are `Labels`")
+                };
                 // A list of column expressions is a list of sort / partition
                 // keys, so `[asc .x, .y]` has one element type.
                 let elem = match self.resolve(first) {
@@ -1253,7 +1464,8 @@ impl<'w> Checker<'w> {
             }
             ExprKind::Sql(_) => Err(TyErr {
                 span: sp,
-                msg: "`sql \"...\"` must be the whole body of a definition with a type signature".into(),
+                msg: "`sql \"...\"` must be the whole body of a definition with a type signature"
+                    .into(),
             }),
             ExprKind::Error => Ok(self.fresh()),
         }
@@ -1264,7 +1476,9 @@ impl<'w> Checker<'w> {
             Some(Binding::Def(dm, di)) => self.def_type(dm, di, site, sp),
             Some(Binding::Overloads(om, is)) => Ok(self.overload_type(n, om, &is, site, sp)),
             Some(Binding::Prim(p)) => Ok(self.prim_type(p, sp)),
-            Some(Binding::Module(_)) => Err(format!("`{n}` is a module; refer to a definition as `{n}.name`")),
+            Some(Binding::Module(_)) => Err(format!(
+                "`{n}` is a module; refer to a definition as `{n}.name`"
+            )),
             None => Err(format!("unknown name `{n}`")),
         }
     }
@@ -1288,7 +1502,9 @@ impl<'w> Checker<'w> {
                 let v = ea[2].clone();
                 self.lift(s, &v)
             }
-            (Ty::Con(s, sa), Ty::Con(_, ta)) if sa.is_empty() && ta.is_empty() && SCALARS.contains(s) => {
+            (Ty::Con(s, sa), Ty::Con(_, ta))
+                if sa.is_empty() && ta.is_empty() && SCALARS.contains(s) =>
+            {
                 self.lift(s, &e)
             }
             (Ty::Con("expr", ea), Ty::Con("sortkey", ka)) => {
@@ -1311,19 +1527,32 @@ impl<'w> Checker<'w> {
     fn lift(&mut self, s: &'static str, target: &Ty) -> U {
         match self.resolve(target) {
             Ty::Var(_) if matches!(s, "int" | "string") => {
-                self.pending.push((Cons::Lit { lit: s, target: target.clone() }, self.span));
+                self.pending.push((
+                    Cons::Lit {
+                        lit: s,
+                        target: target.clone(),
+                    },
+                    self.span,
+                ));
                 Ok(())
             }
-            Ty::Con(t, args) if args.is_empty() && matches!((s, t), ("int", "float") | ("string", "date" | "timestamp")) => Ok(()),
+            Ty::Con(t, args)
+                if args.is_empty()
+                    && matches!((s, t), ("int", "float") | ("string", "date" | "timestamp")) =>
+            {
+                Ok(())
+            }
             _ => self.unify(&con(s), target),
         }
     }
 
     fn key_phase(&mut self, p: &Ty) -> U {
         match self.resolve(p) {
-            Ty::Con("agg" | "win", _) => Err("sort and partition keys must be plain column expressions; \
+            Ty::Con("agg" | "win", _) => {
+                Err("sort and partition keys must be plain column expressions; \
                                               compute aggregates or windows in an earlier stage"
-                .into()),
+                    .into())
+            }
             _ => self.unify(p, &con("row")),
         }
     }
@@ -1335,9 +1564,14 @@ impl<'w> Checker<'w> {
             let want = match k.as_str() {
                 "partition" | "order" => list(sortkey(r.clone())),
                 "frame" => con("frame"),
-                o => return Err(format!("unknown window spec field `{o}`; expected partition, order, frame")),
+                o => {
+                    return Err(format!(
+                        "unknown window spec field `{o}`; expected partition, order, frame"
+                    ))
+                }
             };
-            self.coerce(&t, &want).map_err(|m| format!("window spec field `{k}`: {m}"))?;
+            self.coerce(&t, &want)
+                .map_err(|m| format!("window spec field `{k}`: {m}"))?;
         }
         Ok(())
     }
@@ -1351,18 +1585,35 @@ impl<'w> Checker<'w> {
             Table => fun(s.clone(), fun(s, query(self.fresh()))),
             Where => {
                 let (pred, r) = (self.fresh(), self.fresh());
-                self.pending.push((Cons::Filter { pred: pred.clone(), row: r.clone() }, sp));
+                self.pending.push((
+                    Cons::Filter {
+                        pred: pred.clone(),
+                        row: r.clone(),
+                    },
+                    sp,
+                ));
                 fun(pred, fun(query(r.clone()), query(r)))
             }
             Select | AggStage => {
                 let (f, a, b) = (self.fresh(), self.fresh(), self.fresh());
-                let c = Cons::Project { fields: f.clone(), input: a.clone(), output: b.clone(), agg: p == AggStage };
+                let c = Cons::Project {
+                    fields: f.clone(),
+                    input: a.clone(),
+                    output: b.clone(),
+                    agg: p == AggStage,
+                };
                 self.pending.push((c, sp));
                 fun(f, fun(query(a), query(b)))
             }
             Order => {
                 let (req, r) = (self.fresh(), self.fresh());
-                self.pending.push((Cons::Within { req: req.clone(), row: r.clone() }, sp));
+                self.pending.push((
+                    Cons::Within {
+                        req: req.clone(),
+                        row: r.clone(),
+                    },
+                    sp,
+                ));
                 fun(list(sortkey(req)), fun(query(r.clone()), query(r)))
             }
             Limit | Offset => {
@@ -1377,14 +1628,29 @@ impl<'w> Checker<'w> {
                     JoinKind::Full => (true, true),
                 };
                 let (l, r, pred, out) = (self.fresh(), self.fresh(), self.fresh(), self.fresh());
-                self.pending.push((Cons::JoinOn { pred: pred.clone(), left: l.clone(), right: r.clone() }, sp));
-                let c = Cons::JoinOut { left: l.clone(), right: r.clone(), out: out.clone(), nullable };
+                self.pending.push((
+                    Cons::JoinOn {
+                        pred: pred.clone(),
+                        left: l.clone(),
+                        right: r.clone(),
+                    },
+                    sp,
+                ));
+                let c = Cons::JoinOut {
+                    left: l.clone(),
+                    right: r.clone(),
+                    out: out.clone(),
+                    nullable,
+                };
                 self.pending.push((c, sp));
                 fun(query(r), fun(pred, fun(query(l), query(out))))
             }
             Group => {
                 let (r, a) = (self.fresh(), self.fresh());
-                fun(expr(con("row"), r.clone(), a.clone()), expr(con("agg"), r, a))
+                fun(
+                    expr(con("row"), r.clone(), a.clone()),
+                    expr(con("agg"), r, a),
+                )
             }
             Asc | Desc => {
                 let r = self.fresh();
@@ -1392,7 +1658,14 @@ impl<'w> Checker<'w> {
             }
             KeyMap => {
                 let (mp, a, b) = (self.fresh(), self.fresh(), self.fresh());
-                self.pending.push((Cons::KeyMap { mapper: mp.clone(), input: a.clone(), output: b.clone() }, sp));
+                self.pending.push((
+                    Cons::KeyMap {
+                        mapper: mp.clone(),
+                        input: a.clone(),
+                        output: b.clone(),
+                    },
+                    sp,
+                ));
                 fun(mp, fun(query(a), query(b)))
             }
             KeepOnly | DropKeys | Replace => {
@@ -1441,11 +1714,18 @@ impl<'w> Checker<'w> {
     /// `Ok(true)` when solved, `Ok(false)` when it must wait.
     fn step(&mut self, c: &Cons, sp: Span) -> Result<bool, String> {
         match c {
-            Cons::Overload { name, module, cands, target, origin } => {
+            Cons::Overload {
+                name,
+                module,
+                cands,
+                target,
+                origin,
+            } => {
                 let fits = self.fitting(*module, cands, target);
                 match fits.as_slice() {
                     [] => {
-                        let shown: Vec<String> = cands.iter().map(|&i| self.cand_shown(*module, i)).collect();
+                        let shown: Vec<String> =
+                            cands.iter().map(|&i| self.cand_shown(*module, i)).collect();
                         Err(format!(
                             "no overload of `{}` matches {}; candidates: {}",
                             op_name(name),
@@ -1457,7 +1737,9 @@ impl<'w> Checker<'w> {
                         let s = self.cand_scheme(*module, *i);
                         let t = self.instantiate(&s, sp, None)?;
                         self.unify(&t, target)?;
-                        let Origin::Site(site) = *origin else { unreachable!("holes are instantiated first") };
+                        let Origin::Site(site) = *origin else {
+                            unreachable!("holes are instantiated first")
+                        };
                         let (use_site, k) = decode(site);
                         let key = *self.active.last().expect("solving inside a definition");
                         self.record(key, use_site, k, Choice::Def(*module, *i));
@@ -1487,27 +1769,42 @@ impl<'w> Checker<'w> {
                         return Ok(false);
                     }
                     self.unify(row, &r)?;
-                    self.unify(&v, &con("bool"))
-                        .map_err(|_| format!("`where` needs a bool condition, found {}", self.show(&v)))?;
+                    self.unify(&v, &con("bool")).map_err(|_| {
+                        format!("`where` needs a bool condition, found {}", self.show(&v))
+                    })?;
                     Ok(true)
                 }
-                o => Err(format!("`where` needs a bool condition, found {}", self.show(&o))),
+                o => Err(format!(
+                    "`where` needs a bool condition, found {}",
+                    self.show(&o)
+                )),
             },
-            Cons::Project { fields, input, output, agg } => {
+            Cons::Project {
+                fields,
+                input,
+                output,
+                agg,
+            } => {
                 let stage = if *agg { "agg" } else { "select" };
                 let (fs, tail) = self.flatten(fields);
                 match tail {
                     Ty::Empty => {}
                     Ty::Var(_) if fs.is_empty() => return Ok(false),
                     _ => {
-                        let msg = format!("`{stage}` expects a record of column expressions, found {}", self.show(fields));
+                        let msg = format!(
+                            "`{stage}` expects a record of column expressions, found {}",
+                            self.show(fields)
+                        );
                         return Err(msg);
                     }
                 }
                 if fs.is_empty() {
                     return Err(format!("`{stage}` needs at least one field"));
                 }
-                if fs.iter().any(|(_, t)| matches!(self.resolve(t), Ty::Var(_))) {
+                if fs
+                    .iter()
+                    .any(|(_, t)| matches!(self.resolve(t), Ty::Var(_)))
+                {
                     return Ok(false);
                 }
                 let mut out = Vec::new();
@@ -1519,8 +1816,10 @@ impl<'w> Checker<'w> {
                             if is_join(&self.resolve(&r)) {
                                 return Err(format!("field `{l}`: {JOIN_ONLY}"));
                             }
-                            self.stage_phase(&p, *agg).map_err(|m| format!("field `{l}` {m}"))?;
-                            self.unify(input, &r).map_err(|m| format!("field `{l}`: {m}"))?;
+                            self.stage_phase(&p, *agg)
+                                .map_err(|m| format!("field `{l}` {m}"))?;
+                            self.unify(input, &r)
+                                .map_err(|m| format!("field `{l}`: {m}"))?;
                             out.push((l, v));
                         }
                         o => {
@@ -1537,24 +1836,38 @@ impl<'w> Checker<'w> {
                     Ty::Var(_) => return Ok(false),
                     Ty::Con("bool", _) => return Ok(true),
                     Ty::Con("expr", a) => (a[0].clone(), a[1].clone(), a[2].clone()),
-                    o => return Err(format!("a join predicate must be a bool expression, found {}", self.show(&o))),
+                    o => {
+                        return Err(format!(
+                            "a join predicate must be a bool expression, found {}",
+                            self.show(&o)
+                        ))
+                    }
                 };
                 match self.resolve(&p) {
                     Ty::Con("agg" | "win", _) => {
-                        return Err("join predicates cannot contain aggregates or window functions".into())
+                        return Err(
+                            "join predicates cannot contain aggregates or window functions".into(),
+                        )
                     }
                     _ => self.unify(&p, &con("row"))?,
                 }
                 match self.resolve(&r) {
                     Ty::Con("join", sides) => {
-                        if [left, right].iter().any(|t| matches!(self.resolve(t), Ty::Var(_))) {
+                        if [left, right]
+                            .iter()
+                            .any(|t| matches!(self.resolve(t), Ty::Var(_)))
+                        {
                             return Ok(false);
                         }
                         let (sl, sr) = (sides[0].clone(), sides[1].clone());
-                        self.unify(left, &sl).map_err(|m| format!("left join input: {m}"))?;
-                        self.unify(right, &sr).map_err(|m| format!("right join input: {m}"))?;
+                        self.unify(left, &sl)
+                            .map_err(|m| format!("left join input: {m}"))?;
+                        self.unify(right, &sr)
+                            .map_err(|m| format!("right join input: {m}"))?;
                     }
-                    Ty::Var(_) => self.unify(&r, &Ty::Con("join", vec![left.clone(), right.clone()]))?,
+                    Ty::Var(_) => {
+                        self.unify(&r, &Ty::Con("join", vec![left.clone(), right.clone()]))?
+                    }
                     o => {
                         let (fs, _) = self.flatten(&o);
                         let n = fs.first().map_or("x", |(k, _)| k.as_str()).to_string();
@@ -1563,8 +1876,9 @@ impl<'w> Checker<'w> {
                         ));
                     }
                 }
-                self.unify(&v, &con("bool"))
-                    .map_err(|_| format!("a join predicate must be bool, found {}", self.show(&v)))?;
+                self.unify(&v, &con("bool")).map_err(|_| {
+                    format!("a join predicate must be bool, found {}", self.show(&v))
+                })?;
                 Ok(true)
             }
             Cons::Lit { lit, target } => match self.resolve(target) {
@@ -1575,7 +1889,11 @@ impl<'w> Checker<'w> {
                 Ty::Var(_) => Ok(false),
                 _ => self.unify(row, req).map(|_| true),
             },
-            Cons::KeyMap { mapper, input, output } => {
+            Cons::KeyMap {
+                mapper,
+                input,
+                output,
+            } => {
                 let km = match self.key_mapper(mapper)? {
                     Some(Some(km)) => km,
                     // Waiting for the mapper.
@@ -1597,11 +1915,20 @@ impl<'w> Checker<'w> {
                         (new, t.expect("key mapper output comes from the input"))
                     })
                     .collect();
-                let tail = if matches!(km, KeyMapper::Only(_)) { Ty::Empty } else { tail };
+                let tail = if matches!(km, KeyMapper::Only(_)) {
+                    Ty::Empty
+                } else {
+                    tail
+                };
                 self.unify(&row_or_tail(cols, tail), output)?;
                 Ok(true)
             }
-            Cons::JoinOut { left, right, out, nullable } => {
+            Cons::JoinOut {
+                left,
+                right,
+                out,
+                nullable,
+            } => {
                 let (lf, lt) = self.flatten(left);
                 let (rf, rt) = self.flatten(right);
                 if !matches!(lt, Ty::Empty) || !matches!(rt, Ty::Empty) {
@@ -1616,7 +1943,10 @@ impl<'w> Checker<'w> {
                     _ if on => Ty::Con("maybe", vec![t]),
                     _ => t,
                 };
-                let mut fs: Vec<(String, Ty)> = lf.iter().map(|(k, t)| (k.clone(), wrap(self, nullable.0, t.clone()))).collect();
+                let mut fs: Vec<(String, Ty)> = lf
+                    .iter()
+                    .map(|(k, t)| (k.clone(), wrap(self, nullable.0, t.clone())))
+                    .collect();
                 for (k, t) in rf {
                     if !lf.iter().any(|(o, _)| *o == k) {
                         let t = wrap(self, nullable.1, t);
@@ -1635,7 +1965,12 @@ impl<'w> Checker<'w> {
         let payload = match self.resolve(t) {
             Ty::Var(_) => return Ok(None),
             Ty::Con("mapper", a) => self.resolve(&a[0]),
-            o => return Err(format!("`keyMap` expects a key mapper such as `only [..]`, found {}", self.show(&o))),
+            o => {
+                return Err(format!(
+                    "`keyMap` expects a key mapper such as `only [..]`, found {}",
+                    self.show(&o)
+                ))
+            }
         };
         let (tag, arg) = match &payload {
             Ty::Var(_) => return Ok(None),
@@ -1652,18 +1987,30 @@ impl<'w> Checker<'w> {
             ("replace", Ty::Empty) => Some(Some(KeyMapper::Replace(vec![]))),
             ("replace", Ty::Row(..)) => Some(None),
             ("only" | "drop", o) => {
-                return Err(format!("`{tag}` expects a list of column names, found {}", self.show(&o)))
+                return Err(format!(
+                    "`{tag}` expects a list of column names, found {}",
+                    self.show(&o)
+                ))
             }
-            (_, o) => return Err(format!("`replace` expects {{ old = \"new\" }}, found {}", self.show(&o))),
+            (_, o) => {
+                return Err(format!(
+                    "`replace` expects {{ old = \"new\" }}, found {}",
+                    self.show(&o)
+                ))
+            }
         })
     }
 
     /// Phase rules for one `select` / `agg` field (messages follow the label).
     fn stage_phase(&mut self, p: &Ty, agg: bool) -> U {
         match (agg, self.resolve(p)) {
-            (false, Ty::Con("agg", _)) => Err("is an aggregate; aggregates belong in `agg`, not `select`".into()),
+            (false, Ty::Con("agg", _)) => {
+                Err("is an aggregate; aggregates belong in `agg`, not `select`".into())
+            }
             (false, _) => Ok(()),
-            (true, Ty::Con("win", _)) => Err("is a window function; use it in a `select` stage after `agg`".into()),
+            (true, Ty::Con("win", _)) => {
+                Err("is a window function; use it in a `select` stage after `agg`".into())
+            }
             (true, Ty::Con("row", _)) => {
                 Err("uses a column that is not grouped; wrap it in `group` or aggregate it".into())
             }
@@ -1682,7 +2029,10 @@ impl<'w> Checker<'w> {
     }
 
     fn show_scheme(&self, s: &Scheme) -> String {
-        let mut p = Printer { gens: s.gens.iter().map(|g| g.name.clone()).collect(), ..Printer::default() };
+        let mut p = Printer {
+            gens: s.gens.iter().map(|g| g.name.clone()).collect(),
+            ..Printer::default()
+        };
         p.ty(&s.ty, 0)
     }
 }
@@ -1741,7 +2091,10 @@ impl Printer {
                 Some(n) => n,
                 None => {
                     let n = self.names.len() + self.gen_names.len();
-                    self.gen_names.entry(*k).or_insert_with(|| var_name(n)).clone()
+                    self.gen_names
+                        .entry(*k)
+                        .or_insert_with(|| var_name(n))
+                        .clone()
                 }
             },
             Ty::Empty => "{}".into(),
@@ -1754,7 +2107,10 @@ impl Printer {
                 format!("{{ {} }}", ps.join(", "))
             }
             Ty::Row(fs, tail) => {
-                let body: Vec<String> = fs.iter().map(|(k, v)| format!("{k} = {}", self.ty(v, 0))).collect();
+                let body: Vec<String> = fs
+                    .iter()
+                    .map(|(k, v)| format!("{k} = {}", self.ty(v, 0)))
+                    .collect();
                 match &**tail {
                     Ty::Empty => format!("{{ {} }}", body.join(", ")),
                     t => format!("{{ {} | {} }}", body.join(", "), self.ty(t, 0)),

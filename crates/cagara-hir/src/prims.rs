@@ -9,7 +9,10 @@ pub fn lift(v: Value) -> EResult<Expr> {
     match v {
         Value::Lit(l) => Ok(Expr::Lit(l)),
         Value::Expr(e) => Ok(e),
-        o => err(format!("expected a column expression or constant, found {}", o.kind())),
+        o => err(format!(
+            "expected a column expression or constant, found {}",
+            o.kind()
+        )),
     }
 }
 
@@ -85,7 +88,10 @@ fn fields(v: Value) -> EResult<Vec<(String, Expr)>> {
                 Ok((k, e))
             })
             .collect(),
-        o => err(format!("expected a record of column expressions, found {}", o.kind())),
+        o => err(format!(
+            "expected a record of column expressions, found {}",
+            o.kind()
+        )),
     }
 }
 
@@ -105,18 +111,34 @@ fn bound(v: Value) -> EResult<Bound> {
 
 fn win_spec(v: Value) -> EResult<WinSpec> {
     let Value::Record(fs) = v else {
-        return err(format!("a window function expects {{ partition, order, frame }}, found {}", v.kind()));
+        return err(format!(
+            "a window function expects {{ partition, order, frame }}, found {}",
+            v.kind()
+        ));
     };
-    let mut spec = WinSpec { partition: vec![], order: vec![], frame: None };
+    let mut spec = WinSpec {
+        partition: vec![],
+        order: vec![],
+        frame: None,
+    };
     for (k, v) in fs {
         match k.as_str() {
             "partition" => spec.partition = lift_all(list(v)?)?,
             "order" => spec.order = list(v)?.into_iter().map(sort_key).collect::<EResult<_>>()?,
             "frame" => match v {
                 Value::Frame(f) => spec.frame = Some(f),
-                o => return err(format!("`frame` must be a frame such as `wholePartition`, found {}", o.kind())),
+                o => {
+                    return err(format!(
+                        "`frame` must be a frame such as `wholePartition`, found {}",
+                        o.kind()
+                    ))
+                }
             },
-            other => return err(format!("unknown window spec field `{other}`; expected partition, order, frame")),
+            other => {
+                return err(format!(
+                    "unknown window spec field `{other}`; expected partition, order, frame"
+                ))
+            }
         }
     }
     Ok(spec)
@@ -131,7 +153,11 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
         Prim::Table => {
             let schema = string(next())?;
             let name = string(next())?;
-            Value::Query(Rel::Table { schema, name, columns: None })
+            Value::Query(Rel::Table {
+                schema,
+                name,
+                columns: None,
+            })
         }
         Prim::Where => {
             let pred = lift(next())?;
@@ -147,7 +173,10 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
             Value::Query(Rel::Agg(Box::new(query(next())?), fs))
         }
         Prim::Order => {
-            let keys = list(next())?.into_iter().map(sort_key).collect::<EResult<Vec<_>>>()?;
+            let keys = list(next())?
+                .into_iter()
+                .map(sort_key)
+                .collect::<EResult<Vec<_>>>()?;
             Value::Query(Rel::Order(Box::new(query(next())?), keys))
         }
         Prim::Limit => {
@@ -162,7 +191,12 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
             let right = query(next())?;
             let on = lift(next())?;
             let left = query(next())?;
-            Value::Query(Rel::Join { kind, left: Box::new(left), right: Box::new(right), on })
+            Value::Query(Rel::Join {
+                kind,
+                left: Box::new(left),
+                right: Box::new(right),
+                on,
+            })
         }
         Prim::Group => checked(Expr::Group(Box::new(lift(next())?)))?,
         Prim::Asc => Value::Dir(lift(next())?, true),
@@ -170,7 +204,12 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
         Prim::KeyMap => {
             let m = match next() {
                 Value::Mapper(m) => m,
-                o => return err(format!("`keyMap` expects a key mapper such as `only [..]`, found {}", o.kind())),
+                o => {
+                    return err(format!(
+                        "`keyMap` expects a key mapper such as `only [..]`, found {}",
+                        o.kind()
+                    ))
+                }
             };
             Value::Query(Rel::KeyMap(Box::new(query(next())?), m))
         }
@@ -182,13 +221,21 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
                     .map(|(old, v)| Ok((old, string(v)?)))
                     .collect::<EResult<_>>()?,
             )),
-            o => return err(format!("`replace` expects {{ old = \"new\" }}, found {}", o.kind())),
+            o => {
+                return err(format!(
+                    "`replace` expects {{ old = \"new\" }}, found {}",
+                    o.kind()
+                ))
+            }
         },
         Prim::Prefix => Value::Mapper(KeyMapper::Prefix(string(next())?)),
         Prim::Suffix => Value::Mapper(KeyMapper::Suffix(string(next())?)),
         Prim::Rows => {
             let (start, end) = (bound(next())?, bound(next())?);
-            if start == Bound::UnboundedFollowing || end == Bound::UnboundedPreceding || start.key() > end.key() {
+            if start == Bound::UnboundedFollowing
+                || end == Bound::UnboundedPreceding
+                || start.key() > end.key()
+            {
                 return err(format!("impossible window frame: {start:?} to {end:?}"));
             }
             Value::Frame(Frame { start, end })

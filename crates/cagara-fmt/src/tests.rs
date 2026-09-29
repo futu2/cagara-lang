@@ -24,9 +24,21 @@ const SOURCES: &[(&str, &str)] = &[
 fn repo_sources_are_stable_and_keep_every_comment() {
     for (name, src) in SOURCES {
         let out = fmt(src);
-        let comments = |s: &str| s.lines().filter(|l| l.trim_start().starts_with('#')).count();
-        assert_eq!(comments(src), comments(&out), "{name}: comment lines changed");
-        assert!(out.lines().all(|l| l.chars().count() <= WIDTH || !l.contains(' ')), "{name}: {out}");
+        let comments = |s: &str| {
+            s.lines()
+                .filter(|l| l.trim_start().starts_with('#'))
+                .count()
+        };
+        assert_eq!(
+            comments(src),
+            comments(&out),
+            "{name}: comment lines changed"
+        );
+        assert!(
+            out.lines()
+                .all(|l| l.chars().count() <= WIDTH || !l.contains(' ')),
+            "{name}: {out}"
+        );
     }
 }
 
@@ -37,8 +49,14 @@ fn every_prefix_of_the_examples_formats() {
     for (name, src) in SOURCES {
         for (i, _) in src.char_indices().step_by(37) {
             let prefix = &src[..i];
-            let Ok(out) = format(prefix) else { panic!("{name} at {i}: FmtError on {prefix:?}") };
-            assert_eq!(format(&out.text).map(|f| f.text), Ok(out.text.clone()), "{name} at {i}");
+            let Ok(out) = format(prefix) else {
+                panic!("{name} at {i}: FmtError on {prefix:?}")
+            };
+            assert_eq!(
+                format(&out.text).map(|f| f.text),
+                Ok(out.text.clone()),
+                "{name} at {i}"
+            );
         }
     }
 }
@@ -50,9 +68,15 @@ fn pipelines_break_per_stage() {
         "adults = users\n  & where (.age >= 18)\n  & select { id = .id }\n",
     );
     // One stage stays on one line.
-    check("n = users & agg { t = sum .age }\n", "n = users & agg { t = sum .age }\n");
+    check(
+        "n = users & agg { t = sum .age }\n",
+        "n = users & agg { t = sum .age }\n",
+    );
     // Continuation lines are re-indented.
-    check("a = q\n      & where .x\n        &- 10\n", "a = q\n  & where .x\n  &- 10\n");
+    check(
+        "a = q\n      & where .x\n        &- 10\n",
+        "a = q\n  & where .x\n  &- 10\n",
+    );
 }
 
 #[test]
@@ -75,14 +99,23 @@ fn long_records_break_one_field_per_line() {
 fn spacing_is_normalized() {
     check("x={a=1,b=[1,2]}\n", "x = { a = 1, b = [1, 2] }\n");
     check("f   =  x=>y   =>  x+y\n", "f = x => y => x + y\n");
-    check("t : expr r int->agg (expr  r int) = sql   \"SUM($1)\"\n", "t : expr r int -> agg (expr r int) = sql \"SUM($1)\"\n");
-    check("r : query {id=int|r} = table \"t\"\n", "r : query { id = int | r } = table \"t\"\n");
+    check(
+        "t : expr r int->agg (expr  r int) = sql   \"SUM($1)\"\n",
+        "t : expr r int -> agg (expr r int) = sql \"SUM($1)\"\n",
+    );
+    check(
+        "r : query {id=int|r} = table \"t\"\n",
+        "r : query { id = int | r } = table \"t\"\n",
+    );
     check("e = {}\nl = []\n", "e = {}\nl = []\n");
 }
 
 #[test]
 fn projection_and_application_keep_their_meaning() {
-    check("a = s.users\nb = f .x\nc = m.t.u\n", "a = s.users\nb = f .x\nc = m.t.u\n");
+    check(
+        "a = s.users\nb = f .x\nc = m.t.u\n",
+        "a = s.users\nb = f .x\nc = m.t.u\n",
+    );
     check("n = - .x\nm = 1 - -2\n", "n = -.x\nm = 1 - -2\n");
 }
 
@@ -115,7 +148,10 @@ fn comments_never_push_a_name_into_column_zero() {
     // A name after an own-line comment inside a definition must stay indented.
     let out = fmt("a = f # c\n  x\nb : # t\n  int = 1\n");
     for line in out.lines().skip(1) {
-        assert!(!line.starts_with(|c: char| c.is_alphabetic()) || line.starts_with("b "), "{out}");
+        assert!(
+            !line.starts_with(|c: char| c.is_alphabetic()) || line.starts_with("b "),
+            "{out}"
+        );
     }
 }
 
@@ -128,10 +164,20 @@ fn items_with_syntax_errors_are_left_as_written() {
 
 #[test]
 fn long_arguments_break_onto_indented_lines() {
-    let src = format!("x = someFunction {} {} {}\n", "a".repeat(40), "b".repeat(40), "c".repeat(40));
+    let src = format!(
+        "x = someFunction {} {} {}\n",
+        "a".repeat(40),
+        "b".repeat(40),
+        "c".repeat(40)
+    );
     check(
         &src,
-        &format!("x =\n  someFunction\n    {}\n    {}\n    {}\n", "a".repeat(40), "b".repeat(40), "c".repeat(40)),
+        &format!(
+            "x =\n  someFunction\n    {}\n    {}\n    {}\n",
+            "a".repeat(40),
+            "b".repeat(40),
+            "c".repeat(40)
+        ),
     );
 }
 

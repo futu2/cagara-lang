@@ -35,8 +35,16 @@ pub struct Def {
 pub enum TypeExpr {
     /// `head arg...`; a lowercase head that is not a known constructor is a
     /// type variable (decided by the checker, not the parser).
-    App { head: String, args: Vec<TypeExpr>, span: Span },
-    Record { fields: Vec<(String, TypeExpr)>, tail: Option<String>, span: Span },
+    App {
+        head: String,
+        args: Vec<TypeExpr>,
+        span: Span,
+    },
+    Record {
+        fields: Vec<(String, TypeExpr)>,
+        tail: Option<String>,
+        span: Span,
+    },
     Fun(Box<TypeExpr>, Box<TypeExpr>),
     Error(Span),
 }
@@ -99,15 +107,23 @@ struct Lower {
 
 fn span(n: &SyntaxNode) -> Span {
     let r = n.text_range();
-    Span { start: r.start().into(), end: r.end().into() }
+    Span {
+        start: r.start().into(),
+        end: r.end().into(),
+    }
 }
 
 fn token(n: &SyntaxNode, k: K) -> Option<crate::SyntaxToken> {
-    n.children_with_tokens().filter_map(|e| e.into_token()).find(|t| t.kind() == k)
+    n.children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| t.kind() == k)
 }
 
 fn unescape(s: &str) -> String {
-    let inner = s.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(s);
+    let inner = s
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(s);
     let mut out = String::new();
     let mut chars = inner.chars();
     while let Some(c) = chars.next() {
@@ -170,7 +186,12 @@ impl Lower {
             Some(b) => self.expr(&b),
             None => self.mk(span(n), ExprKind::Error),
         };
-        Some(Def { name, ty, body, span: span(n) })
+        Some(Def {
+            name,
+            ty,
+            body,
+            span: span(n),
+        })
     }
 
     fn ty(&mut self, n: &SyntaxNode) -> TypeExpr {
@@ -195,7 +216,11 @@ impl Lower {
                     .collect();
                 // a direct Ident token child of the record is the `| tail`
                 let tail = token(n, K::Ident).map(|t| t.text().to_string());
-                TypeExpr::Record { fields, tail, span: span(n) }
+                TypeExpr::Record {
+                    fields,
+                    tail,
+                    span: span(n),
+                }
             }
             K::TyFun => {
                 let mut cs = n.children();
@@ -224,26 +249,34 @@ impl Lower {
                 None => ExprKind::Error,
             },
             K::Literal => {
-                let t = n.children_with_tokens().filter_map(|e| e.into_token()).find(|t| {
-                    matches!(t.kind(), K::Int | K::Float | K::String)
-                });
+                let t = n
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| matches!(t.kind(), K::Int | K::Float | K::String));
                 match t {
                     Some(t) if t.kind() == K::Int => match t.text().parse() {
                         Ok(v) => ExprKind::Lit(Lit::Int(v)),
                         Err(_) => ExprKind::Error,
                     },
-                    Some(t) if t.kind() == K::Float => ExprKind::Lit(Lit::Float(t.text().to_string())),
+                    Some(t) if t.kind() == K::Float => {
+                        ExprKind::Lit(Lit::Float(t.text().to_string()))
+                    }
                     Some(t) => ExprKind::Lit(Lit::Str(unescape(t.text()))),
                     None => ExprKind::Error,
                 }
             }
             K::FieldExpr => {
-                let t = n.children_with_tokens().filter_map(|e| e.into_token()).find(|t| {
-                    matches!(t.kind(), K::Field | K::LeftField | K::RightField)
-                });
+                let t = n
+                    .children_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| matches!(t.kind(), K::Field | K::LeftField | K::RightField));
                 match t {
-                    Some(t) if t.kind() == K::LeftField => ExprKind::Field(Side::Left, t.text()[2..].to_string()),
-                    Some(t) if t.kind() == K::RightField => ExprKind::Field(Side::Right, t.text()[2..].to_string()),
+                    Some(t) if t.kind() == K::LeftField => {
+                        ExprKind::Field(Side::Left, t.text()[2..].to_string())
+                    }
+                    Some(t) if t.kind() == K::RightField => {
+                        ExprKind::Field(Side::Right, t.text()[2..].to_string())
+                    }
                     Some(t) => ExprKind::Field(Side::Single, t.text()[1..].to_string()),
                     None => ExprKind::Error,
                 }
@@ -272,7 +305,10 @@ impl Lower {
                 match (op, cs.as_slice()) {
                     (Some((name, tok)), [l, r]) => {
                         let r_ = tok.text_range();
-                        let op_span = Span { start: r_.start().into(), end: r_.end().into() };
+                        let op_span = Span {
+                            start: r_.start().into(),
+                            end: r_.end().into(),
+                        };
                         let f = self.mk(op_span, ExprKind::Name(name.to_string()));
                         let (l, r) = (self.expr(l), self.expr(r));
                         ExprKind::App(Box::new(f), vec![l, r])
@@ -299,7 +335,9 @@ impl Lower {
                 None => ExprKind::Error,
             },
             K::Lambda => match (token(n, K::Ident), n.children().next()) {
-                (Some(p), Some(b)) => ExprKind::Lambda(p.text().to_string(), Box::new(self.expr(&b))),
+                (Some(p), Some(b)) => {
+                    ExprKind::Lambda(p.text().to_string(), Box::new(self.expr(&b)))
+                }
                 _ => ExprKind::Error,
             },
             K::RecordExpr => ExprKind::Record(
@@ -342,7 +380,9 @@ mod tests {
 
     #[test]
     fn comparison_desugars_to_operator_app() {
-        let ExprKind::App(f, args) = body("adult = .age >= 18") else { panic!() };
+        let ExprKind::App(f, args) = body("adult = .age >= 18") else {
+            panic!()
+        };
         assert_eq!(name(&f), "_>=_");
         assert_eq!(args[0].kind, ExprKind::Field(Side::Single, "age".into()));
         assert_eq!(args[1].kind, ExprKind::Lit(Lit::Int(18)));
@@ -350,11 +390,17 @@ mod tests {
 
     #[test]
     fn pipeline_and_join_fields() {
-        let ExprKind::App(f, args) = body("r = orders & inner users (.<user_id == .>id)") else { panic!() };
+        let ExprKind::App(f, args) = body("r = orders & inner users (.<user_id == .>id)") else {
+            panic!()
+        };
         assert_eq!(name(&f), "_&_");
-        let ExprKind::App(g, gargs) = &args[1].kind else { panic!() };
+        let ExprKind::App(g, gargs) = &args[1].kind else {
+            panic!()
+        };
         assert_eq!(name(g), "inner");
-        let ExprKind::App(eq, sides) = &gargs[1].kind else { panic!() };
+        let ExprKind::App(eq, sides) = &gargs[1].kind else {
+            panic!()
+        };
         assert_eq!(name(eq), "_==_");
         assert_eq!(sides[0].kind, ExprKind::Field(Side::Left, "user_id".into()));
         assert_eq!(sides[1].kind, ExprKind::Field(Side::Right, "id".into()));
@@ -362,13 +408,19 @@ mod tests {
 
     #[test]
     fn diamond_is_right_associative() {
-        let ExprKind::App(f, args) = body("s = .a <> .b <> .c") else { panic!() };
+        let ExprKind::App(f, args) = body("s = .a <> .b <> .c") else {
+            panic!()
+        };
         assert_eq!(name(&f), "_<>_");
         assert_eq!(args[0].kind, ExprKind::Field(Side::Single, "a".into()));
-        let ExprKind::App(g, _) = &args[1].kind else { panic!("expected .b <> .c on the right") };
+        let ExprKind::App(g, _) = &args[1].kind else {
+            panic!("expected .b <> .c on the right")
+        };
         assert_eq!(name(g), "_<>_");
         // `<` and `<>` stay distinct.
-        let ExprKind::App(lt, _) = body("p = .a < .b") else { panic!() };
+        let ExprKind::App(lt, _) = body("p = .a < .b") else {
+            panic!()
+        };
         assert_eq!(name(&lt), "_<_");
     }
 
@@ -380,9 +432,13 @@ mod tests {
         assert!(errs.is_empty(), "{errs:?}");
         assert_eq!(m.imports[0].path, "schema.cagara");
         assert_eq!(m.imports[0].alias.as_deref(), Some("s"));
-        let Some(TypeExpr::App { head, args, .. }) = &m.defs[0].ty else { panic!() };
+        let Some(TypeExpr::App { head, args, .. }) = &m.defs[0].ty else {
+            panic!()
+        };
         assert_eq!(head, "query");
-        let TypeExpr::Record { fields, tail, .. } = &args[0] else { panic!() };
+        let TypeExpr::Record { fields, tail, .. } = &args[0] else {
+            panic!()
+        };
         assert_eq!(fields[0].0, "id");
         assert_eq!(tail.as_deref(), Some("r"));
         assert!(matches!(&m.defs[0].body.kind, ExprKind::Proj(_, f) if f == "users"));
@@ -396,8 +452,13 @@ mod tests {
             "p = { id = .id, label = upper .name }\nf = x => x\nup : expr r string -> expr r string = sql \"UPPER($1)\"\n",
         );
         assert!(errs.is_empty(), "{errs:?}");
-        let ExprKind::Record(fs) = &m.defs[0].body.kind else { panic!() };
-        assert_eq!(fs.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["id", "label"]);
+        let ExprKind::Record(fs) = &m.defs[0].body.kind else {
+            panic!()
+        };
+        assert_eq!(
+            fs.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(),
+            ["id", "label"]
+        );
         assert!(matches!(&m.defs[1].body.kind, ExprKind::Lambda(p, _) if p == "x"));
         assert_eq!(m.defs[2].body.kind, ExprKind::Sql("UPPER($1)".into()));
     }

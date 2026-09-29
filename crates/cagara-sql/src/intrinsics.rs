@@ -21,7 +21,9 @@
 //! `kind` is `DATE` or `TIMESTAMP`. Dialects not named below get the ANSI /
 //! Postgres spelling.
 
-use sqlglot_rust::ast::{BinaryOperator, DataType, DateTimeField, Expr, QuoteStyle, TypedFunction, UnaryOperator};
+use sqlglot_rust::ast::{
+    BinaryOperator, DataType, DateTimeField, Expr, QuoteStyle, TypedFunction, UnaryOperator,
+};
 use sqlglot_rust::Dialect;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -54,7 +56,18 @@ pub fn lower(e: Expr, to: Dialect) -> Expr {
 }
 
 fn node(e: Expr, f: Fam) -> Expr {
-    let Expr::Function { name, args, distinct, filter, over, order_by, within_group } = e else { return e };
+    let Expr::Function {
+        name,
+        args,
+        distinct,
+        filter,
+        over,
+        order_by,
+        within_group,
+    } = e
+    else {
+        return e;
+    };
     let lowered = if name.to_ascii_uppercase().starts_with("CAGARA_") && over.is_none() {
         intrinsic(&name.to_ascii_uppercase(), &args, f)
     } else {
@@ -64,7 +77,15 @@ fn node(e: Expr, f: Fam) -> Expr {
         // Non-atomic results are parenthesized so they keep precedence
         // inside whatever template they were substituted into.
         Some(out) => atomic(out),
-        None => Expr::Function { name, args, distinct, filter, over, order_by, within_group },
+        None => Expr::Function {
+            name,
+            args,
+            distinct,
+            filter,
+            over,
+            order_by,
+            within_group,
+        },
     }
 }
 
@@ -82,7 +103,11 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
         ("CAGARA_NOW", 0) => match f {
             Fam::Ansi => kw("CURRENT_TIMESTAMP"),
             Fam::Sqlite => func("DATETIME", vec![s("now")]),
-            _ => Expr::TypedFunction { func: TypedFunction::CurrentTimestamp, filter: None, over: None },
+            _ => Expr::TypedFunction {
+                func: TypedFunction::CurrentTimestamp,
+                filter: None,
+                over: None,
+            },
         },
         ("CAGARA_TO_DATE", 1) => match f {
             Fam::Sqlite => func("DATE", vec![a[0].clone()]),
@@ -137,7 +162,10 @@ fn add(ts: bool, unit: &str, x: Expr, count: Expr, f: Fam) -> Option<Expr> {
     // Weeks and quarters are days and months, which every dialect has.
     let (unit, count) = match unit {
         "WEEK" => ("DAY", bin(atomic(count), BinaryOperator::Multiply, n("7"))),
-        "QUARTER" => ("MONTH", bin(atomic(count), BinaryOperator::Multiply, n("3"))),
+        "QUARTER" => (
+            "MONTH",
+            bin(atomic(count), BinaryOperator::Multiply, n("3")),
+        ),
         u => (u, count),
     };
     let field = field(unit)?;
@@ -151,9 +179,25 @@ fn add(ts: bool, unit: &str, x: Expr, count: Expr, f: Fam) -> Option<Expr> {
         Fam::Ansi => same(bin(
             atomic(x),
             BinaryOperator::Plus,
-            bin(count, BinaryOperator::Multiply, Expr::Interval { value: Box::new(s("1")), unit: Some(field) }),
+            bin(
+                count,
+                BinaryOperator::Multiply,
+                Expr::Interval {
+                    value: Box::new(s("1")),
+                    unit: Some(field),
+                },
+            ),
         )),
-        Fam::Mysql => func("DATE_ADD", vec![x, Expr::Interval { value: Box::new(count), unit: Some(field) }]),
+        Fam::Mysql => func(
+            "DATE_ADD",
+            vec![
+                x,
+                Expr::Interval {
+                    value: Box::new(count),
+                    unit: Some(field),
+                },
+            ],
+        ),
         Fam::Sqlite => {
             let plural = format!(" {}s", unit.to_ascii_lowercase());
             let modifier = bin(count, BinaryOperator::Concat, s(&plural));
@@ -165,7 +209,10 @@ fn add(ts: bool, unit: &str, x: Expr, count: Expr, f: Fam) -> Option<Expr> {
         }
         Fam::Tsql | Fam::Snowflake => func("DATEADD", vec![kw(unit), count, x]),
         Fam::BigQuery => {
-            let iv = Expr::Interval { value: Box::new(count), unit: Some(field) };
+            let iv = Expr::Interval {
+                value: Box::new(count),
+                unit: Some(field),
+            };
             match (ts, unit) {
                 (false, _) => func("DATE_ADD", vec![x, iv]),
                 // TIMESTAMP_ADD stops at DAY; months and years go via DATETIME.
@@ -193,21 +240,39 @@ fn trunc(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
         // Postgres truncates a date as a timestamp: cast back.
         Fam::Ansi | Fam::Duck => cast(func("DATE_TRUNC", vec![s(unit), x]), ty()),
         Fam::Snowflake => func("DATE_TRUNC", vec![s(unit), x]),
-        Fam::Tsql => func("DATETRUNC", vec![kw(if unit == "WEEK" { "ISO_WEEK" } else { unit }), x]),
+        Fam::Tsql => func(
+            "DATETRUNC",
+            vec![kw(if unit == "WEEK" { "ISO_WEEK" } else { unit }), x],
+        ),
         Fam::BigQuery => {
             let u = kw(if unit == "WEEK" { "ISOWEEK" } else { unit });
-            func(if ts { "TIMESTAMP_TRUNC" } else { "DATE_TRUNC" }, vec![x, u])
+            func(
+                if ts { "TIMESTAMP_TRUNC" } else { "DATE_TRUNC" },
+                vec![x, u],
+            )
         }
         Fam::Mysql => {
-            let back = |e: Expr| cast(e, if ts { DataType::DateTime } else { DataType::Date });
+            let back = |e: Expr| {
+                cast(
+                    e,
+                    if ts {
+                        DataType::DateTime
+                    } else {
+                        DataType::Date
+                    },
+                )
+            };
             match unit {
                 // Monday of the ISO week: WEEKDAY is 0 for Monday.
                 "WEEK" => back(func(
                     "DATE_SUB",
-                    vec![func("DATE", vec![x.clone()]), Expr::Interval {
-                        value: Box::new(func("WEEKDAY", vec![x])),
-                        unit: Some(DateTimeField::Day),
-                    }],
+                    vec![
+                        func("DATE", vec![x.clone()]),
+                        Expr::Interval {
+                            value: Box::new(func("WEEKDAY", vec![x])),
+                            unit: Some(DateTimeField::Day),
+                        },
+                    ],
                 )),
                 "QUARTER" => {
                     let jan1 = func("MAKEDATE", vec![func("YEAR", vec![x.clone()]), n("1")]);
@@ -216,7 +281,16 @@ fn trunc(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
                         BinaryOperator::Multiply,
                         n("3"),
                     );
-                    back(func("DATE_ADD", vec![jan1, Expr::Interval { value: Box::new(atomic(months)), unit: Some(DateTimeField::Month) }]))
+                    back(func(
+                        "DATE_ADD",
+                        vec![
+                            jan1,
+                            Expr::Interval {
+                                value: Box::new(atomic(months)),
+                                unit: Some(DateTimeField::Month),
+                            },
+                        ],
+                    ))
                 }
                 u => {
                     let fmt = match u {
@@ -241,21 +315,41 @@ fn trunc(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
                 "MONTH" => wrap(vec![s("start of month")]),
                 "DAY" => wrap(vec![s("start of day")]),
                 "HOUR" | "MINUTE" => {
-                    let fmt = if unit == "HOUR" { "%Y-%m-%d %H:00:00" } else { "%Y-%m-%d %H:%M:00" };
+                    let fmt = if unit == "HOUR" {
+                        "%Y-%m-%d %H:00:00"
+                    } else {
+                        "%Y-%m-%d %H:%M:00"
+                    };
                     func("STRFTIME", vec![s(fmt), x])
                 }
                 // Back (weekday + 6) % 7 days to Monday (%w is 0 for Sunday).
                 "WEEK" => {
                     let dow = cast(func("STRFTIME", vec![s("%w"), x.clone()]), DataType::Int);
-                    let back = bin(atomic(bin(dow, BinaryOperator::Plus, n("6"))), BinaryOperator::Modulo, n("7"));
-                    let m = bin(bin(s("-"), BinaryOperator::Concat, atomic(back)), BinaryOperator::Concat, s(" days"));
+                    let back = bin(
+                        atomic(bin(dow, BinaryOperator::Plus, n("6"))),
+                        BinaryOperator::Modulo,
+                        n("7"),
+                    );
+                    let m = bin(
+                        bin(s("-"), BinaryOperator::Concat, atomic(back)),
+                        BinaryOperator::Concat,
+                        s(" days"),
+                    );
                     wrap(vec![s("start of day"), m])
                 }
                 // Back (month - 1) % 3 months from the start of the month.
                 _ => {
                     let month = cast(func("STRFTIME", vec![s("%m"), x.clone()]), DataType::Int);
-                    let back = bin(atomic(bin(month, BinaryOperator::Minus, n("1"))), BinaryOperator::Modulo, n("3"));
-                    let m = bin(bin(s("-"), BinaryOperator::Concat, atomic(back)), BinaryOperator::Concat, s(" months"));
+                    let back = bin(
+                        atomic(bin(month, BinaryOperator::Minus, n("1"))),
+                        BinaryOperator::Modulo,
+                        n("3"),
+                    );
+                    let m = bin(
+                        bin(s("-"), BinaryOperator::Concat, atomic(back)),
+                        BinaryOperator::Concat,
+                        s(" months"),
+                    );
                     wrap(vec![s("start of month"), m])
                 }
             }
@@ -277,7 +371,10 @@ fn part(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
         "DOY" => DateTimeField::DayOfYear,
         u => field(u)?,
     };
-    let extract = |x: Expr| Expr::Extract { field: field.clone(), expr: Box::new(x) };
+    let extract = |x: Expr| Expr::Extract {
+        field: field.clone(),
+        expr: Box::new(x),
+    };
     Some(match f {
         // Postgres's EXTRACT is numeric; the others are already integers.
         Fam::Ansi => cast(extract(x), DataType::Int),
@@ -290,7 +387,11 @@ fn part(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
         Fam::BigQuery => match unit {
             "DOW" | "DOY" => {
                 let fmt = if unit == "DOW" { "%w" } else { "%j" };
-                let fmt_fn = if ts { "FORMAT_TIMESTAMP" } else { "FORMAT_DATE" };
+                let fmt_fn = if ts {
+                    "FORMAT_TIMESTAMP"
+                } else {
+                    "FORMAT_DATE"
+                };
                 cast(func(fmt_fn, vec![s(fmt), x]), DataType::BigInt)
             }
             _ => extract(x),
@@ -306,7 +407,11 @@ fn part(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
                 "HOUR" => code("%H"),
                 "MINUTE" => code("%M"),
                 // (month + 2) / 3
-                _ => bin(atomic(bin(code("%m"), BinaryOperator::Plus, n("2"))), BinaryOperator::Divide, n("3")),
+                _ => bin(
+                    atomic(bin(code("%m"), BinaryOperator::Plus, n("2"))),
+                    BinaryOperator::Divide,
+                    n("3"),
+                ),
             }
         }
     })
@@ -344,16 +449,32 @@ fn field(unit: &str) -> Option<DateTimeField> {
 }
 
 fn timestamp() -> DataType {
-    DataType::Timestamp { precision: None, with_tz: false }
+    DataType::Timestamp {
+        precision: None,
+        with_tz: false,
+    }
 }
 
 fn func(name: &str, args: Vec<Expr>) -> Expr {
-    Expr::Function { name: name.into(), args, distinct: false, filter: None, over: None, order_by: vec![], within_group: false }
+    Expr::Function {
+        name: name.into(),
+        args,
+        distinct: false,
+        filter: None,
+        over: None,
+        order_by: vec![],
+        within_group: false,
+    }
 }
 
 /// A bare keyword argument such as `DAY` in `DATEADD(DAY, n, x)`.
 fn kw(word: &str) -> Expr {
-    Expr::Column { table: None, name: word.into(), quote_style: QuoteStyle::None, table_quote_style: QuoteStyle::None }
+    Expr::Column {
+        table: None,
+        name: word.into(),
+        quote_style: QuoteStyle::None,
+        table_quote_style: QuoteStyle::None,
+    }
 }
 
 fn s(v: &str) -> Expr {
@@ -365,19 +486,33 @@ fn n(v: &str) -> Expr {
 }
 
 fn bin(l: Expr, op: BinaryOperator, r: Expr) -> Expr {
-    Expr::BinaryOp { left: Box::new(l), op, right: Box::new(r) }
+    Expr::BinaryOp {
+        left: Box::new(l),
+        op,
+        right: Box::new(r),
+    }
 }
 
 fn neg(e: Expr) -> Expr {
-    Expr::UnaryOp { op: UnaryOperator::Minus, expr: Box::new(atomic(e)) }
+    Expr::UnaryOp {
+        op: UnaryOperator::Minus,
+        expr: Box::new(atomic(e)),
+    }
 }
 
 fn cast(e: Expr, data_type: DataType) -> Expr {
-    Expr::Cast { expr: Box::new(atomic(e)), data_type }
+    Expr::Cast {
+        expr: Box::new(atomic(e)),
+        data_type,
+    }
 }
 
 fn case(cond: Expr, then: Expr, otherwise: Expr) -> Expr {
-    Expr::Case { operand: None, when_clauses: vec![(cond, then)], else_clause: Some(Box::new(otherwise)) }
+    Expr::Case {
+        operand: None,
+        when_clauses: vec![(cond, then)],
+        else_clause: Some(Box::new(otherwise)),
+    }
 }
 
 /// Parenthesize anything that is not already a single term.

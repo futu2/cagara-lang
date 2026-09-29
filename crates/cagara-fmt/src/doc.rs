@@ -12,7 +12,10 @@ pub enum Doc {
     Text(Rc<str>),
     Concat(Rc<[Doc]>),
     Indent(Rc<Doc>),
-    Group { doc: Rc<Doc>, broken: bool },
+    Group {
+        doc: Rc<Doc>,
+        broken: bool,
+    },
     /// Space when flat, newline when broken.
     Line,
     /// Nothing when flat, newline when broken.
@@ -39,12 +42,18 @@ pub fn indent(d: Doc) -> Doc {
 
 pub fn group(d: Doc) -> Doc {
     let broken = d.forces_break();
-    Doc::Group { doc: Rc::new(d), broken }
+    Doc::Group {
+        doc: Rc::new(d),
+        broken,
+    }
 }
 
 /// A group printed broken even if it would fit.
 pub fn broken_group(d: Doc) -> Doc {
-    Doc::Group { doc: Rc::new(d), broken: true }
+    Doc::Group {
+        doc: Rc::new(d),
+        broken: true,
+    }
 }
 
 impl Doc {
@@ -78,7 +87,13 @@ struct Printer {
 }
 
 pub fn print(doc: &Doc, width: usize) -> String {
-    let mut p = Printer { out: String::new(), width, col: 0, at_line_start: true, suffix: Vec::new() };
+    let mut p = Printer {
+        out: String::new(),
+        width,
+        col: 0,
+        at_line_start: true,
+        suffix: Vec::new(),
+    };
     let mut stack: Vec<(usize, Mode, &Doc)> = vec![(0, Mode::Break, doc)];
     while let Some((ind, mode, d)) = stack.pop() {
         match d {
@@ -153,11 +168,13 @@ impl Printer {
     /// Does `doc`, flat, plus whatever follows it up to the next possible
     /// newline, fit in the rest of the line?
     fn fits(&self, ind: usize, doc: &Doc, rest: &[(usize, Mode, &Doc)]) -> bool {
-        let mut left = self.width as isize - if self.at_line_start { ind } else { self.col } as isize;
+        let mut left =
+            self.width as isize - if self.at_line_start { ind } else { self.col } as isize;
         let mut todo: Vec<(Mode, &Doc)> = vec![(Mode::Flat, doc)];
         let mut rest = rest.iter().rev();
         loop {
-            let Some((mode, d)) = todo.pop().or_else(|| rest.next().map(|&(_, m, d)| (m, d))) else {
+            let Some((mode, d)) = todo.pop().or_else(|| rest.next().map(|&(_, m, d)| (m, d)))
+            else {
                 return true;
             };
             match d {
@@ -169,7 +186,9 @@ impl Printer {
                 }
                 Doc::Concat(ds) => todo.extend(ds.iter().rev().map(|d| (mode, d))),
                 Doc::Indent(d) => todo.push((mode, d)),
-                Doc::Group { doc, broken } => todo.push((if *broken { Mode::Break } else { mode }, doc)),
+                Doc::Group { doc, broken } => {
+                    todo.push((if *broken { Mode::Break } else { mode }, doc))
+                }
                 Doc::Line if mode == Mode::Flat => left -= 1,
                 Doc::SoftLine if mode == Mode::Flat => {}
                 Doc::Line | Doc::SoftLine | Doc::HardLine | Doc::BlankLine => return left >= 0,

@@ -48,19 +48,28 @@ impl std::error::Error for FmtError {}
 pub fn format(src: &str) -> Result<Formatted, FmtError> {
     let parsed = parse(src);
     let root = parsed.syntax();
-    let f = Fmt { errors: &parsed.errors, skip_leading: Cell::new(None) };
+    let f = Fmt {
+        errors: &parsed.errors,
+        skip_leading: Cell::new(None),
+    };
     let text = doc::print(&f.file(&root), WIDTH);
     if skeleton(&root) != skeleton(&parse(&text).syntax()) {
         return Err(FmtError);
     }
-    Ok(Formatted { text, errors: parsed.errors })
+    Ok(Formatted {
+        text,
+        errors: parsed.errors,
+    })
 }
 
 /// 1-based line and column (in chars) of a byte offset.
 pub fn line_col(src: &str, offset: usize) -> (usize, usize) {
     let before = src.get(..offset.min(src.len())).unwrap_or(src);
     let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-    (before.matches('\n').count() + 1, before[line_start..].chars().count() + 1)
+    (
+        before.matches('\n').count() + 1,
+        before[line_start..].chars().count() + 1,
+    )
 }
 
 /// Tree shape and significant tokens, plus comment texts in order.
@@ -95,11 +104,15 @@ fn is_trivia(k: K) -> bool {
 
 /// Children without trivia.
 fn sig(n: &SyntaxNode) -> Vec<SyntaxElement> {
-    n.children_with_tokens().filter(|e| !is_trivia(e.kind())).collect()
+    n.children_with_tokens()
+        .filter(|e| !is_trivia(e.kind()))
+        .collect()
 }
 
 fn sig_tokens(n: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
-    n.descendants_with_tokens().filter_map(|e| e.into_token()).filter(|t| !is_trivia(t.kind()))
+    n.descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !is_trivia(t.kind()))
 }
 
 fn token(e: Option<&SyntaxElement>, k: K) -> Result<SyntaxToken, Bail> {
@@ -138,14 +151,19 @@ fn comment_text(t: &SyntaxToken) -> Doc {
 /// Binding powers of a `BinExpr`'s operator.
 fn bin_parts(n: &SyntaxNode) -> Result<(SyntaxNode, SyntaxToken, SyntaxNode, (u8, u8)), Bail> {
     let els = sig(n);
-    let [l, op, r] = els.as_slice() else { return Err(Bail) };
+    let [l, op, r] = els.as_slice() else {
+        return Err(Bail);
+    };
     let op = op.as_token().ok_or(Bail)?.clone();
     let (lb, rb, _) = op.kind().infix().ok_or(Bail)?;
     Ok((node(Some(l))?, op, node(Some(r))?, (lb, rb)))
 }
 
 fn is_pipe(k: K) -> bool {
-    matches!(k, K::Amp | K::AmpEq | K::AmpQuestion | K::AmpStar | K::AmpDot | K::AmpMinus)
+    matches!(
+        k,
+        K::Amp | K::AmpEq | K::AmpQuestion | K::AmpStar | K::AmpDot | K::AmpMinus
+    )
 }
 
 struct Fmt<'a> {
@@ -170,7 +188,11 @@ impl Fmt<'_> {
                 continue;
             }
             if !(has_prev && first && newlines == 0) {
-                out.push(if newlines >= 2 { Doc::BlankLine } else { Doc::HardLine });
+                out.push(if newlines >= 2 {
+                    Doc::BlankLine
+                } else {
+                    Doc::HardLine
+                });
                 out.push(comment_text(t));
             }
             first = false;
@@ -182,7 +204,8 @@ impl Fmt<'_> {
     /// Own-line comments before `t`. At the top level a blank line before
     /// the item is kept even without comments.
     fn leading(&self, t: &SyntaxToken, top: bool) -> Doc {
-        let has_prev = std::iter::successors(t.prev_token(), |p| p.prev_token()).any(|p| !is_trivia(p.kind()));
+        let has_prev =
+            std::iter::successors(t.prev_token(), |p| p.prev_token()).any(|p| !is_trivia(p.kind()));
         let (mut out, blank) = self.comment_run(&trivia_before(t), has_prev);
         if !out.is_empty() || (top && blank) {
             out.push(if blank { Doc::BlankLine } else { Doc::HardLine });
@@ -205,7 +228,11 @@ impl Fmt<'_> {
     /// A token with its comments.
     fn tok(&self, t: &SyntaxToken) -> Doc {
         let start = usize::from(t.text_range().start());
-        let lead = if self.skip_leading.get() == Some(start) { concat(vec![]) } else { self.leading(t, false) };
+        let lead = if self.skip_leading.get() == Some(start) {
+            concat(vec![])
+        } else {
+            self.leading(t, false)
+        };
         concat(vec![lead, self.tok_body(t)])
     }
 
@@ -217,9 +244,14 @@ impl Fmt<'_> {
     // ── items ────────────────────────────────────────────────
 
     fn file(&self, root: &SyntaxNode) -> Doc {
-        let items: Vec<(SyntaxNode, SyntaxToken)> =
-            root.children().filter_map(|n| sig_tokens(&n).next().map(|t| (n, t))).collect();
-        let starts: Vec<usize> = items.iter().map(|(_, t)| usize::from(t.text_range().start())).collect();
+        let items: Vec<(SyntaxNode, SyntaxToken)> = root
+            .children()
+            .filter_map(|n| sig_tokens(&n).next().map(|t| (n, t)))
+            .collect();
+        let starts: Vec<usize> = items
+            .iter()
+            .map(|(_, t)| usize::from(t.text_range().start()))
+            .collect();
         let mut parts = Vec::new();
         for (i, (item, first)) in items.iter().enumerate() {
             parts.push(Doc::HardLine);
@@ -227,8 +259,13 @@ impl Fmt<'_> {
             self.skip_leading.set(Some(starts[i]));
             let next = starts.get(i + 1).copied().unwrap_or(usize::MAX);
             let dirty = item.kind() == K::ErrorNode
-                || item.descendants_with_tokens().any(|e| matches!(e.kind(), K::ErrorNode | K::Error))
-                || self.errors.iter().any(|e| e.offset > starts[i] && e.offset <= next);
+                || item
+                    .descendants_with_tokens()
+                    .any(|e| matches!(e.kind(), K::ErrorNode | K::Error))
+                || self
+                    .errors
+                    .iter()
+                    .any(|e| e.offset > starts[i] && e.offset <= next);
             let d = if dirty { Err(Bail) } else { self.item(item) };
             parts.push(d.unwrap_or_else(|Bail| self.verbatim(item)));
         }
@@ -245,7 +282,9 @@ impl Fmt<'_> {
     /// The item's source from its first to its last token.
     fn verbatim(&self, item: &SyntaxNode) -> Doc {
         let mut toks = sig_tokens(item);
-        let (Some(first), last) = (toks.next(), toks.last()) else { return concat(vec![]) };
+        let (Some(first), last) = (toks.next(), toks.last()) else {
+            return concat(vec![]);
+        };
         let last = last.unwrap_or_else(|| first.clone());
         let (start, end) = (first.text_range().start(), last.text_range().end());
         let root = item.ancestors().last().unwrap_or_else(|| item.clone());
@@ -286,7 +325,11 @@ impl Fmt<'_> {
             // Indented so a comment inside the type can never push a name
             // into column 0.
             parts.push(text(" "));
-            parts.push(indent(concat(vec![self.tok(&colon), text(" "), self.ty(&ty)?])));
+            parts.push(indent(concat(vec![
+                self.tok(&colon),
+                text(" "),
+                self.ty(&ty)?,
+            ])));
             next = it.next();
         }
         let eq = token(next, K::Eq)?;
@@ -326,7 +369,9 @@ impl Fmt<'_> {
     /// `f a { ... }`: an application whose last argument is bracketed keeps
     /// its arguments on one line and lets the bracket break.
     fn hugs_last_arg(&self, n: &SyntaxNode) -> bool {
-        n.children().last().is_some_and(|l| matches!(l.kind(), K::RecordExpr | K::ListExpr | K::ParenExpr))
+        n.children()
+            .last()
+            .is_some_and(|l| matches!(l.kind(), K::RecordExpr | K::ListExpr | K::ParenExpr))
             && !has_inner_comment(n)
     }
 
@@ -339,13 +384,23 @@ impl Fmt<'_> {
             K::NameRef | K::Literal | K::FieldExpr | K::SqlExpr => self.spaced(n),
             K::ProjExpr => {
                 let els = sig(n);
-                let [base, field] = els.as_slice() else { return Err(Bail) };
-                Ok(concat(vec![self.expr(&node(Some(base))?, false)?, self.tok(&token(Some(field), K::Field)?)]))
+                let [base, field] = els.as_slice() else {
+                    return Err(Bail);
+                };
+                Ok(concat(vec![
+                    self.expr(&node(Some(base))?, false)?,
+                    self.tok(&token(Some(field), K::Field)?),
+                ]))
             }
             K::NegExpr => {
                 let els = sig(n);
-                let [minus, e] = els.as_slice() else { return Err(Bail) };
-                Ok(concat(vec![self.tok(&token(Some(minus), K::Minus)?), self.expr(&node(Some(e))?, false)?]))
+                let [minus, e] = els.as_slice() else {
+                    return Err(Bail);
+                };
+                Ok(concat(vec![
+                    self.tok(&token(Some(minus), K::Minus)?),
+                    self.expr(&node(Some(e))?, false)?,
+                ]))
             }
             K::ParenExpr => self.paren(n, |inner| self.expr(inner, false)),
             K::RecordExpr => self.delimited(n, K::LBrace, K::RBrace, Doc::Line),
@@ -354,7 +409,9 @@ impl Fmt<'_> {
             K::BinExpr => self.bin(n, top),
             K::Lambda => {
                 let els = sig(n);
-                let [param, arrow, body] = els.as_slice() else { return Err(Bail) };
+                let [param, arrow, body] = els.as_slice() else {
+                    return Err(Bail);
+                };
                 Ok(concat(vec![
                     self.tok(&token(Some(param), K::Ident)?),
                     text(" "),
@@ -368,22 +425,34 @@ impl Fmt<'_> {
 
     fn paren(&self, n: &SyntaxNode, inner: impl Fn(&SyntaxNode) -> R) -> R {
         let els = sig(n);
-        let [open, e, close] = els.as_slice() else { return Err(Bail) };
+        let [open, e, close] = els.as_slice() else {
+            return Err(Bail);
+        };
         let close = token(Some(close), K::RParen)?;
         let d = concat(vec![
             self.tok(&token(Some(open), K::LParen)?),
-            indent(concat(vec![Doc::SoftLine, inner(&node(Some(e))?)?, self.leading(&close, false)])),
+            indent(concat(vec![
+                Doc::SoftLine,
+                inner(&node(Some(e))?)?,
+                self.leading(&close, false),
+            ])),
             Doc::SoftLine,
             self.tok_body(&close),
         ]);
-        Ok(if has_inner_comment(n) { broken_group(d) } else { group(d) })
+        Ok(if has_inner_comment(n) {
+            broken_group(d)
+        } else {
+            group(d)
+        })
     }
 
     /// `{ a, b | r }` / `[a, b]`: flat if it fits, else one element per line.
     /// Commas are kept exactly as written (including a trailing one).
     fn delimited(&self, n: &SyntaxNode, open: K, close: K, pad: Doc) -> R {
         let els = sig(n);
-        let (Some(first), Some(last)) = (els.first(), els.last()) else { return Err(Bail) };
+        let (Some(first), Some(last)) = (els.first(), els.last()) else {
+            return Err(Bail);
+        };
         let (open, close) = (token(Some(first), open)?, token(Some(last), close)?);
         let middle = &els[1..els.len() - 1];
         if middle.is_empty() && !has_inner_comment(n) {
@@ -412,14 +481,25 @@ impl Fmt<'_> {
             }
         }
         inner.push(self.leading(&close, false));
-        let d = concat(vec![self.tok(&open), indent(concat(inner)), pad, self.tok_body(&close)]);
-        Ok(if has_inner_comment(n) { broken_group(d) } else { group(d) })
+        let d = concat(vec![
+            self.tok(&open),
+            indent(concat(inner)),
+            pad,
+            self.tok_body(&close),
+        ]);
+        Ok(if has_inner_comment(n) {
+            broken_group(d)
+        } else {
+            group(d)
+        })
     }
 
     /// `name = value` in a record or record type.
     fn field(&self, n: &SyntaxNode, value: impl Fn(&SyntaxNode) -> R) -> R {
         let els = sig(n);
-        let [name, eq, v] = els.as_slice() else { return Err(Bail) };
+        let [name, eq, v] = els.as_slice() else {
+            return Err(Bail);
+        };
         Ok(concat(vec![
             self.tok(&token(Some(name), K::Ident)?),
             text(" "),
@@ -431,8 +511,13 @@ impl Fmt<'_> {
     /// `f a b`: flat if it fits, else arguments on indented lines. With a
     /// bracketed last argument, only that argument breaks.
     fn app(&self, n: &SyntaxNode) -> R {
-        let args = sig(n).iter().map(|e| self.expr(&node(Some(e))?, false)).collect::<Result<Vec<_>, _>>()?;
-        let Some((head, rest)) = args.split_first() else { return Err(Bail) };
+        let args = sig(n)
+            .iter()
+            .map(|e| self.expr(&node(Some(e))?, false))
+            .collect::<Result<Vec<_>, _>>()?;
+        let Some((head, rest)) = args.split_first() else {
+            return Err(Bail);
+        };
         if self.hugs_last_arg(n) {
             let mut parts = vec![head.clone()];
             for a in rest {
@@ -442,7 +527,11 @@ impl Fmt<'_> {
         }
         let tail = rest.iter().flat_map(|a| [Doc::Line, a.clone()]).collect();
         let d = concat(vec![head.clone(), indent(concat(tail))]);
-        Ok(if has_inner_comment(n) { broken_group(d) } else { group(d) })
+        Ok(if has_inner_comment(n) {
+            broken_group(d)
+        } else {
+            group(d)
+        })
     }
 
     /// A chain of operators at one precedence level is laid out as a unit:
@@ -486,7 +575,9 @@ impl Fmt<'_> {
                 let mut cur = n.clone();
                 while cur.kind() == K::TyFun {
                     let els = sig(&cur);
-                    let [a, arrow, b] = els.as_slice() else { return Err(Bail) };
+                    let [a, arrow, b] = els.as_slice() else {
+                        return Err(Bail);
+                    };
                     operands.push(node(Some(a))?);
                     arrows.push(token(Some(arrow), K::Arrow)?);
                     cur = node(Some(b))?;
@@ -497,7 +588,11 @@ impl Fmt<'_> {
                     tail.extend([Doc::Line, self.tok(arrow), text(" "), self.ty(t)?]);
                 }
                 let d = concat(vec![self.ty(&operands[0])?, indent(concat(tail))]);
-                Ok(if has_inner_comment(n) { broken_group(d) } else { group(d) })
+                Ok(if has_inner_comment(n) {
+                    broken_group(d)
+                } else {
+                    group(d)
+                })
             }
             _ => Err(Bail),
         }
@@ -506,7 +601,12 @@ impl Fmt<'_> {
 
 /// Operands and operators of the same-precedence chain rooted at `n`,
 /// following the side its associativity nests on.
-fn flatten(n: &SyntaxNode, bp: (u8, u8), operands: &mut Vec<SyntaxNode>, ops: &mut Vec<SyntaxToken>) -> Result<(), Bail> {
+fn flatten(
+    n: &SyntaxNode,
+    bp: (u8, u8),
+    operands: &mut Vec<SyntaxNode>,
+    ops: &mut Vec<SyntaxToken>,
+) -> Result<(), Bail> {
     let (l, op, r, _) = bin_parts(n)?;
     let same = |c: &SyntaxNode| c.kind() == K::BinExpr && bin_parts(c).is_ok_and(|p| p.3 == bp);
     let left_assoc = bp.0 < bp.1;

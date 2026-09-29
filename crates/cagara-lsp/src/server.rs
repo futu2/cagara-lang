@@ -6,17 +6,19 @@ use crate::{analysis, uri};
 use cagara_hir::workspace::Workspace;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _, PublishDiagnostics,
+    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
+    PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest,
-    References, Request as _,
+    Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting, GotoDefinition,
+    HoverRequest, References, Request as _,
 };
 use lsp_types::{
-    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity, DocumentHighlight,
-    DocumentFormattingParams, DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability, Location, MarkupContent,
-    MarkupKind, OneOf, PublishDiagnosticsParams, ReferenceParams, ServerCapabilities, TextDocumentSyncCapability,
+    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams,
+    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, HoverProviderCapability, Location, MarkupContent, MarkupKind, OneOf,
+    PublishDiagnosticsParams, ReferenceParams, ServerCapabilities, TextDocumentSyncCapability,
     TextDocumentSyncKind, Uri,
 };
 use std::collections::HashMap;
@@ -60,9 +62,14 @@ pub fn run() -> Res<()> {
                 let result = if method == HoverRequest::METHOD {
                     let p: HoverParams = serde_json::from_value(params)?;
                     let tp = p.text_document_position_params;
-                    let h = docs.get(tp.text_document.uri.as_str()).and_then(|d| analysis::hover(&d.ws, tp.position));
+                    let h = docs
+                        .get(tp.text_document.uri.as_str())
+                        .and_then(|d| analysis::hover(&d.ws, tp.position));
                     serde_json::to_value(h.map(|value| Hover {
-                        contents: HoverContents::Markup(MarkupContent { kind: MarkupKind::Markdown, value }),
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value,
+                        }),
                         range: None,
                     }))?
                 } else if method == GotoDefinition::METHOD {
@@ -73,9 +80,16 @@ pub fn run() -> Res<()> {
                         .map(|d| analysis::definition(&d.ws, tp.position))
                         .unwrap_or_default()
                         .into_iter()
-                        .filter_map(|(path, range)| Some(Location { uri: uri::from_path(&path)?, range }))
+                        .filter_map(|(path, range)| {
+                            Some(Location {
+                                uri: uri::from_path(&path)?,
+                                range,
+                            })
+                        })
                         .collect();
-                    serde_json::to_value((!locs.is_empty()).then_some(GotoDefinitionResponse::Array(locs)))?
+                    serde_json::to_value(
+                        (!locs.is_empty()).then_some(GotoDefinitionResponse::Array(locs)),
+                    )?
                 } else if method == References::METHOD {
                     let p: ReferenceParams = serde_json::from_value(params)?;
                     let tp = p.text_document_position;
@@ -83,64 +97,91 @@ pub fn run() -> Res<()> {
                     let locs: Option<Vec<Location>> = docs.get(uri.as_str()).map(|d| {
                         analysis::references(&d.ws, tp.position, p.context.include_declaration)
                             .into_iter()
-                            .map(|range| Location { uri: uri.clone(), range })
+                            .map(|range| Location {
+                                uri: uri.clone(),
+                                range,
+                            })
                             .collect()
                     });
                     serde_json::to_value(locs)?
                 } else if method == DocumentHighlightRequest::METHOD {
                     let p: DocumentHighlightParams = serde_json::from_value(params)?;
                     let tp = p.text_document_position_params;
-                    let hs: Option<Vec<DocumentHighlight>> = docs.get(tp.text_document.uri.as_str()).map(|d| {
-                        analysis::highlights(&d.ws, tp.position)
-                            .into_iter()
-                            .map(|(range, kind)| DocumentHighlight { range, kind: Some(kind) })
-                            .collect()
-                    });
+                    let hs: Option<Vec<DocumentHighlight>> =
+                        docs.get(tp.text_document.uri.as_str()).map(|d| {
+                            analysis::highlights(&d.ws, tp.position)
+                                .into_iter()
+                                .map(|(range, kind)| DocumentHighlight {
+                                    range,
+                                    kind: Some(kind),
+                                })
+                                .collect()
+                        });
                     serde_json::to_value(hs)?
                 } else if method == DocumentSymbolRequest::METHOD {
                     let p: DocumentSymbolParams = serde_json::from_value(params)?;
-                    let ss = docs.get(p.text_document.uri.as_str()).map(|d| analysis::symbols(&d.ws));
+                    let ss = docs
+                        .get(p.text_document.uri.as_str())
+                        .map(|d| analysis::symbols(&d.ws));
                     serde_json::to_value(ss.map(DocumentSymbolResponse::Nested))?
                 } else if method == Completion::METHOD {
                     let p: CompletionParams = serde_json::from_value(params)?;
                     let tp = p.text_document_position;
-                    let items =
-                        docs.get_mut(tp.text_document.uri.as_str()).map(|d| analysis::completion(&mut d.ws, tp.position));
+                    let items = docs
+                        .get_mut(tp.text_document.uri.as_str())
+                        .map(|d| analysis::completion(&mut d.ws, tp.position));
                     serde_json::to_value(items.map(CompletionResponse::Array))?
                 } else if method == Formatting::METHOD {
                     let p: DocumentFormattingParams = serde_json::from_value(params)?;
                     let Some(d) = docs.get(p.text_document.uri.as_str()) else {
-                        conn.sender.send(Message::Response(Response::new_ok(id, serde_json::Value::Null)))?;
+                        conn.sender.send(Message::Response(Response::new_ok(
+                            id,
+                            serde_json::Value::Null,
+                        )))?;
                         continue;
                     };
                     match analysis::format(&d.ws) {
                         Ok(edits) => serde_json::to_value(edits)?,
                         Err(e) => {
-                            let r = Response::new_err(id, ErrorCode::InternalError as i32, e.to_string());
+                            let r = Response::new_err(
+                                id,
+                                ErrorCode::InternalError as i32,
+                                e.to_string(),
+                            );
                             conn.sender.send(Message::Response(r))?;
                             continue;
                         }
                     }
                 } else {
-                    let r = Response::new_err(id, ErrorCode::MethodNotFound as i32, format!("unsupported: {method}"));
+                    let r = Response::new_err(
+                        id,
+                        ErrorCode::MethodNotFound as i32,
+                        format!("unsupported: {method}"),
+                    );
                     conn.sender.send(Message::Response(r))?;
                     continue;
                 };
-                conn.sender.send(Message::Response(Response::new_ok(id, result)))?;
+                conn.sender
+                    .send(Message::Response(Response::new_ok(id, result)))?;
             }
             Message::Notification(n) => {
                 if n.method == DidOpenTextDocument::METHOD {
                     let p: lsp_types::DidOpenTextDocumentParams = serde_json::from_value(n.params)?;
-                    let Some(path) = uri::to_path(&p.text_document.uri) else { continue };
+                    let Some(path) = uri::to_path(&p.text_document.uri) else {
+                        continue;
+                    };
                     let path = path.canonicalize().unwrap_or(path);
                     let ws = Workspace::open_with(&path, p.text_document.text);
                     let doc = Doc { path, ws };
                     publish(&conn, p.text_document.uri.clone(), &doc)?;
                     docs.insert(p.text_document.uri.as_str().to_string(), doc);
                 } else if n.method == DidChangeTextDocument::METHOD {
-                    let p: lsp_types::DidChangeTextDocumentParams = serde_json::from_value(n.params)?;
-                    let (Some(doc), Some(change)) = (docs.get_mut(p.text_document.uri.as_str()), p.content_changes.into_iter().last())
-                    else {
+                    let p: lsp_types::DidChangeTextDocumentParams =
+                        serde_json::from_value(n.params)?;
+                    let (Some(doc), Some(change)) = (
+                        docs.get_mut(p.text_document.uri.as_str()),
+                        p.content_changes.into_iter().last(),
+                    ) else {
                         continue;
                     };
                     let root = doc.ws.root;
@@ -150,10 +191,18 @@ pub fn run() -> Res<()> {
                     }
                     publish(&conn, p.text_document.uri, doc)?;
                 } else if n.method == DidCloseTextDocument::METHOD {
-                    let p: lsp_types::DidCloseTextDocumentParams = serde_json::from_value(n.params)?;
+                    let p: lsp_types::DidCloseTextDocumentParams =
+                        serde_json::from_value(n.params)?;
                     docs.remove(p.text_document.uri.as_str());
-                    let params = PublishDiagnosticsParams { uri: p.text_document.uri, diagnostics: vec![], version: None };
-                    conn.sender.send(Message::Notification(Notification::new(PublishDiagnostics::METHOD.into(), params)))?;
+                    let params = PublishDiagnosticsParams {
+                        uri: p.text_document.uri,
+                        diagnostics: vec![],
+                        version: None,
+                    };
+                    conn.sender.send(Message::Notification(Notification::new(
+                        PublishDiagnostics::METHOD.into(),
+                        params,
+                    )))?;
                 }
             }
             Message::Response(_) => {}
@@ -176,7 +225,14 @@ fn publish(conn: &Connection, uri: Uri, doc: &Doc) -> Res<()> {
             ..Default::default()
         })
         .collect();
-    let params = PublishDiagnosticsParams { uri, diagnostics, version: None };
-    conn.sender.send(Message::Notification(Notification::new(PublishDiagnostics::METHOD.into(), params)))?;
+    let params = PublishDiagnosticsParams {
+        uri,
+        diagnostics,
+        version: None,
+    };
+    conn.sender.send(Message::Notification(Notification::new(
+        PublishDiagnostics::METHOD.into(),
+        params,
+    )))?;
     Ok(())
 }

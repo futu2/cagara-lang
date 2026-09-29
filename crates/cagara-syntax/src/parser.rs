@@ -68,13 +68,18 @@ impl<'a> Parser<'a> {
             if !l.kind.is_trivia() {
                 break;
             }
-            self.b.token(CagaraLanguage::kind_to_raw(l.kind.into()), l.text);
+            self.b
+                .token(CagaraLanguage::kind_to_raw(l.kind.into()), l.text);
             self.pos += 1;
         }
     }
 
     fn peek_lex(&self, n: usize) -> Option<Lexeme<'a>> {
-        self.toks[self.pos..].iter().filter(|l| !l.kind.is_trivia()).nth(n).copied()
+        self.toks[self.pos..]
+            .iter()
+            .filter(|l| !l.kind.is_trivia())
+            .nth(n)
+            .copied()
     }
 
     fn peek(&self) -> Option<Token> {
@@ -96,7 +101,8 @@ impl<'a> Parser<'a> {
     fn bump(&mut self) {
         self.eat_trivia();
         if let Some(l) = self.toks.get(self.pos).copied() {
-            self.b.token(CagaraLanguage::kind_to_raw(l.kind.into()), l.text);
+            self.b
+                .token(CagaraLanguage::kind_to_raw(l.kind.into()), l.text);
             self.pos += 1;
         }
     }
@@ -163,7 +169,8 @@ impl<'a> Parser<'a> {
     // ── items ────────────────────────────────────────────────
 
     fn file(&mut self) {
-        self.b.start_node(CagaraLanguage::kind_to_raw(K::SourceFile));
+        self.b
+            .start_node(CagaraLanguage::kind_to_raw(K::SourceFile));
         loop {
             match self.peek() {
                 None => break,
@@ -221,7 +228,10 @@ impl<'a> Parser<'a> {
 
     fn ty_atom_start(&self) -> bool {
         !self.at_boundary()
-            && matches!(self.peek(), Some(Token::Ident | Token::LBrace | Token::LParen))
+            && matches!(
+                self.peek(),
+                Some(Token::Ident | Token::LBrace | Token::LParen)
+            )
     }
 
     /// `head arg arg`; a bare record or paren type is also accepted.
@@ -327,7 +337,9 @@ impl<'a> Parser<'a> {
                 break;
             }
             let Some(tok) = self.peek() else { break };
-            let Some((l_bp, r_bp, _)) = K::from(tok).infix() else { break };
+            let Some((l_bp, r_bp, _)) = K::from(tok).infix() else {
+                break;
+            };
             if l_bp < min_bp {
                 break;
             }
@@ -518,7 +530,8 @@ mod tests {
                     s.push_str(&sexp(&n));
                 }
                 rowan::NodeOrToken::Token(t) => {
-                    if matches!(t.kind(), K::Ident | K::Int | K::Field) && n.kind() != K::Definition {
+                    if matches!(t.kind(), K::Ident | K::Int | K::Field) && n.kind() != K::Definition
+                    {
                         s.push(' ');
                         s.push_str(t.text());
                     }
@@ -533,7 +546,11 @@ mod tests {
         let p = parse(src);
         assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
         let def = p.syntax().children().next().unwrap();
-        let e = def.children().filter(|c| c.kind() != K::TypeAnn).last().unwrap();
+        let e = def
+            .children()
+            .filter(|c| c.kind() != K::TypeAnn)
+            .last()
+            .unwrap();
         sexp(&e)
     }
 
@@ -575,7 +592,11 @@ mod tests {
     fn types_parse() {
         let p = parse("u : query { id = int, age = int | r } -> expr r bool = x");
         assert!(p.errors.is_empty(), "{:?}", p.errors);
-        let ann = p.syntax().descendants().find(|n| n.kind() == K::TypeAnn).unwrap();
+        let ann = p
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == K::TypeAnn)
+            .unwrap();
         assert!(ann.descendants().any(|n| n.kind() == K::TyFun));
         assert!(ann.descendants().any(|n| n.kind() == K::TyRecord));
     }
@@ -585,7 +606,13 @@ mod tests {
         let src = "a = (1 +\nb = 2\n";
         let p = parse(src);
         assert!(!p.errors.is_empty());
-        assert_eq!(p.syntax().children().filter(|n| n.kind() == K::Definition).count(), 2);
+        assert_eq!(
+            p.syntax()
+                .children()
+                .filter(|n| n.kind() == K::Definition)
+                .count(),
+            2
+        );
         assert_eq!(p.syntax().text().to_string(), src);
     }
 
@@ -616,7 +643,10 @@ mod tests {
             body("x = a ?? b ?? 0 + 1"),
             "(BinExpr (BinExpr (NameRef a) (BinExpr (NameRef b) (Literal 0))) (Literal 1))"
         );
-        assert_eq!(body("x = f a ?? 0"), "(BinExpr (App (NameRef f) (NameRef a)) (Literal 0))");
+        assert_eq!(
+            body("x = f a ?? 0"),
+            "(BinExpr (App (NameRef f) (NameRef a)) (Literal 0))"
+        );
     }
 
     #[test]

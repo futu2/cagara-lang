@@ -4,7 +4,9 @@
 
 use crate::stage::{and_all, col, lower_expr, qualify, Stage};
 use cagara_hir::ir::{Expr as IrExpr, JoinKind, Rel, Side};
-use sqlglot_rust::ast::{Expr, JoinClause, JoinType, OrderByItem, QuoteStyle, TableRef, TableSource};
+use sqlglot_rust::ast::{
+    Expr, JoinClause, JoinType, OrderByItem, QuoteStyle, TableRef, TableSource,
+};
 
 #[derive(Default)]
 pub struct Lowerer {
@@ -24,7 +26,10 @@ impl Lowerer {
             alias: Some(self.alias()),
             alias_quote_style: QuoteStyle::None,
         };
-        Stage::new(from, names.iter().map(|n| (n.clone(), col(None, n))).collect())
+        Stage::new(
+            from,
+            names.iter().map(|n| (n.clone(), col(None, n))).collect(),
+        )
     }
 
     /// Turn a stage into a join input. A projection / filter over a plain
@@ -47,14 +52,21 @@ impl Lowerer {
                 JoinInput {
                     from: TableSource::Table(t),
                     joins: vec![],
-                    items: st.items.into_iter().map(|(n, e)| (n, qualify(e, &alias))).collect(),
+                    items: st
+                        .items
+                        .into_iter()
+                        .map(|(n, e)| (n, qualify(e, &alias)))
+                        .collect(),
                     wheres: st.wheres.into_iter().map(|w| qualify(w, &alias)).collect(),
                 }
             }
             // An earlier join: its columns are already qualified.
-            from if fusable && !st.joins.is_empty() => {
-                JoinInput { from, joins: st.joins, items: st.items, wheres: st.wheres }
-            }
+            from if fusable && !st.joins.is_empty() => JoinInput {
+                from,
+                joins: st.joins,
+                items: st.items,
+                wheres: st.wheres,
+            },
             from => self.derived(Stage { from, ..st }),
         }
     }
@@ -70,7 +82,10 @@ impl Lowerer {
                 alias_quote_style: QuoteStyle::None,
             },
             joins: vec![],
-            items: names.iter().map(|n| (n.clone(), col(Some(&alias), n))).collect(),
+            items: names
+                .iter()
+                .map(|n| (n.clone(), col(Some(&alias), n)))
+                .collect(),
             wheres: vec![],
         }
     }
@@ -78,7 +93,11 @@ impl Lowerer {
     pub fn rel(&mut self, rel: &Rel) -> Result<Stage, String> {
         Ok(match rel {
             Rel::At(_, r) => self.rel(r)?,
-            Rel::Table { schema, name, columns } => {
+            Rel::Table {
+                schema,
+                name,
+                columns,
+            } => {
                 let cols = columns.as_ref().ok_or("internal: table without columns")?;
                 let t = TableRef {
                     catalog: None,
@@ -89,7 +108,10 @@ impl Lowerer {
                     name_quote_style: QuoteStyle::None,
                     alias_quote_style: QuoteStyle::None,
                 };
-                Stage::new(TableSource::Table(t), cols.iter().map(|c| (c.clone(), col(None, c))).collect())
+                Stage::new(
+                    TableSource::Table(t),
+                    cols.iter().map(|c| (c.clone(), col(None, c))).collect(),
+                )
             }
             Rel::Where(r, p) => {
                 let mut st = self.rel(r)?;
@@ -102,11 +124,19 @@ impl Lowerer {
             }
             Rel::Select(r, fs) => {
                 let mut st = self.rel(r)?;
-                let new_win = fs.iter().any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
-                if st.limit.is_some() || st.offset.is_some() || (new_win && (st.has_agg || st.has_win)) {
+                let new_win = fs
+                    .iter()
+                    .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
+                if st.limit.is_some()
+                    || st.offset.is_some()
+                    || (new_win && (st.has_agg || st.has_win))
+                {
                     st = self.wrap(st);
                 }
-                let items = fs.iter().map(|(n, e)| Ok((n.clone(), st.resolve(e)?))).collect::<Result<_, String>>()?;
+                let items = fs
+                    .iter()
+                    .map(|(n, e)| Ok((n.clone(), st.resolve(e)?)))
+                    .collect::<Result<_, String>>()?;
                 st.items = items;
                 st.has_win |= new_win;
                 st
@@ -121,17 +151,28 @@ impl Lowerer {
                 for (_, e) in fs {
                     collect_groups(e, &mut keys);
                 }
-                let has_aggfn = fs.iter().any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Agg(..))));
+                let has_aggfn = fs
+                    .iter()
+                    .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Agg(..))));
                 if keys.is_empty() && !has_aggfn {
                     // Only constants: force exactly one output row.
-                    st.items = vec![("cagara_n".into(), crate::stage::template("COUNT(*)", vec![])?)];
+                    st.items = vec![(
+                        "cagara_n".into(),
+                        crate::stage::template("COUNT(*)", vec![])?,
+                    )];
                     st.has_agg = true;
                     st = self.wrap(st);
                 } else {
-                    st.group_by = keys.iter().map(|k| st.resolve(k)).collect::<Result<_, _>>()?;
+                    st.group_by = keys
+                        .iter()
+                        .map(|k| st.resolve(k))
+                        .collect::<Result<_, _>>()?;
                     st.has_agg = true;
                 }
-                let items = fs.iter().map(|(n, e)| Ok((n.clone(), st.resolve(e)?))).collect::<Result<_, String>>()?;
+                let items = fs
+                    .iter()
+                    .map(|(n, e)| Ok((n.clone(), st.resolve(e)?)))
+                    .collect::<Result<_, String>>()?;
                 st.items = items;
                 st
             }
@@ -142,7 +183,13 @@ impl Lowerer {
                 }
                 let order = ks
                     .iter()
-                    .map(|(k, asc)| Ok(OrderByItem { expr: st.resolve(k)?, ascending: *asc, nulls_first: None }))
+                    .map(|(k, asc)| {
+                        Ok(OrderByItem {
+                            expr: st.resolve(k)?,
+                            ascending: *asc,
+                            nulls_first: None,
+                        })
+                    })
                     .collect::<Result<_, String>>()?;
                 st.order_by = order;
                 st
@@ -166,11 +213,19 @@ impl Lowerer {
             Rel::KeyMap(r, m) => {
                 let mut st = self.rel(r)?;
                 let pairs = m.apply(&st.names())?;
-                let items = pairs.into_iter().map(|(old, new)| Ok((new, st.item(&old)?))).collect::<Result<_, String>>()?;
+                let items = pairs
+                    .into_iter()
+                    .map(|(old, new)| Ok((new, st.item(&old)?)))
+                    .collect::<Result<_, String>>()?;
                 st.items = items;
                 st
             }
-            Rel::Join { kind, left, right, on } => {
+            Rel::Join {
+                kind,
+                left,
+                right,
+                on,
+            } => {
                 // Where an inlined input's filters may go without changing
                 // the result: a filter on a side whose unmatched rows are not
                 // kept can move to WHERE; the right side of a left join can
@@ -192,7 +247,11 @@ impl Lowerer {
                     ji => self.rewrap(ji),
                 };
                 let find = |items: &[(String, Expr)], n: &str| {
-                    items.iter().find(|(k, _)| k == n).map(|(_, e)| e.clone()).ok_or_else(|| format!("internal: join input has no column `{n}`"))
+                    items
+                        .iter()
+                        .find(|(k, _)| k == n)
+                        .map(|(_, e)| e.clone())
+                        .ok_or_else(|| format!("internal: join input has no column `{n}`"))
                 };
                 let pred = lower_expr(on, &|side, n| match side {
                     Side::Left => find(&l.items, n),
@@ -201,7 +260,12 @@ impl Lowerer {
                 })?;
                 let lnames: Vec<&String> = l.items.iter().map(|(n, _)| n).collect();
                 let mut items: Vec<(String, Expr)> = l.items.clone();
-                items.extend(r.items.iter().filter(|(n, _)| !lnames.contains(&n)).cloned());
+                items.extend(
+                    r.items
+                        .iter()
+                        .filter(|(n, _)| !lnames.contains(&n))
+                        .cloned(),
+                );
                 let mut wheres = l.wheres;
                 let on = match kind {
                     JoinKind::Inner | JoinKind::Right => {
@@ -220,7 +284,12 @@ impl Lowerer {
                     JoinKind::Right => JoinType::Right,
                     JoinKind::Full => JoinType::Full,
                 };
-                st.joins.push(JoinClause { join_type, table: r.from, on: Some(on), using: vec![] });
+                st.joins.push(JoinClause {
+                    join_type,
+                    table: r.from,
+                    on: Some(on),
+                    using: vec![],
+                });
                 st
             }
         })

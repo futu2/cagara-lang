@@ -1,9 +1,9 @@
 //! Compile-time evaluator. Runs a Cagara program (prelude included) and
 //! reduces each definition to a value; query definitions become `Rel` IR.
 
+use crate::check::{Choice, TypeCheck};
 use crate::ir::{Expr, Lit, Loc, Rel};
 use crate::prims::{self, build_tpl};
-use crate::check::{Choice, TypeCheck};
 use crate::value::{err, Closure, EResult, Env, Inst, Template, TplKind, Value};
 use crate::workspace::{Binding, Diag, Workspace};
 use cagara_syntax::ast::{self, ExprKind, Span, TypeExpr};
@@ -44,12 +44,21 @@ fn at<T>(r: EResult<T>, module: usize, span: Span) -> EResult<T> {
 
 impl<'w> Evaluator<'w> {
     pub fn new(ws: &'w Workspace, tc: &'w TypeCheck) -> Self {
-        Evaluator { ws, tc, cache: HashMap::new(), active: Vec::new(), depth: 0 }
+        Evaluator {
+            ws,
+            tc,
+            cache: HashMap::new(),
+            active: Vec::new(),
+            depth: 0,
+        }
     }
 
     /// Value of a definition with no open overloads.
     pub fn def_value(&mut self, m: usize, i: usize) -> EResult<Value> {
-        self.inst_value(Inst { def: (m, i), holes: vec![] })
+        self.inst_value(Inst {
+            def: (m, i),
+            holes: vec![],
+        })
     }
 
     fn inst_value(&mut self, inst: Inst) -> EResult<Value> {
@@ -60,7 +69,10 @@ impl<'w> Evaluator<'w> {
         let (m, i) = inst.def;
         let def = &ws.modules[m].module.defs[i];
         if self.active.contains(&(m, i)) {
-            let msg = format!("`{}` refers to itself; recursion is not supported", def.name);
+            let msg = format!(
+                "`{}` refers to itself; recursion is not supported",
+                def.name
+            );
             return at(err(msg), m, def.span);
         }
         self.active.push((m, i));
@@ -95,8 +107,13 @@ impl<'w> Evaluator<'w> {
 
     /// A definition used at `site`, with its holes filled from the choices.
     fn use_def(&mut self, inst: &Inst, site: u32, dm: usize, di: usize) -> EResult<Value> {
-        let holes = (0..self.tc.holes(dm, di)).map(|k| self.choose(inst, site, k)).collect::<EResult<_>>()?;
-        self.inst_value(Inst { def: (dm, di), holes })
+        let holes = (0..self.tc.holes(dm, di))
+            .map(|k| self.choose(inst, site, k))
+            .collect::<EResult<_>>()?;
+        self.inst_value(Inst {
+            def: (dm, di),
+            holes,
+        })
     }
 
     fn use_binding(&mut self, inst: &Inst, site: u32, b: Binding, n: &str) -> EResult<Value> {
@@ -108,11 +125,19 @@ impl<'w> Evaluator<'w> {
             }
             Binding::Prim(p) if p.arity() == 0 => prims::call(p, vec![]),
             Binding::Prim(p) => Ok(Value::Prim(p, vec![])),
-            Binding::Module(_) => err(format!("`{n}` is a module; refer to a definition as `{n}.name`")),
+            Binding::Module(_) => err(format!(
+                "`{n}` is a module; refer to a definition as `{n}.name`"
+            )),
         }
     }
 
-    fn eval_inner(&mut self, m: usize, inst: &Rc<Inst>, env: &Env, e: &ast::Expr) -> EResult<Value> {
+    fn eval_inner(
+        &mut self,
+        m: usize,
+        inst: &Rc<Inst>,
+        env: &Env,
+        e: &ast::Expr,
+    ) -> EResult<Value> {
         match &e.kind {
             ExprKind::Name(n) => match env.get(n) {
                 Some(v) => Ok(v.clone()),
@@ -191,9 +216,11 @@ impl<'w> Evaluator<'w> {
                 }
                 Ok(Value::Record(out))
             }
-            ExprKind::List(xs) => {
-                Ok(Value::List(xs.iter().map(|x| self.eval(m, inst, env, x)).collect::<EResult<_>>()?))
-            }
+            ExprKind::List(xs) => Ok(Value::List(
+                xs.iter()
+                    .map(|x| self.eval(m, inst, env, x))
+                    .collect::<EResult<_>>()?,
+            )),
             ExprKind::Sql(_) => {
                 err("`sql \"...\"` must be the whole body of a definition with a type signature")
             }
@@ -206,7 +233,10 @@ impl<'w> Evaluator<'w> {
             Value::Closure(c) => {
                 if self.depth >= MAX_DEPTH {
                     let d = &self.ws.modules[c.module].module.defs[c.inst.def.1];
-                    let msg = format!("`{}` applies itself without terminating; recursion is not supported", d.name);
+                    let msg = format!(
+                        "`{}` applies itself without terminating; recursion is not supported",
+                        d.name
+                    );
                     return at(err(msg), c.module, c.body.span);
                 }
                 self.depth += 1;
@@ -262,7 +292,11 @@ fn template_def(sql: &str, ty: Option<&TypeExpr>) -> EResult<Value> {
             "template uses placeholders up to ${used} but its signature has {expr_args} expression argument(s)"
         ));
     }
-    let t = Rc::new(Template { sql: sql.to_string(), kind, arity });
+    let t = Rc::new(Template {
+        sql: sql.to_string(),
+        kind,
+        arity,
+    });
     if arity == 0 {
         build_tpl(&t, vec![])
     } else {
@@ -286,7 +320,9 @@ fn max_placeholder(sql: &str) -> usize {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'$' {
-            let j = (i + 1..b.len()).find(|&j| !b[j].is_ascii_digit()).unwrap_or(b.len());
+            let j = (i + 1..b.len())
+                .find(|&j| !b[j].is_ascii_digit())
+                .unwrap_or(b.len());
             if let Ok(n) = sql[i + 1..j].parse::<usize>() {
                 max = max.max(n);
             }
@@ -318,7 +354,9 @@ fn attach_schema(mut v: Value, ty: Option<&TypeExpr>) -> Value {
 fn closed_row(ty: Option<&TypeExpr>) -> Option<Vec<String>> {
     match ty? {
         TypeExpr::App { head, args, .. } if head == "query" && args.len() == 1 => match &args[0] {
-            TypeExpr::Record { fields, tail: None, .. } => Some(fields.iter().map(|f| f.0.clone()).collect()),
+            TypeExpr::Record {
+                fields, tail: None, ..
+            } => Some(fields.iter().map(|f| f.0.clone()).collect()),
             _ => None,
         },
         _ => None,
@@ -373,7 +411,12 @@ mod tests {
         let tc = crate::check::check(&ws);
         let mut out: Vec<String> = ws.diags.iter().map(|d| d.message.clone()).collect();
         out.extend(tc.errors.iter().map(|e| e.diag.message.clone()));
-        out.extend(root_queries_checked(&ws, &tc).into_iter().filter_map(|(_, r)| r.err()).map(|d| d.message));
+        out.extend(
+            root_queries_checked(&ws, &tc)
+                .into_iter()
+                .filter_map(|(_, r)| r.err())
+                .map(|d| d.message),
+        );
         out
     }
 
@@ -413,6 +456,9 @@ mod tests {
             fields.join(", ")
         );
         let e = errors(&src);
-        assert!(e.iter().any(|m| m.contains("too many open overloads")), "{e:?}");
+        assert!(
+            e.iter().any(|m| m.contains("too many open overloads")),
+            "{e:?}"
+        );
     }
 }

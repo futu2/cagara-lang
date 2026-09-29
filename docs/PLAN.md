@@ -28,7 +28,7 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 | Crate | Contents |
 |---|---|
 | `cagara-syntax` | lexer, parser (Pratt operators, column-0 layout rule, error recovery), AST lowering; operators desugar to calls (`a + b` → `_+_ a b`) |
-| `cagara-hir` | salsa db and `parse_module` query, workspace/module loading, type checker (`check.rs`), evaluator, `__` primitives, IR, schema/phase validation |
+| `cagara-hir` | salsa db (`parse_module`, per-module `module_check` queries), workspace/module loading, type checker (`check.rs`), evaluator, `__` primitives, IR, schema/phase validation |
 | `cagara-sql` | IR → sqlglot stages, `sql "..."` template expansion, dialect rewriting, end-to-end tests |
 | `cagara-cli` | `cagara <file> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]` |
 
@@ -76,6 +76,12 @@ Done and tested (`cargo test --workspace`: 55 tests, no clippy warnings):
 
 - Lexer, parser, AST lowering (15 tests), including recovery and losslessness.
 - Salsa parse query with re-parse on edit (3 tests).
+- Per-module type checking as a salsa query (`module_check` over a
+  `ModuleInput`): type schemes are self-contained (scheme-local variables
+  with their own flags), each module is checked against its imports'
+  schemes only, and editing a file re-checks it and its dependents, not the
+  prelude (1 test counts query runs). Name resolution and import loading
+  still run in the workspace, outside salsa.
 - Type checker (23 tests): HM with let-polymorphism for top-level definitions,
   monomorphic lambdas, Rémy-style rows, rigid (checked) signatures, constant
   lifting into `expr` with deferred int→float / string→date widening,
@@ -139,7 +145,8 @@ Known gaps:
 2. ~~Overloading~~ (done; see Status).
 3. ~~Nullability~~ (done; see Status).
 4. ~~Precise error spans~~ (done; see Status).
-5. **Salsa beyond parsing:** memoize name resolution and type checking per module.
+5. **Salsa beyond parsing:** type checking per module is done; name
+   resolution and import loading are next.
 6. ~~Tidy-ups~~ (done: `cagara-core` removed, join inputs inlined,
    `--optimize`, dialect rewriting and tests).
 7. **Later:** language server on top of the salsa db.

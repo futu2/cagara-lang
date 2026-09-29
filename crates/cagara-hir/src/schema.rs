@@ -1,7 +1,7 @@
 //! Output-schema computation and static validation of the relational IR:
 //! column existence, key-mapper validity, join sides, and phase placement.
 
-use crate::ir::{Expr, KeyMapper, Phase, Rel, Side};
+use crate::ir::{Expr, KeyMapper, Loc, Phase, Rel, Side};
 
 pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
     match rel {
@@ -31,7 +31,7 @@ pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
             }
             Ok(c)
         }
-        Rel::Limit(r, _) | Rel::Offset(r, _) => schema(r),
+        Rel::Limit(r, _) | Rel::Offset(r, _) | Rel::At(_, r) => schema(r),
         Rel::KeyMap(r, m) => Ok(m.apply(&schema(r)?)?.into_iter().map(|(_, new)| new).collect()),
         Rel::Join { left, right, on, .. } => {
             let (lc, rc) = (schema(left)?, schema(right)?);
@@ -57,6 +57,25 @@ pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
             Ok(out)
         }
     }
+}
+
+/// Like [`schema`], but an error carries the location of the innermost
+/// failing stage (the nearest enclosing `Rel::At`).
+pub fn schema_located(rel: &Rel) -> Result<Vec<String>, (Option<Loc>, String)> {
+    schema(rel).map_err(|msg| blame(rel, None, msg))
+}
+
+fn blame(rel: &Rel, loc: Option<Loc>, msg: String) -> (Option<Loc>, String) {
+    let loc = match rel {
+        Rel::At(l, _) => Some(*l),
+        _ => loc,
+    };
+    for c in rel.children() {
+        if let Err(m) = schema(c) {
+            return blame(c, loc, m);
+        }
+    }
+    (loc, msg)
 }
 
 fn projection(fs: &[(String, Expr)], cols: &[String], agg: bool) -> Result<Vec<String>, String> {

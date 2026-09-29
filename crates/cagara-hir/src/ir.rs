@@ -3,7 +3,14 @@
 //! aggregate or window node may only contain row-phase expressions, which is
 //! what enforces the one-level nesting rule for `agg` and `win`.
 
-pub use cagara_syntax::ast::Side;
+pub use cagara_syntax::ast::{Side, Span};
+
+/// Source location of a query stage in user code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Loc {
+    pub module: usize,
+    pub span: Span,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Lit {
@@ -184,4 +191,31 @@ pub enum Rel {
     KeyMap(Box<Rel>, KeyMapper),
     /// `left & inner right on`; output columns are left-wins on collision.
     Join { kind: JoinKind, left: Box<Rel>, right: Box<Rel>, on: Expr },
+    /// The stage written at `Loc` (transparent for schema and lowering).
+    At(Loc, Box<Rel>),
+}
+
+impl Rel {
+    pub fn children(&self) -> Vec<&Rel> {
+        match self {
+            Rel::Table { .. } => vec![],
+            Rel::Where(r, _)
+            | Rel::Select(r, _)
+            | Rel::Agg(r, _)
+            | Rel::Order(r, _)
+            | Rel::Limit(r, _)
+            | Rel::Offset(r, _)
+            | Rel::KeyMap(r, _)
+            | Rel::At(_, r) => vec![r],
+            Rel::Join { left, right, .. } => vec![left, right],
+        }
+    }
+
+    /// The relation without location wrappers at its root.
+    pub fn bare(&self) -> &Rel {
+        match self {
+            Rel::At(_, r) => r.bare(),
+            r => r,
+        }
+    }
 }

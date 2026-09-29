@@ -72,7 +72,7 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 54 tests, no clippy warnings):
+Done and tested (`cargo test --workspace`: 55 tests, no clippy warnings):
 
 - Lexer, parser, AST lowering (15 tests), including recovery and losslessness.
 - Salsa parse query with re-parse on edit (3 tests).
@@ -110,7 +110,11 @@ Done and tested (`cargo test --workspace`: 54 tests, no clippy warnings):
 - SQL lowering for where/select/agg/order/limit/offset/keyMap/joins/windows,
   frames, constant-only global aggregates, join-input inlining, dialect
   rewriting (postgres, mysql, sqlite, duckdb, tsql, bigquery, snowflake),
-  and `--optimize` (14 end-to-end tests).
+  and `--optimize` (15 end-to-end tests).
+- Precise error locations: query stages built in user code are tagged with
+  their source span (`Rel::At`, transparent to schema and lowering), so an
+  IR-validator error points at the innermost failing stage. Diagnostics show
+  the source line with the span underlined.
 - CLI with `file:line:col` diagnostics and non-zero exit on errors.
 - Examples: `examples/report.cagara`, `public.cagara` + `schema.cagara`,
   `errors.cagara`.
@@ -123,8 +127,6 @@ Known gaps:
   .user_id` are type errors; only literals take the type their context
   needs, like Haskell's numeric literals. Duplicate overload candidates with
   the same signature are only reported as ambiguous at a use.
-- **Coarse error locations** for errors found only by the IR validator
-  (start of the definition). Checker errors point at the argument.
 - **Extra subqueries** remain where a join is the right input of another
   join (no parenthesized joins yet).
 - `--optimize` runs sqlglot's optimizer (constant folding, boolean
@@ -136,7 +138,7 @@ Known gaps:
 1. ~~Type checker~~ and static key-mapper types (done; see Status).
 2. ~~Overloading~~ (done; see Status).
 3. ~~Nullability~~ (done; see Status).
-4. **Precise error spans** by carrying source spans into IR nodes.
+4. ~~Precise error spans~~ (done; see Status).
 5. **Salsa beyond parsing:** memoize name resolution and type checking per module.
 6. ~~Tidy-ups~~ (done: `cagara-core` removed, join inputs inlined,
    `--optimize`, dialect rewriting and tests).

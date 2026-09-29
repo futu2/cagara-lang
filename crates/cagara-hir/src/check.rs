@@ -559,7 +559,7 @@ impl<'w> Checker<'w> {
                 Scheme { ty: self.zonk(&t), cons }
             }
             Err(e) => {
-                let diag = self.ws.diag(m, e.span.start as usize, e.msg);
+                let diag = self.ws.diag_span(m, e.span, e.msg);
                 self.errors.push(TypeError { module: m, def: i, diag });
                 self.failed.insert((m, i));
                 Scheme { ty: self.fresh(), cons: vec![] }

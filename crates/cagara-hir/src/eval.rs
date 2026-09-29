@@ -1,7 +1,7 @@
 //! Compile-time evaluator. Runs a Cagara program (prelude included) and
 //! reduces each definition to a value; query definitions become `Rel` IR.
 
-use crate::ir::{Expr, Lit, Rel};
+use crate::ir::{Expr, Lit, Loc, Rel};
 use crate::prims::{self, build_tpl};
 use crate::check::{Choice, TypeCheck};
 use crate::value::{err, Closure, EResult, Env, Inst, Template, TplKind, Value};
@@ -145,6 +145,19 @@ impl<'w> Evaluator<'w> {
                     let x = self.eval(m, inst, env, a)?;
                     v = self.apply(v, x)?;
                 }
+                // Tag a query built in user code with where it was written:
+                // for `q & stage` that is the stage, otherwise the whole call.
+                // Prelude (module 0) stages are tagged at their user call site.
+                if m != 0 {
+                    if let Value::Query(r) = v {
+                        let pipe = matches!(&f.kind, ExprKind::Name(n) if n == "_&_") && args.len() == 2;
+                        let span = if pipe { args[1].span } else { e.span };
+                        v = Value::Query(match r {
+                            r @ Rel::At(..) => r,
+                            r => Rel::At(Loc { module: m, span }, Box::new(r)),
+                        });
+                    }
+                }
                 Ok(v)
             }
             ExprKind::Lambda(p, body) => Ok(Value::Closure(Rc::new(Closure {
@@ -267,9 +280,15 @@ fn max_placeholder(sql: &str) -> usize {
 /// `t : query { a = int, b = string } = table "s" "t"` gives the table its
 /// column list (in declaration order).
 fn attach_schema(mut v: Value, ty: Option<&TypeExpr>) -> Value {
-    if let Value::Query(Rel::Table { columns, .. }) = &mut v {
-        if columns.is_none() {
-            *columns = closed_row(ty);
+    if let Value::Query(r) = &mut v {
+        let mut r = r;
+        while let Rel::At(_, inner) = r {
+            r = inner;
+        }
+        if let Rel::Table { columns, .. } = r {
+            if columns.is_none() {
+                *columns = closed_row(ty);
+            }
         }
     }
     v
@@ -308,9 +327,10 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
         }
         match ev.def_value(m, i) {
             Ok(Value::Query(r)) => {
-                let checked = match crate::schema::schema(&r) {
+                let checked = match crate::schema::schema_located(&r) {
                     Ok(_) => Ok(r),
-                    Err(msg) => Err(ws.diag(m, d.span.start as usize, msg)),
+                    Err((Some(l), msg)) => Err(ws.diag_span(l.module, l.span, msg)),
+                    Err((None, msg)) => Err(ws.diag_span(m, d.span, msg)),
                 };
                 out.push((d.name.clone(), checked));
             }

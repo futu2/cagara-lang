@@ -234,3 +234,19 @@ fn optimizer_keeps_stage_boundaries() {
     let s = sql_with("q = orders & where (1 + 1 == 2 && .amount > 1.0)\n", "q", opts);
     assert!(!s.contains("1 + 1"), "{s}");
 }
+
+#[test]
+fn validator_errors_point_at_the_stage() {
+    let src = format!("{USERS}q = users\n  & keyMap (prefix \"u_\")\n  & where (.id > 1)\nb = table \"s\" \"t\" & select {{ x = .x }}\n");
+    let ws = Workspace::from_source(&src);
+    let out = root_queries(&ws);
+    let get = |n: &str| out.iter().find(|(k, _)| k == n).unwrap().1.clone().unwrap_err();
+    let d = get("q");
+    assert!(d.message.contains("no column `id`"), "{d}");
+    assert_eq!(d.source.trim(), "& where (.id > 1)", "{d}");
+    assert_eq!((d.col, d.width), (5, "where (.id > 1)".len()), "{d}");
+    let d = get("b");
+    assert!(d.message.contains("unknown"), "{d}");
+    assert_eq!((d.col, d.width), (5, "table \"s\" \"t\"".len()), "{d}");
+    assert!(d.to_string().contains("^^^^^"), "{d}");
+}

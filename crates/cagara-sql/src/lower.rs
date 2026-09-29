@@ -77,6 +77,7 @@ impl Lowerer {
 
     pub fn rel(&mut self, rel: &Rel) -> Result<Stage, String> {
         Ok(match rel {
+            Rel::At(_, r) => self.rel(r)?,
             Rel::Table { schema, name, columns } => {
                 let cols = columns.as_ref().ok_or("internal: table without columns")?;
                 let t = TableRef {

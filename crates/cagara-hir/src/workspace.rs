@@ -4,7 +4,7 @@
 use crate::db::{Database, SourceFile};
 use crate::lower::parse_module;
 use crate::value::{EvalError, Prim, PRIMS};
-use cagara_syntax::ast::{Import, Module};
+use cagara_syntax::ast::{Import, Module, Span};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -39,11 +39,22 @@ pub struct Diag {
     pub line: usize,
     pub col: usize,
     pub message: String,
+    /// The source line, for the excerpt (empty if unknown).
+    pub source: String,
+    /// Characters to underline, starting at `col`.
+    pub width: usize,
 }
 
 impl fmt::Display for Diag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}:{}: error: {}", self.path, self.line, self.col, self.message)
+        write!(f, "{}:{}:{}: error: {}", self.path, self.line, self.col, self.message)?;
+        if !self.source.is_empty() {
+            let n = self.line.to_string();
+            let pad = self.source.get(..self.col - 1).map_or(0, |s| s.chars().count());
+            let gutter = " ".repeat(n.len());
+            write!(f, "\n {n} | {}\n {gutter} | {}{}", self.source, " ".repeat(pad), "^".repeat(self.width.max(1)))?;
+        }
+        Ok(())
     }
 }
 
@@ -90,6 +101,8 @@ impl Workspace {
                 line: 1,
                 col: 1,
                 message: format!("cannot read file: {e}"),
+                source: String::new(),
+                width: 0,
             }),
         }
         ws
@@ -182,18 +195,43 @@ impl Workspace {
 
     pub fn diag(&self, m: usize, offset: usize, message: impl Into<String>) -> Diag {
         let md = &self.modules[m];
-        make_diag(&md.path, &md.text, offset, message.into())
+        make_diag_range(&md.path, &md.text, offset, offset, message.into())
+    }
+
+    /// A diagnostic underlining `span` in module `m`.
+    pub fn diag_span(&self, m: usize, span: Span, message: impl Into<String>) -> Diag {
+        let md = &self.modules[m];
+        make_diag_range(&md.path, &md.text, span.start as usize, span.end as usize, message.into())
     }
 
     pub fn eval_diag(&self, e: &EvalError) -> Diag {
-        self.diag(e.module, e.span.map_or(0, |s| s.start as usize), e.message.clone())
+        match e.span {
+            Some(s) => self.diag_span(e.module, s, e.message.clone()),
+            None => self.diag(e.module, 0, e.message.clone()),
+        }
     }
 }
 
 fn make_diag(path: &Path, text: &str, offset: usize, message: String) -> Diag {
-    let offset = offset.min(text.len());
-    let before = &text[..offset];
+    make_diag_range(path, text, offset, offset, message)
+}
+
+fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: String) -> Diag {
+    let start = start.min(text.len());
+    let end = end.clamp(start, text.len());
+    let before = &text[..start];
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[start..].find('\n').map_or(text.len(), |i| start + i);
     let line = before.matches('\n').count() + 1;
-    let col = offset - before.rfind('\n').map_or(0, |i| i + 1) + 1;
-    Diag { path: path.display().to_string(), line, col, message }
+    let col = start - line_start + 1;
+    // Underline up to the end of the span or of the line, whichever is first.
+    let width = text[start..end.min(line_end)].chars().count();
+    Diag {
+        path: path.display().to_string(),
+        line,
+        col,
+        message,
+        source: text[line_start..line_end].trim_end().to_string(),
+        width,
+    }
 }

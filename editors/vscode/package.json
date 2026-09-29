@@ -1,0 +1,84 @@
+{
+  "name": "cagara",
+  "displayName": "Cagara",
+  "description": "Cagara language support: diagnostics, hover, go-to-definition, references, symbols, and completion via cagara-lsp",
+  "version": "0.1.0",
+  "publisher": "cagara",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/futu2/cagara-lang.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "cagara",
+        "aliases": [
+          "Cagara",
+          "cagara"
+        ],
+        "extensions": [
+          ".cagara"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "cagara",
+        "scopeName": "source.cagara",
+        "path": "./syntaxes/cagara.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Cagara",
+      "properties": {
+        "cagara.server.path": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "Path to the cagara-lsp executable. When empty, target/release or target/debug of the open workspace is tried, then cagara-lsp on PATH."
+        },
+        "cagara.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace the communication between VS Code and the language server."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "cagara.restartServer",
+        "title": "Cagara: Restart Language Server"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --skip-license"
+  },
+  "dependencies": {
+    "vscode-languageclient": "10.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "@types/vscode": "1.91.0",
+    "@vscode/vsce": "4.0.0",
+    "typescript": "5.9.3"
+  }
+}

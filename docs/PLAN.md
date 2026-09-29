@@ -32,6 +32,8 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 | `cagara-sql` | IR → sqlglot stages, `sql "..."` template expansion, dialect rewriting, end-to-end tests |
 | `cagara-lsp` | language server over stdio (`lsp-server`): diagnostics, hover with inferred types, go-to-definition |
 | `cagara-cli` | `cagara <file> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]` |
+| `editors/vscode` | VS Code extension: TextMate grammar, language configuration, `vscode-languageclient` starting `cagara-lsp` |
+| `editors/nvim` | Neovim plugin (0.10+): filetype, syntax, `require("cagara").setup()` starting `cagara-lsp` |
 
 ### Design decisions
 

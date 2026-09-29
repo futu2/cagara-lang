@@ -1,0 +1,90 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Cagara",
+  "scopeName": "source.cagara",
+  "fileTypes": ["cagara"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#import" },
+    { "include": "#definition" },
+    { "include": "#expression" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.cagara"
+    },
+    "string": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.cagara",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.cagara" },
+        { "match": "\\$[0-9]+", "name": "variable.parameter.placeholder.cagara" }
+      ]
+    },
+    "import": {
+      "match": "^(import)\\s+(\"[^\"]*\")(?:\\s+(as)\\s+([a-zA-Z_][a-zA-Z0-9_]*))?",
+      "captures": {
+        "1": { "name": "keyword.control.import.cagara" },
+        "2": { "name": "string.quoted.double.cagara" },
+        "3": { "name": "keyword.control.as.cagara" },
+        "4": { "name": "entity.name.namespace.cagara" }
+      }
+    },
+    "definition": {
+      "comment": "A top-level name at column 0, before its signature or body.",
+      "match": "^([a-zA-Z_][a-zA-Z0-9_]*|_[+\\-*/%<>=!&|$?.]+_)(?=\\s*[:=](?!=))",
+      "captures": {
+        "1": { "name": "entity.name.function.cagara" }
+      }
+    },
+    "expression": {
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#string" },
+        {
+          "match": "\\b(sql)\\b",
+          "name": "keyword.other.sql.cagara"
+        },
+        {
+          "match": "\\b(true|false)\\b",
+          "name": "constant.language.boolean.cagara"
+        },
+        {
+          "match": "\\b(query|expr|agg|win|maybe|list|int|float|string|bool|date|timestamp|sortkey|winspec|bound|frame)\\b",
+          "name": "support.type.cagara"
+        },
+        {
+          "match": "\\.[<>]?[a-zA-Z_][a-zA-Z0-9_]*",
+          "name": "variable.other.member.column.cagara"
+        },
+        {
+          "match": "\\b[0-9]+\\.[0-9]+(?:[eE][+-]?[0-9]+)?\\b",
+          "name": "constant.numeric.float.cagara"
+        },
+        {
+          "match": "\\b[0-9]+\\b",
+          "name": "constant.numeric.integer.cagara"
+        },
+        {
+          "match": "\\b_[+\\-*/%<>=!&|$?.]+_",
+          "name": "entity.name.function.operator.cagara"
+        },
+        {
+          "match": "=>|->",
+          "name": "keyword.operator.arrow.cagara"
+        },
+        {
+          "match": "<\\?>|<\\?|\\?>|\\?\\?|&[=?*.\\-]|>>>|&&|\\|\\||==|!=|<>|<=|>=|[&$?<>+\\-*/%|]",
+          "name": "keyword.operator.cagara"
+        },
+        {
+          "match": "[=:]",
+          "name": "punctuation.separator.cagara"
+        }
+      ]
+    }
+  }
+}

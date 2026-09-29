@@ -97,10 +97,10 @@ fn let_polymorphism_across_schemas() {
 
 #[test]
 fn scalar_type_errors() {
-    assert!(err("q = users & select { x = .name + 1 }\n", "q").contains("expected string, found int"));
+    assert!(err("q = users & select { x = .name <> 1 }\n", "q").contains("expected string, found int"));
     assert!(err("q = users & limit .id\n", "q").contains("type mismatch"));
-    let e = err("f = x => { a = x + 1, b = upper x }\n", "f");
-    assert!(e.contains("type mismatch"), "lambda parameters are monomorphic: {e}");
+    let e = err("f = x => { a = x <> \"!\", b = x + 1 }\n", "f");
+    assert!(e.contains("no overload of `+`"), "lambda parameters are monomorphic: {e}");
 }
 
 #[test]
@@ -183,15 +183,20 @@ fn key_mapper_errors() {
 #[test]
 fn overloads_resolve_by_type() {
     assert_eq!(
-        ty("q = users & select { a = .age + 1, s = .name + \"!\", f = negate .age }\n", "q"),
+        ty("q = users & select { a = .age + 1, s = .name <> \"!\", f = negate .age }\n", "q"),
         "query { a = int, s = string, f = int }"
     );
     // Leftover literals default before overloads are forced.
     assert_eq!(ty("q = users & select { x = 1 + 2 }\n", "q"), "query { x = int }");
     // A helper with an open overload stays generic and works at both types.
-    let src = "twice = x => x + x\nq = users & select { a = twice .age, s = twice .name }\n";
-    assert_eq!(ty(src, "q"), "query { a = int, s = string }");
+    let src = "people : query { n = int, x = float } = table \"p\" \"people\"\n\
+               twice = x => x + x\nq = people & select { a = twice .n, b = twice .x }\n";
+    assert_eq!(ty(src, "q"), "query { a = int, b = float }");
     assert!(err("q = users & select { b = .active + .active }\n", "q").contains("no overload of `+` matches"));
+    // `+` is numeric only; strings use `<>`, and there are no conversions.
+    assert!(err("q = users & select { s = .name + .name }\n", "q").contains("no overload of `+` matches"));
+    assert!(err("q = orders & select { x = .amount + .user_id }\n", "q").contains("expected int, found float"));
+    assert!(err("q = users & select { s = .name <> .age }\n", "q").contains("type mismatch"));
 }
 
 #[test]

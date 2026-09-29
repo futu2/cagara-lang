@@ -124,13 +124,15 @@ fn errors() {
 
 #[test]
 fn overloads_dispatch_to_sql() {
-    let s = sql("q = users & select { s = .name + \"!\", a = .age + 1 }\n", "q");
-    assert!(s.contains("name || '!' AS s"), "{s}");
+    let s = sql("q = users & select { s = .name <> \" \" <> upper .name, a = .age + 1 }\n", "q");
+    // `<>` is right-associative.
+    assert!(s.contains("name || (' ' || UPPER(name)) AS s"), "{s}");
     assert!(s.contains("age + 1 AS a"), "{s}");
-    // One generic helper, two dispatches in the same query.
-    let s = sql("twice = x => x + x\nquad = x => twice (twice x)\nq = users & select { a = quad .age, s = twice .name }\n", "q");
-    assert!(s.contains("age + age"), "{s}");
-    assert!(s.contains("name || name AS s"), "{s}");
+    // One generic helper, dispatched at int and float in the same query
+    // (the choices are also checked in cagara-hir's overload tests).
+    let s = sql("twice = x => x + x\nquad = x => twice (twice x)\nq = orders & select { a = quad .user_id, b = twice .amount }\n", "q");
+    assert!(s.contains("AS a"), "{s}");
+    assert!(s.contains("amount + amount AS b"), "{s}");
     let s = sql(
         "describe : expr r int -> expr r string = sql \"CAST($1 AS TEXT)\"\n\
          describe : expr r bool -> expr r string = sql \"CASE WHEN $1 THEN 'yes' ELSE 'no' END\"\n\

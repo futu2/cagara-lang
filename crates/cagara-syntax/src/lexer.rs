@@ -30,6 +30,8 @@ pub enum Token {
     EqEq,
     #[token("!=")]
     NotEq,
+    #[token("<>")]
+    Diamond,
     #[token("<=")]
     LtEq,
     #[token(">=")]

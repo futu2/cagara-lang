@@ -18,6 +18,7 @@ pub enum SyntaxKind {
     OrOr,
     EqEq,
     NotEq,
+    Diamond,
     LtEq,
     GtEq,
     Lt,
@@ -115,6 +116,7 @@ impl From<Token> for SyntaxKind {
             Token::OrOr => K::OrOr,
             Token::EqEq => K::EqEq,
             Token::NotEq => K::NotEq,
+            Token::Diamond => K::Diamond,
             Token::LtEq => K::LtEq,
             Token::GtEq => K::GtEq,
             Token::Lt => K::Lt,
@@ -167,6 +169,7 @@ impl SyntaxKind {
             K::Gt => (11, 12, "_>_"),
             K::GtEq => (11, 12, "_>=_"),
             K::Plus => (13, 14, "_+_"),
+            K::Diamond => (14, 13, "_<>_"),   // right-assoc, like Haskell's infixr 6
             K::Minus => (13, 14, "_-_"),
             K::Star => (15, 16, "_*_"),
             K::Slash => (15, 16, "_/_"),

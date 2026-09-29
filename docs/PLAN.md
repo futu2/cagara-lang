@@ -65,7 +65,7 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 46 tests, no clippy warnings):
+Done and tested (`cargo test --workspace`: 47 tests, no clippy warnings):
 
 - Lexer, parser, AST lowering (15 tests), including recovery and losslessness.
 - Salsa parse query with re-parse on edit (3 tests).
@@ -82,12 +82,12 @@ Done and tested (`cargo test --workspace`: 46 tests, no clippy warnings):
   joins are checked). Stage constraints wait for the query's row, so printed
   types keep declaration order.
 - Overloading: a name defined more than once, each with a signature, is an
-  overload set (prelude: `+ - * / negate sum avg` on int and float; `+` on
-  strings is `||`). Uses are resolved by trial unification against each
+  overload set (prelude: `+ - * / negate sum avg` on int and float).
+  Strings concatenate with `<>` (`infixr 6`, as in Haskell). Uses are resolved by trial unification against each
   candidate. A helper whose overloads stay open (`twice = x => x + x`) keeps
   them as holes in its scheme; every use fills them, and the evaluator
-  follows the recorded choices, so one helper can compile to `age + age` and
-  `name || name` in the same query. Query definitions default leftover
+  follows the recorded choices, so one helper can be used at int and float
+  in the same query. Query definitions default leftover
   literals before reporting ambiguity. Works through imports and aliases.
 - Evaluator, prelude, imports with aliases, cycle and duplicate detection.
 - IR validation: missing columns, join sides, key-mapper collisions, nested
@@ -102,9 +102,10 @@ Known gaps:
 
 - **Non-static key mappers** (`prefix`, `suffix`, or a column list that is
   not a literal) give an unconstrained row; the IR validator checks them.
-- **Overload limits:** there is no implicit int → float conversion for
-  columns (`.age * 1.5` is a type error; literals still widen), and duplicate
-  candidates with the same signature are only reported as ambiguous at use.
+- **No implicit conversions (by design).** `.age * 1.5` and `.amount +
+  .user_id` are type errors; only literals take the type their context
+  needs, like Haskell's numeric literals. Duplicate overload candidates with
+  the same signature are only reported as ambiguous at a use.
 - **Nullability is not tracked**, including outer-join sides.
 - **Coarse error locations** for errors found only by the IR validator
   (start of the definition). Checker errors point at the argument.

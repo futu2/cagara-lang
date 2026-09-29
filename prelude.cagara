@@ -94,10 +94,9 @@ _&&_ : expr r bool -> expr r bool -> expr r bool = sql "$1 AND $2"
 _||_ : expr r bool -> expr r bool -> expr r bool = sql "$1 OR $2"
 not : expr r bool -> expr r bool = sql "NOT $1"
 
-# Arithmetic is overloaded on int and float; `+` on strings concatenates.
+# Arithmetic is overloaded on int and float (no implicit conversions).
 _+_ : expr r int -> expr r int -> expr r int = sql "$1 + $2"
 _+_ : expr r float -> expr r float -> expr r float = sql "$1 + $2"
-_+_ : expr r string -> expr r string -> expr r string = sql "$1 || $2"
 _-_ : expr r int -> expr r int -> expr r int = sql "$1 - $2"
 _-_ : expr r float -> expr r float -> expr r float = sql "$1 - $2"
 _*_ : expr r int -> expr r int -> expr r int = sql "$1 * $2"
@@ -108,7 +107,9 @@ _%_ : expr r int -> expr r int -> expr r int = sql "$1 % $2"
 negate : expr r int -> expr r int = sql "-$1"
 negate : expr r float -> expr r float = sql "-$1"
 
-concat : expr r string -> expr r string -> expr r string = sql "$1 || $2"
+# String concatenation, `infixr 6` as in Haskell: `.first <> " " <> .last`.
+_<>_ : expr r string -> expr r string -> expr r string = sql "$1 || $2"
+concat = _<>_
 upper : expr r string -> expr r string = sql "UPPER($1)"
 lower : expr r string -> expr r string = sql "LOWER($1)"
 trim : expr r string -> expr r string = sql "TRIM($1)"

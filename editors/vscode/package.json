@@ -1,7 +1,7 @@
 {
   "name": "cagara",
   "displayName": "Cagara",
-  "description": "Cagara language support: diagnostics, hover, go-to-definition, references, symbols, and completion via cagara-lsp",
+  "description": "Cagara language support: diagnostics, hover, go-to-definition, references, symbols, and completion via `cagara lsp`",
   "version": "0.1.0",
   "publisher": "cagara",
   "license": "MIT OR Apache-2.0",
@@ -41,11 +41,11 @@
     "configuration": {
       "title": "Cagara",
       "properties": {
-        "cagara.server.path": {
+        "cagara.path": {
           "type": "string",
           "default": "",
           "scope": "machine-overridable",
-          "description": "Path to the cagara-lsp executable. When empty, target/release or target/debug of the open workspace is tried, then cagara-lsp on PATH."
+          "description": "Path to the cagara executable; the extension runs `cagara lsp`. When empty, target/release or target/debug of the open workspace is tried, then cagara on PATH."
         },
         "cagara.trace.server": {
           "type": "string",

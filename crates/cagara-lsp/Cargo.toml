@@ -4,13 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "cagara-lsp"
-path = "src/main.rs"
-
 [dependencies]
 cagara-hir = { path = "../cagara-hir" }
 cagara-syntax.workspace = true

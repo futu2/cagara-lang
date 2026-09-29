@@ -1,9 +1,9 @@
-//! `cagara-lsp`: a language server over stdio. Full-text sync; each open
+//! The language server over stdio (`cagara lsp`). Full-text sync; each open
 //! document is the root of its own workspace, updated with `set_source`
 //! (reloaded when its imports change). Imported files are read from disk.
 
+use crate::{analysis, uri};
 use cagara_hir::workspace::Workspace;
-use cagara_lsp::{analysis, uri};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _, PublishDiagnostics,
@@ -23,14 +23,15 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
 
-type Res<T> = Result<T, Box<dyn Error + Send + Sync>>;
+pub type Res<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 struct Doc {
     path: PathBuf,
     ws: Workspace,
 }
 
-fn main() -> Res<()> {
+/// Serve LSP over stdin / stdout until the client shuts the server down.
+pub fn run() -> Res<()> {
     let (conn, io) = Connection::stdio();
     let caps = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),

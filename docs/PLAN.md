@@ -30,10 +30,10 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 | `cagara-syntax` | lexer, parser (Pratt operators, column-0 layout rule, error recovery), AST lowering; operators desugar to calls (`a + b` → `_+_ a b`) |
 | `cagara-hir` | salsa db (`parse_module`, per-module `module_check` queries), workspace/module loading, type checker (`check.rs`), evaluator, `__` primitives, IR, schema/phase validation |
 | `cagara-sql` | IR → sqlglot stages, `sql "..."` template expansion, dialect rewriting, end-to-end tests |
-| `cagara-lsp` | language server over stdio (`lsp-server`): diagnostics, hover with inferred types, go-to-definition |
-| `cagara-cli` | `cagara <file> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]` |
-| `editors/vscode` | VS Code extension: TextMate grammar, language configuration, `vscode-languageclient` starting `cagara-lsp` |
-| `editors/nvim` | Neovim plugin (0.10+): filetype, syntax, `require("cagara").setup()` starting `cagara-lsp` |
+| `cagara-lsp` | language server library over stdio (`lsp-server`), run by `cagara lsp`: diagnostics, hover, definitions, references, symbols, completion |
+| `cagara-cli` | the single `cagara` executable: `cagara <file> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]`, and `cagara lsp` |
+| `editors/vscode` | VS Code extension: TextMate grammar, language configuration, `vscode-languageclient` starting `cagara lsp` |
+| `editors/nvim` | Neovim plugin (0.10+): filetype, syntax, `require("cagara").setup()` starting `cagara lsp` |
 
 ### Design decisions
 
@@ -89,7 +89,7 @@ Done and tested (`cargo test --workspace`: 79 tests, no clippy warnings):
   so an edit that adds or removes a definition updates scopes, checks, and
   evaluation. `Workspace::set_source` applies an edit; it returns `false`
   when the imports changed, since loading files stays outside salsa.
-- Language server (`cagara-lsp`, 12 tests): full-text sync, one workspace
+- Language server (`cagara lsp`, crate `cagara-lsp`, 12 tests): full-text sync, one workspace
   per open document updated with `set_source` (reloaded when imports
   change). Publishes all diagnostics for the file (syntax, type, schema)
   with UTF-16 ranges; hover shows the inferred type (every candidate of an

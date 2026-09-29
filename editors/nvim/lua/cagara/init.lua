@@ -1,4 +1,4 @@
--- Cagara for Neovim: starts cagara-lsp for `cagara` buffers.
+-- Cagara for Neovim: starts the language server (`cagara lsp`) for `cagara` buffers.
 --
 --   require("cagara").setup({
 --     cmd = nil,          -- server command; default: see M.server_cmd
@@ -18,11 +18,11 @@ local defaults = {
 
 M.config = vim.deepcopy(defaults)
 
-local exe = vim.fn.has("win32") == 1 and "cagara-lsp.exe" or "cagara-lsp"
+local exe = vim.fn.has("win32") == 1 and "cagara.exe" or "cagara"
 
---- The server command for a buffer in `dir`: `target/release/cagara-lsp` or
---- `target/debug/cagara-lsp` in `dir` or a parent (a checkout of this
---- repository), else `cagara-lsp` on PATH.
+--- The server command for a buffer in `dir`: `cagara lsp`, with
+--- `target/release/cagara` or `target/debug/cagara` in `dir` or a parent (a
+--- checkout of this repository), else `cagara` on PATH.
 ---@param dir string?
 ---@return string[]
 function M.server_cmd(dir)
@@ -30,11 +30,11 @@ function M.server_cmd(dir)
     for _, profile in ipairs({ "release", "debug" }) do
       local found = vim.fs.find("target/" .. profile .. "/" .. exe, { path = dir, upward = true, type = "file" })[1]
       if found then
-        return { found }
+        return { found, "lsp" }
       end
     end
   end
-  return { exe }
+  return { exe, "lsp" }
 end
 
 ---@param bufnr integer
@@ -49,7 +49,7 @@ local function start(bufnr)
   local cmd = M.config.cmd or M.server_cmd(dir)
   if vim.fn.executable(cmd[1]) ~= 1 then
     vim.notify_once(
-      ("cagara: `%s` not found; build it with `cargo build -p cagara-lsp` or pass `cmd` to setup()"):format(cmd[1]),
+      ("cagara: `%s` not found; build it with `cargo build --release` or pass `cmd` to setup()"):format(cmd[1]),
       vim.log.levels.WARN
     )
     return

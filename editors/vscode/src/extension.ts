@@ -1,4 +1,4 @@
-// Starts cagara-lsp over stdio for `.cagara` files.
+// Starts the language server (`cagara lsp`, over stdio) for `.cagara` files.
 
 import * as fs from "fs";
 import * as path from "path";
@@ -14,7 +14,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await start();
     }),
     vscode.workspace.onDidChangeConfiguration(async (e) => {
-      if (e.affectsConfiguration("cagara.server.path")) {
+      if (e.affectsConfiguration("cagara.path")) {
         await stop();
         await start();
       }
@@ -28,8 +28,9 @@ export async function deactivate(): Promise<void> {
 }
 
 async function start(): Promise<void> {
-  const command = serverPath();
-  const serverOptions: ServerOptions = { run: { command }, debug: { command } };
+  const command = cagaraPath();
+  const run = { command, args: ["lsp"] };
+  const serverOptions: ServerOptions = { run, debug: run };
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "cagara" }],
   };
@@ -40,7 +41,7 @@ async function start(): Promise<void> {
     client = undefined;
     const msg = err instanceof Error ? err.message : String(err);
     void vscode.window.showErrorMessage(
-      `Cagara: could not start ${command} (${msg}). Build it with \`cargo build -p cagara-lsp\` or set cagara.server.path.`,
+      `Cagara: could not start \`${command} lsp\` (${msg}). Build it with \`cargo build --release\` or set cagara.path.`,
     );
   }
 }
@@ -54,9 +55,9 @@ async function stop(): Promise<void> {
 }
 
 /** The configured path, else a build in an open workspace folder, else PATH. */
-function serverPath(): string {
-  const exe = process.platform === "win32" ? "cagara-lsp.exe" : "cagara-lsp";
-  const configured = vscode.workspace.getConfiguration("cagara").get<string>("server.path", "").trim();
+function cagaraPath(): string {
+  const exe = process.platform === "win32" ? "cagara.exe" : "cagara";
+  const configured = vscode.workspace.getConfiguration("cagara").get<string>("path", "").trim();
   if (configured) {
     return configured;
   }

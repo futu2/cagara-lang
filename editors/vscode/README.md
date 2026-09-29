@@ -2,22 +2,22 @@
 
 Syntax highlighting for `.cagara` files, plus diagnostics, hover types,
 go-to-definition, references, highlights, outline, and name / column
-completion from `cagara-lsp`.
+completion from the language server, `cagara lsp`.
 
 ## Setup
 
-Build the server from the repository root:
+Build `cagara` from the repository root:
 
 ```sh
-cargo build --release -p cagara-lsp
+cargo build --release
 ```
 
-The extension looks for the server in this order:
+The extension runs `cagara lsp`, looking for `cagara` in this order:
 
-1. the `cagara.server.path` setting;
-2. `target/release/cagara-lsp`, then `target/debug/cagara-lsp`, in an open
+1. the `cagara.path` setting;
+2. `target/release/cagara`, then `target/debug/cagara`, in an open
    workspace folder;
-3. `cagara-lsp` on `PATH`.
+3. `cagara` on `PATH`.
 
 ## Develop
 

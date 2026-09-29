@@ -1,15 +1,37 @@
 //! `cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]`
+//! `cagara lsp`
 //!
 //! Prints one SQL statement per query definition in the root file, or with
-//! `--types` the inferred type of every root definition.
+//! `--types` the inferred type of every root definition. `cagara lsp` runs
+//! the language server over stdio.
 
 use cagara_hir::{check, root_queries_checked, Workspace};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]";
+const USAGE: &str = "usage: cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
+       cagara lsp    run the language server over stdio";
 
 fn main() -> ExitCode {
+    let mut rest = std::env::args().skip(1);
+    if std::env::args().nth(1).as_deref() == Some("lsp") {
+        rest.next();
+        // Editors may pass `--stdio`; stdio is the only transport.
+        if let Some(a) = rest.find(|a| a != "--stdio") {
+            return usage(&format!("unexpected argument `{a}` for `cagara lsp`"));
+        }
+        return match cagara_lsp::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("cagara lsp: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    compile(rest)
+}
+
+fn compile(mut args: impl Iterator<Item = String>) -> ExitCode {
     let mut file: Option<PathBuf> = None;
     let mut dialect_name = String::from("ansi");
     let mut only: Option<String> = None;
@@ -17,7 +39,6 @@ fn main() -> ExitCode {
     let mut types = false;
     let mut optimize = false;
 
-    let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--dialect" => match args.next() {

@@ -1,8 +1,7 @@
 # Filtering, projection, ordering and paging.
 # The prelude is imported automatically.
 
-users : query { id = int, name = string, age = int, active = bool } =
-  table "public" "users"
+users : query { id = int, name = string, age = int, active = bool } = table "public" "users"
 
 orders : query { id = int, user_id = int, amount = float, status = string, created_at = date } =
   table "public" "orders"
@@ -28,7 +27,11 @@ latest = orders
   & where (.rn <= 3)
 
 running = orders
-  & select { id = .id, total = sumOver { partition = [.user_id], order = [asc .created_at], frame = runningFrame } .amount }
+  & select {
+    id = .id,
+    total =
+      sumOver { partition = [.user_id], order = [asc .created_at], frame = runningFrame } .amount
+  }
 
 # Joins name the side each column comes from.
 order_names = orders

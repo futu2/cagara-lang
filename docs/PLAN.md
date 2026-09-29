@@ -73,7 +73,7 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 55 tests, no clippy warnings):
+Done and tested (`cargo test --workspace`: 61 tests, no clippy warnings):
 
 - Lexer, parser, AST lowering (15 tests), including recovery and losslessness.
 - Salsa parse query with re-parse on edit (3 tests).
@@ -87,7 +87,7 @@ Done and tested (`cargo test --workspace`: 55 tests, no clippy warnings):
   so an edit that adds or removes a definition updates scopes, checks, and
   evaluation. `Workspace::set_source` applies an edit; it returns `false`
   when the imports changed, since loading files stays outside salsa.
-- Language server (`cagara-lsp`, 6 tests): full-text sync, one workspace
+- Language server (`cagara-lsp`, 5 tests): full-text sync, one workspace
   per open document updated with `set_source` (reloaded when imports
   change). Publishes all diagnostics for the file (syntax, type, schema)
   with UTF-16 ranges; hover shows the inferred type (every candidate of an

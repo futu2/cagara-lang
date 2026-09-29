@@ -42,9 +42,18 @@ checksum = "36f64beae40a84da1b4b26ff2761a5b895c12adc41dc25aaee1c4f2bbfe97a6e"
 name = "cagara-cli"
 version = "0.1.0"
 dependencies = [
+ "cagara-fmt",
  "cagara-hir",
  "cagara-lsp",
  "cagara-sql",
+]
+
+[[package]]
+name = "cagara-fmt"
+version = "0.1.0"
+dependencies = [
+ "cagara-syntax",
+ "rowan",
 ]
 
 [[package]]
@@ -59,6 +68,7 @@ dependencies = [
 name = "cagara-lsp"
 version = "0.1.0"
 dependencies = [
+ "cagara-fmt",
  "cagara-hir",
  "cagara-syntax",
  "lsp-server",

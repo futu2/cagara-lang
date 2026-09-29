@@ -1,5 +1,5 @@
-//! Diagnostics, hover, definitions, references, highlights, symbols, and
-//! completion for the root file of a workspace. Names are resolved on the
+//! Diagnostics, hover, definitions, references, highlights, symbols,
+//! completion, and formatting for the root file of a workspace. Names are resolved on the
 //! AST, so a lambda parameter shadows a top-level name of the same spelling.
 //! LSP positions count UTF-16 code units; the workspace uses byte offsets.
 
@@ -7,7 +7,9 @@ use cagara_hir::check::{check, TypeCheck, PROBE_FIELD};
 use cagara_hir::root_queries_checked;
 use cagara_hir::workspace::{Binding, Diag, Workspace};
 use cagara_syntax::ast::{Expr, ExprKind, Span};
-use lsp_types::{CompletionItem, CompletionItemKind, DocumentHighlightKind, DocumentSymbol, Position, Range, SymbolKind};
+use lsp_types::{
+    CompletionItem, CompletionItemKind, DocumentHighlightKind, DocumentSymbol, Position, Range, SymbolKind, TextEdit,
+};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -429,6 +431,19 @@ fn is_name(n: &str) -> bool {
     !b.is_empty() && b.iter().all(|&c| is_ident(c)) && !b[0].is_ascii_digit() && !n.starts_with("__")
 }
 
+/// Formatting edits for the root file: one edit replacing the whole text, or
+/// none if it is already formatted. Definitions with syntax errors are left
+/// as written, so formatting works while a file is being edited.
+pub fn format(ws: &Workspace) -> Result<Vec<TextEdit>, cagara_fmt::FmtError> {
+    let text = &ws.modules[ws.root].text;
+    let out = cagara_fmt::format(text)?.text;
+    if &out == text {
+        return Ok(vec![]);
+    }
+    let range = Range { start: Position { line: 0, character: 0 }, end: position_of(text, text.len()) };
+    Ok(vec![TextEdit { range, new_text: out }])
+}
+
 /// Byte offset of an LSP position (UTF-16 columns).
 pub fn offset_at(text: &str, pos: Position) -> Option<usize> {
     let mut line_start = 0;
@@ -485,6 +500,16 @@ mod tests {
 
     fn range(line: u32, start: u32, end: u32) -> Range {
         Range { start: pos(line, start), end: pos(line, end) }
+    }
+
+    #[test]
+    fn formatting_replaces_the_whole_document() {
+        let edits = format(&ws()).unwrap();
+        let [edit] = edits.as_slice() else { panic!("{edits:?}") };
+        assert_eq!(edit.range, Range { start: pos(0, 0), end: pos(6, 0) });
+        assert!(edit.new_text.contains("q = users\n  & where adult\n  & agg { s = sum .age }\n"));
+        let formatted = Workspace::open_with(Path::new("/nonexistent/main.cagara"), edit.new_text.clone());
+        assert!(format(&formatted).unwrap().is_empty());
     }
 
     #[test]

@@ -1,19 +1,26 @@
 //! `cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]`
+//! `cagara fmt [--check] <files...|->`
 //! `cagara lsp`
 //!
 //! Prints one SQL statement per query definition in the root file, or with
-//! `--types` the inferred type of every root definition. `cagara lsp` runs
-//! the language server over stdio.
+//! `--types` the inferred type of every root definition. `cagara fmt`
+//! formats files in place. `cagara lsp` runs the language server over stdio.
 
 use cagara_hir::{check, root_queries_checked, Workspace};
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
+       cagara fmt [--check] <files...>   format files in place (`-` for stdin to stdout)
        cagara lsp    run the language server over stdio";
 
 fn main() -> ExitCode {
     let mut rest = std::env::args().skip(1);
+    if std::env::args().nth(1).as_deref() == Some("fmt") {
+        rest.next();
+        return fmt(rest);
+    }
     if std::env::args().nth(1).as_deref() == Some("lsp") {
         rest.next();
         // Editors may pass `--stdio`; stdio is the only transport.
@@ -123,6 +130,86 @@ fn compile(mut args: impl Iterator<Item = String>) -> ExitCode {
     if let (Some(o), 0, false) = (&only, printed, failed) {
         eprintln!("no query definition named `{o}`");
         failed = true;
+    }
+    if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+/// `cagara fmt`: rewrite files in place, or with `--check` list the files
+/// that are not formatted. Files with syntax errors are reported and left
+/// unchanged. `-` formats stdin to stdout (echoing it on failure, so editor
+/// filters never lose text).
+fn fmt(args: impl Iterator<Item = String>) -> ExitCode {
+    let mut check = false;
+    let mut files = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--check" => check = true,
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            "-" => files.push(a),
+            f if !f.starts_with('-') => files.push(a),
+            other => return usage(&format!("unexpected argument `{other}` for `cagara fmt`")),
+        }
+    }
+    if files.is_empty() {
+        return usage("`cagara fmt` needs files to format (or `-` for stdin)");
+    }
+    let mut failed = false;
+    for file in &files {
+        let stdin = file == "-";
+        let name = if stdin { "<stdin>" } else { file.as_str() };
+        let read = if stdin {
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s).map(|_| s)
+        } else {
+            std::fs::read_to_string(file)
+        };
+        let src = match read {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{name}: {e}");
+                failed = true;
+                continue;
+            }
+        };
+        let out = match cagara_fmt::format(&src) {
+            Ok(f) if f.errors.is_empty() => Some(f.text),
+            Ok(f) => {
+                for e in &f.errors {
+                    let (line, col) = cagara_fmt::line_col(&src, e.offset);
+                    eprintln!("{name}:{line}:{col}: error: {} (file not formatted)", e.message);
+                }
+                None
+            }
+            Err(e) => {
+                eprintln!("{name}: {e}");
+                None
+            }
+        };
+        failed |= out.is_none();
+        if stdin {
+            let text = if check { None } else { Some(out.as_deref().unwrap_or(&src)) };
+            if let Some(t) = text {
+                if std::io::stdout().write_all(t.as_bytes()).is_err() {
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        let Some(out) = out else { continue };
+        if out == src {
+            continue;
+        }
+        if check {
+            println!("{name}");
+            failed = true;
+        } else if !stdin {
+            if let Err(e) = std::fs::write(file, out) {
+                eprintln!("{name}: {e}");
+                failed = true;
+            }
+        }
     }
     if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }

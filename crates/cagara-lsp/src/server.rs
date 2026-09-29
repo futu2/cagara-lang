@@ -9,12 +9,12 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentHighlightRequest, DocumentSymbolRequest, GotoDefinition, HoverRequest, References,
-    Request as _,
+    Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest,
+    References, Request as _,
 };
 use lsp_types::{
     CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity, DocumentHighlight,
-    DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
+    DocumentFormattingParams, DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability, Location, MarkupContent,
     MarkupKind, OneOf, PublishDiagnosticsParams, ReferenceParams, ServerCapabilities, TextDocumentSyncCapability,
     TextDocumentSyncKind, Uri,
@@ -40,6 +40,7 @@ pub fn run() -> Res<()> {
         references_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".into()]),
             ..Default::default()
@@ -106,6 +107,20 @@ pub fn run() -> Res<()> {
                     let items =
                         docs.get_mut(tp.text_document.uri.as_str()).map(|d| analysis::completion(&mut d.ws, tp.position));
                     serde_json::to_value(items.map(CompletionResponse::Array))?
+                } else if method == Formatting::METHOD {
+                    let p: DocumentFormattingParams = serde_json::from_value(params)?;
+                    let Some(d) = docs.get(p.text_document.uri.as_str()) else {
+                        conn.sender.send(Message::Response(Response::new_ok(id, serde_json::Value::Null)))?;
+                        continue;
+                    };
+                    match analysis::format(&d.ws) {
+                        Ok(edits) => serde_json::to_value(edits)?,
+                        Err(e) => {
+                            let r = Response::new_err(id, ErrorCode::InternalError as i32, e.to_string());
+                            conn.sender.send(Message::Response(r))?;
+                            continue;
+                        }
+                    }
                 } else {
                     let r = Response::new_err(id, ErrorCode::MethodNotFound as i32, format!("unsupported: {method}"));
                     conn.sender.send(Message::Response(r))?;

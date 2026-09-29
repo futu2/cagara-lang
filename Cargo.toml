@@ -15,3 +15,4 @@ cagara-syntax = { path = "crates/cagara-syntax" }
 cagara-hir = { path = "crates/cagara-hir" }
 cagara-sql = { path = "crates/cagara-sql" }
 cagara-lsp = { path = "crates/cagara-lsp" }
+cagara-fmt = { path = "crates/cagara-fmt" }

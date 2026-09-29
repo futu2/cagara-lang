@@ -44,7 +44,7 @@
 
 use crate::ir::{JoinKind, KeyMapper};
 use crate::value::Prim;
-use crate::workspace::{Binding, Diag, Workspace};
+use crate::workspace::{diag_in, Binding, Diag, Workspace};
 use cagara_syntax::ast::{self, ExprKind, Side, Span, TypeExpr};
 use std::collections::{HashMap, HashSet};
 
@@ -247,7 +247,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
     let mut deps: HashMap<(usize, usize), Scheme> = HashMap::new();
     let mut out = TypeCheck { errors: vec![], types: HashMap::new(), holes: HashMap::new(), choices: HashMap::new() };
     for m in 0..ws.modules.len() {
-        let mc = check_module(ws, m, &deps);
+        let mc = check_module(ModuleEnv::of(ws, m), &deps);
         out.errors.extend(mc.errors);
         out.types.extend(mc.types);
         out.holes.extend(mc.holes);
@@ -266,10 +266,37 @@ struct ModuleCheck {
     choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
 }
 
-/// Check module `m` against the schemes of the modules it may use.
-fn check_module(ws: &Workspace, m: usize, deps: &HashMap<(usize, usize), Scheme>) -> ModuleCheck {
+/// What checking one module reads: its definitions, scope, and source (for
+/// diagnostics), and every module's exports (for `alias.name`). Nothing
+/// else of the workspace is needed, so a salsa query can build this view.
+pub struct ModuleEnv<'w> {
+    pub module: usize,
+    pub path: &'w std::path::Path,
+    pub text: &'w str,
+    pub defs: &'w [ast::Def],
+    pub scope: &'w HashMap<String, Binding>,
+    pub owns: Vec<&'w HashMap<String, Binding>>,
+}
+
+impl<'w> ModuleEnv<'w> {
+    pub fn of(ws: &'w Workspace, m: usize) -> Self {
+        let md = &ws.modules[m];
+        ModuleEnv {
+            module: m,
+            path: &md.path,
+            text: &md.text,
+            defs: &md.module.defs,
+            scope: &md.scope,
+            owns: ws.modules.iter().map(|x| &x.own).collect(),
+        }
+    }
+}
+
+/// Check one module against the schemes of the modules it may use.
+fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> ModuleCheck {
+    let m = env.module;
     let mut c = Checker {
-        ws,
+        env,
         module: m,
         vars: Vec::new(),
         schemes: deps.clone(),
@@ -282,7 +309,7 @@ fn check_module(ws: &Workspace, m: usize, deps: &HashMap<(usize, usize), Scheme>
         holes: HashMap::new(),
         choices: HashMap::new(),
     };
-    for i in 0..ws.modules[m].module.defs.len() {
+    for i in 0..c.env.defs.len() {
         c.def_scheme(m, i);
     }
     let schemes: HashMap<_, _> = c.schemes.iter().filter(|(k, _)| k.0 == m).map(|(k, s)| (*k, s.clone())).collect();
@@ -312,7 +339,7 @@ struct VarInfo {
 }
 
 struct Checker<'w> {
-    ws: &'w Workspace,
+    env: ModuleEnv<'w>,
     /// The module being checked; other modules' schemes are given.
     module: usize,
     vars: Vec<VarInfo>,
@@ -571,7 +598,7 @@ impl<'w> Checker<'w> {
         }
         self.active.push((m, i));
         let saved = std::mem::take(&mut self.pending);
-        let r = self.check_def(m, i);
+        let r = self.check_def(i);
         let left = std::mem::replace(&mut self.pending, saved);
         self.active.pop();
         let scheme = match r {
@@ -597,7 +624,7 @@ impl<'w> Checker<'w> {
                 self.generalize(&t, cons)
             }
             Err(e) => {
-                let diag = self.ws.diag_span(m, e.span, e.msg);
+                let diag = diag_in(self.env.path, self.env.text, e.span, e.msg);
                 self.errors.push(TypeError { module: m, def: i, diag });
                 self.failed.insert((m, i));
                 let v = self.fresh();
@@ -608,9 +635,9 @@ impl<'w> Checker<'w> {
         Some(scheme)
     }
 
-    fn check_def(&mut self, m: usize, i: usize) -> R<Ty> {
-        let ws = self.ws;
-        let def = &ws.modules[m].module.defs[i];
+    fn check_def(&mut self, i: usize) -> R<Ty> {
+        let defs = self.env.defs;
+        let def = &defs[i];
         let ann = match &def.ty {
             Some(t) => Some(self.annotation(t).map_err(at(def.span))?),
             None => None,
@@ -620,7 +647,7 @@ impl<'w> Checker<'w> {
             // evaluator reports a missing one).
             return Ok(ann.unwrap_or_else(|| self.fresh()));
         }
-        let t = self.infer(m, &mut Vec::new(), &def.body)?;
+        let t = self.infer(&mut Vec::new(), &def.body)?;
         if let Some(a) = &ann {
             self.span = def.body.span;
             self.coerce(&t, a)
@@ -675,7 +702,8 @@ impl<'w> Checker<'w> {
         if let Some(s) = self.def_scheme(m, i) {
             return s;
         }
-        let ann = self.ws.modules[m].module.defs[i].ty.as_ref().map(|t| self.annotation(t));
+        let defs = self.env.defs;
+        let ann = if m == self.module { defs[i].ty.as_ref().map(|t| self.annotation(t)) } else { None };
         match ann {
             Some(Ok(t)) => self.generalize(&t, vec![]),
             _ => {
@@ -934,12 +962,12 @@ impl<'w> Checker<'w> {
 
     // ── inference ──────────────────────────────────────────────────────────
 
-    fn infer(&mut self, m: usize, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
+    fn infer(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
         let sp = e.span;
         match &e.kind {
             ExprKind::Name(n) => match env.iter().rev().find(|(k, _)| k == n) {
                 Some((_, t)) => Ok(t.clone()),
-                None => self.lookup(m, n, e.id, sp).map_err(at(sp)),
+                None => self.lookup(n, e.id, sp).map_err(at(sp)),
             },
             ExprKind::Lit(l) => Ok(con(match l {
                 ast::Lit::Int(_) => "int",
@@ -960,10 +988,11 @@ impl<'w> Checker<'w> {
             }
             ExprKind::Proj(base, f) => {
                 if let ExprKind::Name(n) = &base.kind {
-                    let ws = self.ws;
+                    let scope = self.env.scope;
                     if !env.iter().any(|(k, _)| k == n) {
-                        if let Some(Binding::Module(t)) = ws.modules[m].scope.get(n) {
-                            return match ws.modules[*t].own.get(f).cloned() {
+                        if let Some(Binding::Module(t)) = scope.get(n) {
+                            let own = self.env.owns[*t];
+                            return match own.get(f).cloned() {
                                 Some(Binding::Def(dm, i)) => Ok(self.def_type(dm, i, e.id, sp)),
                                 Some(Binding::Overloads(om, is)) => Ok(self.overload_type(f, om, &is, e.id, sp)),
                                 _ => Err(TyErr {
@@ -974,16 +1003,16 @@ impl<'w> Checker<'w> {
                         }
                     }
                 }
-                let bt = self.infer(m, env, base)?;
+                let bt = self.infer(env, base)?;
                 let (a, tail) = (self.fresh(), self.fresh());
                 let want = row(vec![(f.clone(), a.clone())], tail);
                 self.unify(&bt, &want).map_err(|msg| format!("cannot take `.{f}`: {msg}")).map_err(at(sp))?;
                 Ok(a)
             }
             ExprKind::App(f, args) => {
-                let mut ft = self.infer(m, env, f)?;
+                let mut ft = self.infer(env, f)?;
                 for arg in args {
-                    let at_ = self.infer(m, env, arg)?;
+                    let at_ = self.infer(env, arg)?;
                     self.span = arg.span;
                     ft = match self.resolve(&ft) {
                         Ty::Fun(p, r) => {
@@ -1007,7 +1036,7 @@ impl<'w> Checker<'w> {
             ExprKind::Lambda(p, body) => {
                 let pt = self.fresh();
                 env.push((p.clone(), pt.clone()));
-                let bt = self.infer(m, env, body);
+                let bt = self.infer(env, body);
                 env.pop();
                 Ok(fun(pt, bt?))
             }
@@ -1017,7 +1046,7 @@ impl<'w> Checker<'w> {
                     if out.iter().any(|(o, _)| o == k) {
                         return Err(TyErr { span: sp, msg: format!("field `{k}` appears twice") });
                     }
-                    let t = self.infer(m, env, v)?;
+                    let t = self.infer(env, v)?;
                     out.push((k.clone(), t));
                 }
                 let lits: Option<Vec<(String, String)>> = fs
@@ -1045,7 +1074,7 @@ impl<'w> Checker<'w> {
                 }
                 let mut ts = Vec::new();
                 for x in xs {
-                    ts.push((self.infer(m, env, x)?, x.span));
+                    ts.push((self.infer(env, x)?, x.span));
                 }
                 let Some((first, _)) = ts.first() else { unreachable!("empty lists are `Labels`") };
                 // A list of column expressions is a list of sort / partition
@@ -1067,8 +1096,8 @@ impl<'w> Checker<'w> {
         }
     }
 
-    fn lookup(&mut self, m: usize, n: &str, site: u32, sp: Span) -> Result<Ty, String> {
-        match self.ws.modules[m].scope.get(n).cloned() {
+    fn lookup(&mut self, n: &str, site: u32, sp: Span) -> Result<Ty, String> {
+        match self.env.scope.get(n).cloned() {
             Some(Binding::Def(dm, di)) => Ok(self.def_type(dm, di, site, sp)),
             Some(Binding::Overloads(om, is)) => Ok(self.overload_type(n, om, &is, site, sp)),
             Some(Binding::Prim(p)) => Ok(self.prim_type(p, sp)),

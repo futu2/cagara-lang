@@ -201,7 +201,7 @@ impl Workspace {
     /// A diagnostic underlining `span` in module `m`.
     pub fn diag_span(&self, m: usize, span: Span, message: impl Into<String>) -> Diag {
         let md = &self.modules[m];
-        make_diag_range(&md.path, &md.text, span.start as usize, span.end as usize, message.into())
+        diag_in(&md.path, &md.text, span, message)
     }
 
     pub fn eval_diag(&self, e: &EvalError) -> Diag {
@@ -210,6 +210,11 @@ impl Workspace {
             None => self.diag(e.module, 0, e.message.clone()),
         }
     }
+}
+
+/// A diagnostic underlining `span` in the file `path` with contents `text`.
+pub fn diag_in(path: &Path, text: &str, span: Span, message: impl Into<String>) -> Diag {
+    make_diag_range(path, text, span.start as usize, span.end as usize, message.into())
 }
 
 fn make_diag(path: &Path, text: &str, offset: usize, message: String) -> Diag {

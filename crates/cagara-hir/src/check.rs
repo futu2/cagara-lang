@@ -241,10 +241,38 @@ impl TypeCheck {
 
 /// Type-check every definition of every loaded module (prelude included).
 pub fn check(ws: &Workspace) -> TypeCheck {
+    // Modules are loaded after their imports, so index order is a valid
+    // dependency order: each module is checked on its own, seeing only the
+    // (self-contained) schemes of the modules before it.
+    let mut deps: HashMap<(usize, usize), Scheme> = HashMap::new();
+    let mut out = TypeCheck { errors: vec![], types: HashMap::new(), holes: HashMap::new(), choices: HashMap::new() };
+    for m in 0..ws.modules.len() {
+        let mc = check_module(ws, m, &deps);
+        out.errors.extend(mc.errors);
+        out.types.extend(mc.types);
+        out.holes.extend(mc.holes);
+        out.choices.extend(mc.choices);
+        deps.extend(mc.schemes);
+    }
+    out
+}
+
+/// Result of checking one module.
+struct ModuleCheck {
+    schemes: HashMap<(usize, usize), Scheme>,
+    errors: Vec<TypeError>,
+    types: HashMap<(usize, usize), String>,
+    holes: HashMap<(usize, usize), usize>,
+    choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
+}
+
+/// Check module `m` against the schemes of the modules it may use.
+fn check_module(ws: &Workspace, m: usize, deps: &HashMap<(usize, usize), Scheme>) -> ModuleCheck {
     let mut c = Checker {
         ws,
+        module: m,
         vars: Vec::new(),
-        schemes: HashMap::new(),
+        schemes: deps.clone(),
         failed: HashSet::new(),
         active: Vec::new(),
         pending: Vec::new(),
@@ -254,18 +282,12 @@ pub fn check(ws: &Workspace) -> TypeCheck {
         holes: HashMap::new(),
         choices: HashMap::new(),
     };
-    for m in 0..ws.modules.len() {
-        for i in 0..ws.modules[m].module.defs.len() {
-            c.def_scheme(m, i);
-        }
+    for i in 0..ws.modules[m].module.defs.len() {
+        c.def_scheme(m, i);
     }
-    let types = c
-        .schemes
-        .iter()
-        .filter(|(k, _)| !c.failed.contains(k))
-        .map(|(k, s)| (*k, c.show_scheme(s)))
-        .collect();
-    TypeCheck { errors: c.errors, types, holes: c.holes, choices: c.choices }
+    let schemes: HashMap<_, _> = c.schemes.iter().filter(|(k, _)| k.0 == m).map(|(k, s)| (*k, s.clone())).collect();
+    let types = schemes.iter().filter(|(k, _)| !c.failed.contains(k)).map(|(k, s)| (*k, c.show_scheme(s))).collect();
+    ModuleCheck { schemes, errors: c.errors, types, holes: c.holes, choices: c.choices }
 }
 
 struct TyErr {
@@ -291,6 +313,8 @@ struct VarInfo {
 
 struct Checker<'w> {
     ws: &'w Workspace,
+    /// The module being checked; other modules' schemes are given.
+    module: usize,
     vars: Vec<VarInfo>,
     schemes: HashMap<(usize, usize), Scheme>,
     failed: HashSet<(usize, usize)>,
@@ -540,8 +564,9 @@ impl<'w> Checker<'w> {
         if let Some(s) = self.schemes.get(&(m, i)) {
             return Some(s.clone());
         }
-        if self.active.contains(&(m, i)) {
-            // Recursion; the evaluator reports it.
+        if self.active.contains(&(m, i)) || m != self.module {
+            // Recursion (the evaluator reports it), or a module that is not
+            // loaded before this one (cannot happen for valid imports).
             return None;
         }
         self.active.push((m, i));

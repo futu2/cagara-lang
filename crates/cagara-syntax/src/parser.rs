@@ -31,6 +31,7 @@ pub fn parse(input: &str) -> Parse {
         errors: Vec::new(),
         end: input.len(),
         depth: 0,
+        bailed: false,
     };
     p.file();
     Parse {
@@ -48,6 +49,10 @@ struct Parser<'a> {
     /// Nesting depth of `expr`, so pathological input is rejected instead of
     /// overflowing the stack.
     depth: usize,
+    /// Set once the depth limit has been reported in the current definition.
+    /// The rest of it has been consumed, so every enclosing construct would
+    /// otherwise add its own "expected ..." error while unwinding.
+    bailed: bool,
 }
 
 /// Deepest expression nesting accepted. Well below what overflows the stack
@@ -116,6 +121,9 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&mut self, message: impl Into<String>) {
+        if self.bailed {
+            return;
+        }
         let offset = self.peek_lex(0).map(|l| l.offset).unwrap_or(self.end);
         self.errors.push(ParseError {
             offset,
@@ -143,6 +151,13 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         self.finish();
+    }
+
+    /// Report the depth limit and consume the rest of the definition. Later
+    /// errors in it are follow-on noise, so they are held back.
+    fn bail(&mut self, message: &str) {
+        self.recover(message);
+        self.bailed = true;
     }
 
     // ── items ────────────────────────────────────────────────
@@ -173,6 +188,7 @@ impl<'a> Parser<'a> {
     }
 
     fn def(&mut self) {
+        self.bailed = false;
         self.start(K::Definition);
         self.bump(); // name
         if self.at(Token::Colon) {
@@ -187,6 +203,7 @@ impl<'a> Parser<'a> {
         if !self.at_boundary() {
             self.recover("unexpected tokens after definition");
         }
+        self.bailed = false;
         self.finish();
     }
 
@@ -280,7 +297,7 @@ impl<'a> Parser<'a> {
         // item boundary so the rest of the file still parses.
         if self.depth >= MAX_DEPTH {
             if !self.at_boundary() && self.depth == MAX_DEPTH {
-                self.recover("expression is nested too deeply");
+                self.bail("expression is nested too deeply");
             }
             return;
         }
@@ -316,7 +333,7 @@ impl<'a> Parser<'a> {
             }
             chain += 1;
             if self.depth + chain >= MAX_DEPTH {
-                self.recover("expression is too long");
+                self.bail("expression is too long");
                 break;
             }
             self.bump();
@@ -336,7 +353,7 @@ impl<'a> Parser<'a> {
         if self.at(Token::Minus) {
             if self.depth >= MAX_DEPTH {
                 if !self.at_boundary() && self.depth == MAX_DEPTH {
-                    self.recover("expression is nested too deeply");
+                    self.bail("expression is nested too deeply");
                 }
                 return;
             }
@@ -605,17 +622,19 @@ mod tests {
     #[test]
     fn runaway_nesting_is_a_syntax_error_not_a_crash() {
         // Each of these used to overflow the stack while parsing or checking.
-        let deep_parens = format!("x = {}1{}\n", "(".repeat(4000), ")".repeat(4000));
-        let deep_neg = format!("x = {}1\n", "-".repeat(4000));
-        let long_chain = format!("x = 1{}\n", " + 1".repeat(4000));
+        // Each reports exactly one error: the enclosing constructs must not
+        // add an "expected `)`" apiece while unwinding. The next definition
+        // parses normally, and its own errors are still reported.
+        let deep_parens = format!("x = {}1{}\ny = 2\n", "(".repeat(4000), ")".repeat(4000));
+        let deep_neg = format!("x = {}1\ny = 2\n", "-".repeat(4000));
+        let long_chain = format!("x = 1{}\ny = 2\n", " + 1".repeat(4000));
         for src in [deep_parens, deep_neg, long_chain] {
             let p = parse(&src);
-            assert!(!p.errors.is_empty(), "expected a depth error");
-            assert!(
-                p.errors.iter().any(|e| e.message.contains("too ")),
-                "{:?}",
-                p.errors
-            );
+            assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+            assert!(p.errors[0].message.contains("too "), "{:?}", p.errors);
+            let later = parse(&format!("{src}z = (1\n"));
+            assert_eq!(later.errors.len(), 2, "{:?}", later.errors);
+            assert_eq!(later.errors[1].message, "expected `)`");
             // The tree stays lossless, so the editor can still work on it.
             assert_eq!(p.syntax().text().to_string(), src);
         }

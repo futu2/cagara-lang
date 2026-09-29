@@ -756,32 +756,37 @@ impl<'w> Checker<'w> {
             // something uses the definition (`.a + "x"`). Leftover literals
             // stay polymorphic (`.age >= 18` keeps its type), so this only
             // reports, and never narrows, what the definition inferred.
-            for (c, sp) in self.pending.clone() {
-                if let Cons::Overload { name, module, cands, target, .. } = c {
-                    if self.unsatisfiable(&module, &cands, &target) {
-                        let shown: Vec<String> = cands.iter().map(|&i| self.cand_shown(module, i)).collect();
-                        let msg = format!(
-                            "no overload of `{}` matches {}; candidates: {}",
-                            op_name(&name),
-                            self.show(&target),
-                            shown.join(", ")
-                        );
-                        return Err(TyErr { span: sp, msg });
-                    }
-                }
+            if let Some((Cons::Overload { name, module, cands, target, .. }, sp)) = self.first_unsatisfiable() {
+                let shown: Vec<String> = cands.iter().map(|&i| self.cand_shown(module, i)).collect();
+                let msg = format!(
+                    "no overload of `{}` matches {}; candidates: {}",
+                    op_name(&name),
+                    self.show(&target),
+                    shown.join(", ")
+                );
+                return Err(TyErr { span: sp, msg });
             }
         }
         Ok(t)
     }
 
-    /// Are no candidates left for this open overload, once leftover literals
-    /// are defaulted? Leaves the checker as it found it.
-    fn unsatisfiable(&mut self, module: &usize, cands: &[usize], target: &Ty) -> bool {
+    /// The first open overload with no candidates left once leftover
+    /// literals are defaulted. A single trial covers every overload, so the
+    /// cost stays linear in their number. Leaves the checker as it found it.
+    fn first_unsatisfiable(&mut self) -> Option<(Cons, Span)> {
         let (trail, nvars) = (self.trail.len(), self.vars.len());
         let saved = self.pending.clone();
         self.default_lits();
         let _ = self.solve();
-        let empty = self.fitting(*module, cands, target).is_empty();
+        let mut found = None;
+        for (c, sp) in &saved {
+            if let Cons::Overload { module, cands, target, .. } = c {
+                if self.fitting(*module, cands, target).is_empty() {
+                    found = Some((c.clone(), *sp));
+                    break;
+                }
+            }
+        }
         while self.trail.len() > trail {
             let (v, old) = self.trail.pop().expect("trail entry");
             if (v as usize) < nvars {
@@ -790,7 +795,7 @@ impl<'w> Checker<'w> {
         }
         self.vars.truncate(nvars);
         self.pending = saved;
-        empty
+        found
     }
 
     fn default_lits(&mut self) {

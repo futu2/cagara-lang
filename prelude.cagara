@@ -3,9 +3,9 @@
 # The Rust core provides only the `__` primitives (relational operators, key
 # mappers, window frames) and the `sql "..."` template mechanism. Everything
 # below is ordinary Cagara. Type signatures on `sql` templates are required:
-# they give the arity and whether the result is a scalar (`expr`), an
-# aggregate (`agg`), or a window function (`win`). Other signatures are
-# documentation until the type checker lands.
+# they give the arity and whether the result is a scalar (`expr r a`), an
+# aggregate (`agg (expr r a)`), or a window function (`win (expr r a)`).
+# All signatures are checked by the type checker.
 
 # ── combinators ────────────────────────────────────────────────────────────
 
@@ -48,25 +48,25 @@ rename = mapping => keyMap (replace mapping)
 
 # ── aggregates (depth 1: arguments must be row expressions) ───────────────
 
-count : agg r int = sql "COUNT(*)"
-countOf : expr r a -> agg r int = sql "COUNT($1)"
-countDistinct : expr r a -> agg r int = sql "COUNT(DISTINCT $1)"
-sum : expr r a -> agg r a = sql "SUM($1)"
-avg : expr r a -> agg r float = sql "AVG($1)"
-min : expr r a -> agg r a = sql "MIN($1)"
-max : expr r a -> agg r a = sql "MAX($1)"
+count : agg (expr r int) = sql "COUNT(*)"
+countOf : expr r a -> agg (expr r int) = sql "COUNT($1)"
+countDistinct : expr r a -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
+sum : expr r a -> agg (expr r a) = sql "SUM($1)"
+avg : expr r a -> agg (expr r float) = sql "AVG($1)"
+min : expr r a -> agg (expr r a) = sql "MIN($1)"
+max : expr r a -> agg (expr r a) = sql "MAX($1)"
 
 # ── window functions (depth 1) ────────────────────────────────────────────
 # spec = { partition = [..], order = [asc .x, desc .y], frame = .. }
 
-rowNumber : winspec r -> win r int = sql "ROW_NUMBER()"
-rank : winspec r -> win r int = sql "RANK()"
-denseRank : winspec r -> win r int = sql "DENSE_RANK()"
-lag : winspec r -> expr r a -> win r a = sql "LAG($1)"
-lead : winspec r -> expr r a -> win r a = sql "LEAD($1)"
-sumOver : winspec r -> expr r a -> win r a = sql "SUM($1)"
-avgOver : winspec r -> expr r a -> win r float = sql "AVG($1)"
-countOver : winspec r -> win r int = sql "COUNT(*)"
+rowNumber : winspec r -> win (expr r int) = sql "ROW_NUMBER()"
+rank : winspec r -> win (expr r int) = sql "RANK()"
+denseRank : winspec r -> win (expr r int) = sql "DENSE_RANK()"
+lag : winspec r -> expr r a -> win (expr r a) = sql "LAG($1)"
+lead : winspec r -> expr r a -> win (expr r a) = sql "LEAD($1)"
+sumOver : winspec r -> expr r a -> win (expr r a) = sql "SUM($1)"
+avgOver : winspec r -> expr r a -> win (expr r float) = sql "AVG($1)"
+countOver : winspec r -> win (expr r int) = sql "COUNT(*)"
 
 rows = __rows
 unboundedPreceding = __unboundedPreceding

@@ -258,10 +258,20 @@ fn closed_row(ty: Option<&TypeExpr>) -> Option<Vec<String>> {
 /// Evaluate every definition of the root module and return the query ones,
 /// schema-checked, in source order.
 pub fn root_queries(ws: &Workspace) -> Vec<(String, Result<Rel, Diag>)> {
+    root_queries_checked(ws, &crate::check::check(ws))
+}
+
+/// Like [`root_queries`], reusing a type check. A root definition with a type
+/// error is reported (and not evaluated) even if it is not a query.
+pub fn root_queries_checked(ws: &Workspace, tc: &crate::check::TypeCheck) -> Vec<(String, Result<Rel, Diag>)> {
     let mut ev = Evaluator::new(ws);
     let m = ws.root;
     let mut out = Vec::new();
     for (i, d) in ws.modules[m].module.defs.iter().enumerate() {
+        if let Some(e) = tc.error_for(m, i) {
+            out.push((d.name.clone(), Err(e.clone())));
+            continue;
+        }
         match ev.def_value(m, i) {
             Ok(Value::Query(r)) => {
                 let checked = match crate::schema::schema(&r) {

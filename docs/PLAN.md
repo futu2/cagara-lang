@@ -20,6 +20,7 @@ core stays minimal; the user-facing library is written in Cagara itself
 ```
 source ──logos──▶ tokens ──rowan──▶ lossless CST ──▶ owned AST      (cagara-syntax)
 AST ──salsa parse_module──▶ workspace (prelude + imports, scopes)  (cagara-hir)
+      ──type checker (HM + extensible rows)──▶ well-typed defs        (cagara-hir)
       ──compile-time evaluator──▶ relational IR ──schema checks──▶   (cagara-hir)
 IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text            (cagara-sql)
 ```
@@ -27,9 +28,9 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 | Crate | Contents |
 |---|---|
 | `cagara-syntax` | lexer, parser (Pratt operators, column-0 layout rule, error recovery), AST lowering; operators desugar to calls (`a + b` → `_+_ a b`) |
-| `cagara-hir` | salsa db and `parse_module` query, workspace/module loading, evaluator, `__` primitives, IR, schema/phase validation |
+| `cagara-hir` | salsa db and `parse_module` query, workspace/module loading, type checker (`check.rs`), evaluator, `__` primitives, IR, schema/phase validation |
 | `cagara-sql` | IR → sqlglot stages, `sql "..."` template expansion, end-to-end tests |
-| `cagara-cli` | `cagara <file> [--dialect NAME] [--only DEF] [--pretty]` |
+| `cagara-cli` | `cagara <file> [--dialect NAME] [--only DEF] [--pretty] [--types]` |
 | `cagara-core` | unused stub (to delete or repurpose) |
 
 ### Design decisions
@@ -41,6 +42,16 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 - **Templates carry their phase in the signature.** A `sql` definition must be
   annotated; its arity comes from the arrows, and the result head (`expr`,
   `agg`, `win`) decides whether it builds a scalar, aggregate, or window node.
+- **Phases wrap expressions.** Surface types are `expr r a`, `agg (expr r a)`,
+  and `win (expr r a)`. Internally `expr` has a phase slot (`row`/`agg`/`win`
+  or a variable). A plain `expr` in a signature is phase-polymorphic (so `_+_`
+  works on aggregates too), except when the result is `agg`/`win`, where its
+  `expr` arguments must be row-phase: the depth-1 rule, in the types.
+- **Column references can be `row` or `win`, never `agg`.** That is how
+  ungrouped columns in `agg` are rejected by the checker.
+- **Query stages are deferred constraints.** `where`, `select`/`agg`, and
+  joins create constraints solved once their inputs are known; unsolved ones
+  travel with a definition's type scheme and are re-instantiated at each use.
 - **Phases are structural in the IR.** Aggregate and window nodes accept only
   row-phase arguments, which enforces the depth-1 rule.
 - **Tables get columns from their annotation:**
@@ -50,10 +61,22 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 28 tests, no warnings):
+Done and tested (`cargo test --workspace`: 42 tests, no clippy warnings):
 
 - Lexer, parser, AST lowering (15 tests), including recovery and losslessness.
 - Salsa parse query with re-parse on edit (3 tests).
+- Type checker (17 tests): HM with let-polymorphism for top-level definitions,
+  monomorphic lambdas, Rémy-style rows, rigid (checked) signatures, constant
+  lifting into `expr` with deferred int→float / string→date widening,
+  expressions as sort keys, records as window specs. Rejects scalar type
+  errors (`.name + 1`), missing/removed columns, phase errors, join-side
+  errors, and bad window spec fields before evaluation, with the error at the
+  offending argument. `--types` prints inferred types.
+- Typed key mappers: literal lists and records of strings get label types, so
+  `pick` / `omit` / `rename` compute their output row statically (missing
+  columns, duplicates, and collisions are type errors, and later stages and
+  joins are checked). Stage constraints wait for the query's row, so printed
+  types keep declaration order.
 - Evaluator, prelude, imports with aliases, cycle and duplicate detection.
 - IR validation: missing columns, join sides, key-mapper collisions, nested
   aggregates, ungrouped columns, filtering on aggregates/windows.
@@ -65,23 +88,19 @@ Done and tested (`cargo test --workspace`: 28 tests, no warnings):
 
 Known gaps:
 
-- **No type checker.** Signatures are read only on `sql` templates; elsewhere
-  they are documentation. `.name + 1` is not rejected.
+- **Non-static key mappers** (`prefix`, `suffix`, or a column list that is
+  not a literal) give an unconstrained row; the IR validator checks them.
 - **No overloading.** A name defined twice in a module is an error.
 - **Nullability is not tracked**, including outer-join sides.
-- **Coarse error locations** for schema errors (start of the definition).
+- **Coarse error locations** for errors found only by the IR validator
+  (start of the definition). Checker errors point at the argument.
 - **Extra subqueries** in some cases, e.g. `rename` before a join.
 - `--optimize` (sqlglot optimizer) is not wired in; its predicate pushdown
   can move filters across window boundaries, so it must stay opt-in.
 
 ## Roadmap
 
-1. **Type checker** (HM with extensible rows) over the AST, before evaluation:
-   - `query r`, `expr r a`, `agg r a`, `win r a`, records with row tails,
-     `join l r` inputs for `.<x` / `.>x`.
-   - Literals lift into `expr` at call sites.
-   - Deferred projection constraints so `select` / `agg` check fields statically.
-   - Signatures become checked, not documentation.
+1. ~~Type checker~~ and static key-mapper types (done; see Status).
 2. **Overloading** of operators by argument type, resolved by the checker.
 3. **Nullability** (`maybe a`) through outer joins and aggregates such as `sum`.
 4. **Precise error spans** by carrying source spans into IR nodes.

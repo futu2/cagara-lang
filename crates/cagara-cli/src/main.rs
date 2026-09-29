@@ -1,18 +1,20 @@
-//! `cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty]`
+//! `cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--types]`
 //!
-//! Prints one SQL statement per query definition in the root file.
+//! Prints one SQL statement per query definition in the root file, or with
+//! `--types` the inferred type of every root definition.
 
-use cagara_hir::{root_queries, Workspace};
+use cagara_hir::{check, root_queries_checked, Workspace};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty]";
+const USAGE: &str = "usage: cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--types]";
 
 fn main() -> ExitCode {
     let mut file: Option<PathBuf> = None;
     let mut dialect_name = String::from("ansi");
     let mut only: Option<String> = None;
     let mut pretty = false;
+    let mut types = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -26,6 +28,7 @@ fn main() -> ExitCode {
                 None => return usage("--only needs a definition name"),
             },
             "--pretty" => pretty = true,
+            "--types" => types = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -47,9 +50,34 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Errors in imported modules are always reported; root errors are
+    // reported per definition below (so `--only` applies to them).
+    let tc = check(&ws);
     let mut failed = false;
+    for e in tc.errors.iter().filter(|e| e.module != ws.root) {
+        eprintln!("{}", e.diag);
+        failed = true;
+    }
+
+    if types {
+        for (i, d) in ws.modules[ws.root].module.defs.iter().enumerate() {
+            if only.as_deref().is_some_and(|o| o != d.name) {
+                continue;
+            }
+            match (tc.error_for(ws.root, i), tc.type_of(ws.root, i)) {
+                (Some(e), _) => {
+                    eprintln!("{e}");
+                    failed = true;
+                }
+                (None, Some(t)) => println!("{} : {t}", d.name),
+                (None, None) => println!("{} : ?", d.name),
+            }
+        }
+        return if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS };
+    }
+
     let mut printed = 0;
-    for (name, result) in root_queries(&ws) {
+    for (name, result) in root_queries_checked(&ws, &tc) {
         if only.as_deref().is_some_and(|o| o != name) {
             continue;
         }

@@ -53,6 +53,9 @@ pub enum Ty {
     Var(u32),
     /// Type variable from a signature; unifies only with itself.
     Rigid(u32, String),
+    /// A quantified variable of a type scheme (index into `Scheme::gens`).
+    /// Schemes use these instead of arena variables, so they stand alone.
+    Gen(u32),
     Con(&'static str, Vec<Ty>),
     Fun(Box<Ty>, Box<Ty>),
     /// Fields plus a tail (`Empty`, a variable, or a rigid variable).
@@ -186,6 +189,16 @@ impl Cons {
 struct Scheme {
     ty: Ty,
     cons: Vec<Cons>,
+    gens: Vec<GenInfo>,
+}
+
+/// Flags of a scheme's quantified variable, copied to each instance.
+#[derive(Debug, Clone)]
+struct GenInfo {
+    row_or_win: bool,
+    nonnull: bool,
+    /// Signature name, for printing.
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -250,7 +263,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
         .schemes
         .iter()
         .filter(|(k, _)| !c.failed.contains(k))
-        .map(|(k, s)| (*k, c.show(&s.ty)))
+        .map(|(k, s)| (*k, c.show_scheme(s)))
         .collect();
     TypeCheck { errors: c.errors, types, holes: c.holes, choices: c.choices }
 }
@@ -556,13 +569,14 @@ impl<'w> Checker<'w> {
                 if k > 0 {
                     self.holes.insert((m, i), k);
                 }
-                Scheme { ty: self.zonk(&t), cons }
+                self.generalize(&t, cons)
             }
             Err(e) => {
                 let diag = self.ws.diag_span(m, e.span, e.msg);
                 self.errors.push(TypeError { module: m, def: i, diag });
                 self.failed.insert((m, i));
-                Scheme { ty: self.fresh(), cons: vec![] }
+                let v = self.fresh();
+                self.generalize(&v, vec![])
             }
         };
         self.schemes.insert((m, i), scheme.clone());
@@ -638,20 +652,23 @@ impl<'w> Checker<'w> {
         }
         let ann = self.ws.modules[m].module.defs[i].ty.as_ref().map(|t| self.annotation(t));
         match ann {
-            Some(Ok(t)) => Scheme { ty: t, cons: vec![] },
-            _ => Scheme { ty: self.fresh(), cons: vec![] },
+            Some(Ok(t)) => self.generalize(&t, vec![]),
+            _ => {
+                let v = self.fresh();
+                self.generalize(&v, vec![])
+            }
         }
     }
 
     fn cand_shown(&mut self, m: usize, i: usize) -> String {
         let s = self.cand_scheme(m, i);
-        self.show(&s.ty)
+        self.show_scheme(&s)
     }
 
     /// Would candidate type `t` unify with `target`? Leaves no trace.
-    fn fits(&mut self, t: &Ty, target: &Ty) -> bool {
+    fn fits(&mut self, s: &Scheme, target: &Ty) -> bool {
         let (trail, nvars) = (self.trail.len(), self.vars.len());
-        let t = self.inst(t, &mut HashMap::new());
+        let t = self.inst(&s.ty, &mut HashMap::new(), &s.gens);
         let ok = self.unify(&t, target).is_ok();
         while self.trail.len() > trail {
             let (v, old) = self.trail.pop().expect("trail entry");
@@ -667,7 +684,7 @@ impl<'w> Checker<'w> {
         let mut out = Vec::new();
         for &i in cands {
             let s = self.cand_scheme(m, i);
-            if self.fits(&s.ty, target) {
+            if self.fits(&s, target) {
                 out.push(i);
             }
         }
@@ -816,9 +833,9 @@ impl<'w> Checker<'w> {
     /// Its holes become overload uses at `site`.
     fn instantiate(&mut self, s: &Scheme, span: Span, site: Option<u32>) -> Ty {
         let mut map = HashMap::new();
-        let t = self.inst(&s.ty, &mut map);
+        let t = self.inst(&s.ty, &mut map, &s.gens);
         for c in &s.cons {
-            let mut c = c.map(&mut |t| self.inst(t, &mut map));
+            let mut c = c.map(&mut |t| self.inst(t, &mut map, &s.gens));
             if let (Cons::Overload { origin, .. }, Some(site)) = (&mut c, site) {
                 if let Origin::Hole(k) = *origin {
                     // Resolved as hole `k` of the definition used at `site`.
@@ -830,24 +847,63 @@ impl<'w> Checker<'w> {
         t
     }
 
-    fn inst(&mut self, t: &Ty, map: &mut HashMap<u32, Ty>) -> Ty {
+    /// Fresh arena variables for a scheme's `Gen` variables.
+    fn inst(&mut self, t: &Ty, map: &mut HashMap<u32, Ty>, gens: &[GenInfo]) -> Ty {
         match self.resolve(t) {
-            Ty::Var(v) | Ty::Rigid(v, _) => {
-                if let Some(t) = map.get(&v) {
+            Ty::Gen(k) => {
+                if let Some(t) = map.get(&k) {
                     return t.clone();
                 }
-                let info = &self.vars[v as usize];
-                let n = Ty::Var(self.fresh_with(info.row_or_win, info.nonnull));
-                map.insert(v, n.clone());
+                let g = &gens[k as usize];
+                let n = Ty::Var(self.fresh_with(g.row_or_win, g.nonnull));
+                map.insert(k, n.clone());
                 n
             }
-            Ty::Con(n, args) => Ty::Con(n, args.iter().map(|a| self.inst(a, map)).collect()),
-            Ty::Fun(a, b) => fun(self.inst(&a, map), self.inst(&b, map)),
+            Ty::Con(n, args) => Ty::Con(n, args.iter().map(|a| self.inst(a, map, gens)).collect()),
+            Ty::Fun(a, b) => fun(self.inst(&a, map, gens), self.inst(&b, map, gens)),
             Ty::Row(fs, tail) => {
-                let fs = fs.iter().map(|(k, v)| (k.clone(), self.inst(v, map))).collect();
-                row(fs, self.inst(&tail, map))
+                let fs = fs.iter().map(|(k, v)| (k.clone(), self.inst(v, map, gens))).collect();
+                row(fs, self.inst(&tail, map, gens))
             }
-            t @ (Ty::Empty | Ty::Labels(_) | Ty::Renames(_)) => t,
+            t @ (Ty::Var(_) | Ty::Rigid(..) | Ty::Empty | Ty::Labels(_) | Ty::Renames(_)) => t,
+        }
+    }
+
+    /// Close a type and its constraints into a self-contained scheme: every
+    /// free variable becomes a `Gen` index carrying its flags, so the scheme
+    /// no longer refers to this checker's variable arena.
+    fn generalize(&self, ty: &Ty, cons: Vec<Cons>) -> Scheme {
+        let (mut map, mut gens) = (HashMap::new(), Vec::new());
+        let ty = self.gen(ty, &mut map, &mut gens);
+        let mut out = Vec::new();
+        for c in &cons {
+            out.push(c.map(&mut |t| self.gen(t, &mut map, &mut gens)));
+        }
+        Scheme { ty, cons: out, gens }
+    }
+
+    fn gen(&self, t: &Ty, map: &mut HashMap<u32, u32>, gens: &mut Vec<GenInfo>) -> Ty {
+        match self.resolve(t) {
+            r @ (Ty::Var(_) | Ty::Rigid(..)) => {
+                let (v, name) = match r {
+                    Ty::Var(v) => (v, None),
+                    Ty::Rigid(v, n) => (v, Some(n)),
+                    _ => unreachable!(),
+                };
+                let k = *map.entry(v).or_insert_with(|| {
+                    let info = &self.vars[v as usize];
+                    gens.push(GenInfo { row_or_win: info.row_or_win, nonnull: info.nonnull, name });
+                    gens.len() as u32 - 1
+                });
+                Ty::Gen(k)
+            }
+            Ty::Con(n, args) => Ty::Con(n, args.iter().map(|a| self.gen(a, map, gens)).collect()),
+            Ty::Fun(a, b) => fun(self.gen(&a, map, gens), self.gen(&b, map, gens)),
+            Ty::Row(fs, tail) => {
+                let fs = fs.iter().map(|(k, v)| (k.clone(), self.gen(v, map, gens))).collect();
+                row(fs, self.gen(&tail, map, gens))
+            }
+            t @ (Ty::Gen(_) | Ty::Empty | Ty::Labels(_) | Ty::Renames(_)) => t,
         }
     }
 
@@ -1405,7 +1461,12 @@ impl<'w> Checker<'w> {
 
     fn show(&self, t: &Ty) -> String {
         let t = self.zonk(t);
-        Printer { names: HashMap::new() }.ty(&t, 0)
+        Printer::default().ty(&t, 0)
+    }
+
+    fn show_scheme(&self, s: &Scheme) -> String {
+        let mut p = Printer { gens: s.gens.iter().map(|g| g.name.clone()).collect(), ..Printer::default() };
+        p.ty(&s.ty, 0)
     }
 }
 
@@ -1436,13 +1497,17 @@ fn is_join(t: &Ty) -> bool {
     matches!(t, Ty::Con("join", _))
 }
 
+#[derive(Default)]
 struct Printer {
     names: HashMap<u32, String>,
+    /// Signature names of a scheme's `Gen` variables; others get fresh names.
+    gens: Vec<Option<String>>,
+    gen_names: HashMap<u32, String>,
 }
 
 impl Printer {
     fn var(&mut self, v: u32) -> String {
-        let n = self.names.len();
+        let n = self.names.len() + self.gen_names.len();
         self.names.entry(v).or_insert_with(|| var_name(n)).clone()
     }
 
@@ -1452,6 +1517,13 @@ impl Printer {
         match t {
             Ty::Var(v) => self.var(*v),
             Ty::Rigid(_, n) => n.clone(),
+            Ty::Gen(k) => match self.gens.get(*k as usize).cloned().flatten() {
+                Some(n) => n,
+                None => {
+                    let n = self.names.len() + self.gen_names.len();
+                    self.gen_names.entry(*k).or_insert_with(|| var_name(n)).clone()
+                }
+            },
             Ty::Empty => "{}".into(),
             Ty::Labels(ls) => {
                 let ls: Vec<String> = ls.iter().map(|l| format!("{l:?}")).collect();

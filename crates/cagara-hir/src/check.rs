@@ -223,6 +223,9 @@ pub struct TypeCheck {
     choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
     /// Per module: the columns known at its `PROBE_FIELD` reference.
     probe_fields: HashMap<usize, Vec<(String, String)>>,
+    /// Printed type of each name use, by `(module, span start, span end)`:
+    /// the instance at that use, not the definition's scheme.
+    use_types: HashMap<(usize, u32, u32), String>,
 }
 
 /// A column name no user writes (`__` names are reserved). A reference to
@@ -252,6 +255,11 @@ impl TypeCheck {
         self.choices.get(&(module, def))?.get(&(site, k)).copied()
     }
 
+    /// Printed type of the name use whose expression spans `span` in `module`.
+    pub fn use_type(&self, module: usize, span: Span) -> Option<&str> {
+        self.use_types.get(&(module, span.start, span.end)).map(String::as_str)
+    }
+
     pub fn error_for(&self, module: usize, def: usize) -> Option<&Diag> {
         self.errors.iter().find(|e| e.module == module && e.def == def).map(|e| &e.diag)
     }
@@ -270,6 +278,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
         holes: HashMap::new(),
         choices: HashMap::new(),
         probe_fields: HashMap::new(),
+        use_types: HashMap::new(),
     };
     for &input in &ws.inputs {
         let mc = module_check(&ws.db, input);
@@ -278,6 +287,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
         out.holes.extend(mc.holes.clone());
         out.choices.extend(mc.choices.clone());
         out.probe_fields.extend(mc.probe_fields.clone());
+        out.use_types.extend(mc.use_types.clone());
     }
     out
 }
@@ -326,6 +336,7 @@ struct ModuleCheck {
     holes: HashMap<(usize, usize), usize>,
     choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
     probe_fields: Option<(usize, Vec<(String, String)>)>,
+    use_types: HashMap<(usize, u32, u32), String>,
 }
 
 /// What checking one module reads: its definitions, scope, and source (for
@@ -373,6 +384,8 @@ fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> M
         choices: HashMap::new(),
         probe: None,
         probe_fields: None,
+        uses: Vec::new(),
+        use_types: HashMap::new(),
     };
     for i in 0..c.env.defs.len() {
         c.def_scheme(m, i);
@@ -380,7 +393,8 @@ fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> M
     let schemes: HashMap<_, _> = c.schemes.iter().filter(|(k, _)| k.0 == m).map(|(k, s)| (*k, s.clone())).collect();
     let types = schemes.iter().filter(|(k, _)| !c.failed.contains(k)).map(|(k, s)| (*k, c.show_scheme(s))).collect();
     let probe_fields = c.probe_fields.map(|fs| (m, fs));
-    ModuleCheck { schemes, errors: c.errors, types, holes: c.holes, choices: c.choices, probe_fields }
+    let use_types = c.use_types;
+    ModuleCheck { schemes, errors: c.errors, types, holes: c.holes, choices: c.choices, probe_fields, use_types }
 }
 
 struct TyErr {
@@ -423,6 +437,9 @@ struct Checker<'w> {
     /// Input row of the `PROBE_FIELD` column being checked.
     probe: Option<Ty>,
     probe_fields: Option<Vec<(String, String)>>,
+    /// Name uses of the definition being checked, with their instance types.
+    uses: Vec<(Span, Ty)>,
+    use_types: HashMap<(usize, u32, u32), String>,
 }
 fn row_or_tail(fs: Vec<(String, Ty)>, tail: Ty) -> Ty {
     if fs.is_empty() {
@@ -667,7 +684,13 @@ impl<'w> Checker<'w> {
         }
         self.active.push((m, i));
         let saved = std::mem::take(&mut self.pending);
+        let saved_uses = std::mem::take(&mut self.uses);
         let r = self.check_def(i);
+        // Use types as far as checking got, even if it failed later on.
+        for (sp, t) in std::mem::replace(&mut self.uses, saved_uses) {
+            let shown = self.show(&t);
+            self.use_types.insert((m, sp.start, sp.end), shown);
+        }
         if let Some(p) = self.probe.take() {
             // Whatever the definition learned about the probe's row, even
             // if it failed later on.
@@ -1091,10 +1114,14 @@ impl<'w> Checker<'w> {
     fn infer(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
         let sp = e.span;
         match &e.kind {
-            ExprKind::Name(n) => match env.iter().rev().find(|(k, _)| k == n) {
-                Some((_, t)) => Ok(t.clone()),
-                None => self.lookup(n, e.id, sp).map_err(at(sp)),
-            },
+            ExprKind::Name(n) => {
+                let t = match env.iter().rev().find(|(k, _)| k == n) {
+                    Some((_, t)) => t.clone(),
+                    None => self.lookup(n, e.id, sp).map_err(at(sp))?,
+                };
+                self.uses.push((sp, t.clone()));
+                Ok(t)
+            }
             ExprKind::Lit(l) => Ok(con(match l {
                 ast::Lit::Int(_) => "int",
                 ast::Lit::Float(_) => "float",
@@ -1124,14 +1151,18 @@ impl<'w> Checker<'w> {
                     if !env.iter().any(|(k, _)| k == n) {
                         if let Some(Binding::Module(t)) = scope.get(n) {
                             let own = self.env.owns[t];
-                            return match own.get(f).cloned() {
-                                Some(Binding::Def(dm, i)) => self.def_type(dm, i, e.id, sp).map_err(at(sp)),
-                                Some(Binding::Overloads(om, is)) => Ok(self.overload_type(f, om, &is, e.id, sp)),
-                                _ => Err(TyErr {
-                                    span: sp,
-                                    msg: format!("module `{n}` has no definition `{f}`"),
-                                }),
+                            let t = match own.get(f).cloned() {
+                                Some(Binding::Def(dm, i)) => self.def_type(dm, i, e.id, sp).map_err(at(sp))?,
+                                Some(Binding::Overloads(om, is)) => self.overload_type(f, om, &is, e.id, sp),
+                                _ => {
+                                    return Err(TyErr {
+                                        span: sp,
+                                        msg: format!("module `{n}` has no definition `{f}`"),
+                                    })
+                                }
                             };
+                            self.uses.push((sp, t.clone()));
+                            return Ok(t);
                         }
                     }
                 }

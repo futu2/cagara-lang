@@ -51,6 +51,8 @@ struct Occ {
     decl: bool,
     /// For a lambda parameter: the end of the lambda (its scope).
     scope_end: usize,
+    /// For a use: the span of its expression, which keys its instance type.
+    site: Option<Span>,
 }
 
 /// Every resolved name occurrence in the root file, in source order.
@@ -64,7 +66,8 @@ fn occurrences(ws: &Workspace) -> Vec<Occ> {
         let spelled = md.text.get(start..).is_some_and(|t| t.starts_with(&d.name));
         if let (true, Some(b)) = (spelled, md.scope.get(&d.name)) {
             let end = start + d.name.len();
-            w.out.push(Occ { start, end, target: Target::Global(b.clone()), decl: true, scope_end: end });
+            let target = Target::Global(b.clone());
+            w.out.push(Occ { start, end, target, decl: true, scope_end: end, site: None });
         }
         w.expr(&d.body);
     }
@@ -92,7 +95,7 @@ impl Walk<'_> {
                         None => return,
                     },
                 };
-                self.out.push(Occ { start, end, target, decl: false, scope_end: end });
+                self.out.push(Occ { start, end, target, decl: false, scope_end: end, site: Some(e.span) });
             }
             ExprKind::Proj(inner, field) => {
                 self.expr(inner);
@@ -106,7 +109,8 @@ impl Walk<'_> {
                 let Some((_, end)) = trimmed(&md.text, e.span) else { return };
                 if md.text[..end].ends_with(field.as_str()) {
                     let start = end - field.len();
-                    self.out.push(Occ { start, end, target: Target::Global(b.clone()), decl: false, scope_end: end });
+                    let target = Target::Global(b.clone());
+                    self.out.push(Occ { start, end, target, decl: false, scope_end: end, site: Some(e.span) });
                 }
             }
             ExprKind::App(f, args) => {
@@ -119,7 +123,7 @@ impl Walk<'_> {
                 let at = if md.text[start..].starts_with(p.as_str()) { start } else { usize::MAX };
                 if at != usize::MAX {
                     let end = start + p.len();
-                    self.out.push(Occ { start, end, target: Target::Local(at), decl: true, scope_end });
+                    self.out.push(Occ { start, end, target: Target::Local(at), decl: true, scope_end, site: None });
                 }
                 self.env.push((p.clone(), at));
                 self.expr(body);
@@ -162,24 +166,35 @@ fn root_range(ws: &Workspace, start: usize, end: usize) -> Range {
 
 // ── requests ─────────────────────────────────────────────────
 
-/// Markdown for the name under the cursor: its inferred type (every
-/// candidate for an overload set).
+/// Markdown for the name under the cursor. At a use, its type there (the
+/// definition's scheme instantiated, as far as the checker got), followed
+/// by the definition's general type (every candidate for an overload set)
+/// when that differs.
 pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
     let text = &ws.modules[ws.root].text;
     let occs = occurrences(ws);
     let o = occ_at(&occs, offset_at(text, pos)?)?;
     let name = &text[o.start..o.end];
-    let Target::Global(b) = &o.target else {
-        return Some(format!("```cagara\n{name}\n```\nlambda parameter"));
-    };
     let tc = check(ws);
-    let lines = match b {
-        Binding::Def(m, i) => vec![def_line(&tc, ws, *m, *i)],
-        Binding::Overloads(m, is) => is.iter().map(|&i| def_line(&tc, ws, *m, i)).collect(),
-        Binding::Module(t) => vec![format!("module {}", ws.modules[*t].path.display())],
-        Binding::Prim(_) => vec![format!("{name} : primitive")],
+    let here = o.site.and_then(|sp| tc.use_type(ws.root, sp));
+    let Target::Global(b) = &o.target else {
+        let head = here.map_or_else(|| name.to_string(), |t| format!("{name} : {t}"));
+        return Some(format!("```cagara\n{head}\n```\nlambda parameter"));
     };
-    Some(format!("```cagara\n{}\n```", lines.join("\n")))
+    let (lines, def_name) = match b {
+        Binding::Def(m, i) => (vec![def_line(&tc, ws, *m, *i)], ws.modules[*m].module.defs[*i].name.as_str()),
+        Binding::Overloads(m, is) => {
+            let lines = is.iter().map(|&i| def_line(&tc, ws, *m, i)).collect();
+            (lines, is.first().map_or(name, |&i| ws.modules[*m].module.defs[i].name.as_str()))
+        }
+        Binding::Module(t) => return Some(format!("```cagara\nmodule {}\n```", ws.modules[*t].path.display())),
+        Binding::Prim(_) => (vec![format!("{name} : primitive")], name),
+    };
+    let general = format!("```cagara\n{}\n```", lines.join("\n"));
+    match here.map(|t| format!("{def_name} : {t}")) {
+        Some(line) if lines != [line.as_str()] => Some(format!("```cagara\n{line}\n```\n---\ndefined as\n{general}")),
+        _ => Some(general),
+    }
 }
 
 /// Where the name under the cursor is defined: file and range of the name
@@ -534,7 +549,9 @@ mod tests {
         assert!(h.contains("adult : expr { age = a | b } bool"), "{h}");
         // `sum` is an overload set in the prelude.
         let h = hover(&ws, pos(2, 37)).unwrap();
-        assert_eq!(h.matches("sum : ").count(), 4, "{h}");
+        let (here, general) = h.split_once("defined as").unwrap();
+        assert!(here.contains("sum : expr { age = int, id = int, name = string } int -> "), "{h}");
+        assert_eq!(general.matches("sum : ").count(), 4, "{h}");
         // Operators hover at their symbol, under their definition name.
         let h = hover(&ws, pos(4, 15)).unwrap();
         assert!(h.contains("_+_ : "), "{h}");
@@ -543,6 +560,26 @@ mod tests {
         // A lambda parameter shadows the table.
         let h = hover(&ws, pos(5, 19)).unwrap();
         assert!(h.contains("lambda parameter"), "{h}");
+    }
+
+    #[test]
+    fn hover_shows_the_type_at_the_use() {
+        let src = "users : query { id = int, name = string } = table \"p\" \"users\"\n\
+                   q = users & select { n = .name }\n\
+                   twice = x => x + x\n";
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        // `select` at its use: instantiated, then the general scheme.
+        let h = hover(&ws, pos(1, 14)).unwrap();
+        let (here, general) = h.split_once("defined as").unwrap();
+        assert!(here.contains("select : { n = expr { name = string, id = int } string } -> "), "{h}");
+        assert!(here.contains("-> query { n = string }"), "{h}");
+        assert!(general.contains("select : a -> query b -> query c"), "{h}");
+        // A monomorphic use shows its type once.
+        let h = hover(&ws, pos(1, 5)).unwrap();
+        assert!(!h.contains("defined as") && h.contains("users : query { id = int, name = string }"), "{h}");
+        // A lambda parameter shows its inferred type.
+        let h = hover(&ws, pos(2, 13)).unwrap();
+        assert!(h.contains("x : expr ") && h.contains("lambda parameter"), "{h}");
     }
 
     #[test]

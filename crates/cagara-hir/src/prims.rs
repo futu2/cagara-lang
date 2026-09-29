@@ -2,7 +2,7 @@
 //! saturation. Phase rules are checked as soon as an expression is built, so
 //! errors point at the offending application.
 
-use crate::ir::{Bound, Expr, Frame, JoinKind, KeyMapper, Lit, Rel, WinSpec};
+use crate::ir::{Bound, Expr, Frame, KeyMapper, Lit, Rel, WinSpec};
 use crate::value::{err, EResult, Prim, Template, TplKind, Value};
 
 pub fn lift(v: Value) -> EResult<Expr> {
@@ -158,14 +158,7 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
             let n = count(next(), "offset")?;
             Value::Query(Rel::Offset(Box::new(query(next())?), n))
         }
-        Prim::Join => {
-            let kind = match string(next())?.as_str() {
-                "inner" => JoinKind::Inner,
-                "left" => JoinKind::Left,
-                "right" => JoinKind::Right,
-                "full" => JoinKind::Full,
-                k => return err(format!("unknown join kind `{k}`")),
-            };
+        Prim::Join(kind) => {
             let right = query(next())?;
             let on = lift(next())?;
             let left = query(next())?;

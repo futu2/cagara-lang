@@ -117,7 +117,7 @@ fn errors() {
     assert!(error("q = users & pick [\"nope\"]\n", "q").contains("no column `nope`"));
     assert!(error("q = table \"s\" \"t\"\n", "q").contains("unknown"));
     assert!(error("q = q\n", "q").contains("refers to itself"));
-    assert!(error("q = users & agg { x = sum .age + .age }\n", "q").contains("ungrouped"));
+    assert!(error("q = users & agg { x = coalesce (sum .age) 0 + .age }\n", "q").contains("ungrouped"));
     let w = error("q = users & where (rowNumber { order = [.id] } <= 3)\n", "q");
     assert!(w.contains("window"), "{w}");
 }
@@ -141,4 +141,18 @@ fn overloads_dispatch_to_sql() {
     );
     assert!(s.contains("CAST(age AS TEXT)"), "{s}");
     assert!(s.contains("CASE WHEN active THEN 'yes' ELSE 'no' END"), "{s}");
+}
+
+#[test]
+fn nulls_and_outer_joins() {
+    let s = sql(
+        "q = orders & leftJoin users (.<user_id == .>id)\n  & select { id = .id, who = coalesce .name \"?\", known = isNotNull .name }\n",
+        "q",
+    );
+    assert!(s.contains("LEFT JOIN public.users"), "{s}");
+    assert!(s.contains("COALESCE(t2.name, '?') AS who"), "{s}");
+    assert!(s.contains("t2.name IS NOT NULL AS known"), "{s}");
+    let s = sql("q = orders & agg { total = coalesce (sum .amount) 0.0 }\n", "q");
+    assert!(s.contains("COALESCE(SUM(amount), 0.0) AS total"), "{s}");
+    assert!(error("q = orders & leftJoin users (.<user_id == .>id) & where (.name == \"x\")\n", "q").contains("maybe"));
 }

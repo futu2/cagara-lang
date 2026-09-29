@@ -31,10 +31,11 @@ desc = __desc
 group = __group
 
 # `left & inner right (.<k == .>k)`
-inner = __join "inner"
-leftJoin = __join "left"
-rightJoin = __join "right"
-fullJoin = __join "full"
+# Outer joins make the columns of the side that may be missing `maybe`.
+inner = __innerJoin
+leftJoin = __leftJoin
+rightJoin = __rightJoin
+fullJoin = __fullJoin
 
 # ── key mapping: pick / omit / rename are all keyMap ──────────────────────
 
@@ -50,16 +51,27 @@ omit = keys => keyMap (drop keys)
 rename = mapping => keyMap (replace mapping)
 
 # ── aggregates (depth 1: arguments must be row expressions) ───────────────
+# Type variables in signatures are non-null; `maybe a` is spelled out.
+# `sum` / `avg` / `min` / `max` are NULL for an all-NULL or empty input, so
+# they return `maybe`: write `coalesce (sum .x) 0` for a number.
 
 count : agg (expr r int) = sql "COUNT(*)"
 countOf : expr r a -> agg (expr r int) = sql "COUNT($1)"
+countOf : expr r (maybe a) -> agg (expr r int) = sql "COUNT($1)"
 countDistinct : expr r a -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
-sum : expr r int -> agg (expr r int) = sql "SUM($1)"
-sum : expr r float -> agg (expr r float) = sql "SUM($1)"
-avg : expr r int -> agg (expr r float) = sql "AVG($1)"
-avg : expr r float -> agg (expr r float) = sql "AVG($1)"
-min : expr r a -> agg (expr r a) = sql "MIN($1)"
-max : expr r a -> agg (expr r a) = sql "MAX($1)"
+countDistinct : expr r (maybe a) -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
+sum : expr r int -> agg (expr r (maybe int)) = sql "SUM($1)"
+sum : expr r (maybe int) -> agg (expr r (maybe int)) = sql "SUM($1)"
+sum : expr r float -> agg (expr r (maybe float)) = sql "SUM($1)"
+sum : expr r (maybe float) -> agg (expr r (maybe float)) = sql "SUM($1)"
+avg : expr r int -> agg (expr r (maybe float)) = sql "AVG($1)"
+avg : expr r (maybe int) -> agg (expr r (maybe float)) = sql "AVG($1)"
+avg : expr r float -> agg (expr r (maybe float)) = sql "AVG($1)"
+avg : expr r (maybe float) -> agg (expr r (maybe float)) = sql "AVG($1)"
+min : expr r a -> agg (expr r (maybe a)) = sql "MIN($1)"
+min : expr r (maybe a) -> agg (expr r (maybe a)) = sql "MIN($1)"
+max : expr r a -> agg (expr r (maybe a)) = sql "MAX($1)"
+max : expr r (maybe a) -> agg (expr r (maybe a)) = sql "MAX($1)"
 
 # ── window functions (depth 1) ────────────────────────────────────────────
 # spec = { partition = [..], order = [asc .x, desc .y], frame = .. }
@@ -67,10 +79,19 @@ max : expr r a -> agg (expr r a) = sql "MAX($1)"
 rowNumber : winspec r -> win (expr r int) = sql "ROW_NUMBER()"
 rank : winspec r -> win (expr r int) = sql "RANK()"
 denseRank : winspec r -> win (expr r int) = sql "DENSE_RANK()"
-lag : winspec r -> expr r a -> win (expr r a) = sql "LAG($1)"
-lead : winspec r -> expr r a -> win (expr r a) = sql "LEAD($1)"
-sumOver : winspec r -> expr r a -> win (expr r a) = sql "SUM($1)"
-avgOver : winspec r -> expr r a -> win (expr r float) = sql "AVG($1)"
+# `lag` / `lead` are NULL at the partition edge; frames may be empty.
+lag : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LAG($1)"
+lag : winspec r -> expr r (maybe a) -> win (expr r (maybe a)) = sql "LAG($1)"
+lead : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LEAD($1)"
+lead : winspec r -> expr r (maybe a) -> win (expr r (maybe a)) = sql "LEAD($1)"
+sumOver : winspec r -> expr r int -> win (expr r (maybe int)) = sql "SUM($1)"
+sumOver : winspec r -> expr r (maybe int) -> win (expr r (maybe int)) = sql "SUM($1)"
+sumOver : winspec r -> expr r float -> win (expr r (maybe float)) = sql "SUM($1)"
+sumOver : winspec r -> expr r (maybe float) -> win (expr r (maybe float)) = sql "SUM($1)"
+avgOver : winspec r -> expr r int -> win (expr r (maybe float)) = sql "AVG($1)"
+avgOver : winspec r -> expr r (maybe int) -> win (expr r (maybe float)) = sql "AVG($1)"
+avgOver : winspec r -> expr r float -> win (expr r (maybe float)) = sql "AVG($1)"
+avgOver : winspec r -> expr r (maybe float) -> win (expr r (maybe float)) = sql "AVG($1)"
 countOver : winspec r -> win (expr r int) = sql "COUNT(*)"
 
 rows = __rows
@@ -115,6 +136,12 @@ lower : expr r string -> expr r string = sql "LOWER($1)"
 trim : expr r string -> expr r string = sql "TRIM($1)"
 length : expr r string -> expr r int = sql "LENGTH($1)"
 like : expr r string -> expr r string -> expr r bool = sql "$1 LIKE $2"
+
+# ── nulls: operators need non-null arguments, so nulls are handled here ────
+
 coalesce : expr r (maybe a) -> expr r a -> expr r a = sql "COALESCE($1, $2)"
+just : expr r a -> expr r (maybe a) = sql "$1"
 isNull : expr r (maybe a) -> expr r bool = sql "$1 IS NULL"
 isNotNull : expr r (maybe a) -> expr r bool = sql "$1 IS NOT NULL"
+# NULL counts as false, as in `where`.
+isTrue : expr r (maybe bool) -> expr r bool = sql "COALESCE($1, FALSE)"

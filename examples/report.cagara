@@ -35,3 +35,9 @@ order_names = orders
   & rename { id = "order_id" }
   & inner users (.<user_id == .>id)
   & select { order_id = .order_id, name = .name, amount = .amount }
+
+# Nulls are explicit: the right side of a left join is `maybe`, and so are
+# `sum` / `avg` / `min` / `max`. Operators need non-null values.
+user_totals = users
+  & leftJoin orders (.<id == .>user_id)
+  & agg { id = group .id, total = coalesce (sum .amount) 0.0, orders = countOf .user_id }

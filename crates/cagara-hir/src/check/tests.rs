@@ -54,8 +54,11 @@ fn row_polymorphic_predicate() {
 
 #[test]
 fn aggregate_types_print_wrapped() {
-    assert_eq!(ty("total = sum .amount\n", "total"), "agg (expr { amount = a | b } a)");
-    assert_eq!(ty("q = orders & agg { t = sum .amount, a = avg .user_id }\n", "q"), "query { t = float, a = float }");
+    assert_eq!(ty("total = sum .amount\n", "total"), "agg (expr { amount = a | b } (maybe c))");
+    assert_eq!(
+        ty("q = orders & agg { t = sum .amount, a = avg .user_id }\n", "q"),
+        "query { t = maybe float, a = maybe float }"
+    );
 }
 
 #[test]
@@ -66,7 +69,7 @@ fn query_output_rows() {
     );
     assert_eq!(
         ty("q = orders & agg { user_id = group .user_id, revenue = sum .amount, n = count }\n", "q"),
-        "query { user_id = int, revenue = float, n = int }"
+        "query { user_id = int, revenue = maybe float, n = int }"
     );
     assert_eq!(
         ty("q = orders & inner users (.<user_id == .>id)\n", "q"),
@@ -123,7 +126,7 @@ fn schema_errors() {
 fn phase_errors() {
     assert!(err("q = users & agg { t = sum (sum .age) }\n", "q").contains("cannot nest"));
     assert!(err("q = users & agg { n = count, name = .name }\n", "q").contains("not grouped"));
-    assert!(err("q = users & agg { x = sum .age + .age }\n", "q").contains("ungrouped"));
+    assert!(err("q = users & agg { x = coalesce (sum .age) 0 + .age }\n", "q").contains("ungrouped"));
     assert!(err("q = users & agg { x = .age + sum .age }\n", "q").contains("ungrouped"));
     assert!(err("q = users & where (count >= 1)\n", "q").contains("aggregate"));
     assert!(err("q = users & select { n = count }\n", "q").contains("belong in `agg`"));
@@ -135,7 +138,7 @@ fn phase_errors() {
 fn window_types() {
     let src = "spec = { partition = [.user_id], order = [desc .id] }\n\
                q = orders & select { id = .id, rn = rowNumber spec, prev = lag spec .amount }\n";
-    assert_eq!(ty(src, "q"), "query { id = int, rn = int, prev = float }");
+    assert_eq!(ty(src, "q"), "query { id = int, rn = int, prev = maybe float }");
     assert!(err("q = users & select { r = rowNumber { bogus = [.id] } }\n", "q").contains("unknown window spec field"));
 }
 
@@ -215,4 +218,53 @@ fn user_overloads() {
 fn overloads_need_signatures() {
     let ws = Workspace::from_source("f = 1\nf = 2\n");
     assert!(ws.diags.iter().any(|d| d.message.contains("needs a type signature")), "{:?}", ws.diags);
+}
+
+const NULLABLE: &str = "people : query { id = int, email = maybe string, score = maybe int } = table \"p\" \"people\"\n";
+
+#[test]
+fn nullable_columns_are_explicit() {
+    let q = |body: &str| format!("{NULLABLE}q = people & {body}\n");
+    assert_eq!(ty(&q("select { e = .email }"), "q"), "query { e = maybe string }");
+    assert_eq!(
+        ty(&q("where (isNotNull .email) & select { e = coalesce .email \"-\", s = coalesce .score 0 + 1 }"), "q"),
+        "query { e = string, s = int }"
+    );
+    let e = err(&q("where (.email == \"x\")"), "q");
+    assert!(e.contains("non-null") && e.contains("coalesce"), "{e}");
+    assert!(err(&q("select { s = .score + 1 }"), "q").contains("no overload of `+`"));
+    // `just` makes a value nullable explicitly; there is no implicit lift.
+    assert_eq!(ty(&q("select { m = just .id }"), "q"), "query { m = maybe int }");
+    // `coalesce`'s default is non-null (like Haskell's `fromMaybe`).
+    assert!(err(&q("select { m = coalesce .score (just .id) }"), "q").contains("non-null"));
+    let e = err(&q("select { m = coalesce .id 0 }"), "q");
+    assert!(e.contains("field `id`") && e.contains("only one side is nullable"), "{e}");
+    // `where` needs `bool`; `isTrue` treats NULL as false.
+    let src = format!("{NULLABLE}flags : query {{ ok = maybe bool }} = table \"p\" \"f\"\nq = flags & where .ok\nr = flags & where (isTrue .ok)\n");
+    assert!(err(&src, "q").contains("bool"));
+    ty(&src, "r");
+}
+
+#[test]
+fn outer_joins_make_the_missing_side_maybe() {
+    let j = |kind: &str| ty(&format!("q = orders & {kind} users (.<user_id == .>id) & select {{ o = .amount, n = .name }}\n"), "q");
+    assert_eq!(j("inner"), "query { o = float, n = string }");
+    assert_eq!(j("leftJoin"), "query { o = float, n = maybe string }");
+    assert_eq!(j("rightJoin"), "query { o = maybe float, n = string }");
+    assert_eq!(j("fullJoin"), "query { o = maybe float, n = maybe string }");
+    // An already nullable column is not wrapped twice.
+    let src = format!("{NULLABLE}q = users & leftJoin people (.<id == .>id) & select {{ e = .email }}\n");
+    assert_eq!(ty(&src, "q"), "query { e = maybe string }");
+    // The predicate sees the plain column types.
+    ty("q = orders & leftJoin users (.<user_id == .>id && .>active)\n", "q");
+}
+
+#[test]
+fn aggregates_are_nullable() {
+    let src = format!("{NULLABLE}q = people & agg {{ n = count, c = countOf .email, s = sum .score, t = coalesce (max .email) \"\" }}\n");
+    assert_eq!(ty(&src, "q"), "query { n = int, c = int, s = maybe int, t = string }");
+    let e = err("q = orders & agg { r = sum .amount } & where (.r > 100.0)\n", "q");
+    assert!(e.contains("maybe float") && e.contains("nullable"), "{e}");
+    ty("q = orders & agg { r = coalesce (sum .amount) 0.0 } & where (.r > 100.0)\n", "q");
+    assert!(err("q = orders & agg { u = group .user_id } & select { x = sum .u }\n", "q").contains("belong in `agg`"));
 }

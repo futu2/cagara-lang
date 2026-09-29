@@ -33,11 +33,16 @@
 //!   compile time). In a query definition, leftover literals default to
 //!   their own type before overloads are forced.
 //!
+//! - Nullability is explicit: `maybe a` is a type, and type variables in
+//!   signatures stand for non-null types, so `expr r a` and
+//!   `expr r (maybe a)` are disjoint overloads. Operators need non-null
+//!   arguments (`coalesce` / `isNotNull` handle nulls); outer joins make the
+//!   far side's columns `maybe`; `sum` / `avg` / `min` / `max` return `maybe`.
+//!
 //! Known limits: `prefix` / `suffix` and key lists that are not literals give
-//! an unconstrained row (the schema validator checks them), and `maybe a` is
-//! treated as `a`.
+//! an unconstrained row (the schema validator checks them).
 
-use crate::ir::KeyMapper;
+use crate::ir::{JoinKind, KeyMapper};
 use crate::value::Prim;
 use crate::workspace::{Binding, Diag, Workspace};
 use cagara_syntax::ast::{self, ExprKind, Side, Span, TypeExpr};
@@ -106,6 +111,8 @@ const CONS: &[(&str, usize)] = &[
 ];
 
 const JOIN_ONLY: &str = "`.<x` and `.>x` refer to the inputs of a join and can only be used in a join predicate";
+const NULLABLE: &str = "expected a non-null value, found a `maybe`; use `coalesce x default` \
+                        (or `isNull` / `isNotNull` to test it)";
 const UNGROUPED: &str = "mixes an aggregate with an ungrouped column; wrap the column in `group`";
 
 #[derive(Debug, Clone)]
@@ -117,7 +124,8 @@ enum Cons {
     /// Join predicate over `join left right`.
     JoinOn { pred: Ty, left: Ty, right: Ty },
     /// Output columns of a join: left, then right columns not on the left.
-    JoinOut { left: Ty, right: Ty, out: Ty },
+    /// `nullable`: whether the left / right columns become `maybe`.
+    JoinOut { left: Ty, right: Ty, out: Ty, nullable: (bool, bool) },
     /// A literal of scalar type `lit` used where `target` is expected, once
     /// `target` is known (int widens to float, string to date).
     Lit { lit: &'static str, target: Ty },
@@ -155,7 +163,9 @@ impl Cons {
                 Cons::Project { fields: f(fields), input: f(input), output: f(output), agg: *agg }
             }
             Cons::JoinOn { pred, left, right } => Cons::JoinOn { pred: f(pred), left: f(left), right: f(right) },
-            Cons::JoinOut { left, right, out } => Cons::JoinOut { left: f(left), right: f(right), out: f(out) },
+            Cons::JoinOut { left, right, out, nullable } => {
+                Cons::JoinOut { left: f(left), right: f(right), out: f(out), nullable: *nullable }
+            }
             Cons::Lit { lit, target } => Cons::Lit { lit, target: f(target) },
             Cons::KeyMap { mapper, input, output } => {
                 Cons::KeyMap { mapper: f(mapper), input: f(input), output: f(output) }
@@ -262,6 +272,8 @@ struct VarInfo {
     bound: Option<Ty>,
     /// Phase variable of a column reference: may become `row` or `win`.
     row_or_win: bool,
+    /// From a signature's type variable: cannot become `maybe _`.
+    nonnull: bool,
 }
 
 struct Checker<'w> {
@@ -312,7 +324,11 @@ impl<'w> Checker<'w> {
     // ── variables and substitution ─────────────────────────────────────────
 
     fn fresh_id(&mut self, row_or_win: bool) -> u32 {
-        self.vars.push(VarInfo { bound: None, row_or_win });
+        self.fresh_with(row_or_win, false)
+    }
+
+    fn fresh_with(&mut self, row_or_win: bool, nonnull: bool) -> u32 {
+        self.vars.push(VarInfo { bound: None, row_or_win, nonnull });
         self.vars.len() as u32 - 1
     }
 
@@ -397,6 +413,16 @@ impl<'w> Checker<'w> {
                 Ty::Con("row" | "win", _) => {}
                 Ty::Con("agg", _) => return Err(UNGROUPED.into()),
                 o => return Err(format!("a column expression cannot have phase {}", self.show(o))),
+            }
+        }
+        if self.vars[v as usize].nonnull {
+            match &t {
+                Ty::Var(u) => {
+                    self.trail.push((*u, self.vars[*u as usize].clone()));
+                    self.vars[*u as usize].nonnull = true
+                }
+                Ty::Con("maybe", _) => return Err(NULLABLE.into()),
+                _ => {}
             }
         }
         self.vars[v as usize].bound = Some(t);
@@ -486,7 +512,13 @@ impl<'w> Checker<'w> {
         if (join(a) && plain(e)) || (plain(a) && join(e)) {
             return "cannot mix join-side columns (`.<x`, `.>x`) with plain columns (`.x`)".into();
         }
-        format!("type mismatch: expected {}, found {}", self.show(e), self.show(a))
+        let maybe = |t: &Ty| matches!(t, Ty::Con("maybe", _));
+        let hint = if maybe(a) != maybe(e) {
+            "; only one side is nullable: `coalesce x default` takes a `maybe`, `just x` makes one"
+        } else {
+            ""
+        };
+        format!("type mismatch: expected {}, found {}{hint}", self.show(e), self.show(a))
     }
 
     // ── definitions and schemes ────────────────────────────────────────────
@@ -732,8 +764,6 @@ impl<'w> Checker<'w> {
                     return Err(format!("`{name}` takes {arity} type argument(s), got {}", args.len()));
                 }
                 match name {
-                    // Nullability is not tracked yet.
-                    "maybe" => self.conv(&args[0], phase, names),
                     "expr" => {
                         let r = self.conv(&args[0], phase, names)?;
                         let a = self.conv(&args[1], phase, names)?;
@@ -777,7 +807,7 @@ impl<'w> Checker<'w> {
         if let Some(t) = names.get(name) {
             return t.clone();
         }
-        let t = Ty::Rigid(self.fresh_id(false), name.to_string());
+        let t = Ty::Rigid(self.fresh_with(false, true), name.to_string());
         names.insert(name.to_string(), t.clone());
         t
     }
@@ -806,7 +836,8 @@ impl<'w> Checker<'w> {
                 if let Some(t) = map.get(&v) {
                     return t.clone();
                 }
-                let n = Ty::Var(self.fresh_id(self.vars[v as usize].row_or_win));
+                let info = &self.vars[v as usize];
+                let n = Ty::Var(self.fresh_with(info.row_or_win, info.nonnull));
                 map.insert(v, n.clone());
                 n
             }
@@ -1065,11 +1096,18 @@ impl<'w> Checker<'w> {
                 let r = self.fresh();
                 fun(i, fun(query(r.clone()), query(r)))
             }
-            Join => {
+            Join(kind) => {
+                let nullable = match kind {
+                    JoinKind::Inner => (false, false),
+                    JoinKind::Left => (false, true),
+                    JoinKind::Right => (true, false),
+                    JoinKind::Full => (true, true),
+                };
                 let (l, r, pred, out) = (self.fresh(), self.fresh(), self.fresh(), self.fresh());
                 self.pending.push((Cons::JoinOn { pred: pred.clone(), left: l.clone(), right: r.clone() }, sp));
-                self.pending.push((Cons::JoinOut { left: l.clone(), right: r.clone(), out: out.clone() }, sp));
-                fun(s, fun(query(r), fun(pred, fun(query(l), query(out)))))
+                let c = Cons::JoinOut { left: l.clone(), right: r.clone(), out: out.clone(), nullable };
+                self.pending.push((c, sp));
+                fun(query(r), fun(pred, fun(query(l), query(out))))
             }
             Group => {
                 let (r, a) = (self.fresh(), self.fresh());
@@ -1290,7 +1328,7 @@ impl<'w> Checker<'w> {
                 self.unify(&row_or_tail(cols, tail), output)?;
                 Ok(true)
             }
-            Cons::JoinOut { left, right, out } => {
+            Cons::JoinOut { left, right, out, nullable } => {
                 let (lf, lt) = self.flatten(left);
                 let (rf, rt) = self.flatten(right);
                 if !matches!(lt, Ty::Empty) || !matches!(rt, Ty::Empty) {
@@ -1298,8 +1336,20 @@ impl<'w> Checker<'w> {
                     // columns are not statically known.
                     return Ok(false);
                 }
-                let mut fs = lf.clone();
-                fs.extend(rf.into_iter().filter(|(k, _)| !lf.iter().any(|(o, _)| o == k)));
+                // The far side of an outer join may be missing: its columns
+                // become `maybe` (once; `maybe (maybe a)` is `maybe a`).
+                let wrap = |this: &Self, on: bool, t: Ty| match this.resolve(&t) {
+                    Ty::Con("maybe", _) => t,
+                    _ if on => Ty::Con("maybe", vec![t]),
+                    _ => t,
+                };
+                let mut fs: Vec<(String, Ty)> = lf.iter().map(|(k, t)| (k.clone(), wrap(self, nullable.0, t.clone()))).collect();
+                for (k, t) in rf {
+                    if !lf.iter().any(|(o, _)| *o == k) {
+                        let t = wrap(self, nullable.1, t);
+                        fs.push((k, t));
+                    }
+                }
                 self.unify(&row(fs, Ty::Empty), out)?;
                 Ok(true)
             }

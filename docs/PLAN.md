@@ -65,11 +65,11 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 47 tests, no clippy warnings):
+Done and tested (`cargo test --workspace`: 51 tests, no clippy warnings):
 
 - Lexer, parser, AST lowering (15 tests), including recovery and losslessness.
 - Salsa parse query with re-parse on edit (3 tests).
-- Type checker (20 tests): HM with let-polymorphism for top-level definitions,
+- Type checker (23 tests): HM with let-polymorphism for top-level definitions,
   monomorphic lambdas, Rémy-style rows, rigid (checked) signatures, constant
   lifting into `expr` with deferred int→float / string→date widening,
   expressions as sort keys, records as window specs. Rejects scalar type
@@ -89,6 +89,14 @@ Done and tested (`cargo test --workspace`: 47 tests, no clippy warnings):
   follows the recorded choices, so one helper can be used at int and float
   in the same query. Query definitions default leftover
   literals before reporting ambiguity. Works through imports and aliases.
+- Nullability, strict and explicit: `maybe a` is a real type, and type
+  variables in signatures stand for non-null types, so `expr r a` and
+  `expr r (maybe a)` are disjoint overloads. Operators reject `maybe`
+  arguments; `coalesce`, `just`, `isNull`, `isNotNull`, `isTrue` handle
+  nulls. Outer joins make the missing side's columns `maybe` (never twice);
+  join predicates see the plain types. `sum` / `avg` / `min` / `max`,
+  `lag` / `lead`, `sumOver` / `avgOver` return `maybe`; counts do not. Join
+  kinds are separate primitives (`__leftJoin`, ...) so the checker sees them.
 - Evaluator, prelude, imports with aliases, cycle and duplicate detection.
 - IR validation: missing columns, join sides, key-mapper collisions, nested
   aggregates, ungrouped columns, filtering on aggregates/windows.
@@ -106,7 +114,6 @@ Known gaps:
   .user_id` are type errors; only literals take the type their context
   needs, like Haskell's numeric literals. Duplicate overload candidates with
   the same signature are only reported as ambiguous at a use.
-- **Nullability is not tracked**, including outer-join sides.
 - **Coarse error locations** for errors found only by the IR validator
   (start of the definition). Checker errors point at the argument.
 - **Extra subqueries** in some cases, e.g. `rename` before a join.
@@ -117,7 +124,7 @@ Known gaps:
 
 1. ~~Type checker~~ and static key-mapper types (done; see Status).
 2. ~~Overloading~~ (done; see Status).
-3. **Nullability** (`maybe a`) through outer joins and aggregates such as `sum`.
+3. ~~Nullability~~ (done; see Status).
 4. **Precise error spans** by carrying source spans into IR nodes.
 5. **Salsa beyond parsing:** memoize name resolution and type checking per module.
 6. **Tidy-ups:** remove `cagara-core`, reduce avoidable subqueries, opt-in

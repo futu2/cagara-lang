@@ -21,3 +21,22 @@ impl SourceFile {
         self.set_text(db).to(text);
     }
 }
+
+/// Input: one loaded module. `scope` and `owns` come from name resolution
+/// in the workspace; `deps` are the modules it imports (and the prelude).
+/// Its definitions are read through `parse_module(file)`, so editing a file
+/// invalidates only the checks that depend on it.
+#[salsa::input]
+pub struct ModuleInput {
+    pub index: usize,
+    #[returns(ref)]
+    pub path: std::path::PathBuf,
+    pub file: SourceFile,
+    #[returns(ref)]
+    pub scope: std::collections::HashMap<String, crate::workspace::Binding>,
+    /// Exports of every module loaded up to this one (for `alias.name`).
+    #[returns(ref)]
+    pub owns: Vec<std::collections::HashMap<String, crate::workspace::Binding>>,
+    #[returns(ref)]
+    pub deps: Vec<ModuleInput>,
+}

@@ -268,3 +268,17 @@ fn aggregates_are_nullable() {
     ty("q = orders & agg { r = coalesce (sum .amount) 0.0 } & where (.r > 100.0)\n", "q");
     assert!(err("q = orders & agg { u = group .user_id } & select { x = sum .u }\n", "q").contains("belong in `agg`"));
 }
+
+#[test]
+fn editing_the_root_rechecks_only_the_root() {
+    let mut ws = Workspace::from_source(&format!("{TABLES}q = users & where (.age > 1)\n"));
+    assert!(check(&ws).errors.is_empty());
+    let runs = super::check_runs();
+    let _ = check(&ws);
+    assert_eq!(super::check_runs(), runs, "nothing changed, so nothing is rechecked");
+    let file = *ws.inputs[ws.root].file(&ws.db);
+    file.set_contents(&mut ws.db, format!("{TABLES}q = users & where (.age > \"x\")\n"));
+    let after = check(&ws);
+    assert_eq!(super::check_runs(), runs + 1, "only the edited root is rechecked, not the prelude");
+    assert!(after.errors.iter().any(|e| e.module == ws.root && e.diag.message.contains("type mismatch")), "{:?}", after.errors);
+}

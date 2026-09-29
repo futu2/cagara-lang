@@ -1,7 +1,7 @@
 //! Module loading: the embedded prelude, the root file, and its imports.
 //! Parsing goes through the salsa `parse_module` query.
 
-use crate::db::{Database, SourceFile};
+use crate::db::{Database, ModuleInput, SourceFile};
 use crate::lower::parse_module;
 use crate::value::{EvalError, Prim, PRIMS};
 use cagara_syntax::ast::{Import, Module, Span};
@@ -64,6 +64,8 @@ pub struct Workspace {
     pub modules: Vec<LoadedModule>,
     pub root: usize,
     pub diags: Vec<Diag>,
+    /// Salsa input of each module (same indices as `modules`).
+    pub inputs: Vec<ModuleInput>,
     by_path: HashMap<PathBuf, usize>,
     stack: Vec<PathBuf>,
 }
@@ -76,6 +78,7 @@ impl Workspace {
             modules: Vec::new(),
             root: 0,
             diags: Vec::new(),
+            inputs: Vec::new(),
             by_path: HashMap::new(),
             stack: Vec::new(),
         };
@@ -126,8 +129,10 @@ impl Workspace {
             scope.extend(self.modules[0].own.clone());
         }
 
+        let mut deps: Vec<usize> = if self.modules.is_empty() { vec![] } else { vec![0] };
         for imp in &parsed.module.imports {
             let Some(target) = self.import(&path, &text, imp) else { continue };
+            deps.push(target);
             match &imp.alias {
                 Some(a) => {
                     scope.insert(a.clone(), Binding::Module(target));
@@ -166,6 +171,11 @@ impl Workspace {
 
         self.stack.pop();
         self.by_path.insert(path.clone(), m);
+        let mut owns: Vec<HashMap<String, Binding>> = self.modules.iter().map(|x| x.own.clone()).collect();
+        owns.push(own.clone());
+        let deps = deps.iter().map(|&d| self.inputs[d]).collect();
+        let input = ModuleInput::new(&self.db, m, path.clone(), file, scope.clone(), owns, deps);
+        self.inputs.push(input);
         self.modules.push(LoadedModule { path, text, module: parsed.module, scope, own });
         m
     }

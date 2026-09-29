@@ -42,7 +42,9 @@
 //! Known limits: `prefix` / `suffix` and key lists that are not literals give
 //! an unconstrained row (the schema validator checks them).
 
+use crate::db::ModuleInput;
 use crate::ir::{JoinKind, KeyMapper};
+use crate::lower::parse_module;
 use crate::value::Prim;
 use crate::workspace::{diag_in, Binding, Diag, Workspace};
 use cagara_syntax::ast::{self, ExprKind, Side, Span, TypeExpr};
@@ -118,7 +120,7 @@ const NULLABLE: &str = "expected a non-null value, found a `maybe`; use `coalesc
                         (or `isNull` / `isNotNull` to test it)";
 const UNGROUPED: &str = "mixes an aggregate with an ungrouped column; wrap the column in `group`";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Cons {
     /// `where pred`: pred is a row-phase bool expression over `row`.
     Filter { pred: Ty, row: Ty },
@@ -142,7 +144,7 @@ enum Cons {
 }
 
 /// Where an overload's choice is recorded.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Origin {
     /// Use site (see `encode`) in the definition being checked.
     Site(u32),
@@ -185,7 +187,7 @@ impl Cons {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Scheme {
     ty: Ty,
     cons: Vec<Cons>,
@@ -193,7 +195,7 @@ struct Scheme {
 }
 
 /// Flags of a scheme's quantified variable, copied to each instance.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct GenInfo {
     row_or_win: bool,
     nonnull: bool,
@@ -201,7 +203,7 @@ struct GenInfo {
     name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TypeError {
     pub module: usize,
     pub def: usize,
@@ -244,20 +246,55 @@ pub fn check(ws: &Workspace) -> TypeCheck {
     // Modules are loaded after their imports, so index order is a valid
     // dependency order: each module is checked on its own, seeing only the
     // (self-contained) schemes of the modules before it.
-    let mut deps: HashMap<(usize, usize), Scheme> = HashMap::new();
+    // Each module's check is a salsa query, so an edit re-checks only the
+    // edited module and the modules that (transitively) depend on it.
     let mut out = TypeCheck { errors: vec![], types: HashMap::new(), holes: HashMap::new(), choices: HashMap::new() };
-    for m in 0..ws.modules.len() {
-        let mc = check_module(ModuleEnv::of(ws, m), &deps);
-        out.errors.extend(mc.errors);
-        out.types.extend(mc.types);
-        out.holes.extend(mc.holes);
-        out.choices.extend(mc.choices);
-        deps.extend(mc.schemes);
+    for &input in &ws.inputs {
+        let mc = module_check(&ws.db, input);
+        out.errors.extend(mc.errors.iter().cloned());
+        out.types.extend(mc.types.clone());
+        out.holes.extend(mc.holes.clone());
+        out.choices.extend(mc.choices.clone());
     }
     out
 }
 
+/// Check one module (memoized). Dependencies are checked first; only their
+/// self-contained schemes are used.
+#[salsa::tracked(returns(ref))]
+fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> ModuleCheck {
+    #[cfg(test)]
+    CHECK_RUNS.with(|c| c.set(c.get() + 1));
+    let mut deps = HashMap::new();
+    for d in input.deps(db) {
+        deps.extend(module_check(db, *d).schemes.clone());
+    }
+    let file = *input.file(db);
+    let parsed = parse_module(db, file);
+    let env = ModuleEnv {
+        module: *input.index(db),
+        path: input.path(db),
+        text: file.text(db),
+        defs: &parsed.module.defs,
+        scope: input.scope(db),
+        owns: input.owns(db).iter().collect(),
+    };
+    check_module(env, &deps)
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHECK_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many module checks ran on this thread (for incrementality tests).
+#[cfg(test)]
+fn check_runs() -> usize {
+    CHECK_RUNS.with(|c| c.get())
+}
+
 /// Result of checking one module.
+#[derive(Debug, Clone, PartialEq)]
 struct ModuleCheck {
     schemes: HashMap<(usize, usize), Scheme>,
     errors: Vec<TypeError>,

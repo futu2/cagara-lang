@@ -61,6 +61,7 @@ name = "cagara-lsp"
 version = "0.1.0"
 dependencies = [
  "cagara-hir",
+ "cagara-syntax",
  "lsp-server",
  "lsp-types",
  "serde_json",

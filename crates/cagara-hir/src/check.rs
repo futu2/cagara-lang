@@ -221,9 +221,22 @@ pub struct TypeCheck {
     /// Per definition: `(use site, hole of the referenced definition)` → choice.
     /// Hole 0 of a direct overload-set use is the overload itself.
     choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
+    /// Per module: the columns known at its `PROBE_FIELD` reference.
+    probe_fields: HashMap<usize, Vec<(String, String)>>,
 }
 
+/// A column name no user writes (`__` names are reserved). A reference to
+/// it adds no column to its row; the checker records the columns the row
+/// is known to have instead, for completion.
+pub const PROBE_FIELD: &str = "__cagara_complete";
+
 impl TypeCheck {
+    /// Columns (name, printed type) of the row seen by the `PROBE_FIELD`
+    /// reference in `module`, if it has one and its definition got that far.
+    pub fn probe_fields(&self, module: usize) -> Option<&[(String, String)]> {
+        self.probe_fields.get(&module).map(Vec::as_slice)
+    }
+
     /// Printed type scheme of a well-typed definition.
     pub fn type_of(&self, module: usize, def: usize) -> Option<&str> {
         self.types.get(&(module, def)).map(String::as_str)
@@ -251,13 +264,20 @@ pub fn check(ws: &Workspace) -> TypeCheck {
     // (self-contained) schemes of the modules before it.
     // Each module's check is a salsa query, so an edit re-checks only the
     // edited module and the modules that (transitively) depend on it.
-    let mut out = TypeCheck { errors: vec![], types: HashMap::new(), holes: HashMap::new(), choices: HashMap::new() };
+    let mut out = TypeCheck {
+        errors: vec![],
+        types: HashMap::new(),
+        holes: HashMap::new(),
+        choices: HashMap::new(),
+        probe_fields: HashMap::new(),
+    };
     for &input in &ws.inputs {
         let mc = module_check(&ws.db, input);
         out.errors.extend(mc.errors.iter().cloned());
         out.types.extend(mc.types.clone());
         out.holes.extend(mc.holes.clone());
         out.choices.extend(mc.choices.clone());
+        out.probe_fields.extend(mc.probe_fields.clone());
     }
     out
 }
@@ -305,6 +325,7 @@ struct ModuleCheck {
     types: HashMap<(usize, usize), String>,
     holes: HashMap<(usize, usize), usize>,
     choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
+    probe_fields: Option<(usize, Vec<(String, String)>)>,
 }
 
 /// What checking one module reads: its definitions, scope, and source (for
@@ -350,13 +371,16 @@ fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> M
         trail: Vec::new(),
         holes: HashMap::new(),
         choices: HashMap::new(),
+        probe: None,
+        probe_fields: None,
     };
     for i in 0..c.env.defs.len() {
         c.def_scheme(m, i);
     }
     let schemes: HashMap<_, _> = c.schemes.iter().filter(|(k, _)| k.0 == m).map(|(k, s)| (*k, s.clone())).collect();
     let types = schemes.iter().filter(|(k, _)| !c.failed.contains(k)).map(|(k, s)| (*k, c.show_scheme(s))).collect();
-    ModuleCheck { schemes, errors: c.errors, types, holes: c.holes, choices: c.choices }
+    let probe_fields = c.probe_fields.map(|fs| (m, fs));
+    ModuleCheck { schemes, errors: c.errors, types, holes: c.holes, choices: c.choices, probe_fields }
 }
 
 struct TyErr {
@@ -396,6 +420,9 @@ struct Checker<'w> {
     trail: Vec<(u32, VarInfo)>,
     holes: HashMap<(usize, usize), usize>,
     choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
+    /// Input row of the `PROBE_FIELD` column being checked.
+    probe: Option<Ty>,
+    probe_fields: Option<Vec<(String, String)>>,
 }
 fn row_or_tail(fs: Vec<(String, Ty)>, tail: Ty) -> Ty {
     if fs.is_empty() {
@@ -641,6 +668,12 @@ impl<'w> Checker<'w> {
         self.active.push((m, i));
         let saved = std::mem::take(&mut self.pending);
         let r = self.check_def(i);
+        if let Some(p) = self.probe.take() {
+            // Whatever the definition learned about the probe's row, even
+            // if it failed later on.
+            let (fs, _) = self.flatten(&p);
+            self.probe_fields = Some(fs.iter().map(|(k, t)| (k.clone(), self.show(t))).collect());
+        }
         let left = std::mem::replace(&mut self.pending, saved);
         self.active.pop();
         let scheme = match r {
@@ -1020,7 +1053,13 @@ impl<'w> Checker<'w> {
             ExprKind::Field(side, n) => {
                 let phase = self.fresh_col_phase();
                 let (tail, a) = (self.fresh(), self.fresh());
-                let r = row(vec![(n.clone(), a.clone())], tail);
+                let r = if n == PROBE_FIELD {
+                    // Completion probe: adds no column, remembers the row.
+                    self.probe = Some(tail.clone());
+                    tail
+                } else {
+                    row(vec![(n.clone(), a.clone())], tail)
+                };
                 let input = match side {
                     Side::Single => r,
                     Side::Left => Ty::Con("join", vec![r, self.fresh()]),

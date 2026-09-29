@@ -73,7 +73,7 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 61 tests, no clippy warnings):
+Done and tested (`cargo test --workspace`: 79 tests, no clippy warnings):
 
 - Lexer, parser, AST lowering (15 tests), including recovery and losslessness.
 - Salsa parse query with re-parse on edit (3 tests).
@@ -87,13 +87,24 @@ Done and tested (`cargo test --workspace`: 61 tests, no clippy warnings):
   so an edit that adds or removes a definition updates scopes, checks, and
   evaluation. `Workspace::set_source` applies an edit; it returns `false`
   when the imports changed, since loading files stays outside salsa.
-- Language server (`cagara-lsp`, 5 tests): full-text sync, one workspace
+- Language server (`cagara-lsp`, 12 tests): full-text sync, one workspace
   per open document updated with `set_source` (reloaded when imports
   change). Publishes all diagnostics for the file (syntax, type, schema)
   with UTF-16 ranges; hover shows the inferred type (every candidate of an
   overload set); go-to-definition jumps to the name, including
-  `alias.name` into imports. Prelude definitions have no location.
-  Imported files are read from disk, and edits to them are not watched.
+  `alias.name` into imports. Names are resolved on the AST, so lambda
+  parameters shadow top-level names and operators resolve at their symbol.
+  Find-references and document highlights cover the open file; document
+  symbols list imports and definitions with their types; completion offers
+  names in scope, enclosing lambda parameters, and `alias.` members
+  (operators and `__` primitives left out). After `.`, `.<`, or `.>` it
+  offers the columns of that row, in declaration order: the file is
+  re-checked with a reserved probe column (`PROBE_FIELD`) at the cursor,
+  which adds nothing to its row but records what the row is known to
+  have, then the text is restored. This works on half-typed lines; an
+  open predicate outside a query only knows the columns used beside it. Prelude definitions have no
+  location. Imported files are read from disk, and edits to them are not
+  watched.
 - Type checker (23 tests): HM with let-polymorphism for top-level definitions,
   monomorphic lambdas, Rémy-style rows, rigid (checked) signatures, constant
   lifting into `expr` with deferred int→float / string→date / timestamp

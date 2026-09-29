@@ -4,7 +4,19 @@ Syntax highlighting for `.cagara` files, plus diagnostics, hover types,
 go-to-definition, references, highlights, outline, and name / column
 completion from the language server, `cagara lsp`.
 
-## Setup
+## Install from a release
+
+Each [GitHub release](https://github.com/futu2/cagara-lang/releases) has
+`cagara-<tag>-linux-{amd64,arm64}.tar.gz` (static binaries) and
+`cagara-vscode-<tag>.vsix`:
+
+```sh
+tar -xzf cagara-v0.1.0-linux-amd64.tar.gz
+install cagara-v0.1.0-linux-amd64/cagara ~/.local/bin/
+code --install-extension cagara-vscode-v0.1.0.vsix
+```
+
+## Setup from source
 
 Build `cagara` from the repository root:
 

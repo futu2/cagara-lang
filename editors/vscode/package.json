@@ -4,7 +4,7 @@
   "description": "Cagara language support: diagnostics, hover, go-to-definition, references, symbols, and completion via `cagara lsp`",
   "version": "0.1.0",
   "publisher": "cagara",
-  "license": "MIT OR Apache-2.0",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/futu2/cagara-lang.git",

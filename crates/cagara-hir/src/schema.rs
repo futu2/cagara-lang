@@ -92,9 +92,11 @@ fn projection(fs: &[(String, Expr)], cols: &[String], agg: bool) -> Result<Vec<S
                     "field `{n}` is an aggregate; aggregates belong in `agg`, not `select`"
                 ))
             }
-            (true, Phase::Row) => return Err(format!(
+            (true, Phase::Row) => {
+                return Err(format!(
                 "field `{n}` uses a column that is not grouped; wrap it in `group` or aggregate it"
-            )),
+            ))
+            }
             (true, Phase::Win) => {
                 return Err(format!(
                     "field `{n}` is a window function; use it in a `select` stage after `agg`"

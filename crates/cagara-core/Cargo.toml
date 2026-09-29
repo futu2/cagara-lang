@@ -1,8 +1,0 @@
-[package]
-name = "cagara-core"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-salsa = "=0.28.5"

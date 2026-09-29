@@ -41,13 +41,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cagara-core"
-version = "0.1.0"
-dependencies = [
- "salsa",
-]
-
-[[package]]
 name = "cagara-hir"
 version = "0.1.0"
 dependencies = [

@@ -83,11 +83,7 @@ impl Stage {
     }
 
     pub fn into_statement(self) -> SelectStatement {
-        let where_clause = self.wheres.into_iter().map(paren).reduce(|a, b| Expr::BinaryOp {
-            left: Box::new(a),
-            op: BinaryOperator::And,
-            right: Box::new(b),
-        });
+        let where_clause = and_all(self.wheres);
         let columns = self
             .items
             .into_iter()
@@ -116,6 +112,25 @@ impl Stage {
             query_options: None,
         }
     }
+}
+
+/// Conjunction of predicates (each parenthesized), or `None` if empty.
+pub fn and_all(ps: impl IntoIterator<Item = Expr>) -> Option<Expr> {
+    ps.into_iter().map(paren).reduce(|a, b| Expr::BinaryOp {
+        left: Box::new(a),
+        op: BinaryOperator::And,
+        right: Box::new(b),
+    })
+}
+
+/// Qualify the unqualified columns of `e` with a table alias.
+pub fn qualify(e: Expr, alias: &str) -> Expr {
+    e.transform(&|e| match e {
+        Expr::Column { table: None, name, quote_style, table_quote_style } => {
+            Expr::Column { table: Some(alias.to_string()), name, quote_style, table_quote_style }
+        }
+        other => other,
+    })
 }
 
 /// Parenthesize compound expressions so template substitution keeps precedence.

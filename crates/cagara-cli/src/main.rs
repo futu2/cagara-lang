@@ -1,4 +1,4 @@
-//! `cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--types]`
+//! `cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]`
 //!
 //! Prints one SQL statement per query definition in the root file, or with
 //! `--types` the inferred type of every root definition.
@@ -7,7 +7,7 @@ use cagara_hir::{check, root_queries_checked, Workspace};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--types]";
+const USAGE: &str = "usage: cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]";
 
 fn main() -> ExitCode {
     let mut file: Option<PathBuf> = None;
@@ -15,6 +15,7 @@ fn main() -> ExitCode {
     let mut only: Option<String> = None;
     let mut pretty = false;
     let mut types = false;
+    let mut optimize = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -29,6 +30,7 @@ fn main() -> ExitCode {
             },
             "--pretty" => pretty = true,
             "--types" => types = true,
+            "--optimize" => optimize = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -82,7 +84,7 @@ fn main() -> ExitCode {
             continue;
         }
         match result.map_err(|d| d.to_string()).and_then(|rel| {
-            cagara_sql::compile(&rel, dialect, pretty).map_err(|m| format!("{}: error in `{name}`: {m}", file.display()))
+            cagara_sql::compile(&rel, cagara_sql::Options { dialect, pretty, optimize }).map_err(|m| format!("{}: error in `{name}`: {m}", file.display()))
         }) {
             Ok(sql) => {
                 if printed > 0 {

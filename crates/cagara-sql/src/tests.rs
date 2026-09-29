@@ -1,6 +1,6 @@
 //! End-to-end tests: Cagara source -> SQL (ANSI).
 
-use crate::{compile, Dialect};
+use crate::{compile, Dialect, Options};
 use cagara_hir::{root_queries, Workspace};
 
 const USERS: &str = "users : query { id = int, name = string, age = int, active = bool } = table \"public\" \"users\"\n\
@@ -12,8 +12,26 @@ fn run(src: &str) -> Vec<(String, Result<String, String>)> {
     assert!(ws.diags.is_empty(), "load diagnostics: {:?}", ws.diags);
     root_queries(&ws)
         .into_iter()
-        .map(|(n, r)| (n, r.map_err(|d| d.message).and_then(|rel| compile(&rel, Dialect::Ansi, false))))
+        .map(|(n, r)| (n, r.map_err(|d| d.message).and_then(|rel| compile(&rel, Options::default()))))
         .collect()
+}
+
+fn sql_with(src: &str, name: &str, opts: Options) -> String {
+    let full = format!("{USERS}{src}");
+    let ws = Workspace::from_source(&full);
+    assert!(ws.diags.is_empty(), "load diagnostics: {:?}", ws.diags);
+    let (_, r) = root_queries(&ws).into_iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no query `{name}`"));
+    let s = r.map_err(|d| d.message).and_then(|rel| compile(&rel, opts)).unwrap_or_else(|e| panic!("`{name}` failed: {e}"));
+    eprintln!("{name}: {s}");
+    s
+}
+
+fn dialect(src: &str, name: &str, d: &str) -> Result<String, String> {
+    let full = format!("{USERS}{src}");
+    let ws = Workspace::from_source(&full);
+    let (_, r) = root_queries(&ws).into_iter().find(|(n, _)| n == name).expect("no such query");
+    let opts = Options { dialect: Dialect::from_str(d).expect("dialect"), ..Options::default() };
+    r.map_err(|d| d.message).and_then(|rel| compile(&rel, opts))
 }
 
 fn sql(src: &str, name: &str) -> String {
@@ -155,4 +173,64 @@ fn nulls_and_outer_joins() {
     let s = sql("q = orders & agg { total = coalesce (sum .amount) 0.0 }\n", "q");
     assert!(s.contains("COALESCE(SUM(amount), 0.0) AS total"), "{s}");
     assert!(error("q = orders & leftJoin users (.<user_id == .>id) & where (.name == \"x\")\n", "q").contains("maybe"));
+}
+
+#[test]
+fn join_inputs_are_inlined_when_safe() {
+    // A rename before a join needs no derived table.
+    let s = sql("q = orders & rename { id = \"order_id\" } & inner users (.<user_id == .>id) & select { o = .order_id, n = .name }\n", "q");
+    assert_eq!(s, "SELECT t1.id AS o, t2.name AS n FROM public.orders AS t1 INNER JOIN public.users AS t2 ON t1.user_id = t2.id");
+    // Left join: the preserved side's filter goes to WHERE, the other into ON.
+    let s = sql("q = orders & where (.amount > 10.0) & leftJoin (users & where .active) (.<user_id == .>id)\n", "q");
+    assert!(!s.contains("(SELECT"), "{s}");
+    assert!(s.contains("ON (t1.user_id = t2.id) AND t2.active WHERE (t1.amount > 10.0)"), "{s}");
+    // Right / full join: a filtered null-extended side keeps a derived table.
+    let s = sql("q = orders & where (.amount > 10.0) & fullJoin users (.<user_id == .>id)\n", "q");
+    assert!(s.contains("FROM public.orders WHERE (amount > 10.0)) AS t1 FULL JOIN public.users AS t2"), "{s}");
+    let s = sql("q = orders & where (.amount > 10.0) & rightJoin users (.<user_id == .>id)\n", "q");
+    assert!(s.contains("(SELECT"), "{s}");
+    // Chains of joins stay flat, including a self-join with renamed columns.
+    let s = sql("q = orders & inner users (.<user_id == .>id) & leftJoin (users & rename { id = \"uid\", name = \"n2\", active = \"a2\" }) (.<user_id == .>uid)\n", "q");
+    assert!(!s.contains("(SELECT"), "{s}");
+    assert!(s.contains("LEFT JOIN public.users AS t3 ON t1.user_id = t3.id"), "{s}");
+    // A join on the right is a derived table.
+    let s = sql("q = orders & inner (users & inner orders (.<id == .>user_id)) (.<user_id == .>id)\n", "q");
+    assert!(s.contains("INNER JOIN (SELECT"), "{s}");
+}
+
+#[test]
+fn dialects_rewrite_every_block() {
+    let q = "q = users & select { id = .id, s = .name <> \"!\" } & order [asc .s] & limit 10 & offset 5\n";
+    assert!(dialect(q, "q", "postgres").unwrap().contains("name || '!'"));
+    let my = dialect(q, "q", "mysql").unwrap();
+    assert!(!my.contains("||"), "`||` is OR in MySQL: {my}");
+    assert!(my.contains("CONCAT(name, '!') AS s") && my.contains("ORDER BY CONCAT(name, '!')"), "{my}");
+    assert!(my.contains("LIMIT 18446744073709551615 OFFSET 5"), "MySQL needs a LIMIT with OFFSET: {my}");
+    let ts = dialect("q = users & order [asc .id] & offset 5 & limit 3\n", "q", "tsql").unwrap();
+    assert!(ts.contains("ORDER BY id OFFSET 5 ROWS FETCH NEXT 3 ROWS ONLY"), "{ts}");
+    let ts = dialect("q = users & order [asc .name] & limit 3 & select { s = .name <> .name }\n", "q", "tsql").unwrap();
+    assert!(ts.contains("TOP 3") && ts.contains("CONCAT(name, name)"), "{ts}");
+    assert!(dialect(q, "q", "tsql").unwrap_err().contains("needs an `order` before `offset`"));
+    // Joins and windows go through every dialect.
+    let j = "q = orders & leftJoin users (.<user_id == .>id) & select { n = coalesce .name \"?\" <> \"!\", rn = rowNumber { order = [desc .amount] } }\n";
+    for d in ["postgres", "mysql", "sqlite", "duckdb", "tsql", "bigquery", "snowflake"] {
+        let s = dialect(j, "q", d).unwrap_or_else(|e| panic!("{d}: {e}"));
+        assert!(s.contains("ROW_NUMBER() OVER (ORDER BY t1.amount DESC)"), "{d}: {s}");
+    }
+}
+
+#[test]
+fn optimizer_keeps_stage_boundaries() {
+    let opts = Options { optimize: true, ..Options::default() };
+    // A filter after a window, LIMIT, or aggregate must stay outside it.
+    for q in [
+        "q = orders & select { id = .id, amount = .amount, rn = rowNumber { order = [desc .amount] } } & where (.amount > 10.0)\n",
+        "q = orders & order [desc .amount] & limit 5 & where (.amount > 10.0)\n",
+        "q = orders & agg { u = group .user_id, n = count } & where (.n > 3)\n",
+    ] {
+        let s = sql_with(q, "q", opts);
+        assert!(s.contains(") AS t1 WHERE"), "filter moved across a boundary: {s}");
+    }
+    let s = sql_with("q = orders & where (1 + 1 == 2 && .amount > 1.0)\n", "q", opts);
+    assert!(!s.contains("1 + 1"), "{s}");
 }

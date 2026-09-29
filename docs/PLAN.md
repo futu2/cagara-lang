@@ -29,9 +29,8 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 |---|---|
 | `cagara-syntax` | lexer, parser (Pratt operators, column-0 layout rule, error recovery), AST lowering; operators desugar to calls (`a + b` → `_+_ a b`) |
 | `cagara-hir` | salsa db and `parse_module` query, workspace/module loading, type checker (`check.rs`), evaluator, `__` primitives, IR, schema/phase validation |
-| `cagara-sql` | IR → sqlglot stages, `sql "..."` template expansion, end-to-end tests |
-| `cagara-cli` | `cagara <file> [--dialect NAME] [--only DEF] [--pretty] [--types]` |
-| `cagara-core` | unused stub (to delete or repurpose) |
+| `cagara-sql` | IR → sqlglot stages, `sql "..."` template expansion, dialect rewriting, end-to-end tests |
+| `cagara-cli` | `cagara <file> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]` |
 
 ### Design decisions
 
@@ -61,11 +60,19 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 - **Tables get columns from their annotation:**
   `users : query { id = int, ... } = table "public" "users"`.
 - **Lowering fuses stages** into one SELECT when safe and wraps a derived table
-  after aggregation, windows, or LIMIT/OFFSET.
+  after aggregation, windows, or LIMIT/OFFSET. Join inputs that only project
+  or filter a table (or an earlier join) are inlined: filters of a preserved
+  side move to WHERE, those of a left join's right side into ON; a filtered
+  null-extended side of a right / full join keeps a derived table.
+- **SQL is built as ANSI and rewritten per dialect** over every block and
+  expression slot (sqlglot's own pass only covers the outer SELECT's
+  columns / WHERE / GROUP BY / HAVING). `||` becomes `CONCAT` for MySQL and
+  T-SQL; a lone `offset` gets MySQL's max LIMIT, and T-SQL requires an
+  `order` before `offset`.
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 51 tests, no clippy warnings):
+Done and tested (`cargo test --workspace`: 54 tests, no clippy warnings):
 
 - Lexer, parser, AST lowering (15 tests), including recovery and losslessness.
 - Salsa parse query with re-parse on edit (3 tests).
@@ -101,7 +108,9 @@ Done and tested (`cargo test --workspace`: 51 tests, no clippy warnings):
 - IR validation: missing columns, join sides, key-mapper collisions, nested
   aggregates, ungrouped columns, filtering on aggregates/windows.
 - SQL lowering for where/select/agg/order/limit/offset/keyMap/joins/windows,
-  frames, constant-only global aggregates (9 end-to-end tests).
+  frames, constant-only global aggregates, join-input inlining, dialect
+  rewriting (postgres, mysql, sqlite, duckdb, tsql, bigquery, snowflake),
+  and `--optimize` (14 end-to-end tests).
 - CLI with `file:line:col` diagnostics and non-zero exit on errors.
 - Examples: `examples/report.cagara`, `public.cagara` + `schema.cagara`,
   `errors.cagara`.
@@ -116,9 +125,11 @@ Known gaps:
   the same signature are only reported as ambiguous at a use.
 - **Coarse error locations** for errors found only by the IR validator
   (start of the definition). Checker errors point at the argument.
-- **Extra subqueries** in some cases, e.g. `rename` before a join.
-- `--optimize` (sqlglot optimizer) is not wired in; its predicate pushdown
-  can move filters across window boundaries, so it must stay opt-in.
+- **Extra subqueries** remain where a join is the right input of another
+  join (no parenthesized joins yet).
+- `--optimize` runs sqlglot's optimizer (constant folding, boolean
+  simplification, pushdown). Tests pin that it keeps filters outside
+  window / LIMIT / aggregate boundaries; it stays opt-in.
 
 ## Roadmap
 
@@ -127,6 +138,6 @@ Known gaps:
 3. ~~Nullability~~ (done; see Status).
 4. **Precise error spans** by carrying source spans into IR nodes.
 5. **Salsa beyond parsing:** memoize name resolution and type checking per module.
-6. **Tidy-ups:** remove `cagara-core`, reduce avoidable subqueries, opt-in
-   `--optimize`, more dialect tests.
+6. ~~Tidy-ups~~ (done: `cagara-core` removed, join inputs inlined,
+   `--optimize`, dialect rewriting and tests).
 7. **Later:** language server on top of the salsa db.

@@ -55,6 +55,7 @@ fn row_polymorphic_predicate() {
 #[test]
 fn aggregate_types_print_wrapped() {
     assert_eq!(ty("total = sum .amount\n", "total"), "agg (expr { amount = a | b } a)");
+    assert_eq!(ty("q = orders & agg { t = sum .amount, a = avg .user_id }\n", "q"), "query { t = float, a = float }");
 }
 
 #[test]
@@ -177,4 +178,36 @@ fn key_mapper_errors() {
     assert!(err("q = users & pick 5\n", "q").contains("list of column names"));
     // Literal lists still work as ordinary values.
     assert!(err("q = users & order [\"id\"]\n", "q").contains("type mismatch"));
+}
+
+#[test]
+fn overloads_resolve_by_type() {
+    assert_eq!(
+        ty("q = users & select { a = .age + 1, s = .name + \"!\", f = negate .age }\n", "q"),
+        "query { a = int, s = string, f = int }"
+    );
+    // Leftover literals default before overloads are forced.
+    assert_eq!(ty("q = users & select { x = 1 + 2 }\n", "q"), "query { x = int }");
+    // A helper with an open overload stays generic and works at both types.
+    let src = "twice = x => x + x\nq = users & select { a = twice .age, s = twice .name }\n";
+    assert_eq!(ty(src, "q"), "query { a = int, s = string }");
+    assert!(err("q = users & select { b = .active + .active }\n", "q").contains("no overload of `+` matches"));
+}
+
+#[test]
+fn user_overloads() {
+    let src = "describe : expr r int -> expr r string = sql \"CAST($1 AS TEXT)\"\n\
+               describe : expr r bool -> expr r string = sql \"CASE WHEN $1 THEN 'yes' ELSE 'no' END\"\n\
+               q = users & select { a = describe .age, b = describe .active }\n";
+    assert_eq!(ty(src, "q"), "query { a = string, b = string }");
+    let amb = "pick2 : expr r int -> expr r int = sql \"$1\"\n\
+               pick2 : expr r int -> expr r float = sql \"$1\"\n\
+               q = users & select { a = pick2 .age }\n";
+    assert!(err(amb, "q").contains("ambiguous use of `pick2`"));
+}
+
+#[test]
+fn overloads_need_signatures() {
+    let ws = Workspace::from_source("f = 1\nf = 2\n");
+    assert!(ws.diags.iter().any(|d| d.message.contains("needs a type signature")), "{:?}", ws.diags);
 }

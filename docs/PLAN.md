@@ -35,6 +35,10 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ### Design decisions
 
+- **Overloads are resolved at compile time.** The checker records, per
+  definition and use site, which candidate (or which of its own holes) each
+  overloaded use means; evaluation is keyed by definition plus hole
+  assignment, and closures capture it.
 - **Rust provides only primitives.** About 20 `__` functions (table, where,
   select, agg, order, limit/offset, join, group, asc/desc, key mappers, frame
   bounds) plus the `sql "..."` template mechanism. `__` names are visible only
@@ -61,11 +65,11 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 42 tests, no clippy warnings):
+Done and tested (`cargo test --workspace`: 46 tests, no clippy warnings):
 
 - Lexer, parser, AST lowering (15 tests), including recovery and losslessness.
 - Salsa parse query with re-parse on edit (3 tests).
-- Type checker (17 tests): HM with let-polymorphism for top-level definitions,
+- Type checker (20 tests): HM with let-polymorphism for top-level definitions,
   monomorphic lambdas, Rémy-style rows, rigid (checked) signatures, constant
   lifting into `expr` with deferred int→float / string→date widening,
   expressions as sort keys, records as window specs. Rejects scalar type
@@ -77,6 +81,14 @@ Done and tested (`cargo test --workspace`: 42 tests, no clippy warnings):
   columns, duplicates, and collisions are type errors, and later stages and
   joins are checked). Stage constraints wait for the query's row, so printed
   types keep declaration order.
+- Overloading: a name defined more than once, each with a signature, is an
+  overload set (prelude: `+ - * / negate sum avg` on int and float; `+` on
+  strings is `||`). Uses are resolved by trial unification against each
+  candidate. A helper whose overloads stay open (`twice = x => x + x`) keeps
+  them as holes in its scheme; every use fills them, and the evaluator
+  follows the recorded choices, so one helper can compile to `age + age` and
+  `name || name` in the same query. Query definitions default leftover
+  literals before reporting ambiguity. Works through imports and aliases.
 - Evaluator, prelude, imports with aliases, cycle and duplicate detection.
 - IR validation: missing columns, join sides, key-mapper collisions, nested
   aggregates, ungrouped columns, filtering on aggregates/windows.
@@ -90,7 +102,9 @@ Known gaps:
 
 - **Non-static key mappers** (`prefix`, `suffix`, or a column list that is
   not a literal) give an unconstrained row; the IR validator checks them.
-- **No overloading.** A name defined twice in a module is an error.
+- **Overload limits:** there is no implicit int → float conversion for
+  columns (`.age * 1.5` is a type error; literals still widen), and duplicate
+  candidates with the same signature are only reported as ambiguous at use.
 - **Nullability is not tracked**, including outer-join sides.
 - **Coarse error locations** for errors found only by the IR validator
   (start of the definition). Checker errors point at the argument.
@@ -101,7 +115,7 @@ Known gaps:
 ## Roadmap
 
 1. ~~Type checker~~ and static key-mapper types (done; see Status).
-2. **Overloading** of operators by argument type, resolved by the checker.
+2. ~~Overloading~~ (done; see Status).
 3. **Nullability** (`maybe a`) through outer joins and aggregates such as `sum`.
 4. **Precise error spans** by carrying source spans into IR nodes.
 5. **Salsa beyond parsing:** memoize name resolution and type checking per module.

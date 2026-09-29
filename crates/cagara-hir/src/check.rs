@@ -24,6 +24,15 @@
 //!   `pick ["id"]`, `omit [..]` and `rename { a = "b" }` compute their output
 //!   row statically, with the same rules as the IR validator.
 //!
+//! - Overloading: a name defined more than once (each with a signature) is an
+//!   overload set. Each use gets the candidates' common shape and an
+//!   `Overload` constraint, resolved by trial unification once exactly one
+//!   candidate fits. A definition whose overloads stay open (`x => x + x`)
+//!   keeps them as holes in its scheme; each use fills them, and the
+//!   evaluator follows the recorded choices (dictionary passing, resolved at
+//!   compile time). In a query definition, leftover literals default to
+//!   their own type before overloads are forced.
+//!
 //! Known limits: `prefix` / `suffix` and key lists that are not literals give
 //! an unconstrained row (the schema validator checks them), and `maybe a` is
 //! treated as `a`.
@@ -117,6 +126,25 @@ enum Cons {
     /// `row` (a query's columns) must contain the `req` row, once `row` is
     /// known (so the query's column order is kept).
     Within { req: Ty, row: Ty },
+    /// Use of an overload set at type `target`.
+    Overload { name: String, module: usize, cands: Vec<usize>, target: Ty, origin: Origin },
+}
+
+/// Where an overload's choice is recorded.
+#[derive(Debug, Clone, Copy)]
+enum Origin {
+    /// Use site (see `encode`) in the definition being checked.
+    Site(u32),
+    /// Hole index of a generalized definition (replaced on instantiation).
+    Hole(usize),
+}
+
+/// A resolved overload use: a candidate, or a hole of the enclosing
+/// definition (filled differently at each of its uses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    Def(usize, usize),
+    Hole(usize),
 }
 
 impl Cons {
@@ -133,6 +161,13 @@ impl Cons {
                 Cons::KeyMap { mapper: f(mapper), input: f(input), output: f(output) }
             }
             Cons::Within { req, row } => Cons::Within { req: f(req), row: f(row) },
+            Cons::Overload { name, module, cands, target, origin } => Cons::Overload {
+                name: name.clone(),
+                module: *module,
+                cands: cands.clone(),
+                target: f(target),
+                origin: *origin,
+            },
         }
     }
 }
@@ -154,12 +189,26 @@ pub struct TypeError {
 pub struct TypeCheck {
     pub errors: Vec<TypeError>,
     types: HashMap<(usize, usize), String>,
+    holes: HashMap<(usize, usize), usize>,
+    /// Per definition: `(use site, hole of the referenced definition)` → choice.
+    /// Hole 0 of a direct overload-set use is the overload itself.
+    choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
 }
 
 impl TypeCheck {
     /// Printed type scheme of a well-typed definition.
     pub fn type_of(&self, module: usize, def: usize) -> Option<&str> {
         self.types.get(&(module, def)).map(String::as_str)
+    }
+
+    /// Number of open overloads a definition leaves to its users.
+    pub fn holes(&self, module: usize, def: usize) -> usize {
+        self.holes.get(&(module, def)).copied().unwrap_or(0)
+    }
+
+    /// Choice for hole `k` at use site `site` inside definition `(module, def)`.
+    pub fn choice(&self, module: usize, def: usize, site: u32, k: usize) -> Option<Choice> {
+        self.choices.get(&(module, def))?.get(&(site, k)).copied()
     }
 
     pub fn error_for(&self, module: usize, def: usize) -> Option<&Diag> {
@@ -178,6 +227,9 @@ pub fn check(ws: &Workspace) -> TypeCheck {
         pending: Vec::new(),
         errors: Vec::new(),
         span: Span::default(),
+        trail: Vec::new(),
+        holes: HashMap::new(),
+        choices: HashMap::new(),
     };
     for m in 0..ws.modules.len() {
         for i in 0..ws.modules[m].module.defs.len() {
@@ -190,7 +242,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
         .filter(|(k, _)| !c.failed.contains(k))
         .map(|(k, s)| (*k, c.show(&s.ty)))
         .collect();
-    TypeCheck { errors: c.errors, types }
+    TypeCheck { errors: c.errors, types, holes: c.holes, choices: c.choices }
 }
 
 struct TyErr {
@@ -205,6 +257,7 @@ fn at(span: Span) -> impl FnOnce(String) -> TyErr {
     move |msg| TyErr { span, msg }
 }
 
+#[derive(Clone)]
 struct VarInfo {
     bound: Option<Ty>,
     /// Phase variable of a column reference: may become `row` or `win`.
@@ -221,6 +274,10 @@ struct Checker<'w> {
     errors: Vec<TypeError>,
     /// Location of the argument being checked (for deferred literals).
     span: Span,
+    /// Previous state of every variable binding, for trial unification.
+    trail: Vec<(u32, VarInfo)>,
+    holes: HashMap<(usize, usize), usize>,
+    choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
 }
 fn row_or_tail(fs: Vec<(String, Ty)>, tail: Ty) -> Ty {
     if fs.is_empty() {
@@ -330,9 +387,13 @@ impl<'w> Checker<'w> {
         if self.occurs(v, &t) {
             return Err(format!("infinite type: a type would contain itself ({})", self.show(&t)));
         }
+        self.trail.push((v, self.vars[v as usize].clone()));
         if self.vars[v as usize].row_or_win {
             match &t {
-                Ty::Var(u) => self.vars[*u as usize].row_or_win = true,
+                Ty::Var(u) => {
+                    self.trail.push((*u, self.vars[*u as usize].clone()));
+                    self.vars[*u as usize].row_or_win = true
+                }
                 Ty::Con("row" | "win", _) => {}
                 Ty::Con("agg", _) => return Err(UNGROUPED.into()),
                 o => return Err(format!("a column expression cannot have phase {}", self.show(o))),
@@ -444,10 +505,27 @@ impl<'w> Checker<'w> {
         let left = std::mem::replace(&mut self.pending, saved);
         self.active.pop();
         let scheme = match r {
-            Ok(t) => Scheme {
-                ty: self.zonk(&t),
-                cons: left.iter().map(|(c, _)| c.map(&mut |t| self.zonk(t))).collect(),
-            },
+            Ok(t) => {
+                // Open overloads become holes, numbered in constraint order.
+                let mut cons = Vec::new();
+                let mut k = 0;
+                for (c, _) in &left {
+                    let mut c = c.map(&mut |t| self.zonk(t));
+                    if let Cons::Overload { origin, .. } = &mut c {
+                        if let Origin::Site(site) = *origin {
+                            let (use_site, hk) = decode(site);
+                            self.record((m, i), use_site, hk, Choice::Hole(k));
+                        }
+                        *origin = Origin::Hole(k);
+                        k += 1;
+                    }
+                    cons.push(c);
+                }
+                if k > 0 {
+                    self.holes.insert((m, i), k);
+                }
+                Scheme { ty: self.zonk(&t), cons }
+            }
             Err(e) => {
                 let diag = self.ws.diag(m, e.span.start as usize, e.msg);
                 self.errors.push(TypeError { module: m, def: i, diag });
@@ -479,7 +557,151 @@ impl<'w> Checker<'w> {
                 .map_err(at(def.body.span))?;
         }
         self.solve()?;
-        Ok(ann.unwrap_or(t))
+        let t = ann.unwrap_or(t);
+        if let Ty::Con("query", _) = self.resolve(&t) {
+            // A query is evaluated, so its overloads must be resolved:
+            // default leftover literals, then report what is still open.
+            self.default_lits();
+            self.solve()?;
+            for (c, sp) in self.pending.clone() {
+                if let Cons::Overload { name, module, cands, target, .. } = c {
+                    let fits = self.fitting(module, &cands, &target);
+                    let shown: Vec<String> = fits.iter().map(|&i| self.cand_shown(module, i)).collect();
+                    let msg = format!(
+                        "ambiguous use of `{}` at type {}; candidates: {}",
+                        op_name(&name),
+                        self.show(&target),
+                        shown.join(", ")
+                    );
+                    return Err(TyErr { span: sp, msg });
+                }
+            }
+        }
+        Ok(t)
+    }
+
+    fn default_lits(&mut self) {
+        let lits: Vec<(&'static str, Ty)> = self
+            .pending
+            .iter()
+            .filter_map(|(c, _)| match c {
+                Cons::Lit { lit, target } => Some((*lit, target.clone())),
+                _ => None,
+            })
+            .collect();
+        for (lit, target) in lits {
+            if let Ty::Var(_) = self.resolve(&target) {
+                let _ = self.unify(&target, &con(lit));
+            }
+        }
+    }
+
+    // ── overloads ──────────────────────────────────────────────────────────
+
+    /// Scheme of an overload candidate: checked if possible, else (inside
+    /// its own body) its signature.
+    fn cand_scheme(&mut self, m: usize, i: usize) -> Scheme {
+        if let Some(s) = self.def_scheme(m, i) {
+            return s;
+        }
+        let ann = self.ws.modules[m].module.defs[i].ty.as_ref().map(|t| self.annotation(t));
+        match ann {
+            Some(Ok(t)) => Scheme { ty: t, cons: vec![] },
+            _ => Scheme { ty: self.fresh(), cons: vec![] },
+        }
+    }
+
+    fn cand_shown(&mut self, m: usize, i: usize) -> String {
+        let s = self.cand_scheme(m, i);
+        self.show(&s.ty)
+    }
+
+    /// Would candidate type `t` unify with `target`? Leaves no trace.
+    fn fits(&mut self, t: &Ty, target: &Ty) -> bool {
+        let (trail, nvars) = (self.trail.len(), self.vars.len());
+        let t = self.inst(t, &mut HashMap::new());
+        let ok = self.unify(&t, target).is_ok();
+        while self.trail.len() > trail {
+            let (v, old) = self.trail.pop().expect("trail entry");
+            if (v as usize) < nvars {
+                self.vars[v as usize] = old;
+            }
+        }
+        self.vars.truncate(nvars);
+        ok
+    }
+
+    fn fitting(&mut self, m: usize, cands: &[usize], target: &Ty) -> Vec<usize> {
+        let mut out = Vec::new();
+        for &i in cands {
+            let s = self.cand_scheme(m, i);
+            if self.fits(&s.ty, target) {
+                out.push(i);
+            }
+        }
+        out
+    }
+
+    /// Type of a use of an overload set: the candidates' common shape.
+    fn overload_type(&mut self, name: &str, m: usize, cands: &[usize], site: u32, sp: Span) -> Ty {
+        let tys: Vec<Ty> = cands.iter().map(|&i| self.cand_scheme(m, i).ty).collect();
+        let target = self.skeleton(&tys, &mut HashMap::new());
+        let c = Cons::Overload {
+            name: name.to_string(),
+            module: m,
+            cands: cands.to_vec(),
+            target: target.clone(),
+            origin: Origin::Site(site),
+        };
+        self.pending.push((c, sp));
+        target
+    }
+
+    /// Anti-unification: shared structure is kept; positions where the
+    /// candidates differ become variables (one per distinct combination).
+    fn skeleton(&mut self, ts: &[Ty], memo: &mut HashMap<String, Ty>) -> Ty {
+        let ts: Vec<Ty> = ts.iter().map(|t| self.resolve(t)).collect();
+        match &ts[0] {
+            Ty::Con(n, args) if ts.iter().all(|t| matches!(t, Ty::Con(m, a) if m == n && a.len() == args.len())) => {
+                let (n, arity) = (*n, args.len());
+                let args = (0..arity)
+                    .map(|k| {
+                        let col: Vec<Ty> = ts
+                            .iter()
+                            .map(|t| match t {
+                                Ty::Con(_, a) => a[k].clone(),
+                                _ => unreachable!(),
+                            })
+                            .collect();
+                        self.skeleton(&col, memo)
+                    })
+                    .collect();
+                Ty::Con(n, args)
+            }
+            Ty::Fun(..) if ts.iter().all(|t| matches!(t, Ty::Fun(..))) => {
+                let (mut xs, mut ys) = (Vec::new(), Vec::new());
+                for t in &ts {
+                    if let Ty::Fun(a, b) = t {
+                        xs.push((**a).clone());
+                        ys.push((**b).clone());
+                    }
+                }
+                fun(self.skeleton(&xs, memo), self.skeleton(&ys, memo))
+            }
+            _ => {
+                let key = format!("{ts:?}");
+                if let Some(t) = memo.get(&key) {
+                    return t.clone();
+                }
+                let v = self.fresh();
+                memo.insert(key, v.clone());
+                v
+            }
+        }
+    }
+
+    fn record(&mut self, key: (usize, usize), site: u32, k: usize, c: Choice) {
+        self.choices.entry(key).or_default().insert((site, k), c);
     }
 
     /// Convert a signature. Its type variables are rigid; its phase variable
@@ -561,11 +783,18 @@ impl<'w> Checker<'w> {
     }
 
     /// Fresh copy of a scheme; its deferred constraints join the pending set.
-    fn instantiate(&mut self, s: &Scheme, span: Span) -> Ty {
+    /// Its holes become overload uses at `site`.
+    fn instantiate(&mut self, s: &Scheme, span: Span, site: Option<u32>) -> Ty {
         let mut map = HashMap::new();
         let t = self.inst(&s.ty, &mut map);
         for c in &s.cons {
-            let c = c.map(&mut |t| self.inst(t, &mut map));
+            let mut c = c.map(&mut |t| self.inst(t, &mut map));
+            if let (Cons::Overload { origin, .. }, Some(site)) = (&mut c, site) {
+                if let Origin::Hole(k) = *origin {
+                    // Resolved as hole `k` of the definition used at `site`.
+                    *origin = Origin::Site(encode(site, k));
+                }
+            }
             self.pending.push((c, span));
         }
         t
@@ -598,7 +827,7 @@ impl<'w> Checker<'w> {
         match &e.kind {
             ExprKind::Name(n) => match env.iter().rev().find(|(k, _)| k == n) {
                 Some((_, t)) => Ok(t.clone()),
-                None => self.lookup(m, n, sp).map_err(at(sp)),
+                None => self.lookup(m, n, e.id, sp).map_err(at(sp)),
             },
             ExprKind::Lit(l) => Ok(con(match l {
                 ast::Lit::Int(_) => "int",
@@ -622,9 +851,10 @@ impl<'w> Checker<'w> {
                     let ws = self.ws;
                     if !env.iter().any(|(k, _)| k == n) {
                         if let Some(Binding::Module(t)) = ws.modules[m].scope.get(n) {
-                            return match ws.modules[*t].module.defs.iter().position(|d| &d.name == f) {
-                                Some(i) => Ok(self.def_type(*t, i, sp)),
-                                None => Err(TyErr {
+                            return match ws.modules[*t].own.get(f).cloned() {
+                                Some(Binding::Def(dm, i)) => Ok(self.def_type(dm, i, e.id, sp)),
+                                Some(Binding::Overloads(om, is)) => Ok(self.overload_type(f, om, &is, e.id, sp)),
+                                _ => Err(TyErr {
                                     span: sp,
                                     msg: format!("module `{n}` has no definition `{f}`"),
                                 }),
@@ -725,18 +955,19 @@ impl<'w> Checker<'w> {
         }
     }
 
-    fn lookup(&mut self, m: usize, n: &str, sp: Span) -> Result<Ty, String> {
-        match self.ws.modules[m].scope.get(n).copied() {
-            Some(Binding::Def(dm, di)) => Ok(self.def_type(dm, di, sp)),
+    fn lookup(&mut self, m: usize, n: &str, site: u32, sp: Span) -> Result<Ty, String> {
+        match self.ws.modules[m].scope.get(n).cloned() {
+            Some(Binding::Def(dm, di)) => Ok(self.def_type(dm, di, site, sp)),
+            Some(Binding::Overloads(om, is)) => Ok(self.overload_type(n, om, &is, site, sp)),
             Some(Binding::Prim(p)) => Ok(self.prim_type(p, sp)),
             Some(Binding::Module(_)) => Err(format!("`{n}` is a module; refer to a definition as `{n}.name`")),
             None => Err(format!("unknown name `{n}`")),
         }
     }
 
-    fn def_type(&mut self, m: usize, i: usize, sp: Span) -> Ty {
+    fn def_type(&mut self, m: usize, i: usize, site: u32, sp: Span) -> Ty {
         match self.def_scheme(m, i) {
-            Some(s) => self.instantiate(&s, sp),
+            Some(s) => self.instantiate(&s, sp, Some(site)),
             None => self.fresh(),
         }
     }
@@ -878,7 +1109,7 @@ impl<'w> Checker<'w> {
             let mut progress = false;
             let mut keep = Vec::new();
             for (c, sp) in std::mem::take(&mut self.pending) {
-                match self.step(&c) {
+                match self.step(&c, sp) {
                     Ok(true) => progress = true,
                     Ok(false) => keep.push((c, sp)),
                     Err(msg) => {
@@ -887,7 +1118,8 @@ impl<'w> Checker<'w> {
                     }
                 }
             }
-            // `step` may instantiate nothing, so `pending` is empty here.
+            // Resolving an overload may have added the candidate's constraints.
+            keep.append(&mut self.pending);
             self.pending = keep;
             if !progress {
                 return Ok(());
@@ -896,8 +1128,33 @@ impl<'w> Checker<'w> {
     }
 
     /// `Ok(true)` when solved, `Ok(false)` when it must wait.
-    fn step(&mut self, c: &Cons) -> Result<bool, String> {
+    fn step(&mut self, c: &Cons, sp: Span) -> Result<bool, String> {
         match c {
+            Cons::Overload { name, module, cands, target, origin } => {
+                let fits = self.fitting(*module, cands, target);
+                match fits.as_slice() {
+                    [] => {
+                        let shown: Vec<String> = cands.iter().map(|&i| self.cand_shown(*module, i)).collect();
+                        Err(format!(
+                            "no overload of `{}` matches {}; candidates: {}",
+                            op_name(name),
+                            self.show(target),
+                            shown.join(", ")
+                        ))
+                    }
+                    [i] => {
+                        let s = self.cand_scheme(*module, *i);
+                        let t = self.instantiate(&s, sp, None);
+                        self.unify(&t, target)?;
+                        let Origin::Site(site) = *origin else { unreachable!("holes are instantiated first") };
+                        let (use_site, k) = decode(site);
+                        let key = *self.active.last().expect("solving inside a definition");
+                        self.record(key, use_site, k, Choice::Def(*module, *i));
+                        Ok(true)
+                    }
+                    _ => Ok(false),
+                }
+            }
             Cons::Filter { pred, row } => match self.resolve(pred) {
                 Ty::Var(_) => Ok(false),
                 Ty::Con("bool", _) => Ok(true),
@@ -1099,6 +1356,29 @@ impl<'w> Checker<'w> {
     fn show(&self, t: &Ty) -> String {
         let t = self.zonk(t);
         Printer { names: HashMap::new() }.ty(&t, 0)
+    }
+}
+
+/// `_+_` → `+` in messages.
+fn op_name(n: &str) -> &str {
+    match n.strip_prefix('_').and_then(|n| n.strip_suffix('_')) {
+        Some(op) if !op.is_empty() => op,
+        _ => n,
+    }
+}
+
+/// An overload's origin names the use site and which hole of the used
+/// definition it is (0 for a direct use of an overload set).
+fn encode(site: u32, k: usize) -> u32 {
+    assert!(k < 256 && site < (1 << 23), "too many overload holes");
+    (site << 8) | k as u32 | (1 << 31)
+}
+
+fn decode(origin: u32) -> (u32, usize) {
+    if origin & (1 << 31) != 0 {
+        ((origin & !(1 << 31)) >> 8, (origin & 0xff) as usize)
+    } else {
+        (origin, 0)
     }
 }
 

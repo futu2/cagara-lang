@@ -6,6 +6,9 @@
 # they give the arity and whether the result is a scalar (`expr r a`), an
 # aggregate (`agg (expr r a)`), or a window function (`win (expr r a)`).
 # All signatures are checked by the type checker.
+#
+# A name defined more than once (each with a signature) is overloaded: the
+# type checker picks the definition whose signature fits each use.
 
 # ── combinators ────────────────────────────────────────────────────────────
 
@@ -51,8 +54,10 @@ rename = mapping => keyMap (replace mapping)
 count : agg (expr r int) = sql "COUNT(*)"
 countOf : expr r a -> agg (expr r int) = sql "COUNT($1)"
 countDistinct : expr r a -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
-sum : expr r a -> agg (expr r a) = sql "SUM($1)"
-avg : expr r a -> agg (expr r float) = sql "AVG($1)"
+sum : expr r int -> agg (expr r int) = sql "SUM($1)"
+sum : expr r float -> agg (expr r float) = sql "SUM($1)"
+avg : expr r int -> agg (expr r float) = sql "AVG($1)"
+avg : expr r float -> agg (expr r float) = sql "AVG($1)"
 min : expr r a -> agg (expr r a) = sql "MIN($1)"
 max : expr r a -> agg (expr r a) = sql "MAX($1)"
 
@@ -89,12 +94,19 @@ _&&_ : expr r bool -> expr r bool -> expr r bool = sql "$1 AND $2"
 _||_ : expr r bool -> expr r bool -> expr r bool = sql "$1 OR $2"
 not : expr r bool -> expr r bool = sql "NOT $1"
 
-_+_ : expr r a -> expr r a -> expr r a = sql "$1 + $2"
-_-_ : expr r a -> expr r a -> expr r a = sql "$1 - $2"
-_*_ : expr r a -> expr r a -> expr r a = sql "$1 * $2"
-_/_ : expr r a -> expr r a -> expr r a = sql "$1 / $2"
+# Arithmetic is overloaded on int and float; `+` on strings concatenates.
+_+_ : expr r int -> expr r int -> expr r int = sql "$1 + $2"
+_+_ : expr r float -> expr r float -> expr r float = sql "$1 + $2"
+_+_ : expr r string -> expr r string -> expr r string = sql "$1 || $2"
+_-_ : expr r int -> expr r int -> expr r int = sql "$1 - $2"
+_-_ : expr r float -> expr r float -> expr r float = sql "$1 - $2"
+_*_ : expr r int -> expr r int -> expr r int = sql "$1 * $2"
+_*_ : expr r float -> expr r float -> expr r float = sql "$1 * $2"
+_/_ : expr r int -> expr r int -> expr r int = sql "$1 / $2"
+_/_ : expr r float -> expr r float -> expr r float = sql "$1 / $2"
 _%_ : expr r int -> expr r int -> expr r int = sql "$1 % $2"
-negate : expr r a -> expr r a = sql "-$1"
+negate : expr r int -> expr r int = sql "-$1"
+negate : expr r float -> expr r float = sql "-$1"
 
 concat : expr r string -> expr r string -> expr r string = sql "$1 || $2"
 upper : expr r string -> expr r string = sql "UPPER($1)"

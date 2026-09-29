@@ -3,15 +3,19 @@
 
 use crate::ir::{Expr, Lit, Rel};
 use crate::prims::{self, build_tpl};
-use crate::value::{err, Closure, EResult, Env, Template, TplKind, Value};
+use crate::check::{Choice, TypeCheck};
+use crate::value::{err, Closure, EResult, Env, Inst, Template, TplKind, Value};
 use crate::workspace::{Binding, Diag, Workspace};
 use cagara_syntax::ast::{self, ExprKind, Span, TypeExpr};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// Evaluation follows the type checker's overload choices: each definition
+/// is evaluated per assignment of its overload holes.
 pub struct Evaluator<'w> {
     ws: &'w Workspace,
-    cache: HashMap<(usize, usize), Value>,
+    tc: &'w TypeCheck,
+    cache: HashMap<Inst, Value>,
     active: Vec<(usize, usize)>,
 }
 
@@ -27,45 +31,83 @@ fn at<T>(r: EResult<T>, module: usize, span: Span) -> EResult<T> {
 }
 
 impl<'w> Evaluator<'w> {
-    pub fn new(ws: &'w Workspace) -> Self {
-        Evaluator { ws, cache: HashMap::new(), active: Vec::new() }
+    pub fn new(ws: &'w Workspace, tc: &'w TypeCheck) -> Self {
+        Evaluator { ws, tc, cache: HashMap::new(), active: Vec::new() }
     }
 
+    /// Value of a definition with no open overloads.
     pub fn def_value(&mut self, m: usize, i: usize) -> EResult<Value> {
-        if let Some(v) = self.cache.get(&(m, i)) {
+        self.inst_value(Inst { def: (m, i), holes: vec![] })
+    }
+
+    fn inst_value(&mut self, inst: Inst) -> EResult<Value> {
+        if let Some(v) = self.cache.get(&inst) {
             return Ok(v.clone());
         }
         let ws = self.ws;
+        let (m, i) = inst.def;
         let def = &ws.modules[m].module.defs[i];
         if self.active.contains(&(m, i)) {
             let msg = format!("`{}` refers to itself; recursion is not supported", def.name);
             return at(err(msg), m, def.span);
         }
         self.active.push((m, i));
-        let r = self.eval_def(m, def);
+        let r = self.eval_def(m, def, Rc::new(inst.clone()));
         self.active.pop();
         let v = r?;
-        self.cache.insert((m, i), v.clone());
+        self.cache.insert(inst, v.clone());
         Ok(v)
     }
 
-    fn eval_def(&mut self, m: usize, def: &ast::Def) -> EResult<Value> {
+    fn eval_def(&mut self, m: usize, def: &ast::Def, inst: Rc<Inst>) -> EResult<Value> {
         let v = match &def.body.kind {
             ExprKind::Sql(sql) => at(template_def(sql, def.ty.as_ref()), m, def.body.span)?,
-            _ => self.eval(m, &Env::default(), &def.body)?,
+            _ => self.eval(m, &inst, &Env::default(), &def.body)?,
         };
         Ok(attach_schema(v, def.ty.as_ref()))
     }
 
-    pub fn eval(&mut self, m: usize, env: &Env, e: &ast::Expr) -> EResult<Value> {
-        at(self.eval_inner(m, env, e), m, e.span)
+    pub fn eval(&mut self, m: usize, inst: &Rc<Inst>, env: &Env, e: &ast::Expr) -> EResult<Value> {
+        at(self.eval_inner(m, inst, env, e), m, e.span)
     }
 
-    fn eval_inner(&mut self, m: usize, env: &Env, e: &ast::Expr) -> EResult<Value> {
+    /// Candidate chosen for hole `k` at `site` in the current instance.
+    fn choose(&self, inst: &Inst, site: u32, k: usize) -> EResult<(usize, usize)> {
+        let (m, i) = inst.def;
+        match self.tc.choice(m, i, site, k) {
+            Some(Choice::Def(dm, di)) => Ok((dm, di)),
+            Some(Choice::Hole(h)) if h < inst.holes.len() => Ok(inst.holes[h]),
+            _ => err("this overloaded name could not be resolved (see the type errors)"),
+        }
+    }
+
+    /// A definition used at `site`, with its holes filled from the choices.
+    fn use_def(&mut self, inst: &Inst, site: u32, dm: usize, di: usize) -> EResult<Value> {
+        let holes = (0..self.tc.holes(dm, di)).map(|k| self.choose(inst, site, k)).collect::<EResult<_>>()?;
+        self.inst_value(Inst { def: (dm, di), holes })
+    }
+
+    fn use_binding(&mut self, inst: &Inst, site: u32, b: Binding, n: &str) -> EResult<Value> {
+        match b {
+            Binding::Def(dm, di) => self.use_def(inst, site, dm, di),
+            Binding::Overloads(..) => {
+                let (dm, di) = self.choose(inst, site, 0)?;
+                self.use_def(inst, site, dm, di)
+            }
+            Binding::Prim(p) if p.arity() == 0 => prims::call(p, vec![]),
+            Binding::Prim(p) => Ok(Value::Prim(p, vec![])),
+            Binding::Module(_) => err(format!("`{n}` is a module; refer to a definition as `{n}.name`")),
+        }
+    }
+
+    fn eval_inner(&mut self, m: usize, inst: &Rc<Inst>, env: &Env, e: &ast::Expr) -> EResult<Value> {
         match &e.kind {
             ExprKind::Name(n) => match env.get(n) {
                 Some(v) => Ok(v.clone()),
-                None => self.lookup(m, n),
+                None => match self.ws.modules[m].scope.get(n).cloned() {
+                    Some(b) => self.use_binding(inst, e.id, b, n),
+                    None => err(format!("unknown name `{n}`")),
+                },
             },
             ExprKind::Lit(l) => Ok(Value::Lit(match l {
                 ast::Lit::Int(i) => Lit::Int(*i),
@@ -79,11 +121,17 @@ impl<'w> Evaluator<'w> {
                     let ws = self.ws;
                     if env.get(n).is_none() {
                         if let Some(Binding::Module(target)) = ws.modules[m].scope.get(n) {
-                            return self.lookup_in(*target, f);
+                            return match ws.modules[*target].own.get(f).cloned() {
+                                Some(b) => self.use_binding(inst, e.id, b, f),
+                                None => err(format!(
+                                    "module `{}` has no definition `{f}`",
+                                    ws.modules[*target].path.display()
+                                )),
+                            };
                         }
                     }
                 }
-                match self.eval(m, env, base)? {
+                match self.eval(m, inst, env, base)? {
                     Value::Record(fs) => match fs.into_iter().find(|(k, _)| k == f) {
                         Some((_, v)) => Ok(v),
                         None => err(format!("record has no field `{f}`")),
@@ -92,9 +140,9 @@ impl<'w> Evaluator<'w> {
                 }
             }
             ExprKind::App(f, args) => {
-                let mut v = self.eval(m, env, f)?;
+                let mut v = self.eval(m, inst, env, f)?;
                 for a in args {
-                    let x = self.eval(m, env, a)?;
+                    let x = self.eval(m, inst, env, a)?;
                     v = self.apply(v, x)?;
                 }
                 Ok(v)
@@ -104,6 +152,7 @@ impl<'w> Evaluator<'w> {
                 body: (**body).clone(),
                 env: env.clone(),
                 module: m,
+                inst: inst.clone(),
             }))),
             ExprKind::Record(fs) => {
                 let mut out: Vec<(String, Value)> = Vec::new();
@@ -111,13 +160,13 @@ impl<'w> Evaluator<'w> {
                     if out.iter().any(|(o, _)| o == k) {
                         return err(format!("field `{k}` appears twice"));
                     }
-                    let v = self.eval(m, env, x)?;
+                    let v = self.eval(m, inst, env, x)?;
                     out.push((k.clone(), v));
                 }
                 Ok(Value::Record(out))
             }
             ExprKind::List(xs) => {
-                Ok(Value::List(xs.iter().map(|x| self.eval(m, env, x)).collect::<EResult<_>>()?))
+                Ok(Value::List(xs.iter().map(|x| self.eval(m, inst, env, x)).collect::<EResult<_>>()?))
             }
             ExprKind::Sql(_) => {
                 err("`sql \"...\"` must be the whole body of a definition with a type signature")
@@ -126,30 +175,11 @@ impl<'w> Evaluator<'w> {
         }
     }
 
-    fn lookup(&mut self, m: usize, n: &str) -> EResult<Value> {
-        let ws = self.ws;
-        match ws.modules[m].scope.get(n) {
-            Some(Binding::Def(dm, di)) => self.def_value(*dm, *di),
-            Some(Binding::Prim(p)) if p.arity() == 0 => prims::call(*p, vec![]),
-            Some(Binding::Prim(p)) => Ok(Value::Prim(*p, vec![])),
-            Some(Binding::Module(_)) => err(format!("`{n}` is a module; refer to a definition as `{n}.name`")),
-            None => err(format!("unknown name `{n}`")),
-        }
-    }
-
-    fn lookup_in(&mut self, target: usize, n: &str) -> EResult<Value> {
-        let ws = self.ws;
-        match ws.modules[target].module.defs.iter().position(|d| d.name == n) {
-            Some(i) => self.def_value(target, i),
-            None => err(format!("module `{}` has no definition `{n}`", ws.modules[target].path.display())),
-        }
-    }
-
     pub fn apply(&mut self, f: Value, x: Value) -> EResult<Value> {
         match f {
             Value::Closure(c) => {
                 let env = c.env.bind(c.param.clone(), x);
-                self.eval(c.module, &env, &c.body)
+                self.eval(c.module, &c.inst, &env, &c.body)
             }
             Value::Prim(p, mut args) => {
                 args.push(x);
@@ -263,13 +293,17 @@ pub fn root_queries(ws: &Workspace) -> Vec<(String, Result<Rel, Diag>)> {
 
 /// Like [`root_queries`], reusing a type check. A root definition with a type
 /// error is reported (and not evaluated) even if it is not a query.
-pub fn root_queries_checked(ws: &Workspace, tc: &crate::check::TypeCheck) -> Vec<(String, Result<Rel, Diag>)> {
-    let mut ev = Evaluator::new(ws);
+pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Rel, Diag>)> {
+    let mut ev = Evaluator::new(ws, tc);
     let m = ws.root;
     let mut out = Vec::new();
     for (i, d) in ws.modules[m].module.defs.iter().enumerate() {
         if let Some(e) = tc.error_for(m, i) {
             out.push((d.name.clone(), Err(e.clone())));
+            continue;
+        }
+        if tc.holes(m, i) > 0 {
+            // Overloaded helper: only meaningful at its uses.
             continue;
         }
         match ev.def_value(m, i) {

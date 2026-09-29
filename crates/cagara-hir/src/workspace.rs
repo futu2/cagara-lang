@@ -5,17 +5,20 @@ use crate::db::{Database, SourceFile};
 use crate::lower::parse_module;
 use crate::value::{EvalError, Prim, PRIMS};
 use cagara_syntax::ast::{Import, Module};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub const PRELUDE_SRC: &str = include_str!("../../../prelude.cagara");
 pub const PRELUDE_PATH: &str = "<prelude>";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Binding {
     /// (module index, definition index)
     Def(usize, usize),
+    /// A name defined more than once with signatures; the type checker picks
+    /// one candidate per use. (module index, definition indices)
+    Overloads(usize, Vec<usize>),
     Module(usize),
     /// `__` primitives; visible only inside the prelude.
     Prim(Prim),
@@ -26,6 +29,8 @@ pub struct LoadedModule {
     pub text: String,
     pub module: Module,
     pub scope: HashMap<String, Binding>,
+    /// This module's own definitions (what `import` and `alias.name` see).
+    pub own: HashMap<String, Binding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,9 +110,7 @@ impl Workspace {
                 scope.insert(n.to_string(), Binding::Prim(*p));
             }
         } else {
-            for (i, d) in self.modules[0].module.defs.iter().enumerate() {
-                scope.insert(d.name.clone(), Binding::Def(0, i));
-            }
+            scope.extend(self.modules[0].own.clone());
         }
 
         for imp in &parsed.module.imports {
@@ -116,28 +119,41 @@ impl Workspace {
                 Some(a) => {
                     scope.insert(a.clone(), Binding::Module(target));
                 }
-                None => {
-                    for (i, d) in self.modules[target].module.defs.iter().enumerate() {
-                        scope.insert(d.name.clone(), Binding::Def(target, i));
-                    }
-                }
+                None => scope.extend(self.modules[target].own.clone()),
             }
         }
 
+        // A module's own definitions shadow imports; a name defined more
+        // than once is an overload set, which needs a signature on each.
         let m = self.modules.len();
-        let mut seen = HashSet::new();
+        let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
         for (i, d) in parsed.module.defs.iter().enumerate() {
-            if seen.insert(d.name.clone()) {
-                scope.insert(d.name.clone(), Binding::Def(m, i));
-            } else {
-                let msg = format!("`{}` is defined twice (overloading is not supported yet)", d.name);
-                self.diags.push(make_diag(&path, &text, d.span.start as usize, msg));
+            match groups.iter_mut().find(|(n, _)| *n == d.name) {
+                Some((_, is)) => is.push(i),
+                None => groups.push((d.name.clone(), vec![i])),
             }
         }
+        let mut own = HashMap::new();
+        for (name, is) in groups {
+            let b = if is.len() == 1 {
+                Binding::Def(m, is[0])
+            } else {
+                for &i in &is {
+                    let d = &parsed.module.defs[i];
+                    if d.ty.is_none() {
+                        let msg = format!("`{name}` is defined more than once, so each definition needs a type signature (overloading)");
+                        self.diags.push(make_diag(&path, &text, d.span.start as usize, msg));
+                    }
+                }
+                Binding::Overloads(m, is)
+            };
+            own.insert(name, b);
+        }
+        scope.extend(own.clone());
 
         self.stack.pop();
         self.by_path.insert(path.clone(), m);
-        self.modules.push(LoadedModule { path, text, module: parsed.module, scope });
+        self.modules.push(LoadedModule { path, text, module: parsed.module, scope, own });
         m
     }
 

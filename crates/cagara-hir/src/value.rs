@@ -88,12 +88,21 @@ pub struct Template {
     pub arity: usize,
 }
 
+/// The definition being evaluated and the candidates filling its overload
+/// holes (see `check::Choice`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Inst {
+    pub def: (usize, usize),
+    pub holes: Vec<(usize, usize)>,
+}
+
 #[derive(Debug)]
 pub struct Closure {
     pub param: String,
     pub body: ast::Expr,
     pub env: Env,
     pub module: usize,
+    pub inst: Rc<Inst>,
 }
 
 #[derive(Debug, Clone)]

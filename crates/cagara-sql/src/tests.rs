@@ -121,3 +121,22 @@ fn errors() {
     let w = error("q = users & where (rowNumber { order = [.id] } <= 3)\n", "q");
     assert!(w.contains("window"), "{w}");
 }
+
+#[test]
+fn overloads_dispatch_to_sql() {
+    let s = sql("q = users & select { s = .name + \"!\", a = .age + 1 }\n", "q");
+    assert!(s.contains("name || '!' AS s"), "{s}");
+    assert!(s.contains("age + 1 AS a"), "{s}");
+    // One generic helper, two dispatches in the same query.
+    let s = sql("twice = x => x + x\nquad = x => twice (twice x)\nq = users & select { a = quad .age, s = twice .name }\n", "q");
+    assert!(s.contains("age + age"), "{s}");
+    assert!(s.contains("name || name AS s"), "{s}");
+    let s = sql(
+        "describe : expr r int -> expr r string = sql \"CAST($1 AS TEXT)\"\n\
+         describe : expr r bool -> expr r string = sql \"CASE WHEN $1 THEN 'yes' ELSE 'no' END\"\n\
+         q = users & select { a = describe .age, b = describe .active }\n",
+        "q",
+    );
+    assert!(s.contains("CAST(age AS TEXT)"), "{s}");
+    assert!(s.contains("CASE WHEN active THEN 'yes' ELSE 'no' END"), "{s}");
+}

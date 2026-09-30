@@ -3,6 +3,7 @@
 //! aggregate or window node may only contain row-phase expressions, which is
 //! what enforces the one-level nesting rule for `agg` and `win`.
 
+use crate::rules;
 pub use cagara_syntax::ast::{Side, Span};
 
 /// Source location of a query stage in user code.
@@ -86,7 +87,7 @@ impl Expr {
             Expr::Lit(_) => Ok(Phase::Const),
             Expr::Tpl(_, args) => args
                 .iter()
-                .try_fold(Phase::Const, |acc, a| join(acc, a.phase()?)),
+                .try_fold(Phase::Const, |acc, a| rules::mix(acc, a.phase()?)),
             Expr::Agg(_, args) => {
                 args.iter()
                     .try_for_each(|a| row_only(a, "an aggregate argument"))?;
@@ -139,32 +140,7 @@ impl Expr {
 }
 
 fn row_only(e: &Expr, what: &str) -> Result<(), String> {
-    match e.phase()? {
-        Phase::Const | Phase::Row => Ok(()),
-        Phase::Agg => Err(format!(
-            "{what} contains an aggregate; aggregates cannot nest (aggregate in an earlier `agg` stage)"
-        )),
-        Phase::Win => Err(format!(
-            "{what} contains a window function; windows cannot nest (compute it in an earlier `select` stage)"
-        )),
-    }
-}
-
-fn join(a: Phase, b: Phase) -> Result<Phase, String> {
-    use Phase::*;
-    match (a, b) {
-        (Const, p) | (p, Const) => Ok(p),
-        (Row, Row) => Ok(Row),
-        (Agg, Agg) => Ok(Agg),
-        (Win, Win) | (Row, Win) | (Win, Row) => Ok(Win),
-        (Row, Agg) | (Agg, Row) => {
-            Err("mixes an aggregate with an ungrouped column; wrap the column in `group`".into())
-        }
-        (Agg, Win) | (Win, Agg) => Err(
-            "mixes an aggregate with a window function; use `agg` first, then `select` the window"
-                .into(),
-        ),
-    }
+    rules::nested(what, e.phase()?)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

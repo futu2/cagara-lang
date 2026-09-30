@@ -6,6 +6,7 @@ pub mod ir;
 pub mod lower;
 pub mod prims;
 pub mod resolve;
+pub mod rules;
 pub mod schema;
 pub mod value;
 pub mod workspace;

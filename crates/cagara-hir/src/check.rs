@@ -44,9 +44,10 @@
 //! an unconstrained row (the schema validator checks them).
 
 use crate::db::ModuleInput;
-use crate::ir::{JoinKind, KeyMapper};
+use crate::ir::{JoinKind, KeyMapper, Phase};
 use crate::lower::parse_module;
 use crate::resolve::{module_own, module_scope};
+use crate::rules::{self, Place};
 use crate::value::Prim;
 use crate::workspace::{diag_in, Binding, Diag, Workspace};
 use cagara_syntax::ast::{self, ExprKind, Side, Span, TypeExpr};
@@ -118,11 +119,22 @@ const CONS: &[(&str, usize)] = &[
     ("bound", 0),
 ];
 
-const JOIN_ONLY: &str =
-    "`.<x` and `.>x` refer to the inputs of a join and can only be used in a join predicate";
 const NULLABLE: &str = "expected a non-null value, found a `maybe`; use `coalesce default x` \
                         (or `isNull` / `isNotNull` to test it)";
-const UNGROUPED: &str = "mixes an aggregate with an ungrouped column; wrap the column in `group`";
+/// An aggregate reaching a phase that must be row or window: next to a
+/// plain column, or as a `select` field.
+const UNGROUPED: &str = "aggregates cannot mix with ungrouped columns or be `select` fields; \
+                         aggregate in `agg`, with columns wrapped in `group`";
+
+/// The IR phase a phase type stands for, once it is known.
+fn phase_of(t: &Ty) -> Option<Phase> {
+    match t {
+        Ty::Con("row", _) => Some(Phase::Row),
+        Ty::Con("agg", _) => Some(Phase::Agg),
+        Ty::Con("win", _) => Some(Phase::Win),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum Cons {
@@ -556,22 +568,6 @@ fn missing(l: &str, have: &[(String, Ty)]) -> String {
     }
 }
 
-fn phase_clash(a: &str, b: &str) -> String {
-    match (a, b) {
-        ("agg", "win") | ("win", "agg") => {
-            "mixes an aggregate with a window function; use `agg` first, then `select` the window"
-                .into()
-        }
-        ("agg", _) | (_, "agg") => {
-            "aggregates cannot nest or mix with plain row values; wrap columns in \
-                                    `group`, or aggregate in an earlier `agg` stage"
-                .into()
-        }
-        _ => "window functions cannot nest; compute the inner window in an earlier `select` stage"
-            .into(),
-    }
-}
-
 impl<'w> Checker<'w> {
     // ── variables and substitution ─────────────────────────────────────────
 
@@ -701,12 +697,25 @@ impl<'w> Checker<'w> {
             (_, Ty::Var(v)) => self.bind(*v, a.clone()),
             (Ty::Rigid(x, _), Ty::Rigid(y, _)) if x == y => Ok(()),
             (Ty::Empty, Ty::Empty) => Ok(()),
+            // Label lists and rename records are compared by content: a key
+            // mapper built from one must not stand for another.
+            (Ty::Labels(x), Ty::Labels(y)) if x == y => Ok(()),
+            (Ty::Labels(_), Ty::Labels(_)) => Err(self.mismatch(&a, &e)),
+            (Ty::Renames(x), Ty::Renames(y)) => {
+                let (mut x, mut y) = (x.clone(), y.clone());
+                x.sort();
+                y.sort();
+                if x == y {
+                    Ok(())
+                } else {
+                    Err(self.mismatch(&a, &e))
+                }
+            }
             (
                 Ty::Row(..) | Ty::Renames(..),
                 Ty::Row(..) | Ty::Empty | Ty::Rigid(..) | Ty::Renames(..),
             )
             | (Ty::Empty | Ty::Rigid(..), Ty::Row(..) | Ty::Renames(..)) => self.unify_rows(&a, &e),
-            (Ty::Labels(_), Ty::Labels(_)) => Ok(()),
             (Ty::Labels(ls), Ty::Con("list", x)) | (Ty::Con("list", x), Ty::Labels(ls)) => {
                 if ls.is_empty() {
                     // `[]` fits any element type.
@@ -775,12 +784,8 @@ impl<'w> Checker<'w> {
     }
 
     fn mismatch(&self, a: &Ty, e: &Ty) -> String {
-        let phase = |t: &Ty| match t {
-            Ty::Con(n @ ("row" | "agg" | "win"), _) => Some(*n),
-            _ => None,
-        };
-        if let (Some(x), Some(y)) = (phase(a), phase(e)) {
-            return phase_clash(x, y);
+        if let (Some(x), Some(y)) = (phase_of(a), phase_of(e)) {
+            return rules::clash(x, y);
         }
         let join = |t: &Ty| matches!(t, Ty::Con("join", _));
         let plain = |t: &Ty| matches!(t, Ty::Row(..) | Ty::Empty);
@@ -1131,9 +1136,26 @@ impl<'w> Checker<'w> {
         while let TypeExpr::Fun(_, r) = res {
             res = r;
         }
+        // A plain `expr` result takes the phase of an `agg` / `win`
+        // argument (a scalar template over an aggregate is an aggregate).
+        let mut wrapped = Vec::new();
+        let mut arg = t;
+        while let TypeExpr::Fun(a, r) = arg {
+            if let TypeExpr::App { head, .. } = a.as_ref() {
+                if (head == "agg" || head == "win") && !wrapped.contains(&head.as_str()) {
+                    wrapped.push(head.as_str());
+                }
+            }
+            arg = r;
+        }
         let phase = match res {
             TypeExpr::App { head, .. } if head == "agg" || head == "win" => con("row"),
-            _ => self.fresh(),
+            _ => match wrapped.as_slice() {
+                [] => self.fresh(),
+                ["agg"] => con("agg"),
+                ["win"] => con("win"),
+                _ => return Err(rules::clash(Phase::Agg, Phase::Win)),
+            },
         };
         let mut names = HashMap::new();
         self.conv(t, &phase, &mut names)
@@ -1594,14 +1616,7 @@ impl<'w> Checker<'w> {
     }
 
     fn key_phase(&mut self, p: &Ty) -> U {
-        match self.resolve(p) {
-            Ty::Con("agg" | "win", _) => {
-                Err("sort and partition keys must be plain column expressions; \
-                                              compute aggregates or windows in an earlier stage"
-                    .into())
-            }
-            _ => self.unify(p, &con("row")),
-        }
+        self.place(Place::Key, p)
     }
 
     fn winspec(&mut self, spec: &Ty, r: &Ty) -> U {
@@ -1807,17 +1822,9 @@ impl<'w> Checker<'w> {
                 Ty::Con("expr", a) => {
                     let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
                     if is_join(&self.resolve(&r)) {
-                        return Err(JOIN_ONLY.into());
+                        return Err(rules::JOIN_ONLY.into());
                     }
-                    match self.resolve(&p) {
-                        Ty::Con("agg", _) => {
-                            return Err("`where` cannot filter on an aggregate; filter the output of an `agg` stage instead".into())
-                        }
-                        Ty::Con("win", _) => {
-                            return Err("`where` cannot filter on a window function; `select` it first, then filter the new column".into())
-                        }
-                        _ => self.unify(&p, &con("row"))?,
-                    }
+                    self.place(Place::Where, &p)?;
                     if matches!(self.resolve(row), Ty::Var(_)) {
                         return Ok(false);
                     }
@@ -1867,7 +1874,7 @@ impl<'w> Checker<'w> {
                         Ty::Con("expr", a) => {
                             let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
                             if is_join(&self.resolve(&r)) {
-                                return Err(format!("field `{l}`: {JOIN_ONLY}"));
+                                return Err(format!("field `{l}`: {}", rules::JOIN_ONLY));
                             }
                             self.stage_phase(&p, *agg)
                                 .map_err(|m| format!("field `{l}` {m}"))?;
@@ -1896,14 +1903,7 @@ impl<'w> Checker<'w> {
                         ))
                     }
                 };
-                match self.resolve(&p) {
-                    Ty::Con("agg" | "win", _) => {
-                        return Err(
-                            "join predicates cannot contain aggregates or window functions".into(),
-                        )
-                    }
-                    _ => self.unify(&p, &con("row"))?,
-                }
+                self.place(Place::JoinOn, &p)?;
                 match self.resolve(&r) {
                     Ty::Con("join", sides) => {
                         if [left, right]
@@ -1923,10 +1923,8 @@ impl<'w> Checker<'w> {
                     }
                     o => {
                         let (fs, _) = self.flatten(&o);
-                        let n = fs.first().map_or("x", |(k, _)| k.as_str()).to_string();
-                        return Err(format!(
-                            "join predicates must say which input a column comes from: `.<{n}` (left) or `.>{n}` (right)"
-                        ));
+                        let n = fs.first().map_or("x", |(k, _)| k.as_str());
+                        return Err(rules::needs_side(n));
                     }
                 }
                 self.unify(&v, &con("bool")).map_err(|_| {
@@ -1990,23 +1988,26 @@ impl<'w> Checker<'w> {
                     return Ok(false);
                 }
                 // The far side of an outer join may be missing: its columns
-                // become `maybe` (once; `maybe (maybe a)` is `maybe a`).
-                let wrap = |this: &Self, on: bool, t: Ty| match this.resolve(&t) {
-                    Ty::Con("maybe", _) => t,
-                    _ if on => Ty::Con("maybe", vec![t]),
-                    _ => t,
+                // become `maybe` (once; `maybe (maybe a)` is `maybe a`). That
+                // needs to know which already are: wait for a column whose
+                // type may still turn out to be a `maybe`.
+                let open = |t: &Ty| match self.resolve(t) {
+                    Ty::Var(v) => !self.vars[v as usize].nonnull,
+                    _ => false,
                 };
-                let mut fs: Vec<(String, Ty)> = lf
-                    .iter()
-                    .map(|(k, t)| (k.clone(), wrap(self, nullable.0, t.clone())))
-                    .collect();
-                for (k, t) in rf {
-                    if !lf.iter().any(|(o, _)| *o == k) {
-                        let t = wrap(self, nullable.1, t);
-                        fs.push((k, t));
-                    }
+                if (nullable.0 && lf.iter().any(|(_, t)| open(t)))
+                    || (nullable.1 && rf.iter().any(|(_, t)| open(t)))
+                {
+                    return Ok(false);
                 }
-                self.unify(&row(fs, Ty::Empty), out)?;
+                let wrap = |this: &Self, on: bool, (k, t): (String, Ty)| match this.resolve(&t) {
+                    Ty::Con("maybe", _) => (k, t),
+                    _ if on => (k, Ty::Con("maybe", vec![t])),
+                    _ => (k, t),
+                };
+                let lf: Vec<_> = lf.into_iter().map(|c| wrap(self, nullable.0, c)).collect();
+                let rf: Vec<_> = rf.into_iter().map(|c| wrap(self, nullable.1, c)).collect();
+                self.unify(&row(rules::join_columns(&lf, &rf), Ty::Empty), out)?;
                 Ok(true)
             }
         }
@@ -2056,21 +2057,33 @@ impl<'w> Checker<'w> {
 
     /// Phase rules for one `select` / `agg` field (messages follow the label).
     fn stage_phase(&mut self, p: &Ty, agg: bool) -> U {
-        match (agg, self.resolve(p)) {
-            (false, Ty::Con("agg", _)) => {
-                Err("is an aggregate; aggregates belong in `agg`, not `select`".into())
+        let at = if agg { Place::Agg } else { Place::Select };
+        match self.resolve(p) {
+            t @ Ty::Con(..) => match phase_of(&t) {
+                Some(ph) => rules::place(at, ph),
+                None => Err(format!("not a phase: {}", self.show(&t))),
+            },
+            // Still open, e.g. a helper's parameter (`e => select { x = e }`):
+            // a `select` field may become a row or window expression, never
+            // an aggregate, so its uses are checked too.
+            Ty::Var(v) if !agg => {
+                if !self.vars[v as usize].row_or_win {
+                    self.trail.push((v, self.vars[v as usize].clone()));
+                    self.vars[v as usize].row_or_win = true;
+                }
+                Ok(())
             }
-            (false, _) => Ok(()),
-            (true, Ty::Con("win", _)) => {
-                Err("is a window function; use it in a `select` stage after `agg`".into())
-            }
-            (true, Ty::Con("row", _)) => {
-                Err("uses a column that is not grouped; wrap it in `group` or aggregate it".into())
-            }
-            (true, Ty::Var(v)) if self.vars[v as usize].row_or_win => {
-                Err("uses a column that is not grouped; wrap it in `group` or aggregate it".into())
-            }
-            (true, _) => self.unify(p, &con("agg")),
+            Ty::Var(v) if self.vars[v as usize].row_or_win => rules::place(at, Phase::Row),
+            _ => self.unify(p, &con("agg")),
+        }
+    }
+
+    /// Phase rules for a `where` condition, join predicate, or key: row (or
+    /// constant). An open phase becomes `row`.
+    fn place(&mut self, at: Place, p: &Ty) -> U {
+        match phase_of(&self.resolve(p)) {
+            Some(ph) => rules::place(at, ph),
+            None => self.unify(p, &con("row")),
         }
     }
 

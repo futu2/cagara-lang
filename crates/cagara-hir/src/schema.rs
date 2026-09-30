@@ -1,7 +1,8 @@
 //! Output-schema computation and static validation of the relational IR:
 //! column existence, key-mapper validity, join sides, and phase placement.
 
-use crate::ir::{Expr, KeyMapper, Loc, Phase, Rel, Side};
+use crate::ir::{Expr, KeyMapper, Loc, Rel, Side};
+use crate::rules::{self, Place};
 
 pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
     match rel {
@@ -13,11 +14,8 @@ pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
         Rel::Where(r, e) => {
             let c = schema(r)?;
             refs(e, &c, "where")?;
-            match e.phase()? {
-                Phase::Agg => Err("`where` cannot filter on an aggregate; filter the output of an `agg` stage instead".into()),
-                Phase::Win => Err("`where` cannot filter on a window function; `select` it first, then filter the new column".into()),
-                _ => Ok(c),
-            }
+            rules::place(Place::Where, e.phase()?)?;
+            Ok(c)
         }
         Rel::Select(r, fs) => projection(fs, &schema(r)?, false),
         Rel::Agg(r, fs) => projection(fs, &schema(r)?, true),
@@ -25,9 +23,7 @@ pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
             let c = schema(r)?;
             for (k, _) in ks {
                 refs(k, &c, "order")?;
-                if matches!(k.phase()?, Phase::Agg | Phase::Win) {
-                    return Err("sort keys must be plain column expressions; compute aggregates or windows in an earlier stage".into());
-                }
+                rules::place(Place::Key, k.phase()?)?;
             }
             Ok(c)
         }
@@ -39,22 +35,16 @@ pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
                 let (cols, what) = match side {
                     Side::Left => (&lc, "left"),
                     Side::Right => (&rc, "right"),
-                    Side::Single => {
-                        return Err(format!(
-                            "join predicates must say which input a column comes from: `.<{n}` (left) or `.>{n}` (right)"
-                        ))
-                    }
+                    Side::Single => return Err(rules::needs_side(&n)),
                 };
                 if !cols.contains(&n) {
                     return Err(format!("the {what} join input has no column `{n}`; available: {}", cols.join(", ")));
                 }
             }
-            if matches!(on.phase()?, Phase::Agg | Phase::Win) {
-                return Err("join predicates cannot contain aggregates or window functions".into());
-            }
-            let mut out = lc.clone();
-            out.extend(rc.into_iter().filter(|n| !lc.contains(n)));
-            Ok(out)
+            rules::place(Place::JoinOn, on.phase()?)?;
+            let named = |cs: Vec<String>| cs.into_iter().map(|c| (c, ())).collect::<Vec<_>>();
+            let out = rules::join_columns(&named(lc), &named(rc));
+            Ok(out.into_iter().map(|(c, ())| c).collect())
         }
     }
 }
@@ -86,24 +76,8 @@ fn projection(fs: &[(String, Expr)], cols: &[String], agg: bool) -> Result<Vec<S
     for (n, e) in fs {
         refs(e, cols, stage).map_err(|m| format!("field `{n}`: {m}"))?;
         let phase = e.phase().map_err(|m| format!("field `{n}`: {m}"))?;
-        match (agg, phase) {
-            (false, Phase::Agg) => {
-                return Err(format!(
-                    "field `{n}` is an aggregate; aggregates belong in `agg`, not `select`"
-                ))
-            }
-            (true, Phase::Row) => {
-                return Err(format!(
-                "field `{n}` uses a column that is not grouped; wrap it in `group` or aggregate it"
-            ))
-            }
-            (true, Phase::Win) => {
-                return Err(format!(
-                    "field `{n}` is a window function; use it in a `select` stage after `agg`"
-                ))
-            }
-            _ => {}
-        }
+        let at = if agg { Place::Agg } else { Place::Select };
+        rules::place(at, phase).map_err(|m| format!("field `{n}` {m}"))?;
     }
     Ok(fs.iter().map(|(n, _)| n.clone()).collect())
 }
@@ -117,11 +91,7 @@ fn refs(e: &Expr, cols: &[String], ctx: &str) -> Result<(), String> {
                     cols.join(", ")
                 ))
             }
-            Side::Left | Side::Right => {
-                return Err(format!(
-                    "`.<{n}` / `.>{n}` can only be used in a join predicate"
-                ))
-            }
+            Side::Left | Side::Right => return Err(rules::JOIN_ONLY.into()),
             _ => {}
         }
     }
@@ -130,7 +100,8 @@ fn refs(e: &Expr, cols: &[String], ctx: &str) -> Result<(), String> {
 
 impl KeyMapper {
     /// Map input columns to `(old, new)` pairs in output order, rejecting
-    /// missing sources, duplicate selectors, and output collisions.
+    /// missing sources, duplicate selectors, output collisions, and an empty
+    /// output. The checker and the validator both use this.
     pub fn apply(&self, cols: &[String]) -> Result<Vec<(String, String)>, String> {
         let exists = |k: &String| {
             if cols.contains(k) {
@@ -174,6 +145,9 @@ impl KeyMapper {
                 .map(|c| (c.clone(), format!("{c}{s}")))
                 .collect(),
         };
+        if out.is_empty() {
+            return Err("key mapping leaves no columns".into());
+        }
         let names: Vec<String> = out.iter().map(|p| p.1.clone()).collect();
         match first_dup(&names) {
             Some(d) => Err(format!("key mapping would produce column `{d}` twice")),

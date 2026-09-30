@@ -284,14 +284,7 @@ impl Lowerer {
                     Side::Right => find(&r.items, n),
                     Side::Single => Err(format!("join predicates need `.<{n}` or `.>{n}`")),
                 })?;
-                let lnames: Vec<&String> = l.items.iter().map(|(n, _)| n).collect();
-                let mut items: Vec<(String, Expr)> = l.items.clone();
-                items.extend(
-                    r.items
-                        .iter()
-                        .filter(|(n, _)| !lnames.contains(&n))
-                        .cloned(),
-                );
+                let items = cagara_hir::rules::join_columns(&l.items, &r.items);
                 let mut wheres = l.wheres;
                 let on = match kind {
                     JoinKind::Inner | JoinKind::Right => {

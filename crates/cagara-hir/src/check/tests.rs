@@ -540,3 +540,161 @@ fn users_of_a_failed_definition_fail_too() {
         assert!(r.is_err(), "`{name}` compiled");
     }
 }
+
+/// Every root definition the checker accepts must also evaluate and pass the
+/// IR validator: the two share their rules (`crate::rules`), and a program
+/// that only the validator rejects is a checker bug. Returns each checked
+/// definition's type or error, like `types`.
+fn consistent(ws: &Workspace) -> Vec<(String, Result<String, String>)> {
+    let tc = check(ws);
+    let m = ws.root;
+    let evaluated = crate::root_queries_checked(ws, &tc);
+    let mut out = Vec::new();
+    for (i, d) in ws.modules[m].module.defs.iter().enumerate() {
+        let r = match tc.error_for(m, i) {
+            Some(e) => Err(e.message.clone()),
+            None => {
+                if let Some((_, Err(e))) = evaluated.iter().find(|(n, _)| *n == d.name) {
+                    panic!("`{}` type-checks but fails later: {}", d.name, e.message);
+                }
+                Ok(tc.type_of(m, i).unwrap_or("?").to_string())
+            }
+        };
+        out.push((d.name.clone(), r));
+    }
+    out
+}
+
+fn consistent_src(src: &str) -> Vec<(String, Result<String, String>)> {
+    let ws = Workspace::from_source(&format!("{TABLES}{src}"));
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    consistent(&ws)
+}
+
+fn result<'a>(
+    rs: &'a [(String, Result<String, String>)],
+    name: &str,
+) -> &'a Result<String, String> {
+    &rs.iter()
+        .find(|(n, _)| n == name)
+        .expect("no such definition")
+        .1
+}
+
+#[test]
+fn examples_are_consistent() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    for f in [
+        "report.cagara",
+        "public.cagara",
+        "errors.cagara",
+        "schema.cagara",
+    ] {
+        let ws = Workspace::open(&dir.join(f));
+        assert!(ws.diags.is_empty(), "{f}: {:?}", ws.diags);
+        consistent(&ws);
+    }
+}
+
+#[test]
+fn label_lists_unify_by_content() {
+    // One key mapper parameter used at two different column lists: before,
+    // `r.b` typed as `{ id = int }` and the validator found no `id`.
+    let rs = consistent_src(
+        "r = (p => { a = users & p [\"id\"], b = users & p [\"name\"] }) pick\n\
+         q = r.b & select { z = .id + 1 }\n\
+         s = (p => { a = users & p { id = \"x\" }, b = users & p { id = \"y\" } }) rename\n\
+         same = (p => { a = users & p [\"id\"], b = users & p [\"id\"] }) pick\n",
+    );
+    assert!(
+        result(&rs, "r")
+            .as_ref()
+            .is_err_and(|e| e.contains("mismatch")),
+        "{rs:?}"
+    );
+    assert!(
+        result(&rs, "s")
+            .as_ref()
+            .is_err_and(|e| e.contains("mismatch")),
+        "{rs:?}"
+    );
+    assert!(result(&rs, "same").is_ok(), "{rs:?}");
+}
+
+#[test]
+fn select_fields_stay_out_of_the_aggregate_phase() {
+    // `e` is open inside `h`; `select` now fixes it to row-or-window, so
+    // passing an aggregate fails at the use instead of in the validator.
+    let h = "h = e => users & select { x = e + 1, id = .id }\n";
+    let rs = consistent_src(&format!(
+        "{h}q = h count\nok = h .age\nwin = h (rowNumber {{ order = [asc .id] }})\n"
+    ));
+    assert!(
+        result(&rs, "q")
+            .as_ref()
+            .is_err_and(|e| e.contains("`select`")),
+        "{rs:?}"
+    );
+    assert!(result(&rs, "ok").is_ok(), "{rs:?}");
+    assert!(result(&rs, "win").is_ok(), "{rs:?}");
+}
+
+#[test]
+fn a_scalar_template_over_an_aggregate_is_an_aggregate() {
+    let rs = consistent_src(
+        "inc : agg (expr r int) -> expr r int = sql \"$1 + 1\"\n\
+         bad = users & select { v = inc count, id = .id }\n\
+         good = users & agg { v = inc count }\n\
+         both : agg (expr r int) -> win (expr r int) -> expr r int = sql \"$1 + $2\"\n",
+    );
+    assert!(
+        result(&rs, "bad")
+            .as_ref()
+            .is_err_and(|e| e.contains("aggregate")),
+        "{rs:?}"
+    );
+    assert_eq!(result(&rs, "good").as_deref(), Ok("query { v = int }"));
+    assert!(
+        result(&rs, "both")
+            .as_ref()
+            .is_err_and(|e| e.contains("window")),
+        "{rs:?}"
+    );
+}
+
+#[test]
+fn key_mappers_leave_some_column() {
+    let rs = consistent_src(
+        "a = users & pick []\n\
+         b = users & omit [\"id\", \"name\", \"age\", \"active\"]\n\
+         c = users & omit [\"id\", \"name\", \"age\"]\n",
+    );
+    assert!(
+        result(&rs, "a")
+            .as_ref()
+            .is_err_and(|e| e.contains("no columns")),
+        "{rs:?}"
+    );
+    assert!(
+        result(&rs, "b")
+            .as_ref()
+            .is_err_and(|e| e.contains("no columns")),
+        "{rs:?}"
+    );
+    assert_eq!(result(&rs, "c").as_deref(), Ok("query { active = bool }"));
+}
+
+#[test]
+fn outer_joins_wrap_once_even_through_helpers() {
+    // The right input's column types are unknown inside `f`; wrapping them
+    // there made `u.v : maybe int` a `maybe (maybe int)`.
+    let rs = consistent_src(
+        "u : query { uid = int, v = maybe int, n = int } = table \"p\" \"u\"\n\
+         f = q => users & leftJoin (q & select { uid = .uid, v = .v, n = .n }) (.<id == .>uid)\n\
+         q = f u & select { w = .v ?? 0, n = .n ?? 0 }\n",
+    );
+    assert_eq!(
+        result(&rs, "q").as_deref(),
+        Ok("query { w = int, n = int }")
+    );
+}

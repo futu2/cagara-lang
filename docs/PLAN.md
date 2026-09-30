@@ -28,7 +28,7 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 | Crate | Contents |
 |---|---|
 | `cagara-syntax` | lexer, parser (Pratt operators, column-0 layout rule, error recovery), AST lowering; operators desugar to calls (`a + b` → `_+_ a b`) |
-| `cagara-hir` | salsa db (`parse_module`, per-module `module_check` queries), workspace/module loading, type checker (`check.rs`), evaluator, `__` primitives, IR, schema/phase validation |
+| `cagara-hir` | salsa db (`parse_module`, per-module `module_check` queries), workspace/module loading, type checker (`check.rs`), evaluator, `__` primitives, IR, schema/phase validation, placement rules shared by both (`rules.rs`) |
 | `cagara-sql` | IR → sqlglot stages, `sql "..."` template expansion, dialect rewriting, end-to-end tests |
 | `cagara-lsp` | language server library over stdio (`lsp-server`), run by `cagara lsp`: diagnostics, hover, definitions, references, symbols, completion |
 | `cagara-cli` | the single `cagara` executable: `cagara <file> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]`, and `cagara lsp` |
@@ -60,6 +60,17 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
   travel with a definition's type scheme and are re-instantiated at each use.
 - **Phases are structural in the IR.** Aggregate and window nodes accept only
   row-phase arguments, which enforces the depth-1 rule.
+- **One set of placement rules.** Which phase may appear in `where`,
+  `select`, `agg`, keys, and join predicates, how phases combine, the join
+  output columns, and key-mapper validity live in `rules.rs` /
+  `KeyMapper::apply`, used by the checker (once a phase type is known) and
+  the IR validator alike. A test checks that every definition the checker
+  accepts, including the examples, also evaluates and validates.
+- **A `sql` template's result follows its `agg` / `win` arguments.**
+  `inc : agg (expr r int) -> expr r int` is an aggregate (the arguments
+  may not mix `agg` and `win`). A `select` field whose phase is still open
+  (a helper's parameter) is fixed to row-or-window, so an aggregate passed
+  in is rejected at the use.
 - **Tables get columns from their annotation:**
   `users : query { id = int, ... } = table "public" "users"`.
 - **Lowering fuses stages** into one SELECT when safe and wraps a derived table
@@ -82,7 +93,7 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 113 tests, no clippy warnings):
+Done and tested (`cargo test --workspace`: 119 tests, no clippy warnings):
 
 - Lexer, parser, AST lowering (21 tests), including recovery, losslessness,
   and a nesting / chain-length limit that reports a syntax error instead of
@@ -210,13 +221,11 @@ Known gaps:
    identifier quoting and literal escaping, constant sort / group keys,
    `--` from negative numbers, intrinsics inside window specs, language
    server survives malformed messages and panics).
-9. **Checker and IR validator agree.** Programs the checker accepts but the
-   validator rejects: label lists unify by shape only; a `select` field's
-   phase variable can later become `agg`; a `sql` signature can take
-   `agg (expr ..)` and return `expr`; `pick []` / `omit` everything leave no
-   columns; outer joins can give `maybe (maybe a)`. Move the phase and
-   join-side rules into one module used by both, and add a test that every
-   accepted program validates.
+9. ~~Checker and IR validator agree~~ (done: label lists and rename
+   records unify by content; open `select` phases stay out of `agg`;
+   template results follow `agg` / `win` arguments; key mappers must leave
+   a column; outer joins wait for column types before adding `maybe`;
+   shared `rules.rs`; consistency test).
 10. **SQL semantics.** Keep ORDER BY when a stage is wrapped; integer `/`
     per dialect (`CAGARA_IDIV`); explicit NULLS FIRST / LAST; T-SQL `LEN`
     and boolean select items; error on an unresolved `$n` in a template;

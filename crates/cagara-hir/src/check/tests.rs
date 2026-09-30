@@ -495,3 +495,48 @@ fn constants_keep_their_polymorphic_type_when_unused() {
     // A column that does not exist is still an error.
     assert!(err(&format!("{src}q = orders & where (adult)\n"), "q").contains("no column `age`"));
 }
+
+#[test]
+fn overload_candidates_resolve_their_own_overloads() {
+    // `1 + 2` is open inside the int candidate. Uses pick a candidate by its
+    // signature alone, so the candidate resolves it (defaulting the
+    // literals) instead of leaving a hole no use can fill. This used to hit
+    // an `unreachable!` in the checker.
+    let src = "k = x => y => x\n\
+               f : expr r int -> expr r int = x => k x (1 + 2)\n\
+               f : expr r float -> expr r float = x => x\n\
+               q = users & select { v = f .age, w = f 1.5 }\n";
+    assert_eq!(ty(src, "q"), "query { v = int, w = float }");
+    let ws = Workspace::from_source(&format!("{TABLES}{src}"));
+    let tc = check(&ws);
+    for (name, r) in crate::root_queries_checked(&ws, &tc) {
+        assert!(r.is_ok(), "`{name}`: {:?}", r.err());
+    }
+}
+
+#[test]
+fn users_of_a_failed_definition_fail_too() {
+    // `r` has a type error; `q` must not be compiled against a made-up type.
+    let src = "r = users & select { s = .name, bad = .id + \"x\" }\n\
+               q = r & select { z = .s + 1 }\n\
+               q2 = q & select { y = .z }\n";
+    assert!(err(src, "r").contains("found string"), "{}", err(src, "r"));
+    assert!(
+        err(src, "q").contains("`r` has a type error"),
+        "{}",
+        err(src, "q")
+    );
+    assert!(
+        err(src, "q2").contains("`q` has a type error"),
+        "{}",
+        err(src, "q2")
+    );
+    // So nothing evaluates either.
+    let ws = Workspace::from_source(&format!("{TABLES}{src}"));
+    let tc = check(&ws);
+    let out = crate::root_queries_checked(&ws, &tc);
+    for name in ["r", "q", "q2"] {
+        let (_, r) = out.iter().find(|(n, _)| n == name).expect("reported");
+        assert!(r.is_err(), "`{name}` compiled");
+    }
+}

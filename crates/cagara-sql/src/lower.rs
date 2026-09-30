@@ -2,7 +2,7 @@
 //! current stage or wraps it in a derived table when fusing would change
 //! meaning (e.g. filtering after aggregation, windows, or LIMIT).
 
-use crate::stage::{and_all, col, lower_expr, qualify, Stage};
+use crate::stage::{and_all, col, ident_style, lower_expr, qualify, Stage};
 use cagara_hir::ir::{Expr as IrExpr, JoinKind, Rel, Side};
 use sqlglot_rust::ast::{
     Expr, JoinClause, JoinType, OrderByItem, QuoteStyle, TableRef, TableSource,
@@ -36,9 +36,17 @@ impl Lowerer {
     /// table (or over an earlier join) is inlined with qualified columns
     /// instead of becoming a derived table, as long as its filters may move
     /// (`can_place`: to WHERE for a preserved side, into ON for the right
-    /// side of a left join; see the join case).
-    fn join_input(&mut self, st: Stage, can_place: bool) -> JoinInput {
+    /// side of a left join; see the join case). A side the join may
+    /// null-extend (`null_ext`) is only inlined when it projects bare
+    /// columns: a computed column (`1`, `coalesce ..`) must be computed
+    /// before the join, or it is not NULL on unmatched rows.
+    fn join_input(&mut self, st: Stage, can_place: bool, null_ext: bool) -> JoinInput {
+        let bare = st
+            .items
+            .iter()
+            .all(|(_, e)| matches!(e, Expr::Column { .. }));
         let fusable = (st.wheres.is_empty() || can_place)
+            && (bare || !null_ext)
             && st.group_by.is_empty()
             && st.order_by.is_empty()
             && st.limit.is_none()
@@ -105,7 +113,7 @@ impl Lowerer {
                     name: name.clone(),
                     alias: None,
                     temporal: None,
-                    name_quote_style: QuoteStyle::None,
+                    name_quote_style: ident_style(name),
                     alias_quote_style: QuoteStyle::None,
                 };
                 Stage::new(
@@ -163,10 +171,19 @@ impl Lowerer {
                     st.has_agg = true;
                     st = self.wrap(st);
                 } else {
-                    st.group_by = keys
+                    let keys: Vec<Expr> = keys
                         .iter()
                         .map(|k| st.resolve(k))
                         .collect::<Result<_, _>>()?;
+                    // A constant key does not split groups, and SQL reads
+                    // `GROUP BY 2` as a position (and rejects `GROUP BY 'x'`).
+                    // Dropping every key would turn "no rows in, no rows out"
+                    // into one row, which HAVING keeps.
+                    let all = keys.len();
+                    st.group_by = keys.into_iter().filter(|k| !is_literal(k)).collect();
+                    if st.group_by.is_empty() && all > 0 {
+                        st.having = Some(crate::stage::template("COUNT(*) > 0", vec![])?);
+                    }
                     st.has_agg = true;
                 }
                 let items = fs
@@ -181,16 +198,18 @@ impl Lowerer {
                 if st.limit.is_some() || st.offset.is_some() {
                     st = self.wrap(st);
                 }
-                let order = ks
-                    .iter()
-                    .map(|(k, asc)| {
-                        Ok(OrderByItem {
-                            expr: st.resolve(k)?,
+                let mut order = Vec::new();
+                for (k, asc) in ks {
+                    let expr = st.resolve(k)?;
+                    // A constant sorts nothing, and `ORDER BY 1` is a position.
+                    if !is_literal(&expr) {
+                        order.push(OrderByItem {
+                            expr,
                             ascending: *asc,
                             nulls_first: None,
-                        })
-                    })
-                    .collect::<Result<_, String>>()?;
+                        });
+                    }
+                }
                 st.order_by = order;
                 st
             }
@@ -238,11 +257,18 @@ impl Lowerer {
                     JoinKind::Right => (false, true),
                     JoinKind::Full => (false, false),
                 };
+                // Sides whose unmatched rows are kept with NULLs for the other.
+                let (left_null, right_null) = match kind {
+                    JoinKind::Inner => (false, false),
+                    JoinKind::Left => (false, true),
+                    JoinKind::Right => (true, false),
+                    JoinKind::Full => (true, true),
+                };
                 let l = self.rel(left)?;
                 let r = self.rel(right)?;
-                let l = self.join_input(l, left_ok);
+                let l = self.join_input(l, left_ok, left_null);
                 // The right input must be a single table or derived table.
-                let r = match self.join_input(r, right_ok) {
+                let r = match self.join_input(r, right_ok, right_null) {
                     ji if ji.joins.is_empty() => ji,
                     ji => self.rewrap(ji),
                 };
@@ -324,5 +350,14 @@ fn collect_groups<'a>(e: &'a IrExpr, out: &mut Vec<&'a IrExpr>) {
     }
     for c in e.children() {
         collect_groups(c, out);
+    }
+}
+
+/// A bare literal, which SQL may read as a column position.
+fn is_literal(e: &Expr) -> bool {
+    match e {
+        Expr::Number(_) | Expr::StringLiteral(_) | Expr::Boolean(_) | Expr::Null => true,
+        Expr::Nested(e) => is_literal(e),
+        _ => false,
     }
 }

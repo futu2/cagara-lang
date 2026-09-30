@@ -66,7 +66,14 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
   after aggregation, windows, or LIMIT/OFFSET. Join inputs that only project
   or filter a table (or an earlier join) are inlined: filters of a preserved
   side move to WHERE, those of a left join's right side into ON; a filtered
-  null-extended side of a right / full join keeps a derived table.
+  null-extended side of a right / full join keeps a derived table, and so
+  does a null-extended side with computed columns (they must be NULL on
+  unmatched rows). Constant ORDER BY / GROUP BY keys are dropped (SQL would
+  read `1` as a position); an all-constant grouping keeps its "no rows in,
+  no rows out" meaning with `HAVING COUNT(*) > 0`.
+- **Identifiers are quoted when needed** (not a lowercase word, or
+  reserved), in the dialect's quotes; string literals double backslashes
+  for dialects that treat `\` as an escape.
 - **SQL is built as ANSI and rewritten per dialect** over every block and
   expression slot (sqlglot's own pass only covers the outer SELECT's
   columns / WHERE / GROUP BY / HAVING). `||` becomes `CONCAT` for MySQL and
@@ -75,7 +82,7 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 87 tests, no clippy warnings):
+Done and tested (`cargo test --workspace`: 113 tests, no clippy warnings):
 
 - Lexer, parser, AST lowering (21 tests), including recovery, losslessness,
   and a nesting / chain-length limit that reports a syntax error instead of
@@ -198,3 +205,38 @@ Known gaps:
 6. ~~Tidy-ups~~ (done: `cagara-core` removed, join inputs inlined,
    `--optimize`, dialect rewriting and tests).
 7. ~~Language server~~ (done; see Status).
+8. ~~Review fixes, first pass~~ (done: checker panic on overload
+   candidates, users of failed definitions, null-extended join inputs,
+   identifier quoting and literal escaping, constant sort / group keys,
+   `--` from negative numbers, intrinsics inside window specs, language
+   server survives malformed messages and panics).
+9. **Checker and IR validator agree.** Programs the checker accepts but the
+   validator rejects: label lists unify by shape only; a `select` field's
+   phase variable can later become `agg`; a `sql` signature can take
+   `agg (expr ..)` and return `expr`; `pick []` / `omit` everything leave no
+   columns; outer joins can give `maybe (maybe a)`. Move the phase and
+   join-side rules into one module used by both, and add a test that every
+   accepted program validates.
+10. **SQL semantics.** Keep ORDER BY when a stage is wrapped; integer `/`
+    per dialect (`CAGARA_IDIV`); explicit NULLS FIRST / LAST; T-SQL `LEN`
+    and boolean select items; error on an unresolved `$n` in a template;
+    Trino / Spark intrinsic families; silent column collisions in
+    self-joins. Add differential tests that run the SQL on DuckDB / SQLite.
+11. **Parser and formatter.** Strings stop at a newline; `at(Ident)` checks
+    respect the column-0 boundary (`x :\ny = 1`); depth limits for types and
+    projection chains; recovery keeps closing delimiters; int overflow is a
+    diagnostic; trailing comments inside `spaced` / `TyApp` / lambdas;
+    `{  | r }`; precedence of `<>` against `+`; property tests for
+    losslessness and format round-trips with comments.
+12. **Language server and CLI.** One shared workspace with open buffers fed
+    to their importers, reloaded on save / watched-file events; the
+    completion probe on a snapshot; `url`-based URI conversion; CLI
+    `args_os`, broken pipe, and `--types --only` exit code; trust gating for
+    repo-local binaries in the editor plugins.
+13. **Checker performance.** Union-find path compression and re-checking an
+    overload only when its variables change (a 250-operator chain takes
+    1.8 s); spans out of salsa results so edits to an import do not re-check
+    every dependent.
+14. **Language.** Conditionals (`CASE`), `distinct`, set operations, `in` /
+    semi-joins, `cast`, CTEs for reused definitions; a null-polymorphic
+    type variable to halve the `maybe` overloads.

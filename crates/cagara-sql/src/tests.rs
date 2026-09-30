@@ -675,3 +675,121 @@ fn shorthand_errors_point_at_the_stage() {
     assert!(d.message.contains("salary"), "{d}");
     assert_eq!(d.source.trim(), "&? (.salary > 1)", "{d}");
 }
+
+#[test]
+fn null_extended_join_inputs_compute_before_the_join() {
+    // A computed column of the side a join may null-extend is NULL on
+    // unmatched rows only if it is computed before the join.
+    let q = "q = users & leftJoin (orders & select { user_id = .user_id, one = 1 }) (.<id == .>user_id)\n  & select { m = isNull .one }\n";
+    let s = sql(q, "q");
+    assert!(
+        s.contains("(SELECT user_id, 1 AS one FROM public.orders) AS t2"),
+        "{s}"
+    );
+    assert!(s.contains("t2.one IS NULL"), "{s}");
+    // The left side of a right join, and both sides of a full join.
+    let r = "r = (users & select { id = .id, k = .id + 1 }) & rightJoin orders (.<id == .>user_id) & select { k = .k }\n";
+    assert!(
+        sql(r, "r").contains("(SELECT id, id + 1 AS k FROM public.users) AS t1"),
+        "{}",
+        sql(r, "r")
+    );
+    let f = "f = users & fullJoin (orders & select { user_id = .user_id, st = coalesce \"none\" (just .status) }) (.<id == .>user_id) & select { s = .st }\n";
+    assert!(
+        sql(f, "f").contains("COALESCE(status, 'none') AS st FROM public.orders) AS t2"),
+        "{}",
+        sql(f, "f")
+    );
+    // Bare columns still inline, and so does anything on a preserved side.
+    let b = "b = users & leftJoin (orders & select { user_id = .user_id }) (.<id == .>user_id) & select { u = .user_id }\n";
+    assert_eq!(
+        sql(b, "b"),
+        "SELECT t2.user_id AS u FROM public.users AS t1 LEFT JOIN public.orders AS t2 ON t1.id = t2.user_id"
+    );
+}
+
+#[test]
+fn constant_keys_are_not_positions() {
+    // `ORDER BY 1` / `GROUP BY 2` would refer to output columns.
+    let o = "o = users & select { a = .name, b = 1 } & order [asc .b, asc .a]\n";
+    assert_eq!(
+        sql(o, "o"),
+        "SELECT name AS a, 1 AS b FROM public.users ORDER BY name"
+    );
+    // A constant group key is dropped; HAVING keeps an empty input empty.
+    let g = "g = users & select { c = 2, name = .name } & agg { c = group .c, n = count }\n";
+    assert_eq!(
+        sql(g, "g"),
+        "SELECT 2 AS c, COUNT(*) AS n FROM public.users HAVING COUNT(*) > 0"
+    );
+    let g2 = "g2 = users & select { c = \"x\", a = .age } & agg { c = group .c, a = group .a, n = count }\n";
+    assert_eq!(
+        sql(g2, "g2"),
+        "SELECT 'x' AS c, age AS a, COUNT(*) AS n FROM public.users GROUP BY age"
+    );
+}
+
+#[test]
+fn negative_numbers_do_not_make_comments() {
+    let q = "q = users & select { x = negate (-5), y = - -1.5, z = .age - -1 }\n";
+    let s = sql(q, "q");
+    assert!(!s.contains("--"), "{s}");
+    assert!(
+        s.contains("-(-5) AS x") && s.contains("1.5 AS y") && s.contains("age - (-1) AS z"),
+        "{s}"
+    );
+}
+
+#[test]
+fn identifiers_are_quoted_when_needed() {
+    let src = "t : query { id = int, order = int, userId = int } = table \"my schema\" \"select\"\n\
+               q = t & select { o = .order, u = .userId } & rename { o = \"x FROM t; DROP TABLE t; --\" }\n";
+    assert_eq!(
+        sql(src, "q"),
+        "SELECT \"order\" AS \"x FROM t; DROP TABLE t; --\", \"userId\" AS u FROM \"my schema\".\"select\""
+    );
+    // The quote character itself is doubled, in each dialect's quotes.
+    let src =
+        "t : query { id = int } = table \"a`b\" \"c\\\"d\"\nq = t & rename { id = \"x]y\" }\n";
+    assert_eq!(
+        sql(src, "q"),
+        "SELECT id AS \"x]y\" FROM \"a`b\".\"c\"\"d\""
+    );
+    assert_eq!(
+        dialect(src, "q", "mysql").unwrap(),
+        "SELECT id AS `x]y` FROM `a``b`.`c\"d`"
+    );
+    assert_eq!(
+        dialect(src, "q", "tsql").unwrap(),
+        "SELECT id AS [x]]y] FROM [a`b].[c\"d]"
+    );
+}
+
+#[test]
+fn backslashes_are_escaped_where_they_are_escapes() {
+    // In MySQL `'a\''` is an unterminated string: `\'` escapes the quote.
+    let q = "q = users & where (.name == \"a\\\\' OR 1=1 -- \") & select { id = .id }\n";
+    assert_eq!(
+        dialect(q, "q", "postgres").unwrap(),
+        "SELECT id FROM public.users WHERE (name = 'a\\'' OR 1=1 -- ')"
+    );
+    for d in ["mysql", "bigquery", "snowflake", "spark"] {
+        let s = dialect(q, "q", d).unwrap();
+        assert!(s.contains("'a\\\\'' OR 1=1 -- '"), "{d}: {s}");
+    }
+    // Also inside a window spec, which `Expr::transform` skips.
+    let w = "w = users & select { id = .id, rn = rowNumber { partition = [.name <> \"\\\\\"] } }\n";
+    let s = dialect(w, "w", "mysql").unwrap();
+    assert!(s.contains("CONCAT(name, '\\\\')"), "{s}");
+}
+
+#[test]
+fn intrinsics_are_lowered_inside_window_specs() {
+    let w = "w = orders & select { id = .id, rn = rowNumber { partition = [year .created_at], order = [asc .id] } }\n";
+    let s = sql(w, "w");
+    assert!(!s.contains("CAGARA_"), "{s}");
+    assert!(
+        s.contains("PARTITION BY CAST(EXTRACT(YEAR FROM created_at) AS INT)"),
+        "{s}"
+    );
+}

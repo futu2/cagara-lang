@@ -52,7 +52,7 @@ fn fam(d: Dialect) -> Fam {
 /// Lower every intrinsic in `e` (bottom-up, so arguments are lowered first).
 pub fn lower(e: Expr, to: Dialect) -> Expr {
     let f = fam(to);
-    e.transform(&|e| node(e, f))
+    crate::stage::transform_deep(e, &|e| node(e, f))
 }
 
 fn node(e: Expr, f: Fam) -> Expr {
@@ -515,9 +515,11 @@ fn case(cond: Expr, then: Expr, otherwise: Expr) -> Expr {
     }
 }
 
-/// Parenthesize anything that is not already a single term.
+/// Parenthesize anything that is not already a single term (a negative
+/// number is not: `-` before it would make a `--` comment).
 fn atomic(e: Expr) -> Expr {
     match e {
+        Expr::Number(ref n) if n.starts_with('-') => Expr::Nested(Box::new(e)),
         Expr::Column { .. }
         | Expr::Number(_)
         | Expr::StringLiteral(_)

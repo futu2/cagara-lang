@@ -9,7 +9,10 @@
 //! Cagara's date and string intrinsics (`CAGARA_*`) are lowered here too,
 //! for every dialect including ANSI.
 
-use sqlglot_rust::ast::{BinaryOperator, Expr, SelectItem, SelectStatement, TableSource};
+use crate::stage::transform_deep;
+use sqlglot_rust::ast::{
+    BinaryOperator, Expr, QuoteStyle, SelectItem, SelectStatement, TableSource,
+};
 use sqlglot_rust::{Dialect, Statement};
 
 pub fn rewrite(stmt: Statement, to: Dialect) -> Result<Statement, String> {
@@ -33,6 +36,21 @@ fn mysql(d: Dialect) -> bool {
 
 fn concat_as_function(d: Dialect) -> bool {
     mysql(d) || tsql(d)
+}
+
+/// Dialects whose string literals treat `\` as an escape character, so a
+/// literal `\'` would end the string early.
+fn backslash_escapes(d: Dialect) -> bool {
+    mysql(d)
+        || matches!(
+            d,
+            Dialect::BigQuery
+                | Dialect::Snowflake
+                | Dialect::Hive
+                | Dialect::Spark
+                | Dialect::Databricks
+                | Dialect::ClickHouse
+        )
 }
 
 fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
@@ -89,12 +107,32 @@ fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
 }
 
 fn source(src: &mut TableSource, to: Dialect) -> Result<(), String> {
-    if let TableSource::Subquery { query, .. } = src {
-        if let Statement::Select(sel) = query.as_mut() {
-            block(sel, to)?;
+    match src {
+        TableSource::Subquery { query, .. } => {
+            if let Statement::Select(sel) = query.as_mut() {
+                block(sel, to)?;
+            }
         }
+        // sqlglot writes a table's schema as is, so quote it here.
+        TableSource::Table(t) => {
+            if let Some(s) = t.schema.as_mut().filter(|s| crate::stage::needs_quotes(s)) {
+                *s = quote(s, to);
+            }
+        }
+        _ => {}
     }
     Ok(())
+}
+
+/// An identifier in the dialect's quotes, the quote character doubled.
+fn quote(name: &str, to: Dialect) -> String {
+    let (open, close) = match QuoteStyle::for_dialect(to) {
+        QuoteStyle::Backtick => ('`', '`'),
+        QuoteStyle::Bracket => ('[', ']'),
+        _ => ('"', '"'),
+    };
+    let escaped = name.replace(close, &format!("{close}{close}"));
+    format!("{open}{escaped}{close}")
 }
 
 /// One expression: intrinsics, concat lowering, then sqlglot's
@@ -104,8 +142,16 @@ fn expr(e: Expr, to: Dialect) -> Expr {
     if to == Dialect::Ansi {
         return e;
     }
+    let e = if backslash_escapes(to) {
+        transform_deep(e, &|e| match e {
+            Expr::StringLiteral(s) => Expr::StringLiteral(s.replace('\\', "\\\\")),
+            other => other,
+        })
+    } else {
+        e
+    };
     let e = if concat_as_function(to) {
-        e.transform(&concat)
+        transform_deep(e, &concat)
     } else {
         e
     };

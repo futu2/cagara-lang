@@ -321,7 +321,12 @@ impl Lower {
                     let inner = self.expr(&c);
                     match inner.kind {
                         ExprKind::Lit(Lit::Int(v)) => ExprKind::Lit(Lit::Int(-v)),
-                        ExprKind::Lit(Lit::Float(s)) => ExprKind::Lit(Lit::Float(format!("-{s}"))),
+                        ExprKind::Lit(Lit::Float(s)) => {
+                            ExprKind::Lit(Lit::Float(match s.strip_prefix('-') {
+                                Some(pos) => pos.to_string(),
+                                None => format!("-{s}"),
+                            }))
+                        }
                         _ => {
                             let f = self.mk(sp, ExprKind::Name("negate".to_string()));
                             ExprKind::App(Box::new(f), vec![inner])

@@ -16,6 +16,7 @@ pub struct Stage {
     pub wheres: Vec<Expr>,
     pub items: Vec<(String, Expr)>,
     pub group_by: Vec<Expr>,
+    pub having: Option<Expr>,
     pub order_by: Vec<OrderByItem>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -27,8 +28,156 @@ pub fn col(table: Option<&str>, name: &str) -> Expr {
     Expr::Column {
         table: table.map(str::to_string),
         name: name.to_string(),
-        quote_style: QuoteStyle::None,
+        quote_style: ident_style(name),
         table_quote_style: QuoteStyle::None,
+    }
+}
+
+/// Words that cannot be a bare identifier in some supported dialect. Quoting
+/// one needlessly is harmless, so this errs on the side of too many.
+const RESERVED: &[&str] = &[
+    "all",
+    "alter",
+    "analyse",
+    "analyze",
+    "and",
+    "any",
+    "array",
+    "as",
+    "asc",
+    "asymmetric",
+    "authorization",
+    "between",
+    "binary",
+    "both",
+    "by",
+    "case",
+    "cast",
+    "check",
+    "collate",
+    "column",
+    "constraint",
+    "create",
+    "cross",
+    "cube",
+    "current",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "database",
+    "default",
+    "delete",
+    "desc",
+    "distinct",
+    "div",
+    "do",
+    "drop",
+    "else",
+    "end",
+    "except",
+    "exists",
+    "false",
+    "fetch",
+    "filter",
+    "for",
+    "foreign",
+    "from",
+    "full",
+    "grant",
+    "group",
+    "grouping",
+    "having",
+    "if",
+    "ilike",
+    "in",
+    "index",
+    "inner",
+    "insert",
+    "intersect",
+    "interval",
+    "into",
+    "is",
+    "join",
+    "key",
+    "keys",
+    "lateral",
+    "leading",
+    "left",
+    "like",
+    "limit",
+    "localtime",
+    "localtimestamp",
+    "minus",
+    "mod",
+    "natural",
+    "not",
+    "null",
+    "of",
+    "offset",
+    "on",
+    "only",
+    "or",
+    "order",
+    "outer",
+    "over",
+    "partition",
+    "primary",
+    "qualify",
+    "range",
+    "references",
+    "regexp",
+    "returning",
+    "right",
+    "rlike",
+    "rollup",
+    "row",
+    "rows",
+    "sample",
+    "schema",
+    "select",
+    "session_user",
+    "set",
+    "similar",
+    "some",
+    "symmetric",
+    "table",
+    "tablesample",
+    "then",
+    "to",
+    "top",
+    "trailing",
+    "true",
+    "union",
+    "unique",
+    "update",
+    "user",
+    "using",
+    "values",
+    "view",
+    "when",
+    "where",
+    "window",
+    "with",
+];
+
+/// Whether `name` must be quoted to be read back as the same identifier:
+/// anything but a lowercase ASCII word that is not reserved. Quoting also
+/// keeps case (`userId` would otherwise fold) and escapes the quote char.
+pub fn needs_quotes(name: &str) -> bool {
+    let mut cs = name.chars();
+    let plain = matches!(cs.next(), Some('a'..='z' | '_'))
+        && cs.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_'));
+    !plain || RESERVED.contains(&name)
+}
+
+/// Quote style for an identifier; the generator maps a quoted one to the
+/// target dialect's quotes (`"x"`, `` `x` ``, `[x]`).
+pub fn ident_style(name: &str) -> QuoteStyle {
+    if needs_quotes(name) {
+        QuoteStyle::DoubleQuote
+    } else {
+        QuoteStyle::None
     }
 }
 
@@ -40,6 +189,7 @@ impl Stage {
             wheres: vec![],
             items,
             group_by: vec![],
+            having: None,
             order_by: vec![],
             limit: None,
             offset: None,
@@ -76,6 +226,7 @@ impl Stage {
             && self.joins.is_empty()
             && self.wheres.is_empty()
             && self.group_by.is_empty()
+            && self.having.is_none()
             && self.order_by.is_empty()
             && self.limit.is_none()
             && self.offset.is_none()
@@ -96,8 +247,8 @@ impl Stage {
                 let same = matches!(&e, Expr::Column { name, .. } if *name == n);
                 SelectItem::Expr {
                     expr: e,
+                    alias_quote_style: ident_style(&n),
                     alias: (!same).then_some(n),
-                    alias_quote_style: QuoteStyle::None,
                 }
             })
             .collect();
@@ -111,7 +262,7 @@ impl Stage {
             joins: self.joins,
             where_clause,
             group_by: self.group_by,
-            having: None,
+            having: self.having,
             order_by: self.order_by,
             limit: self.limit.map(|n| Expr::Number(n.to_string())),
             offset: self.offset.map(|n| Expr::Number(n.to_string())),
@@ -151,8 +302,11 @@ pub fn qualify(e: Expr, alias: &str) -> Expr {
 }
 
 /// Parenthesize compound expressions so template substitution keeps precedence.
+/// A negative number is compound too: `-$1` of `-5` must not become `--5`,
+/// which is a comment.
 fn paren(e: Expr) -> Expr {
     match e {
+        Expr::Number(ref n) if n.starts_with('-') => Expr::Nested(Box::new(e)),
         Expr::Column { .. }
         | Expr::Number(_)
         | Expr::StringLiteral(_)
@@ -196,6 +350,53 @@ pub fn template(sql: &str, args: Vec<Expr>) -> Result<Expr, String> {
 /// descend into a function's OVER clause, so window specs are handled here.
 fn subst(e: Expr, args: &[Expr]) -> Expr {
     e.transform(&|e| subst_node(e, args))
+}
+
+/// `Expr::transform` (bottom-up) that also rewrites the expressions of
+/// window specs, which `transform` skips.
+pub fn transform_deep(e: Expr, f: &dyn Fn(Expr) -> Expr) -> Expr {
+    let spec = |mut s: sqlglot_rust::ast::WindowSpec| {
+        s.partition_by = s
+            .partition_by
+            .into_iter()
+            .map(|p| transform_deep(p, f))
+            .collect();
+        for o in &mut s.order_by {
+            o.expr = transform_deep(std::mem::replace(&mut o.expr, Expr::Null), f);
+        }
+        s
+    };
+    e.transform(&|e| {
+        f(match e {
+            Expr::Function {
+                name,
+                args,
+                distinct,
+                filter,
+                over: Some(s),
+                order_by,
+                within_group,
+            } => Expr::Function {
+                name,
+                args,
+                distinct,
+                filter,
+                over: Some(spec(s)),
+                order_by,
+                within_group,
+            },
+            Expr::TypedFunction {
+                func,
+                filter,
+                over: Some(s),
+            } => Expr::TypedFunction {
+                func,
+                filter,
+                over: Some(spec(s)),
+            },
+            other => other,
+        })
+    })
 }
 
 fn subst_node(e: Expr, args: &[Expr]) -> Expr {

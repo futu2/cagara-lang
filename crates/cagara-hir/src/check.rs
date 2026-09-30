@@ -253,6 +253,9 @@ struct Scheme {
     ty: Ty,
     cons: Vec<Cons>,
     gens: Vec<GenInfo>,
+    /// The definition has a type error: its users fail too, instead of
+    /// going on with a made-up type.
+    failed: bool,
 }
 
 /// Flags of a scheme's quantified variable, copied to each instance.
@@ -859,7 +862,10 @@ impl<'w> Checker<'w> {
                 });
                 self.failed.insert((m, i));
                 let v = self.fresh();
-                self.generalize(&v, vec![])
+                Scheme {
+                    failed: true,
+                    ..self.generalize(&v, vec![])
+                }
             }
         };
         self.schemes.insert((m, i), scheme.clone());
@@ -887,7 +893,10 @@ impl<'w> Checker<'w> {
         }
         self.solve()?;
         let t = ann.unwrap_or(t);
-        if let Ty::Con("query", _) = self.resolve(&t) {
+        // A member of an overload set is picked by its signature alone, so
+        // no use can fill holes of its own: it resolves them like a query.
+        let candidate = defs.iter().filter(|d| d.name == def.name).count() > 1;
+        if candidate || matches!(self.resolve(&t), Ty::Con("query", _)) {
             // A query is evaluated, so its overloads must be resolved:
             // default leftover literals, then report what is still open.
             self.default_lits();
@@ -1272,6 +1281,7 @@ impl<'w> Checker<'w> {
             ty,
             cons: out,
             gens,
+            failed: false,
         }
     }
 
@@ -1500,8 +1510,30 @@ impl<'w> Checker<'w> {
 
     fn def_type(&mut self, m: usize, i: usize, site: u32, sp: Span) -> Result<Ty, String> {
         match self.def_scheme(m, i) {
+            Some(s) if s.failed => Err(self.failed_use(m, i)),
             Some(s) => self.instantiate(&s, sp, Some(site)),
             None => Ok(self.fresh()),
+        }
+    }
+
+    fn failed_use(&self, m: usize, i: usize) -> String {
+        let name = if m == self.module {
+            Some(self.env.defs[i].name.as_str())
+        } else {
+            self.env.owns.get(&m).and_then(|own| {
+                own.iter().find_map(|(n, b)| match b {
+                    Binding::Def(dm, di) if (*dm, *di) == (m, i) => Some(n.as_str()),
+                    Binding::Overloads(dm, is) if *dm == m && is.contains(&i) => Some(n.as_str()),
+                    _ => None,
+                })
+            })
+        };
+        match name {
+            Some(n) => format!(
+                "`{}` has a type error, so this use cannot be checked",
+                op_name(n)
+            ),
+            None => "this name has a type error, so this use cannot be checked".into(),
         }
     }
 
@@ -1750,10 +1782,16 @@ impl<'w> Checker<'w> {
                     }
                     [i] => {
                         let s = self.cand_scheme(*module, *i);
+                        if s.failed {
+                            return Err(self.failed_use(*module, *i));
+                        }
                         let t = self.instantiate(&s, sp, None)?;
                         self.unify(&t, target)?;
                         let Origin::Site(site) = *origin else {
-                            unreachable!("holes are instantiated first")
+                            return Err(format!(
+                                "internal error: unresolved hole of `{}`",
+                                op_name(name)
+                            ));
                         };
                         let (use_site, k) = decode(site);
                         let key = *self.active.last().expect("solving inside a definition");

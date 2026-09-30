@@ -222,25 +222,6 @@ impl Stage {
         })
     }
 
-    /// A plain `SELECT a, b FROM t` that can be used as a table reference.
-    pub fn is_bare_table(&self) -> bool {
-        matches!(self.from, TableSource::Table(_))
-            && self.joins.is_empty()
-            && self.wheres.is_empty()
-            && self.group_by.is_empty()
-            && self.having.is_none()
-            && self.order_by.is_empty()
-            && self.limit.is_none()
-            && self.offset.is_none()
-            && !self.distinct
-            && !self.has_agg
-            && !self.has_win
-            && self
-                .items
-                .iter()
-                .all(|(n, e)| matches!(e, Expr::Column { table: None, name, .. } if name == n))
-    }
-
     pub fn into_statement(self) -> SelectStatement {
         let where_clause = and_all(self.wheres);
         let columns = self
@@ -279,7 +260,7 @@ impl Stage {
 
 /// Conjunction of predicates (each parenthesized), or `None` if empty.
 pub fn and_all(ps: impl IntoIterator<Item = Expr>) -> Option<Expr> {
-    ps.into_iter().map(paren).reduce(|a, b| Expr::BinaryOp {
+    ps.into_iter().map(atomic).reduce(|a, b| Expr::BinaryOp {
         left: Box::new(a),
         op: BinaryOperator::And,
         right: Box::new(b),
@@ -304,10 +285,10 @@ pub fn qualify(e: Expr, alias: &str) -> Expr {
     })
 }
 
-/// Parenthesize compound expressions so template substitution keeps precedence.
-/// A negative number is compound too: `-$1` of `-5` must not become `--5`,
-/// which is a comment.
-fn paren(e: Expr) -> Expr {
+/// Parenthesize anything that is not already a single term, so a substituted
+/// expression keeps the precedence of its slot. A negative number is not a
+/// single term: `-$1` of `-5` must not become `--5`, which is a comment.
+pub fn atomic(e: Expr) -> Expr {
     match e {
         Expr::Number(ref n) if n.starts_with('-') => Expr::Nested(Box::new(e)),
         Expr::Column { .. }
@@ -317,6 +298,9 @@ fn paren(e: Expr) -> Expr {
         | Expr::Null
         | Expr::Function { .. }
         | Expr::TypedFunction { .. }
+        | Expr::Cast { .. }
+        | Expr::Extract { .. }
+        | Expr::Case { .. }
         | Expr::Nested(_)
         | Expr::Star => e,
         other => Expr::Nested(Box::new(other)),
@@ -374,7 +358,7 @@ pub fn template(sql: &str, args: Vec<Expr>) -> Result<Expr, String> {
              and name one of its {n} argument(s)"
         ));
     }
-    let args: Vec<Expr> = args.into_iter().map(paren).collect();
+    let args: Vec<Expr> = args.into_iter().map(atomic).collect();
     Ok(subst(parsed, &args))
 }
 

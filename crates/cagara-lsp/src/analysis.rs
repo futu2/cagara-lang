@@ -917,8 +917,8 @@ mod tests {
     }
 
     fn fields(src: &str, p: Position) -> Vec<String> {
-        let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
-        let items = completion(&mut ws, p);
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        let items = completion(&ws, p);
         assert!(
             items
                 .iter()
@@ -952,17 +952,17 @@ mod tests {
         let src = "users : query { id = int, age = int } = table \"p\" \"users\"\n\
                    c = users & select { n = .\n";
         assert_eq!(fields(src, pos(1, 26)), ["id", "age"]);
-        let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
         let before = diagnostics(&ws);
-        completion(&mut ws, pos(1, 26));
+        completion(&ws, pos(1, 26));
         assert_eq!(diagnostics(&ws), before);
     }
 
     #[test]
     fn completion_lists_scope_and_parameters() {
-        let mut ws = ws();
-        let mut labels = |p| {
-            completion(&mut ws, p)
+        let ws = ws();
+        let labels = |p| {
+            completion(&ws, p)
                 .into_iter()
                 .map(|i| i.label)
                 .collect::<Vec<_>>()
@@ -983,9 +983,9 @@ mod tests {
     #[test]
     fn projection_of_a_value_offers_nothing() {
         let src = "r = { a = 1 }\ns = r.\nt = (r).\n";
-        let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
-        assert!(completion(&mut ws, pos(1, 6)).is_empty());
-        assert!(completion(&mut ws, pos(2, 8)).is_empty());
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        assert!(completion(&ws, pos(1, 6)).is_empty());
+        assert!(completion(&ws, pos(2, 8)).is_empty());
     }
 
     #[test]
@@ -995,14 +995,14 @@ mod tests {
         std::fs::write(dir.join("lib.cagara"), "helper = .age >= 21\n").unwrap();
         let main = dir.join("main.cagara");
         let src = "import \"lib.cagara\" as lib\nq = lib.helper\nr = lib.\n";
-        let mut ws = Workspace::open_with(&main, src.to_string());
+        let ws = Workspace::open_with(&main, src.to_string());
         let h = hover(&ws, pos(1, 10)).unwrap();
         assert!(h.contains("helper : "), "{h}");
         let d = definition(&ws, pos(1, 10));
         assert_eq!(d.len(), 1);
         assert!(d[0].0.ends_with("lib.cagara"), "{d:?}");
         assert_eq!(d[0].1, range(0, 0, 6));
-        let ls: Vec<String> = completion(&mut ws, pos(2, 8))
+        let ls: Vec<String> = completion(&ws, pos(2, 8))
             .into_iter()
             .map(|i| i.label)
             .collect();

@@ -186,6 +186,31 @@ fn set_operations_and_reused_queries_use_sql_set_ops_and_ctes() {
 }
 
 #[test]
+fn nested_blocks_get_dialect_rewrites() {
+    // Regression: a reused query becomes a CTE, and a set operation is not a
+    // `Select`, so neither used to reach the expression rewriter. Their
+    // `CAGARA_*` intrinsics, `||`, and T-SQL conditions leaked unchanged.
+    let reused = "act = users & where .active & select { n = length .name, s = .name <> \"!\" }\n\
+                  q = union act act\n";
+    let ansi = dialect(reused, "q", "ansi").unwrap();
+    assert!(!ansi.contains("CAGARA_"), "{ansi}");
+    assert!(ansi.contains("LENGTH(name)"), "{ansi}");
+    let mysql = dialect(reused, "q", "mysql").unwrap();
+    assert!(mysql.contains("CHAR_LENGTH(name)"), "{mysql}");
+    assert!(mysql.contains("CONCAT(name, '!')"), "{mysql}");
+    let tsql = dialect(reused, "q", "tsql").unwrap();
+    assert!(tsql.contains("CONCAT(name, '!')"), "{tsql}");
+    assert!(tsql.contains("(LEN(name + 'x') - 1)"), "{tsql}");
+
+    // The same, without reuse: the branches are the set operation's own.
+    let once = "q = union (users & select { n = length .name })\n\
+                (users & select { n = length .name })\n";
+    let mysql = dialect(once, "q", "mysql").unwrap();
+    assert!(!mysql.contains("CAGARA_"), "{mysql}");
+    assert!(mysql.contains("CHAR_LENGTH(name)"), "{mysql}");
+}
+
+#[test]
 fn semi_and_anti_joins_use_exists_without_right_columns() {
     let semi = sql("q = users & semiJoin users (.<id == .>id)\n", "q");
     assert!(semi.contains("EXISTS"), "{semi}");
@@ -661,6 +686,16 @@ fn date_functions_compose_and_type_check() {
     let q = format!("{EVENTS}q = ev & select {{ x = addHours 1 .d }}\n");
     let e = dialect(&q, "q", "ansi").unwrap_err();
     assert!(e.contains("timestamp"), "{e}");
+}
+
+#[test]
+fn unknown_intrinsic_is_an_error() {
+    // A `sql` template naming a `CAGARA_*` function the backend does not
+    // know must be a diagnostic, not invalid SQL passed through verbatim.
+    let q = "nope : expr r int -> expr r int = sql \"CAGARA_NOPE($1)\"\n\
+             q = users & select { v = nope .id }\n";
+    let e = dialect(q, "q", "ansi").unwrap_err();
+    assert!(e.contains("CAGARA_NOPE"), "{e}");
 }
 
 #[test]

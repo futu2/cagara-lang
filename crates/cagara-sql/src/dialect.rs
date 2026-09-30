@@ -2,12 +2,13 @@
 //!
 //! The IR and `sql` templates are ANSI. sqlglot's `dialects::transform` only
 //! rewrites the outermost SELECT's columns / WHERE / GROUP BY / HAVING, so
-//! this walks every block (derived tables, join inputs) and every expression
-//! slot (including ORDER BY and join ON), applying sqlglot's expression
-//! rewrites to each. String concatenation is lowered here: `||` means OR in
-//! MySQL, so the MySQL and T-SQL families get `CONCAT(a, b, ...)`.
-//! Cagara's date and string intrinsics (`CAGARA_*`) are lowered here too,
-//! for every dialect including ANSI.
+//! this walks every block (derived tables, CTE bodies, set-operation
+//! branches, join inputs) and every expression slot (including ORDER BY and
+//! join ON), applying sqlglot's expression rewrites to each. String
+//! concatenation is lowered here: `||` means OR in MySQL, so the MySQL and
+//! T-SQL families get `CONCAT(a, b, ...)`. Cagara's date and string
+//! intrinsics (`CAGARA_*`) are lowered here too, for every dialect including
+//! ANSI.
 
 use crate::stage::transform_deep;
 use sqlglot_rust::ast::{
@@ -55,7 +56,10 @@ fn backslash_escapes(d: Dialect) -> bool {
 }
 
 fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
-    // Inner blocks first.
+    // Inner blocks first: CTE bodies, then the FROM / JOIN inputs.
+    for cte in &mut sel.ctes {
+        nested(&mut cte.query, to)?;
+    }
     if let Some(from) = &mut sel.from {
         source(&mut from.source, to)?;
     }
@@ -75,10 +79,9 @@ fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
     }
 
     // Every expression slot of this block.
-    let ex = |e: &mut Expr| *e = expr(std::mem::replace(e, Expr::Null), to);
     for item in &mut sel.columns {
         if let SelectItem::Expr { expr: e, .. } = item {
-            ex(e);
+            *e = expr(std::mem::replace(e, Expr::Null), to)?;
             // T-SQL has no boolean values, only conditions: a condition as a
             // column becomes 1 / 0, and stays NULL when it is unknown.
             if tsql(to) && is_condition(e) {
@@ -95,14 +98,22 @@ fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
         }
     }
     nulls_last(&mut sel.order_by, to);
-    sel.where_clause.as_mut().map(ex);
-    sel.having.as_mut().map(ex);
-    sel.group_by.iter_mut().for_each(ex);
+    for e in [&mut sel.where_clause, &mut sel.having]
+        .into_iter()
+        .flatten()
+    {
+        *e = expr(std::mem::replace(e, Expr::Null), to)?;
+    }
+    for e in &mut sel.group_by {
+        *e = expr(std::mem::replace(e, Expr::Null), to)?;
+    }
     for o in &mut sel.order_by {
-        ex(&mut o.expr);
+        o.expr = expr(std::mem::replace(&mut o.expr, Expr::Null), to)?;
     }
     for j in &mut sel.joins {
-        j.on.as_mut().map(ex);
+        if let Some(on) = &mut j.on {
+            *on = expr(std::mem::replace(on, Expr::Null), to)?;
+        }
     }
 
     // Statement-level rewrites (LIMIT → TOP / FETCH, quoting) for this block.
@@ -121,13 +132,32 @@ fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
     Ok(())
 }
 
+/// A statement nested in a query: a derived table, a CTE body, or a branch of
+/// a set operation. A set operation is not a `Select`, so its own ORDER BY /
+/// LIMIT / OFFSET are rewritten here; everything else is reached by `block`.
+fn nested(s: &mut Statement, to: Dialect) -> Result<(), String> {
+    match s {
+        Statement::Select(sel) => block(sel, to),
+        Statement::SetOperation(set) => {
+            nested(&mut set.left, to)?;
+            nested(&mut set.right, to)?;
+            nulls_last(&mut set.order_by, to);
+            for o in &mut set.order_by {
+                o.expr = expr(std::mem::replace(&mut o.expr, Expr::Null), to)?;
+            }
+            for e in [&mut set.limit, &mut set.offset].into_iter().flatten() {
+                *e = expr(std::mem::replace(e, Expr::Null), to)?;
+            }
+            Ok(())
+        }
+        // Cagara builds only SELECT and set-operation trees.
+        _ => Ok(()),
+    }
+}
+
 fn source(src: &mut TableSource, to: Dialect) -> Result<(), String> {
     match src {
-        TableSource::Subquery { query, .. } => {
-            if let Statement::Select(sel) = query.as_mut() {
-                block(sel, to)?;
-            }
-        }
+        TableSource::Subquery { query, .. } => nested(query, to)?,
         // sqlglot writes a table's schema as is, so quote it here.
         TableSource::Table(t) => {
             if let Some(s) = t.schema.as_mut().filter(|s| crate::stage::needs_quotes(s)) {
@@ -152,10 +182,10 @@ fn quote(name: &str, to: Dialect) -> String {
 
 /// One expression: intrinsics, concat lowering, then sqlglot's
 /// per-expression rewrites (reached by wrapping it in a one-column SELECT).
-fn expr(e: Expr, to: Dialect) -> Expr {
-    let e = crate::intrinsics::lower(e, to);
+fn expr(e: Expr, to: Dialect) -> Result<Expr, String> {
+    let e = crate::intrinsics::lower(e, to)?;
     if to == Dialect::Ansi {
-        return e;
+        return Ok(e);
     }
     let e = if backslash_escapes(to) {
         transform_deep(e, &|e| match e {
@@ -213,11 +243,11 @@ fn expr(e: Expr, to: Dialect) -> Expr {
         alias_quote_style: Default::default(),
     }];
     match sqlglot_rust::dialects::transform(&Statement::Select(sel), Dialect::Ansi, to) {
-        Statement::Select(s) => match s.columns.into_iter().next() {
+        Statement::Select(s) => Ok(match s.columns.into_iter().next() {
             Some(SelectItem::Expr { expr, .. }) => expr,
             _ => e,
-        },
-        _ => e,
+        }),
+        _ => Ok(e),
     }
 }
 
@@ -342,18 +372,14 @@ fn flatten(e: Expr, out: &mut Vec<Expr>) {
             flatten(*left, out);
             flatten(*right, out);
         }
+        Expr::Function { name, args, .. } if name == "CONCAT" => out.extend(args),
+        // A parenthesized concatenation, `x <> (y <> z)`, arrives as
+        // `Nested(Function CONCAT)`: the walk above is bottom-up.
         Expr::Nested(inner)
-            if matches!(
-                *inner,
-                Expr::BinaryOp {
-                    op: BinaryOperator::Concat,
-                    ..
-                }
-            ) =>
+            if matches!(*inner, Expr::Function { ref name, .. } if name == "CONCAT") =>
         {
             flatten(*inner, out)
         }
-        Expr::Function { name, args, .. } if name == "CONCAT" => out.extend(args),
         other => out.push(other),
     }
 }

@@ -349,16 +349,9 @@ impl Lowerer {
                     let right_stage = self.rel(right)?;
                     let left = self.derived(left_stage);
                     let right = self.derived(right_stage);
-                    let find = |items: &[(String, Expr)], n: &str| {
-                        items
-                            .iter()
-                            .find(|(k, _)| k == n)
-                            .map(|(_, e)| e.clone())
-                            .ok_or_else(|| format!("internal: join input has no column `{n}`"))
-                    };
                     let predicate = lower_expr(on, &|side, n| match side {
-                        Side::Left => find(&left.items, n),
-                        Side::Right => find(&right.items, n),
+                        Side::Left => item(&left.items, n),
+                        Side::Right => item(&right.items, n),
                         Side::Single => Err(format!("join predicates need `.<{n}` or `.>{n}`")),
                     })?;
                     let mut subquery = Stage::new(right.from, right.items);
@@ -405,16 +398,9 @@ impl Lowerer {
                     ji if ji.joins.is_empty() => ji,
                     ji => self.rewrap(ji),
                 };
-                let find = |items: &[(String, Expr)], n: &str| {
-                    items
-                        .iter()
-                        .find(|(k, _)| k == n)
-                        .map(|(_, e)| e.clone())
-                        .ok_or_else(|| format!("internal: join input has no column `{n}`"))
-                };
                 let pred = lower_expr(on, &|side, n| match side {
-                    Side::Left => find(&l.items, n),
-                    Side::Right => find(&r.items, n),
+                    Side::Left => item(&l.items, n),
+                    Side::Right => item(&r.items, n),
                     Side::Single => Err(format!("join predicates need `.<{n}` or `.>{n}`")),
                 })?;
                 let items = cagara_hir::rules::join_columns(&l.items, &r.items);
@@ -509,6 +495,16 @@ impl Lowerer {
                 .collect(),
         ))
     }
+}
+
+/// The expression of column `n` in a join input, or an internal error: a
+/// join predicate may only name columns of the two sides.
+fn item(items: &[(String, Expr)], n: &str) -> Result<Expr, String> {
+    items
+        .iter()
+        .find(|(k, _)| k == n)
+        .map(|(_, e)| e.clone())
+        .ok_or_else(|| format!("internal: join input has no column `{n}`"))
 }
 
 fn count_rel(rel: &Rel, counts: &mut Vec<(Rel, usize)>) {

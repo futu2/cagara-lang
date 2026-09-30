@@ -213,19 +213,18 @@ toDate : expr r string -> expr r date = sql "CAGARA_TO_DATE($1)"
 toTimestamp : expr r date -> expr r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
 toTimestamp : expr r string -> expr r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
 
-# `addDays 7 .created_at`; negative counts go back.
+# `addDays 7 .created_at`; negative counts go back. Weeks and quarters are
+# defined here as 7 days and 3 months, so the core needs only DAY and MONTH.
 addDays : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'DAY', $2, $1)"
 addDays : expr r int -> expr r timestamp -> expr r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'DAY', $2, $1)"
-addWeeks : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'WEEK', $2, $1)"
-addWeeks : expr r int -> expr r timestamp -> expr r timestamp =
-  sql "CAGARA_ADD('TIMESTAMP', 'WEEK', $2, $1)"
+addWeeks : expr r int -> expr r date -> expr r date = n => d => addDays (n * 7) d
+addWeeks : expr r int -> expr r timestamp -> expr r timestamp = n => d => addDays (n * 7) d
 addMonths : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'MONTH', $2, $1)"
 addMonths : expr r int -> expr r timestamp -> expr r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'MONTH', $2, $1)"
-addQuarters : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'QUARTER', $2, $1)"
-addQuarters : expr r int -> expr r timestamp -> expr r timestamp =
-  sql "CAGARA_ADD('TIMESTAMP', 'QUARTER', $2, $1)"
+addQuarters : expr r int -> expr r date -> expr r date = n => d => addMonths (n * 3) d
+addQuarters : expr r int -> expr r timestamp -> expr r timestamp = n => d => addMonths (n * 3) d
 addYears : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'YEAR', $2, $1)"
 addYears : expr r int -> expr r timestamp -> expr r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'YEAR', $2, $1)"

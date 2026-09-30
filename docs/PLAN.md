@@ -44,7 +44,10 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 - **Rust provides only primitives.** About 20 `__` functions (table, where,
   select, agg, order, limit/offset, join, group, asc/desc, key mappers, frame
   bounds) plus the `sql "..."` template mechanism. `__` names are visible only
-  inside the prelude.
+  inside the prelude. The one other thing Rust owns is the per-dialect
+  spelling of the `CAGARA_*` date and string functions: sqlglot cannot
+  translate them, and a dialect-specific template string would be re-parsed
+  and corrupted on the way out (`docs/SQL-DIALECTS.md`).
 - **Templates carry their phase in the signature.** A `sql` definition must be
   annotated; its arity comes from the arrows, and the result head (`expr`,
   `agg`, `win`) decides whether it builds a scalar, aggregate, or window node.
@@ -200,7 +203,9 @@ the VS Code extension compile:
   invalidate diagnostics unnecessarily.
 - SQL lowering for where/select/agg/order/limit/offset/keyMap/joins/windows,
   frames, constant-only global aggregates, join-input inlining, dialect
-  rewriting (postgres, mysql, sqlite, duckdb, tsql, bigquery, snowflake),
+  rewriting (postgres, mysql, sqlite, duckdb, tsql, bigquery, snowflake) over
+  every block — derived tables, CTE bodies, set-operation branches, join
+  inputs — and every expression slot (including ORDER BY and a join's ON),
   CASE, casts, `distinct`, membership, semi/anti joins, set operations, and
   automatic CTE reuse for repeated relational subtrees. `--optimize` remains
   opt-in, with differential tests that run the same queries on SQLite and
@@ -213,9 +218,13 @@ the VS Code extension compile:
   `strpos`, `contains`, `startsWith`, `endsWith`, `replaceAll`, `ltrim`,
   `rtrim`, `ilike`. Templates call `CAGARA_*` intrinsics that
   `cagara-sql/src/intrinsics.rs` spells per dialect, since sqlglot's typed
-  date functions do not transpile reliably. Prelude functions take their
-  subject last (`addDays 7 .d`, `coalesce 0 x`, `contains "@" .email`), so
-  partial applications compose with `>>>`.
+  date functions do not transpile reliably and re-parse dialect-specific SQL
+  fed back through a template (see `docs/SQL-DIALECTS.md`). A `CAGARA_*` call
+  the backend does not recognize is a diagnostic, not SQL passed through.
+  `addWeeks` / `addQuarters` are ordinary Cagara built on `addDays` /
+  `addMonths`. Prelude functions take their subject last (`addDays 7 .d`,
+  `coalesce 0 x`, `contains "@" .email`), so partial applications compose
+  with `>>>`.
 - Precise error locations: query stages built in user code are tagged with
   their source span (`Rel::At`, transparent to schema and lowering), so an
   IR-validator error points at the innermost failing stage. Diagnostics show
@@ -227,7 +236,10 @@ the VS Code extension compile:
 Known gaps:
 
 - **Non-static key mappers** (`prefix`, `suffix`, or a column list that is
-  not a literal) give an unconstrained row; the IR validator checks them.
+  not a literal) give an unconstrained row; the IR validator checks them. The
+  element types of a literal list or record are not checked either, so
+  `only [1]` and `rename { id = 5 }` pass the checker and fail in the
+  evaluator.
 - **No implicit conversions (by design).** `.age * 1.5` and `.amount +
   .user_id` are type errors; only literals take the type their context
   needs, like Haskell's numeric literals. Duplicate overload candidates with
@@ -237,6 +249,41 @@ Known gaps:
 - `--optimize` runs sqlglot's optimizer (constant folding, boolean
   simplification, pushdown). Tests pin that it keeps filters outside
   window / LIMIT / aggregate boundaries; it stays opt-in.
+- **`distinct` is not a lowering barrier.** A later stage that changes the
+  row — `agg`, a new window, or a stage whose hidden `__kN` sort key joins
+  the select list — folds into the same SELECT, so it dedupes on the wrong
+  columns or not at all (`distinct & agg { n = count }` counts every row).
+  `distinct` with an ORDER BY key the projection drops, and the T-SQL
+  `NULLS LAST` emulation under `distinct`, both emit SQL the engine rejects.
+- **A set-operation branch with its own `limit` / `offset`** is emitted
+  unparenthesized (`SELECT ... LIMIT 3 UNION SELECT ... LIMIT 2`), which
+  engines reject.
+- **The checker recurses once per forward-referenced definition** with no
+  depth guard, so a chain of a few hundred (`h0 = x => h1 x`, ...) overflows
+  the stack: uncatchable, and at roughly 60 levels on the language server's
+  2 MB thread. The parser and the evaluator report pathological input
+  instead.
+- **`SourceFile::set_contents` desyncs salsa from `Workspace`'s caches.**
+  Spans come from the db text and the checked text from the workspace's, so
+  an edit across a character boundary panics, and the two phases can analyze
+  different programs.
+- **Checker and evaluator still disagree on a few inputs.** `asc (desc .id)`
+  type-checks but the evaluator cannot build a sort key from a sort key, and
+  a `sql` template without a signature is accepted by the checker and
+  rejected by the evaluator, which breaks the "checker accepts, so it
+  evaluates" test invariant.
+- **Smaller gaps from the same review:** `open_with_buffers` can add one
+  file twice (duplicate diagnostics); a nested definition check takes the
+  completion probe from the definition being completed; template `$n`
+  validation misses `$0`, gaps, and a `$n` inside a name or a type;
+  `qualify` rewrites a bare keyword in a template into `t1.DAY`; the
+  reserved-word list misses MySQL 8 words such as `rank`; `MAX_DEPTH`
+  reports recursion for a deep but terminating program.
+- **Names still hardcoded in Rust, not Cagara:** the six pipeline-operator
+  names (`eval.rs`), the window-spec field names (checker and evaluator),
+  and user-facing names inside error strings (`coalesce`, `isNull`, `agg`,
+  `where`, `group`, `keyMap`, `only`, `replace`, `wholePartition`). These
+  need a prelude marker or a shared constant before they can move.
 
 ## Roadmap
 
@@ -283,3 +330,12 @@ Known gaps:
     operations, `in` / semi/anti-joins, `cast`, automatic CTEs for repeated
     relational subtrees, and strict aggregate/window nullability requiring
     explicit `coalesce`.
+15. ~~Review fixes, second pass~~ (done; see Status): the dialect rewriter now
+    walks CTE bodies, set-operation branches, and their own ORDER BY / LIMIT /
+    OFFSET; an unrecognized `CAGARA_*` intrinsic is a diagnostic instead of
+    SQL passed through; nested `||` flattens to one `CONCAT`; `addWeeks` /
+    `addQuarters` moved into `prelude.cagara`; the duplicated `paren` /
+    `atomic` helpers unified; clippy clean (was 10 warnings).
+16. Next: the gaps the second review opened — `distinct` lowering, a checker
+    depth guard, the salsa / workspace text desync, and the remaining
+    checker-versus-evaluator mismatches (see Known gaps).

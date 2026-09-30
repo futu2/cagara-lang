@@ -22,10 +22,12 @@
 //! `kind` is `DATE` or `TIMESTAMP`. Dialects not named below get the ANSI /
 //! Postgres spelling.
 
+use crate::stage::atomic;
 use sqlglot_rust::ast::{
     BinaryOperator, DataType, DateTimeField, Expr, QuoteStyle, TypedFunction, UnaryOperator,
 };
 use sqlglot_rust::Dialect;
+use std::cell::Cell;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Fam {
@@ -55,12 +57,25 @@ fn fam(d: Dialect) -> Fam {
 }
 
 /// Lower every intrinsic in `e` (bottom-up, so arguments are lowered first).
-pub fn lower(e: Expr, to: Dialect) -> Expr {
+/// A `CAGARA_*` call that is not a known intrinsic is an error rather than
+/// SQL that the target engine would reject.
+pub fn lower(e: Expr, to: Dialect) -> Result<Expr, String> {
     let f = fam(to);
-    crate::stage::transform_deep(e, &|e| node(e, f))
+    let failed = Cell::new(None);
+    let out = crate::stage::transform_deep(e, &|e| match node(e, f) {
+        Ok(e) => e,
+        Err(m) => {
+            failed.set(failed.take().or(Some(m)));
+            Expr::Null
+        }
+    });
+    match failed.into_inner() {
+        Some(m) => Err(m),
+        None => Ok(out),
+    }
 }
 
-fn node(e: Expr, f: Fam) -> Expr {
+fn node(e: Expr, f: Fam) -> Result<Expr, String> {
     let Expr::Function {
         name,
         args,
@@ -71,18 +86,11 @@ fn node(e: Expr, f: Fam) -> Expr {
         within_group,
     } = e
     else {
-        return e;
+        return Ok(e);
     };
-    let lowered = if name.to_ascii_uppercase().starts_with("CAGARA_") && over.is_none() {
-        intrinsic(&name.to_ascii_uppercase(), &args, f)
-    } else {
-        None
-    };
-    match lowered {
-        // Non-atomic results are parenthesized so they keep precedence
-        // inside whatever template they were substituted into.
-        Some(out) => atomic(out),
-        None => Expr::Function {
+    let upper = name.to_ascii_uppercase();
+    if !upper.starts_with("CAGARA_") {
+        return Ok(Expr::Function {
             name,
             args,
             distinct,
@@ -90,7 +98,21 @@ fn node(e: Expr, f: Fam) -> Expr {
             over,
             order_by,
             within_group,
-        },
+        });
+    }
+    let lowered = if over.is_none() {
+        intrinsic(&upper, &args, f)
+    } else {
+        None
+    };
+    match lowered {
+        // Non-atomic results are parenthesized so they keep precedence
+        // inside whatever template they were substituted into.
+        Some(out) => Ok(atomic(out)),
+        None => Err(format!(
+            "unknown SQL intrinsic `{upper}` with {} argument(s)",
+            args.len()
+        )),
     }
 }
 
@@ -197,15 +219,8 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
 // ── date arithmetic ────────────────────────────────────────────────────────
 
 fn add(ts: bool, unit: &str, x: Expr, count: Expr, f: Fam) -> Option<Expr> {
-    // Weeks and quarters are days and months, which every dialect has.
-    let (unit, count) = match unit {
-        "WEEK" => ("DAY", bin(atomic(count), BinaryOperator::Multiply, n("7"))),
-        "QUARTER" => (
-            "MONTH",
-            bin(atomic(count), BinaryOperator::Multiply, n("3")),
-        ),
-        u => (u, count),
-    };
+    // Only a unit that contributes a whole number of days or months: the
+    // prelude spells weeks and quarters in terms of these.
     let field = field(unit)?;
     if !ts && !matches!(unit, "DAY" | "MONTH" | "YEAR") {
         return None;
@@ -526,8 +541,8 @@ fn idiv(a: Expr, b: Expr, f: Fam) -> Expr {
         Fam::Mysql | Fam::Snowflake => {
             let rem = bin(atomic(a.clone()), BinaryOperator::Modulo, atomic(b.clone()));
             let exact = slash(bin(atomic(a), BinaryOperator::Minus, atomic(rem)), b);
+            // MySQL casts to SIGNED, not BIGINT.
             if f == Fam::Mysql {
-                // MySQL casts to SIGNED, not BIGINT.
                 cast(exact, DataType::UserDefined("SIGNED".into()))
             } else {
                 func("TRUNC", vec![exact])
@@ -616,25 +631,5 @@ fn case(cond: Expr, then: Expr, otherwise: Expr) -> Expr {
         operand: None,
         when_clauses: vec![(cond, then)],
         else_clause: Some(Box::new(otherwise)),
-    }
-}
-
-/// Parenthesize anything that is not already a single term (a negative
-/// number is not: `-` before it would make a `--` comment).
-fn atomic(e: Expr) -> Expr {
-    match e {
-        Expr::Number(ref n) if n.starts_with('-') => Expr::Nested(Box::new(e)),
-        Expr::Column { .. }
-        | Expr::Number(_)
-        | Expr::StringLiteral(_)
-        | Expr::Boolean(_)
-        | Expr::Null
-        | Expr::Function { .. }
-        | Expr::TypedFunction { .. }
-        | Expr::Cast { .. }
-        | Expr::Extract { .. }
-        | Expr::Case { .. }
-        | Expr::Nested(_) => e,
-        other => Expr::Nested(Box::new(other)),
     }
 }

@@ -1154,17 +1154,17 @@ impl<'w> Checker<'w> {
     fn fingerprint_into(&self, t: &Ty, out: &mut String) {
         match self.resolve(t) {
             Ty::Var(v) => {
-                out.push_str("v");
+                out.push('v');
                 out.push_str(&v.to_string());
                 out.push(':');
                 out.push_str(&self.vars[v as usize].version.to_string());
             }
             Ty::Rigid(v, _) => {
-                out.push_str("r");
+                out.push('r');
                 out.push_str(&v.to_string());
             }
             Ty::Gen(v) => {
-                out.push_str("g");
+                out.push('g');
                 out.push_str(&v.to_string());
             }
             Ty::Con(n, args) => {

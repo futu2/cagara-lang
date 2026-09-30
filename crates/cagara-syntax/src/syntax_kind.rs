@@ -165,6 +165,7 @@ impl From<Token> for SyntaxKind {
             Token::Int => K::Int,
             Token::Float => K::Float,
             Token::String => K::String,
+            Token::UnterminatedString => K::Error,
             Token::Error => K::Error,
         }
     }
@@ -200,14 +201,16 @@ impl SyntaxKind {
             K::LtEq => (13, 14, "_<=_"),
             K::Gt => (13, 14, "_>_"),
             K::GtEq => (13, 14, "_>=_"),
-            K::Plus => (15, 16, "_+_"),
-            K::Diamond => (16, 15, "_<>_"), // right-assoc, like Haskell's infixr 6
-            K::Minus => (15, 16, "_-_"),
-            K::Star => (17, 18, "_*_"),
-            K::Slash => (17, 18, "_/_"),
-            K::Percent => (17, 18, "_%_"),
+            // Right-assoc concatenation, looser than arithmetic so a mixed
+            // chain reads one way: `a <> b + c <> d` = `a <> (b + c) <> d`.
+            K::Diamond => (16, 15, "_<>_"),
+            K::Plus => (17, 18, "_+_"),
+            K::Minus => (17, 18, "_-_"),
+            K::Star => (19, 20, "_*_"),
+            K::Slash => (19, 20, "_/_"),
+            K::Percent => (19, 20, "_%_"),
             // Right-assoc, tightest: `.a ?? .b ?? 0`, `.score ?? 0 + 1`.
-            K::QuestionQuestion => (20, 19, "_??_"),
+            K::QuestionQuestion => (22, 21, "_??_"),
             _ => return None,
         })
     }

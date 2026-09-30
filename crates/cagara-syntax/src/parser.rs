@@ -90,6 +90,34 @@ impl<'a> Parser<'a> {
         self.peek() == Some(t)
     }
 
+    /// `t` inside the current item: an identifier in column 0 starts the
+    /// next one, so it is never a type, field, or alias of this one.
+    fn at_inner(&self, t: Token) -> bool {
+        self.at(t) && !self.at_boundary()
+    }
+
+    /// Tokens that close or separate an enclosing construct: recovery stops
+    /// in front of them instead of swallowing them.
+    fn at_closer(&self) -> bool {
+        matches!(
+            self.peek(),
+            Some(Token::RParen | Token::RBrace | Token::RBracket | Token::Comma | Token::Eq)
+        )
+    }
+
+    /// Enter one level of nesting; `false` (after reporting it once) when the
+    /// limit is reached.
+    fn descend(&mut self) -> bool {
+        if self.depth >= MAX_DEPTH {
+            if !self.at_boundary() && self.depth == MAX_DEPTH {
+                self.bail("expression is nested too deeply");
+            }
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+
     /// Layout rule: an identifier or `import` in column 0 starts a new item.
     fn at_boundary(&self) -> bool {
         match self.peek_lex(0) {
@@ -189,7 +217,11 @@ impl<'a> Parser<'a> {
         self.expect(Token::String, "import path string");
         if self.at(Token::As) {
             self.bump();
-            self.expect(Token::Ident, "module alias");
+            if self.at_inner(Token::Ident) {
+                self.bump();
+            } else {
+                self.error("expected module alias");
+            }
         }
         self.finish();
     }
@@ -217,6 +249,9 @@ impl<'a> Parser<'a> {
     // ── types ────────────────────────────────────────────────
 
     fn ty(&mut self) {
+        if !self.descend() {
+            return;
+        }
         let cp = self.checkpoint();
         self.ty_app();
         if self.at(Token::Arrow) {
@@ -224,6 +259,7 @@ impl<'a> Parser<'a> {
             self.ty();
             self.wrap(cp, K::TyFun);
         }
+        self.depth -= 1;
     }
 
     fn ty_atom_start(&self) -> bool {
@@ -236,7 +272,7 @@ impl<'a> Parser<'a> {
 
     /// `head arg arg`; a bare record or paren type is also accepted.
     fn ty_app(&mut self) {
-        if self.at(Token::Ident) {
+        if self.at_inner(Token::Ident) {
             self.start(K::TyApp);
             self.bump();
             while self.ty_atom_start() {
@@ -249,7 +285,7 @@ impl<'a> Parser<'a> {
     }
 
     fn ty_atom(&mut self) {
-        match self.peek() {
+        match self.peek().filter(|_| !self.at_boundary()) {
             Some(Token::Ident) => {
                 self.start(K::TyApp);
                 self.bump();
@@ -265,7 +301,7 @@ impl<'a> Parser<'a> {
             Some(Token::LBrace) => {
                 self.start(K::TyRecord);
                 self.bump();
-                while self.at(Token::Ident) {
+                while self.at_inner(Token::Ident) {
                     self.start(K::TyField);
                     self.bump();
                     self.expect(Token::Eq, "`=` in record type");
@@ -279,7 +315,11 @@ impl<'a> Parser<'a> {
                 }
                 if self.at(Token::Bar) {
                     self.bump();
-                    self.expect(Token::Ident, "row variable after `|`");
+                    if self.at_inner(Token::Ident) {
+                        self.bump();
+                    } else {
+                        self.error("expected row variable after `|`");
+                    }
                 }
                 self.expect(Token::RBrace, "`}`");
                 self.finish();
@@ -287,7 +327,7 @@ impl<'a> Parser<'a> {
             _ => {
                 self.error("expected a type");
                 self.start(K::ErrorNode);
-                if !self.at_boundary() {
+                if !self.at_boundary() && !self.at_closer() && !self.at(Token::Arrow) {
                     self.bump();
                 }
                 self.finish();
@@ -298,8 +338,7 @@ impl<'a> Parser<'a> {
     // ── expressions ──────────────────────────────────────────
 
     fn at_lambda(&self) -> bool {
-        self.peek() == Some(Token::Ident)
-            && self.peek_lex(1).map(|l| l.kind) == Some(Token::FatArrow)
+        self.at_inner(Token::Ident) && self.peek_lex(1).map(|l| l.kind) == Some(Token::FatArrow)
     }
 
     fn expr(&mut self) {
@@ -372,7 +411,18 @@ impl<'a> Parser<'a> {
             self.depth += 1;
             self.start(K::NegExpr);
             self.bump();
-            self.unary();
+            // `-9223372036854775808` is in range, though its digits alone
+            // are not.
+            if self
+                .peek_lex(0)
+                .is_some_and(|l| l.text == "9223372036854775808")
+            {
+                self.start(K::Literal);
+                self.bump();
+                self.finish();
+            } else {
+                self.unary();
+            }
             self.finish();
             self.depth -= 1;
         } else {
@@ -390,6 +440,7 @@ impl<'a> Parser<'a> {
                         | Token::Int
                         | Token::Float
                         | Token::String
+                        | Token::UnterminatedString
                         | Token::Field
                         | Token::LeftField
                         | Token::RightField
@@ -440,14 +491,35 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.finish();
                 if proj {
-                    // chain: a.b.c
+                    // chain: a.b.c, each link one level deeper in the AST.
+                    let mut chain = 0;
                     while self.toks.get(self.pos).map(|l| l.kind) == Some(Token::Field) {
+                        chain += 1;
+                        if self.depth + chain >= MAX_DEPTH {
+                            self.bail("expression is too long");
+                            break;
+                        }
                         self.bump();
                         self.wrap(cp, K::ProjExpr);
                     }
                 }
             }
-            Some(Token::Int | Token::Float | Token::String) => {
+            Some(Token::Int) => {
+                let text = self.peek_lex(0).map_or("", |l| l.text);
+                if text.parse::<i64>().is_err() {
+                    self.error("integer literal is too large (the limit is 9223372036854775807)");
+                }
+                self.start(K::Literal);
+                self.bump();
+                self.finish();
+            }
+            Some(Token::Float | Token::String) => {
+                self.start(K::Literal);
+                self.bump();
+                self.finish();
+            }
+            Some(Token::UnterminatedString) => {
+                self.error("unterminated string: a string must end on the line it starts");
                 self.start(K::Literal);
                 self.bump();
                 self.finish();
@@ -475,7 +547,9 @@ impl<'a> Parser<'a> {
             _ => {
                 self.error("expected an expression");
                 self.start(K::ErrorNode);
-                self.bump();
+                if !self.at_closer() {
+                    self.bump();
+                }
                 self.finish();
             }
         }
@@ -484,7 +558,7 @@ impl<'a> Parser<'a> {
     fn record(&mut self) {
         self.start(K::RecordExpr);
         self.bump(); // {
-        while self.at(Token::Ident) {
+        while self.at_inner(Token::Ident) {
             self.start(K::RecordField);
             self.bump();
             self.expect(Token::Eq, "`=` in record");
@@ -676,5 +750,132 @@ mod tests {
         let src = format!("x = {}1{}\n", "(".repeat(100), ")".repeat(100));
         let p = parse(&src);
         assert!(p.errors.is_empty(), "{:?}", p.errors);
+    }
+
+    fn defs(p: &Parse) -> Vec<String> {
+        p.syntax()
+            .children()
+            .filter(|n| n.kind() == K::Definition)
+            .map(|n| {
+                n.first_token()
+                    .map_or(String::new(), |t| t.text().to_string())
+            })
+            .collect()
+    }
+
+    fn messages(p: &Parse) -> Vec<&str> {
+        p.errors.iter().map(|e| e.message.as_str()).collect()
+    }
+
+    #[test]
+    fn strings_end_at_their_line() {
+        // A missing quote used to swallow the rest of the file, or pair with
+        // the next string and silently make a different program.
+        for src in ["x = \"abc\ny = 1\nz = 2\n", "x = \"abc\ny = 1\nz = \"q\"\n"] {
+            let p = parse(src);
+            assert_eq!(messages(&p).len(), 1, "{:?}", p.errors);
+            assert!(
+                p.errors[0].message.contains("unterminated string"),
+                "{:?}",
+                p.errors
+            );
+            assert_eq!(defs(&p), ["x", "y", "z"], "{src:?}");
+            assert_eq!(p.syntax().text().to_string(), src);
+        }
+        // Escaped quotes still work.
+        assert!(parse("x = \"a\\\"b\"\n").errors.is_empty());
+    }
+
+    #[test]
+    fn column_zero_names_are_never_part_of_the_item_above() {
+        // Half-typed items: each used to take the next definition in.
+        for (src, msg) in [
+            ("x :\ny = 1\n", "expected a type"),
+            ("x : query {\ny = 1\n", "expected `}`"),
+            ("x = {\ny = 1\n", "expected `}`"),
+            ("x = (\ny = 1\n", "expected an expression"),
+            ("import \"a\" as\ny = 1\n", "expected module alias"),
+            ("x =\ny => 1\n", "expected an expression"),
+        ] {
+            let p = parse(src);
+            assert!(messages(&p).contains(&msg), "{src:?}: {:?}", p.errors);
+            assert!(
+                defs(&p).contains(&"y".to_string()),
+                "{src:?}: {}",
+                sexp(&p.syntax())
+            );
+            assert_eq!(p.syntax().text().to_string(), src);
+        }
+        // `y` itself parses: its errors, if any, are its own.
+        let p = parse("x :\ny = 1\n");
+        assert!(p.errors.iter().all(|e| e.offset <= 4), "{:?}", p.errors);
+    }
+
+    #[test]
+    fn recovery_keeps_closing_delimiters() {
+        for (src, want) in [
+            ("x = ()\n", vec!["expected an expression"]),
+            ("x : = 1\n", vec!["expected a type"]),
+            ("x = [1, ]\n", vec![]),
+            (
+                "x = f (, 1)\n",
+                vec![
+                    "expected an expression",
+                    "expected `)`",
+                    "unexpected tokens after definition",
+                ],
+            ),
+        ] {
+            assert_eq!(messages(&parse(src)), want, "{src:?}");
+        }
+    }
+
+    #[test]
+    fn long_types_and_projections_are_errors_not_overflows() {
+        let arrows = format!("x : {}a = 1\ny = 2\n", "a -> ".repeat(30_000));
+        let parens = format!(
+            "x : {}a{} = 1\ny = 2\n",
+            "(".repeat(30_000),
+            ")".repeat(30_000)
+        );
+        let records = format!(
+            "x : {}a{} = 1\ny = 2\n",
+            "{ f = ".repeat(30_000),
+            " }".repeat(30_000)
+        );
+        let proj = format!("x = m{}\ny = 2\n", ".a".repeat(30_000));
+        for src in [arrows, parens, records, proj] {
+            let p = parse(&src);
+            assert_eq!(
+                p.errors.len(),
+                1,
+                "{:?}",
+                &p.errors[..p.errors.len().min(3)]
+            );
+            assert!(p.errors[0].message.contains("too "), "{:?}", p.errors);
+            assert_eq!(defs(&p), ["x", "y"]);
+        }
+    }
+
+    #[test]
+    fn integer_literals_must_fit() {
+        assert_eq!(
+            messages(&parse("x = 9223372036854775808\n")),
+            ["integer literal is too large (the limit is 9223372036854775807)"]
+        );
+        assert!(parse("x = -9223372036854775808\n").errors.is_empty());
+        assert!(!parse("x = 1 -9223372036854775808\n").errors.is_empty());
+    }
+
+    #[test]
+    fn concat_is_looser_than_arithmetic() {
+        assert_eq!(
+            body("x = a <> b + c <> d"),
+            "(BinExpr (NameRef a) (BinExpr (BinExpr (NameRef b) (NameRef c)) (NameRef d)))"
+        );
+        assert_eq!(
+            body("x = a == b <> c"),
+            "(BinExpr (NameRef a) (BinExpr (NameRef b) (NameRef c)))"
+        );
     }
 }

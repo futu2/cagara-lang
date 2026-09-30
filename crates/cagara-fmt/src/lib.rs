@@ -510,6 +510,8 @@ impl Fmt<'_> {
                             inner.push(Doc::Line);
                         }
                     }
+                    // `{ | r }` has no field before the bar to break after.
+                    K::Bar if i == 0 => inner.extend([self.tok(t), text(" ")]),
                     K::Bar => inner.extend([Doc::Line, self.tok(t), text(" ")]),
                     K::Ident => inner.push(self.tok(t)),
                     _ => return Err(Bail),

@@ -194,7 +194,10 @@ fn engines_agree() {
                 compile(rel, opts).unwrap_or_else(|m| panic!("`{name}` / {}: {m}", e.dialect));
             match run(e, &sql) {
                 None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
-                    panic!("`{}` is not installed (CAGARA_REQUIRE_ENGINES is set)", e.shell)
+                    panic!(
+                        "`{}` is not installed (CAGARA_REQUIRE_ENGINES is set)",
+                        e.shell
+                    )
                 }
                 None => {
                     eprintln!("skipping {}: `{}` is not installed", e.dialect, e.shell);

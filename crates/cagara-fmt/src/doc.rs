@@ -122,6 +122,15 @@ impl Printer {
         if s.is_empty() || (self.at_line_start && s.trim().is_empty()) {
             return;
         }
+        // A trailing comment ends its line: whatever follows it goes on the
+        // next one, indented (column 0 would start a new item), instead of
+        // being printed before the comment.
+        let ind = if !self.suffix.is_empty() && !s.trim().is_empty() {
+            self.newline();
+            ind.max(2)
+        } else {
+            ind
+        };
         if self.at_line_start {
             self.out.extend(std::iter::repeat_n(' ', ind));
             self.col = ind;
@@ -143,6 +152,10 @@ impl Printer {
 
     /// End the current line, if anything is on it.
     fn newline(&mut self) {
+        if !self.suffix.is_empty() {
+            let trimmed = self.out.trim_end_matches(' ').len();
+            self.out.truncate(trimmed);
+        }
         for s in std::mem::take(&mut self.suffix) {
             self.out.push(' ');
             self.out.push_str(&s);

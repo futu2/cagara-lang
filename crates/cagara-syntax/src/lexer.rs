@@ -125,8 +125,13 @@ pub enum Token {
     Int,
     #[regex(r"[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?")]
     Float,
-    #[regex(r#""([^"\\]|\\.)*""#)]
+    /// A string ends on its line: a missing `"` must not swallow the rest
+    /// of the file.
+    #[regex(r#""([^"\\\n]|\\[^\n])*""#)]
     String,
+    /// `"...` with no closing quote before the end of the line.
+    #[regex(r#""([^"\\\n]|\\[^\n])*"#)]
+    UnterminatedString,
 
     Error,
 }

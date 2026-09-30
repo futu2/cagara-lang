@@ -154,7 +154,8 @@ _%_ : expr r int -> expr r int -> expr r int = sql "CAGARA_MOD($1, $2)"
 negate : expr r int -> expr r int = sql "-$1"
 negate : expr r float -> expr r float = sql "-$1"
 
-# String concatenation, `infixr 6` as in Haskell: `.first <> " " <> .last`.
+# String concatenation, right-assoc and looser than arithmetic:
+# `.first <> " " <> .last`.
 _<>_ : expr r string -> expr r string -> expr r string = sql "$1 || $2"
 concat = _<>_
 upper : expr r string -> expr r string = sql "UPPER($1)"

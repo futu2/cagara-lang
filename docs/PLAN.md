@@ -108,11 +108,17 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 124 tests, no clippy warnings):
+Done and tested (`cargo test --workspace`: 133 tests, no clippy warnings):
 
-- Lexer, parser, AST lowering (21 tests), including recovery, losslessness,
-  and a nesting / chain-length limit that reports a syntax error instead of
-  overflowing the stack on pathological input.
+- Lexer, parser, AST lowering (28 tests), including recovery, losslessness,
+  and a nesting / chain-length limit (expressions, types, projection
+  chains) that reports a syntax error instead of overflowing the stack on
+  pathological input. Strings end at their line; an identifier in column 0
+  is never taken into the item above (`x :\ny = 1`); recovery stops in
+  front of closing delimiters; an int literal out of range is an error.
+- Formatter property tests: generated programs with comments between any
+  tokens format losslessly, idempotently, and keep every comment; random
+  token soup never panics. A trailing comment ends its line wherever it is.
 - Salsa parse query with re-parse on edit (3 tests).
 - Per-module type checking as a salsa query (`module_check` over a
   `ModuleInput`): type schemes are self-contained (scheme-local variables
@@ -157,7 +163,7 @@ Done and tested (`cargo test --workspace`: 124 tests, no clippy warnings):
   types keep declaration order.
 - Overloading: a name defined more than once, each with a signature, is an
   overload set (prelude: `+ - * / negate sum avg` on int and float).
-  Strings concatenate with `<>` (`infixr 6`, as in Haskell). Pipeline
+  Strings concatenate with `<>` (right-assoc, just looser than `+` / `-`). Pipeline
   shorthands at the level of `&`: `&?` where, `&=` select, `&*` agg, `&.`
   order, `&-` limit. Join operators sit between `&` and `$`: `?` inner, `<?`
   left, `?>` right, `<?>` full (`users & teachers ? .<a == .>b`). `x ?? d`
@@ -248,12 +254,12 @@ Known gaps:
     condition columns; `$n` errors in templates; Trino / Spark families;
     differential tests on SQLite and DuckDB, run in CI. Joins stay
     left-wins on a shared column name, now documented).
-11. **Parser and formatter.** Strings stop at a newline; `at(Ident)` checks
-    respect the column-0 boundary (`x :\ny = 1`); depth limits for types and
-    projection chains; recovery keeps closing delimiters; int overflow is a
-    diagnostic; trailing comments inside `spaced` / `TyApp` / lambdas;
-    `{  | r }`; precedence of `<>` against `+`; property tests for
-    losslessness and format round-trips with comments.
+11. ~~Parser and formatter~~ (done: strings end at a newline; column-0
+    names end the item above in types, records, imports, and lambdas;
+    depth limits for types and projection chains; recovery keeps closing
+    delimiters; int overflow is a diagnostic; trailing comments anywhere;
+    `{ | r }`; `<>` looser than `+` / `-`; generated-program and
+    token-soup property tests).
 12. **Language server and CLI.** One shared workspace with open buffers fed
     to their importers, reloaded on save / watched-file events; the
     completion probe on a snapshot; `url`-based URI conversion; CLI

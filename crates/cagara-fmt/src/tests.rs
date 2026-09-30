@@ -206,3 +206,343 @@ fn types_break_at_the_width() {
     );
     assert_eq!(format_type("x", "(type error)", 80), "x : (type error)");
 }
+
+// ── generated programs ─────────────────────────────────────────────────────
+
+/// A small deterministic PRNG (xorshift64*), so failures reproduce.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+    fn chance(&mut self, pct: usize) -> bool {
+        self.below(100) < pct
+    }
+    fn pick<'a>(&mut self, xs: &[&'a str]) -> &'a str {
+        xs[self.below(xs.len())]
+    }
+}
+
+/// Writes tokens with random trivia between them. A line break is always
+/// indented: only an item's first token may be in column 0.
+struct Gen {
+    rng: Rng,
+    out: String,
+    comments: usize,
+}
+
+const OPS: &[&str] = &[
+    "&", "&=", "&?", "&*", "&.", "&-", "?", "<?", "?>", "<?>", "$", ">>>", "||", "&&", "==", "!=",
+    "<", "<=", ">", ">=", "<>", "+", "-", "*", "/", "%", "??",
+];
+const NAMES: &[&str] = &["a", "users", "f", "_x1", "where", "select", "count"];
+
+impl Gen {
+    fn gap(&mut self) {
+        match self.rng.below(10) {
+            0 => {
+                self.comments += 1;
+                let c = format!(
+                    " # c{} {}\n  ",
+                    self.comments,
+                    self.rng.pick(&["", "x = 1", "#"])
+                );
+                self.out.push_str(&c);
+            }
+            1 => self.out.push_str("\n    "),
+            2 => self.out.push_str("   "),
+            _ => self.out.push(' '),
+        }
+    }
+    fn tok(&mut self, t: &str) {
+        self.gap();
+        self.out.push_str(t);
+    }
+
+    fn atom(&mut self, depth: usize) {
+        let pick = if depth == 0 {
+            self.rng.below(4)
+        } else {
+            self.rng.below(9)
+        };
+        match pick {
+            0 => {
+                let n = self.rng.pick(NAMES);
+                self.tok(n)
+            }
+            1 => {
+                let l = self
+                    .rng
+                    .pick(&["0", "42", "1.5", "2.0e3", "\"s\"", "\"a\\\"b\"", "\"\""]);
+                self.tok(l)
+            }
+            2 => {
+                let f = self.rng.pick(&[".id", ".<k", ".>k", ".name"]);
+                self.tok(f)
+            }
+            3 => {
+                let p = self.rng.pick(&["m.x", "m.x.y"]);
+                self.tok(p)
+            }
+            4 => {
+                self.tok("(");
+                self.expr(depth - 1);
+                self.tok(")");
+            }
+            5 => {
+                self.tok("{");
+                for i in 0..self.rng.below(4) {
+                    if i > 0 {
+                        self.tok(",");
+                    }
+                    let k = self.rng.pick(&["id", "n", "total"]);
+                    self.tok(k);
+                    self.tok("=");
+                    self.expr(depth - 1);
+                }
+                self.tok("}");
+            }
+            6 => {
+                self.tok("[");
+                for i in 0..self.rng.below(4) {
+                    if i > 0 {
+                        self.tok(",");
+                    }
+                    self.expr(depth - 1);
+                }
+                self.tok("]");
+            }
+            7 => {
+                self.tok("sql");
+                self.tok("\"$1 + 1\"");
+            }
+            _ => {
+                // A lambda takes everything after it, so it is bracketed.
+                self.tok("(");
+                self.tok("x");
+                self.tok("=>");
+                self.expr(depth - 1);
+                self.tok(")");
+            }
+        }
+    }
+
+    /// Application, an operator chain, or a negation.
+    fn expr(&mut self, depth: usize) {
+        if self.rng.chance(15) {
+            self.tok("-");
+        }
+        self.atom(depth);
+        if depth > 0 && self.rng.chance(30) {
+            for _ in 0..1 + self.rng.below(3) {
+                self.atom(depth - 1);
+            }
+        }
+        if depth > 0 && self.rng.chance(40) {
+            for _ in 0..1 + self.rng.below(3) {
+                let op = self.rng.pick(OPS);
+                self.tok(op);
+                if self.rng.chance(10) {
+                    self.tok("-");
+                }
+                self.atom(depth - 1);
+            }
+        }
+    }
+
+    fn ty(&mut self, depth: usize) {
+        match if depth == 0 { 0 } else { self.rng.below(4) } {
+            0 => {
+                let t = self.rng.pick(&["int", "r", "string"]);
+                self.tok(t)
+            }
+            1 => {
+                let head = self.rng.pick(&["query", "expr r", "maybe", "list"]);
+                self.tok(head);
+                self.ty_atom(depth - 1);
+            }
+            2 => {
+                self.ty_atom(depth - 1);
+                self.tok("->");
+                self.ty(depth - 1);
+            }
+            _ => self.ty_atom(depth - 1),
+        }
+    }
+
+    fn ty_atom(&mut self, depth: usize) {
+        match if depth == 0 { 0 } else { self.rng.below(3) } {
+            0 => {
+                let t = self.rng.pick(&["int", "a", "bool"]);
+                self.tok(t)
+            }
+            1 => {
+                self.tok("(");
+                self.ty(depth - 1);
+                self.tok(")");
+            }
+            _ => {
+                self.tok("{");
+                let n = self.rng.below(3);
+                for i in 0..n {
+                    if i > 0 {
+                        self.tok(",");
+                    }
+                    let k = self.rng.pick(&["id", "v"]);
+                    self.tok(k);
+                    self.tok("=");
+                    self.ty(depth - 1);
+                }
+                if self.rng.chance(40) {
+                    self.tok("|");
+                    self.tok("r");
+                }
+                self.tok("}");
+            }
+        }
+    }
+
+    fn program(&mut self) {
+        for i in 0..1 + self.rng.below(4) {
+            if i > 0 {
+                self.out
+                    .push_str(self.rng.pick(&["\n", "\n\n", "\n# own line\n"]));
+            }
+            if self.rng.chance(15) {
+                self.out.push_str("import");
+                self.tok("\"lib.cagara\"");
+                if self.rng.chance(50) {
+                    self.tok("as");
+                    self.tok("lib");
+                }
+                continue;
+            }
+            self.out.push_str(self.rng.pick(&["q", "x", "_+_"]));
+            if self.rng.chance(40) {
+                self.tok(":");
+                self.ty(3);
+            }
+            self.tok("=");
+            self.expr(3);
+        }
+        self.out.push('\n');
+    }
+}
+
+fn comment_texts(src: &str) -> Vec<String> {
+    let mut cs: Vec<String> = cagara_syntax::lexer::lex(src)
+        .into_iter()
+        .filter(|l| l.kind == cagara_syntax::lexer::Token::Comment)
+        .map(|l| l.text.trim_end().to_string())
+        .collect();
+    cs.sort();
+    cs
+}
+
+#[test]
+fn generated_programs_format_losslessly_and_stably() {
+    for seed in 1..=600u64 {
+        let mut g = Gen {
+            rng: Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1),
+            out: String::new(),
+            comments: 0,
+        };
+        g.program();
+        let src = g.out;
+        let p = parse(&src);
+        assert!(
+            p.errors.is_empty(),
+            "seed {seed}: generator made {:?}\n{src}",
+            p.errors
+        );
+        assert_eq!(
+            p.syntax().text().to_string(),
+            src,
+            "seed {seed}: not lossless"
+        );
+        let out = format(&src)
+            .unwrap_or_else(|_| panic!("seed {seed}: formatter changed the program\n{src}"))
+            .text;
+        assert!(
+            parse(&out).errors.is_empty(),
+            "seed {seed}:\n{src}\n=>\n{out}"
+        );
+        assert_eq!(
+            comment_texts(&src),
+            comment_texts(&out),
+            "seed {seed}:\n{src}\n=>\n{out}"
+        );
+        let again = format(&out).expect("formatter changed its own output").text;
+        assert_eq!(out, again, "seed {seed}: not idempotent\n{src}");
+    }
+}
+
+#[test]
+fn token_soup_never_panics_and_stays_lossless() {
+    const SOUP: &[&str] = &[
+        "x",
+        "=",
+        ":",
+        "(",
+        ")",
+        "{",
+        "}",
+        "[",
+        "]",
+        ",",
+        "|",
+        "->",
+        "=>",
+        "&",
+        "+",
+        "-",
+        "<>",
+        ".a",
+        "m.b",
+        "1",
+        "9999999999999999999",
+        "\"s\"",
+        "\"open",
+        "sql",
+        "import",
+        "as",
+        "@",
+        "# c",
+        "\n",
+        "\n  ",
+        " ",
+        "\t",
+    ];
+    for seed in 1..=2000u64 {
+        let mut rng = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
+        let mut src = String::new();
+        for _ in 0..rng.below(40) {
+            src.push_str(rng.pick(SOUP));
+            if rng.chance(70) {
+                src.push(' ');
+            }
+        }
+        let p = parse(&src);
+        assert_eq!(p.syntax().text().to_string(), src, "seed {seed}");
+        let _ = cagara_syntax::ast::lower_source(&src);
+        let out = format(&src)
+            .unwrap_or_else(|_| panic!("seed {seed}: {src:?}"))
+            .text;
+        assert_eq!(
+            comment_texts(&src),
+            comment_texts(&out),
+            "seed {seed}: {src:?}"
+        );
+        let again = format(&out)
+            .unwrap_or_else(|_| panic!("seed {seed}: {out:?}"))
+            .text;
+        assert_eq!(out, again, "seed {seed}: {src:?}");
+    }
+}

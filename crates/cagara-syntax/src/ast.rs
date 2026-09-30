@@ -321,6 +321,11 @@ impl Lower {
                     let inner = self.expr(&c);
                     match inner.kind {
                         ExprKind::Lit(Lit::Int(v)) => ExprKind::Lit(Lit::Int(-v)),
+                        // The one literal whose digits overflow (the parser
+                        // allows it only here).
+                        ExprKind::Error if c.text() == "9223372036854775808" => {
+                            ExprKind::Lit(Lit::Int(i64::MIN))
+                        }
                         ExprKind::Lit(Lit::Float(s)) => {
                             ExprKind::Lit(Lit::Float(match s.strip_prefix('-') {
                                 Some(pos) => pos.to_string(),
@@ -466,5 +471,15 @@ mod tests {
         );
         assert!(matches!(&m.defs[1].body.kind, ExprKind::Lambda(p, _) if p == "x"));
         assert_eq!(m.defs[2].body.kind, ExprKind::Sql("UPPER($1)".into()));
+    }
+
+    #[test]
+    fn negative_literals() {
+        assert_eq!(
+            body("x = -9223372036854775808"),
+            ExprKind::Lit(Lit::Int(i64::MIN))
+        );
+        assert_eq!(body("x = - -1.5"), ExprKind::Lit(Lit::Float("1.5".into())));
+        assert_eq!(body("x = -1.5"), ExprKind::Lit(Lit::Float("-1.5".into())));
     }
 }

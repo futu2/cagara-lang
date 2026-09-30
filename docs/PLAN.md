@@ -192,10 +192,17 @@ the VS Code extension compile:
   aggregates, ungrouped columns, filtering on aggregates/windows.
 - No input aborts the compiler. Every failure is a diagnostic: nesting and
   chain length in the parser, application depth in the evaluator (so
-  `f = x => f x` is reported instead of recursing for ever), and the open
+  `f = x => f x` is reported instead of recursing for ever), a chain of
+  forward-referenced definitions in the checker (reported instead of
+  overflowing the stack), and the open
   overload count in the checker. A definition that nothing uses is still
   rejected when its overloads cannot be satisfied for any type
   (`bad = .age + "x"`), while leftover literals keep their polymorphic type.
+- The checker and the evaluator accept the same programs. `asc` / `desc` take
+  an expression rather than a sort key (`asc (desc .x)` is a type error), a
+  key mapper's list or record must hold strings, and a `sql` template must
+  have the signature that gives it its arity and phase — all of which the
+  evaluator would otherwise reject after the checker had accepted them.
 - Checker performance and incrementality: union-find path compression,
   versioned variable state, and cached overload fitting avoid retrying an
   overload unless its inputs changed. Salsa stores raw diagnostic spans and
@@ -236,10 +243,9 @@ the VS Code extension compile:
 Known gaps:
 
 - **Non-static key mappers** (`prefix`, `suffix`, or a column list that is
-  not a literal) give an unconstrained row; the IR validator checks them. The
-  element types of a literal list or record are not checked either, so
-  `only [1]` and `rename { id = 5 }` pass the checker and fail in the
-  evaluator.
+  not a literal) give an unconstrained row; the IR validator checks them. A
+  literal list or record must hold strings, so `only [1]` and `rename { id =
+  5 }` are now type errors.
 - **No implicit conversions (by design).** `.age * 1.5` and `.amount +
   .user_id` are type errors; only literals take the type their context
   needs, like Haskell's numeric literals. Duplicate overload candidates with
@@ -258,20 +264,10 @@ Known gaps:
 - **A set-operation branch with its own `limit` / `offset`** is emitted
   unparenthesized (`SELECT ... LIMIT 3 UNION SELECT ... LIMIT 2`), which
   engines reject.
-- **The checker recurses once per forward-referenced definition** with no
-  depth guard, so a chain of a few hundred (`h0 = x => h1 x`, ...) overflows
-  the stack: uncatchable, and at roughly 60 levels on the language server's
-  2 MB thread. The parser and the evaluator report pathological input
-  instead.
 - **`SourceFile::set_contents` desyncs salsa from `Workspace`'s caches.**
   Spans come from the db text and the checked text from the workspace's, so
   an edit across a character boundary panics, and the two phases can analyze
   different programs.
-- **Checker and evaluator still disagree on a few inputs.** `asc (desc .id)`
-  type-checks but the evaluator cannot build a sort key from a sort key, and
-  a `sql` template without a signature is accepted by the checker and
-  rejected by the evaluator, which breaks the "checker accepts, so it
-  evaluates" test invariant.
 - **Smaller gaps from the same review:** `open_with_buffers` can add one
   file twice (duplicate diagnostics); a nested definition check takes the
   completion probe from the definition being completed; template `$n`
@@ -336,6 +332,9 @@ Known gaps:
     SQL passed through; nested `||` flattens to one `CONCAT`; `addWeeks` /
     `addQuarters` moved into `prelude.cagara`; the duplicated `paren` /
     `atomic` helpers unified; clippy clean (was 10 warnings).
-16. Next: the gaps the second review opened — `distinct` lowering, a checker
-    depth guard, the salsa / workspace text desync, and the remaining
-    checker-versus-evaluator mismatches (see Known gaps).
+16. ~~Checker guards from the second review~~ (done; see Status): a chain of
+    forward-referenced definitions is reported instead of overflowing the
+    stack; `asc` / `desc` reject a sort key; a key mapper's list or record
+    must hold strings; a `sql` template needs a type signature.
+17. Next: `distinct` lowering barriers, the unparenthesized set-operation
+    branch, and the salsa / `Workspace` text desync (see Known gaps).

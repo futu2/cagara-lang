@@ -309,6 +309,49 @@ fn overloads_need_signatures() {
     );
 }
 
+#[test]
+fn checker_rejects_what_the_evaluator_cannot_build() {
+    // `asc` takes an expression, not a sort key: `asc (desc .id)` used to
+    // type-check and then fail in the evaluator.
+    let e = err("q = users & order [asc (desc .id)]\n", "q");
+    assert!(e.contains("sortkey"), "{e}");
+    // A key mapper's payload must be a string, or the evaluator dies on it.
+    let e = err("q = users & keyMap (only [1])\n", "q");
+    assert!(e.contains("strings"), "{e}");
+    let e = err("q = users & keyMap (rename { id = 5 })\n", "q");
+    assert!(e.contains("strings"), "{e}");
+}
+
+#[test]
+fn sql_templates_need_signatures() {
+    // A template's arity and phase come from its signature; without one the
+    // checker used to hand out a fresh variable and the evaluator rejected it.
+    let e = err("f = sql \"1\"\n", "f");
+    assert!(e.contains("needs a type signature"), "{e}");
+}
+
+#[test]
+fn deep_forward_reference_chains_are_reported_not_a_crash() {
+    // `def_scheme` recurses once per forward-referenced definition, so a long
+    // chain used to overflow the stack before any diagnostic was reported.
+    let chain = |n: usize| {
+        let mut src = String::new();
+        for i in 0..n - 1 {
+            src.push_str(&format!("h{i} = x => h{} x\n", i + 1));
+        }
+        src.push_str(&format!("h{} = x => x\nq = h0 1\n", n - 1));
+        src
+    };
+    // Well under the limit: every definition checks.
+    let ok = types(&chain(20));
+    assert!(ok.iter().all(|(_, r)| r.is_ok()), "{ok:?}");
+    // Past it: reported once, and the rest of the chain still checks.
+    let deep = types(&chain(100));
+    let failed: Vec<&String> = deep.iter().filter_map(|(_, r)| r.as_ref().err()).collect();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(failed[0].contains("forward-referenced"), "{failed:?}");
+}
+
 const NULLABLE: &str = "people : query { id = int, email = maybe string, score = maybe int } = table \"p\" \"people\"\n";
 
 #[test]

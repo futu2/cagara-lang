@@ -127,6 +127,13 @@ const NULLABLE: &str = "expected a non-null value, found a `maybe`; use `coalesc
 const UNGROUPED: &str = "aggregates cannot mix with ungrouped columns or be `select` fields; \
                          aggregate in `agg`, with columns wrapped in `group`";
 
+/// How many forward-referenced definitions one scheme may resolve before the
+/// checker reports the chain instead of overflowing the native stack. A
+/// `def_scheme` level costs tens of kilobytes of stack, and a checker runs on
+/// threads as small as a 2 MB test or embedder thread, so this stays well
+/// under that. Real code defines a name before the definitions that use it.
+const MAX_DEF_DEPTH: usize = 48;
+
 /// The IR phase a phase type stands for, once it is known.
 fn phase_of(t: &Ty) -> Option<Phase> {
     match t {
@@ -495,6 +502,8 @@ fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> M
         schemes: deps.clone(),
         failed: HashSet::new(),
         active: Vec::new(),
+        depth: 0,
+        depth_reported: false,
         pending: Vec::new(),
         errors: Vec::new(),
         span: Span::default(),
@@ -564,6 +573,10 @@ struct Checker<'w> {
     schemes: HashMap<(usize, usize), Scheme>,
     failed: HashSet<(usize, usize)>,
     active: Vec<(usize, usize)>,
+    /// How many `def_scheme` calls are on the stack, for `MAX_DEF_DEPTH`.
+    depth: usize,
+    /// Whether the `MAX_DEF_DEPTH` diagnostic was already reported.
+    depth_reported: bool,
     pending: Vec<(Cons, Span)>,
     errors: Vec<RawTypeError>,
     /// Location of the argument being checked (for deferred literals).
@@ -891,10 +904,35 @@ impl<'w> Checker<'w> {
             // loaded before this one (cannot happen for valid imports).
             return None;
         }
+        if self.depth >= MAX_DEF_DEPTH {
+            // The chain of forward references is deeper than any real program
+            // and would overflow the stack before a diagnostic could be
+            // reported, so report it once, here, and let the rest of the
+            // chain check against a fresh type instead of cascading.
+            if !self.depth_reported {
+                self.depth_reported = true;
+                self.errors.push(RawTypeError {
+                    module: m,
+                    def: i,
+                    span: self.env.defs[i].span,
+                    message: format!(
+                        "`{}` lies on a chain of more than {MAX_DEF_DEPTH} forward-referenced \
+                         definitions; define a name before the definitions that use it",
+                        self.env.defs[i].name
+                    ),
+                });
+            }
+            let v = self.fresh();
+            let scheme = self.generalize(&v, vec![]);
+            self.schemes.insert((m, i), scheme.clone());
+            return Some(scheme);
+        }
         self.active.push((m, i));
+        self.depth += 1;
         let saved = std::mem::take(&mut self.pending);
         let saved_uses = std::mem::take(&mut self.uses);
         let r = self.check_def(i);
+        self.depth -= 1;
         // Use types as far as checking got, even if it failed later on.
         for (sp, t, lit) in std::mem::replace(&mut self.uses, saved_uses) {
             let shown = match (lit, self.resolve(&t)) {
@@ -961,9 +999,17 @@ impl<'w> Checker<'w> {
             None => None,
         };
         if let ExprKind::Sql(_) = def.body.kind {
-            // Templates are trusted: their signature is their type (the
-            // evaluator reports a missing one).
-            return Ok(ann.unwrap_or_else(|| self.fresh()));
+            // A template's signature is its type: its arity and whether it is
+            // a scalar, aggregate, or window function come from the arrows, so
+            // there is nothing to infer.
+            return match ann {
+                Some(t) => Ok(t),
+                None => Err(at(def.span)(format!(
+                    "`{}` needs a type signature: a `sql` template takes its arity and phase \
+                     from it, e.g. `{} : expr r string -> expr r string = sql \"UPPER($1)\"`",
+                    def.name, def.name
+                ))),
+            };
         }
         let t = self.infer(&mut Vec::new(), &def.body)?;
         if let Some(a) = &ann {
@@ -1886,8 +1932,11 @@ impl<'w> Checker<'w> {
                 )
             }
             Asc | Desc => {
-                let r = self.fresh();
-                fun(sortkey(r.clone()), sortkey(r))
+                // `asc .x`: a row-phase expression becomes a sort key. Taking
+                // an `expr` rather than a `sortkey` rejects `asc (desc .x)`,
+                // which the evaluator cannot build.
+                let (r, a) = (self.fresh(), self.fresh());
+                fun(expr(con("row"), r.clone(), a), sortkey(r))
             }
             KeyMap => {
                 let (mp, a, b) = (self.fresh(), self.fresh(), self.fresh());
@@ -2219,10 +2268,33 @@ impl<'w> Checker<'w> {
             (_, Ty::Var(_)) => None,
             ("only", Ty::Labels(ls)) => Some(Some(KeyMapper::Only(ls))),
             ("drop", Ty::Labels(ls)) => Some(Some(KeyMapper::Drop(ls))),
-            ("only" | "drop", Ty::Con("list", _)) => Some(None),
+            ("only" | "drop", Ty::Con("list", elem)) => match self.resolve(&elem[0]) {
+                Ty::Var(_) => return Ok(None),
+                Ty::Con("string", _) => Some(None),
+                o => {
+                    return Err(format!(
+                        "a key mapper's column list must hold strings, found {}",
+                        self.show(&o)
+                    ))
+                }
+            },
             ("replace", Ty::Renames(ps)) => Some(Some(KeyMapper::Replace(ps))),
             ("replace", Ty::Empty) => Some(Some(KeyMapper::Replace(vec![]))),
-            ("replace", Ty::Row(..)) => Some(None),
+            ("replace", Ty::Row(fs, _)) => {
+                for (k, t) in &fs {
+                    match self.resolve(t) {
+                        Ty::Var(_) => return Ok(None),
+                        Ty::Con("string", _) => {}
+                        o => {
+                            return Err(format!(
+                                "a `replace` record must hold strings, but `{k}` is {}",
+                                self.show(&o)
+                            ))
+                        }
+                    }
+                }
+                Some(None)
+            }
             ("only" | "drop", o) => {
                 return Err(format!(
                     "`{tag}` expects a list of column names, found {}",

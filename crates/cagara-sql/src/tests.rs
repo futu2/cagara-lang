@@ -168,10 +168,43 @@ fn distinct_case_cast_and_membership() {
          & select { id = .id, label = ifThenElse (.id == 1) \"yes\" \"no\", n = toFloat .id }\n",
         "q",
     );
-    assert!(s.starts_with("SELECT DISTINCT"), "{s}");
+    // `distinct` dedupes the input row, so the projection that follows it is
+    // computed outside the DISTINCT.
+    assert!(
+        s.contains("SELECT DISTINCT id, name, age, active FROM public.users"),
+        "{s}"
+    );
+    assert!(!s.starts_with("SELECT DISTINCT"), "{s}");
     assert!(s.contains("id IN (1, 2)"), "{s}");
     assert!(s.contains("CASE WHEN (id = 1) THEN 'yes' ELSE 'no' END"), "{s}");
     assert!(s.contains("CAST(id AS FLOAT) AS n"), "{s}");
+}
+
+#[test]
+fn distinct_is_a_lowering_barrier() {
+    // A stage that changes the row cannot fold into `distinct`: it would
+    // dedupe on the new columns instead of the input row.
+    let agg = sql("q = users & distinct & agg { n = count }\n", "q");
+    assert!(agg.contains("COUNT(*) AS n FROM (SELECT DISTINCT"), "{agg}");
+    let win = sql(
+        "q = users & distinct & select { id = .id, rn = rowNumber { order = [asc .id] } }\n",
+        "q",
+    );
+    assert!(win.contains("FROM (SELECT DISTINCT"), "{win}");
+    assert!(win.contains("ROW_NUMBER()"), "{win}");
+    let pick = sql("q = users & distinct & omit [\"age\"]\n", "q");
+    assert!(pick.contains("FROM (SELECT DISTINCT"), "{pick}");
+    // `order` sorts outside the dedup, so an emulated NULLS LAST key never
+    // lands in a DISTINCT select list (T-SQL rejects that).
+    let ordered = dialect("q = users & distinct & order [asc .name]\n", "q", "tsql").unwrap();
+    assert!(
+        ordered.contains("FROM (SELECT DISTINCT id, name, age, active"),
+        "{ordered}"
+    );
+    assert!(ordered.contains("ORDER BY CASE WHEN name IS NULL"), "{ordered}");
+    // A projection *before* `distinct` defines the row, so it still fuses.
+    let fused = sql("q = users & select { n = .name } & distinct\n", "q");
+    assert_eq!(fused, "SELECT DISTINCT name AS n FROM public.users");
 }
 
 #[test]

@@ -214,7 +214,11 @@ the VS Code extension compile:
   every block — derived tables, CTE bodies, set-operation branches, join
   inputs — and every expression slot (including ORDER BY and a join's ON),
   CASE, casts, `distinct`, membership, semi/anti joins, set operations, and
-  automatic CTE reuse for repeated relational subtrees. `--optimize` remains
+  automatic CTE reuse for repeated relational subtrees. `distinct` is a
+  lowering barrier: a projection, aggregate, window, or key mapper that
+  follows it sees the deduped rows instead of folding into the DISTINCT, and
+  ORDER BY is always emitted outside it (an emulated NULLS LAST key may not
+  appear in a DISTINCT select list). `--optimize` remains
   opt-in, with differential tests that run the same queries on SQLite and
   DuckDB (`tests/engines.rs`; skipped when a shell is missing, required in
   CI).
@@ -255,12 +259,6 @@ Known gaps:
 - `--optimize` runs sqlglot's optimizer (constant folding, boolean
   simplification, pushdown). Tests pin that it keeps filters outside
   window / LIMIT / aggregate boundaries; it stays opt-in.
-- **`distinct` is not a lowering barrier.** A later stage that changes the
-  row — `agg`, a new window, or a stage whose hidden `__kN` sort key joins
-  the select list — folds into the same SELECT, so it dedupes on the wrong
-  columns or not at all (`distinct & agg { n = count }` counts every row).
-  `distinct` with an ORDER BY key the projection drops, and the T-SQL
-  `NULLS LAST` emulation under `distinct`, both emit SQL the engine rejects.
 - **A set-operation branch with its own `limit` / `offset`** is emitted
   unparenthesized (`SELECT ... LIMIT 3 UNION SELECT ... LIMIT 2`), which
   engines reject.
@@ -336,5 +334,9 @@ Known gaps:
     forward-referenced definitions is reported instead of overflowing the
     stack; `asc` / `desc` reject a sort key; a key mapper's list or record
     must hold strings; a `sql` template needs a type signature.
-17. Next: `distinct` lowering barriers, the unparenthesized set-operation
-    branch, and the salsa / `Workspace` text desync (see Known gaps).
+17. ~~`distinct` lowering~~ (done; see Status): a projection, aggregate,
+    window, or key mapper after `distinct` no longer folds into it, and
+    ORDER BY is emitted outside the DISTINCT — which also makes the T-SQL
+    NULLS LAST emulation valid. SQLite differential cases cover it.
+18. Next: the unparenthesized set-operation branch and the salsa / `Workspace`
+    text desync (see Known gaps).

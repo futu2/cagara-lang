@@ -220,8 +220,11 @@ impl Lowerer {
                 let new_win = fs
                     .iter()
                     .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
+                // A projection after `distinct` would dedupe on the projected
+                // columns instead of the input row; dedupe first.
                 if st.limit.is_some()
                     || st.offset.is_some()
+                    || st.distinct
                     || (new_win && (st.has_agg || st.has_win))
                 {
                     st = self.wrap(st);
@@ -236,7 +239,14 @@ impl Lowerer {
             }
             Rel::Agg(r, fs) => {
                 let mut st = self.rel(r)?;
-                if st.has_agg || st.has_win || st.limit.is_some() || st.offset.is_some() {
+                // `distinct` must dedupe the input rows before they are
+                // counted or grouped, so it cannot fold into this stage.
+                if st.has_agg
+                    || st.has_win
+                    || st.distinct
+                    || st.limit.is_some()
+                    || st.offset.is_some()
+                {
                     st = self.wrap(st);
                 }
                 st.order_by.clear();
@@ -280,7 +290,10 @@ impl Lowerer {
             }
             Rel::Order(r, ks) => {
                 let mut st = self.rel(r)?;
-                if st.limit.is_some() || st.offset.is_some() {
+                // Sorting belongs outside the dedup: a DISTINCT query may
+                // order only by its own select list, and an emulated NULLS
+                // LAST key cannot appear there.
+                if st.limit.is_some() || st.offset.is_some() || st.distinct {
                     st = self.wrap(st);
                 }
                 let mut order = Vec::new();
@@ -322,10 +335,20 @@ impl Lowerer {
                     st = self.wrap(st);
                 }
                 st.distinct = true;
+                if !st.order_by.is_empty() {
+                    // `order` before `distinct`: dedupe inside the derived
+                    // table, sort outside it (see `Rel::Order`).
+                    st = self.wrap(st);
+                }
                 st
             }
             Rel::KeyMap(r, m) => {
                 let mut st = self.rel(r)?;
+                // As in `select`: picking or renaming after `distinct` would
+                // dedupe on the new columns.
+                if st.distinct {
+                    st = self.wrap(st);
+                }
                 let pairs = m.apply(&st.names())?;
                 let items = pairs
                     .into_iter()

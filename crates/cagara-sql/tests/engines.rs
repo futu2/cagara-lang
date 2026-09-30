@@ -22,6 +22,8 @@ INSERT INTO main.days VALUES (1, '2024-01-31'), (2, '2024-01-07'), (3, '2023-12-
 CREATE TABLE main.\"select\" (id INTEGER, \"order\" INTEGER, \"userId\" INTEGER);
 INSERT INTO main.\"select\" VALUES (1, 5, 9);
 CREATE TABLE main.empty (id INTEGER);
+CREATE TABLE main.dupes (id INTEGER, k TEXT);
+INSERT INTO main.dupes VALUES (1, 'x'), (1, 'x'), (2, 'x'), (3, 'y');
 ";
 
 const TABLES: &str = "\
@@ -31,6 +33,7 @@ orders : query { id = int, user_id = int, amount = float } = table \"main\" \"or
 days : query { id = int, d = date } = table \"main\" \"days\"
 kw : query { id = int, order = int, userId = int } = table \"main\" \"select\"
 empty : query { id = int } = table \"main\" \"empty\"
+dupes : query { id = int, k = string } = table \"main\" \"dupes\"
 ";
 
 /// `(definition, expected rows)`; a row is its columns joined by `|`, NULL
@@ -40,6 +43,17 @@ const CASES: &[(&str, &[&str])] = &[
     (
         "div = nums & select { id = .id, d = .a / .b, m = .a % .b } & order [asc .id]",
         &["1|3|1", "2|-3|-1", "3|-3|1", "4|-2|-2"],
+    ),
+    // `distinct` dedupes the input row: a stage after it sees the deduped
+    // rows, and a projection before it defines the row being deduped.
+    ("d1 = dupes & distinct & agg { n = count }", &["3"]),
+    (
+        "d2 = dupes & distinct & omit [\"id\"] & select { k = .k } & order [asc .k]",
+        &["x", "x", "y"],
+    ),
+    (
+        "d3 = dupes & select { k = .k } & distinct & order [asc .k]",
+        &["x", "y"],
     ),
     // NULLs sort last in both directions.
     (

@@ -253,20 +253,20 @@ impl Workspace {
     /// type checking are salsa queries, so only what depends on the file is
     /// recomputed. Returns `false` if its imports changed; the workspace
     /// must then be reloaded, since loading files is outside salsa.
+    ///
+    /// This is the only way to edit a loaded file. Salsa's `SourceFile` and
+    /// `modules[m].text` are updated together here and nowhere else, so a
+    /// span from a query always indexes the text the diagnostics are
+    /// rendered against (see `db.rs`).
     pub fn set_source(&mut self, m: usize, text: String) -> bool {
-        let imports = |md: &Module| {
-            md.imports
-                .iter()
-                .map(|i| (i.path.clone(), i.alias.clone()))
-                .collect::<Vec<_>>()
-        };
-        let before = imports(&self.modules[m].module);
-        let file = *self.inputs[m].file(&self.db);
-        file.set_contents(&mut self.db, text.clone());
-        let parsed = parse_module(&self.db, file).clone();
-        if imports(&parsed.module) != before {
+        // Parse the candidate text up front, so a rejected edit (one that
+        // changes the imports) leaves both texts as they were.
+        let parsed = parse_text(&text);
+        if imports(&parsed.module) != imports(&self.modules[m].module) {
             return false;
         }
+        let file = *self.inputs[m].file(&self.db);
+        file.set_contents(&mut self.db, text.clone());
         let path = self.modules[m].path.clone();
         // Exports of `m` feed the scopes of its importers: refresh all
         // modules (the queries recompute only what changed).
@@ -344,6 +344,21 @@ fn normalize(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// A module's import list, as `(path, alias)` in source order. Two texts
+/// agree on their imports when these are equal.
+fn imports(md: &Module) -> Vec<(String, Option<String>)> {
+    md.imports
+        .iter()
+        .map(|i| (i.path.clone(), i.alias.clone()))
+        .collect()
+}
+
+/// Parse a file that is not (yet) in the db.
+fn parse_text(text: &str) -> ParsedModule {
+    let (module, errors) = cagara_syntax::ast::lower_source(text);
+    ParsedModule { module, errors }
+}
+
 /// Syntax errors of a file, and overloads missing a signature.
 fn file_diags(
     path: &Path,
@@ -395,8 +410,17 @@ fn make_diag(path: &Path, text: &str, offset: usize, message: String) -> Diag {
 }
 
 fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: String) -> Diag {
-    let start = start.min(text.len());
-    let end = end.clamp(start, text.len());
+    // An offset from a parse of a *different* text can land inside a
+    // multi-byte character of this one. Snap to a boundary rather than
+    // panicking: a diagnostic is not worth crashing over.
+    let mut start = start.min(text.len());
+    while !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = end.clamp(start, text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
     let before = &text[..start];
     let line_start = before.rfind('\n').map_or(0, |i| i + 1);
     let line_end = text[start..].find('\n').map_or(text.len(), |i| start + i);
@@ -417,6 +441,7 @@ fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: S
 #[cfg(test)]
 mod tests {
     use super::Workspace;
+    use crate::db::SourceFile;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
@@ -434,5 +459,74 @@ mod tests {
         assert!(ws.diags.is_empty(), "{:?}", ws.diags);
         assert!(ws.module_for_path(Path::new("/tmp/cagara-shared/lib.cagara")).is_some());
         assert_eq!(ws.modules[ws.root].module.defs[0].name, "q");
+    }
+
+    /// The db text and the workspace text must always be the same text:
+    /// spans come from the parsed db text while diagnostics are rendered
+    /// against the workspace's, so a difference means the two phases are
+    /// analyzing different programs (and can panic on a char boundary).
+    fn assert_texts_agree(ws: &Workspace) {
+        for (m, md) in ws.modules.iter().enumerate() {
+            let file: SourceFile = *ws.inputs[m].file(&ws.db);
+            assert_eq!(
+                file.text(&ws.db),
+                md.text.as_str(),
+                "module {m} ({}) desynced",
+                md.path.display()
+            );
+            assert_eq!(
+                crate::lower::parse_module(&ws.db, file).module.defs.len(),
+                md.module.defs.len(),
+                "module {m} parsed differently in the two phases"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rejected_edit_leaves_both_texts_alone() {
+        let mut ws = Workspace::from_source("q = 1\n");
+        let root = ws.root;
+        assert_texts_agree(&ws);
+        // Changing the imports is refused, and the db must not keep the new
+        // text: the workspace was not updated for it, so keeping it would
+        // leave the two phases analyzing different programs.
+        let longer = "import \"missing.cagara\"\nq = 1\nr = 2\n";
+        assert!(!ws.set_source(root, longer.to_string()));
+        assert_texts_agree(&ws);
+        assert_eq!(ws.modules[root].text, "q = 1\n");
+        // The workspace still works after the refused edit.
+        assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+        assert!(ws.set_source(root, "w = 9\n".to_string()));
+        assert_texts_agree(&ws);
+    }
+
+    #[test]
+    fn an_accepted_edit_keeps_both_texts_in_step() {
+        let mut ws = Workspace::from_source("q = 1\n");
+        let root = ws.root;
+        // Growing, shrinking, and a multi-byte edit all stay in step.
+        for text in [
+            "q = 1\nr = 2\ns = 3\n",
+            "q =\n",
+            "q = \"héllo wörld\"\n",
+            "x = 1\n",
+        ] {
+            assert!(ws.set_source(root, text.to_string()), "{text:?}");
+            assert_texts_agree(&ws);
+        }
+        // Diagnostics render against the same text the span came from, so an
+        // offset that is not a char boundary of it cannot panic.
+        let _ = ws.diag(root, 7, "boom");
+    }
+
+    #[test]
+    fn a_diagnostic_offset_inside_a_character_is_snapped() {
+        // A span from a parse of another text can land inside a multi-byte
+        // character; rendering must not panic.
+        let ws = Workspace::from_source("q = \"héllo\"\n");
+        let diag = ws.diag(ws.root, 7, "boom");
+        assert_eq!(diag.line, 1, "{diag:?}");
+        let diag = ws.diag(ws.root, "q = \"héllo\"\n".len() - 1, "boom");
+        assert_eq!(diag.line, 1, "{diag:?}");
     }
 }

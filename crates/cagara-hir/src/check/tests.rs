@@ -465,11 +465,12 @@ fn editing_the_root_rechecks_only_the_root() {
         runs,
         "nothing changed, so nothing is rechecked"
     );
-    let file = *ws.inputs[ws.root].file(&ws.db);
-    file.set_contents(
-        &mut ws.db,
-        format!("{TABLES}q = users & where (.age > \"x\")\n"),
-    );
+    // Edit through the workspace, as an editor does, so the db and the
+    // workspace's cached text stay in step.
+    assert!(ws.set_source(
+        ws.root,
+        format!("{TABLES}q = users & where (.age > \"x\")\n")
+    ));
     let after = check(&ws);
     assert_eq!(
         super::check_runs(),

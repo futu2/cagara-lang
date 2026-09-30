@@ -467,8 +467,8 @@ impl Lowerer {
                     comments: vec![],
                     op,
                     all: false,
-                    left: Box::new(Statement::Select(left.into_statement())),
-                    right: Box::new(Statement::Select(right.into_statement())),
+                    left: Box::new(self.branch(left)),
+                    right: Box::new(self.branch(right)),
                     order_by: vec![],
                     limit: None,
                     offset: None,
@@ -488,6 +488,33 @@ impl Lowerer {
                 )
             }
         })
+    }
+
+    /// One branch of a set operation. A branch with its own LIMIT / OFFSET
+    /// cannot be written as a bare SELECT: the set operator's own tail would
+    /// apply to the whole operation instead, and `SELECT ... LIMIT 3 UNION
+    /// SELECT ... LIMIT 2` is rejected by every engine. Put such a branch
+    /// behind a derived table, which is portable. A plain branch is emitted
+    /// as is, so the common case stays flat.
+    fn branch(&mut self, st: Stage) -> Statement {
+        if st.limit.is_none() && st.offset.is_none() {
+            return Statement::Select(st.into_statement());
+        }
+        let alias = self.alias();
+        let names = st.names();
+        let inner = Statement::Select(st.into_statement());
+        let outer = Stage::new(
+            TableSource::Subquery {
+                query: Box::new(inner),
+                alias: Some(alias.clone()),
+                alias_quote_style: QuoteStyle::None,
+            },
+            names
+                .iter()
+                .map(|n| (n.clone(), col(Some(&alias), n)))
+                .collect(),
+        );
+        Statement::Select(outer.into_statement())
     }
 
     fn is_cte_candidate(&self, rel: &Rel) -> bool {

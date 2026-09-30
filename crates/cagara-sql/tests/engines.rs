@@ -117,6 +117,13 @@ const CASES: &[(&str, &[&str])] = &[
         "kws = kw & select { order = .order, userId = .userId, id = .id }",
         &["5|9|1"],
     ),
+    // A set-operation branch with its own LIMIT: the set operator's own tail
+    // would otherwise swallow it (`SELECT ... LIMIT 3 UNION SELECT ... LIMIT
+    // 2` is a parse error on both engines), so the branch is wrapped.
+    (
+        "setlim = union (nums & select { id = .id } & order [asc .id] & limit 2) (nums & select { id = .id } & order [desc .id] & limit 2)",
+        &["1", "2", "3", "4"],
+    ),
 ];
 
 struct Engine {

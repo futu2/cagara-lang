@@ -219,6 +219,51 @@ fn set_operations_and_reused_queries_use_sql_set_ops_and_ctes() {
 }
 
 #[test]
+fn a_set_branch_with_its_own_limit_is_wrapped() {
+    // A set operator's LIMIT applies to the whole operation, so a branch
+    // that has one cannot be a bare SELECT: `SELECT ... LIMIT 3 UNION
+    // SELECT ... LIMIT 2` is rejected by every engine. Such a branch goes
+    // behind a derived table, which is portable.
+    let s = sql("q = union (users & limit 3) (users & limit 2)\n", "q");
+    assert!(
+        s.contains("FROM (SELECT id, name, age, active FROM public.users LIMIT 3) AS t1"),
+        "{s}"
+    );
+    assert!(
+        s.contains("FROM (SELECT id, name, age, active FROM public.users LIMIT 2) AS t2"),
+        "{s}"
+    );
+    // No LIMIT is left attached to a branch of the set operation itself.
+    assert!(!s.contains("LIMIT 3 UNION"), "{s}");
+    // The common case is untouched: a branch without pagination stays flat.
+    let plain = sql(
+        "q = union (users & where (.age > 1)) (users & where (.age > 2))\n",
+        "q",
+    );
+    assert!(plain.contains("UNION SELECT"), "{plain}");
+    assert!(
+        !plain.contains("UNION SELECT t"),
+        "no wrapper for a plain branch: {plain}"
+    );
+    assert!(!plain.contains("LIMIT"), "{plain}");
+}
+
+#[test]
+fn a_set_branch_with_its_own_offset_is_wrapped() {
+    let s = sql(
+        "p = users & order [asc .id] & offset 5\nq = union p (users & where .active)\n",
+        "q",
+    );
+    // The offset branch is a derived table, and its ORDER BY stays inside it
+    // where the OFFSET needs it.
+    assert!(
+        s.contains("OFFSET 5) AS t"),
+        "the offset branch should be a derived table: {s}"
+    );
+    assert!(!s.contains("OFFSET 5 UNION"), "{s}");
+}
+
+#[test]
 fn nested_blocks_get_dialect_rewrites() {
     // Regression: a reused query becomes a CTE, and a set operation is not a
     // `Select`, so neither used to reach the expression rewriter. Their

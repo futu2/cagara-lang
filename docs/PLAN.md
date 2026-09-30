@@ -133,7 +133,12 @@ the VS Code extension compile:
   and `module_scope` are derived from the parsed file and resolved imports,
   so an edit that adds or removes a definition updates scopes, checks, and
   evaluation. `Workspace::set_source` applies an edit; it returns `false`
-  when the imports changed, since loading files stays outside salsa.
+  when the imports changed, since loading files stays outside salsa. Salsa's
+  text and the workspace's are written together and nowhere else, so a span
+  from a query always indexes the text diagnostics are rendered against: a
+  refused edit leaves both alone instead of stranding the db on the new
+  text, and a span that is not a char boundary of the rendered text is
+  snapped rather than panicking.
 - Language server (`cagara lsp`, crate `cagara-lsp`): full-text sync, one shared
   workspace/module graph for all open documents, and unsaved-buffer overlays
   passed to importers (reloaded when imports change). Publishes all diagnostics for the file (syntax, type, schema)
@@ -218,7 +223,11 @@ the VS Code extension compile:
   lowering barrier: a projection, aggregate, window, or key mapper that
   follows it sees the deduped rows instead of folding into the DISTINCT, and
   ORDER BY is always emitted outside it (an emulated NULLS LAST key may not
-  appear in a DISTINCT select list). `--optimize` remains
+  appear in a DISTINCT select list). A branch of a set operation that has
+  its own LIMIT / OFFSET is put behind a derived table, since the set
+  operator's tail would otherwise swallow it (`SELECT ... LIMIT 3 UNION
+  SELECT ... LIMIT 2` is rejected by every engine); a plain branch stays
+  flat. `--optimize` remains
   opt-in, with differential tests that run the same queries on SQLite and
   DuckDB (`tests/engines.rs`; skipped when a shell is missing, required in
   CI).
@@ -259,13 +268,10 @@ Known gaps:
 - `--optimize` runs sqlglot's optimizer (constant folding, boolean
   simplification, pushdown). Tests pin that it keeps filters outside
   window / LIMIT / aggregate boundaries; it stays opt-in.
-- **A set-operation branch with its own `limit` / `offset`** is emitted
-  unparenthesized (`SELECT ... LIMIT 3 UNION SELECT ... LIMIT 2`), which
-  engines reject.
-- **`SourceFile::set_contents` desyncs salsa from `Workspace`'s caches.**
-  Spans come from the db text and the checked text from the workspace's, so
-  an edit across a character boundary panics, and the two phases can analyze
-  different programs.
+- **`offset` without `limit` is not spelled for SQLite.** SQLite rejects a
+  lone `OFFSET`, and the rewriter only adds the missing `LIMIT` for MySQL
+  (and requires an `order` for T-SQL). A query that offsets without a limit
+  therefore compiles to SQL that SQLite refuses.
 - **Smaller gaps from the same review:** `open_with_buffers` can add one
   file twice (duplicate diagnostics); a nested definition check takes the
   completion probe from the definition being completed; template `$n`
@@ -338,5 +344,11 @@ Known gaps:
     window, or key mapper after `distinct` no longer folds into it, and
     ORDER BY is emitted outside the DISTINCT — which also makes the T-SQL
     NULLS LAST emulation valid. SQLite differential cases cover it.
-18. Next: the unparenthesized set-operation branch and the salsa / `Workspace`
-    text desync (see Known gaps).
+18. ~~Set-operation branches and the salsa / `Workspace` text desync~~ (done;
+    see Status): a branch with its own LIMIT / OFFSET is wrapped in a
+    derived table (a SQLite differential case covers it), and the db text
+    and the workspace text are updated together, so a refused edit cannot
+    strand the db on text the workspace never took, and a span that is not a
+    char boundary of the rendered text no longer panics.
+19. Next: `offset` without `limit` for SQLite, and the smaller gaps from the
+    same review (see Known gaps).

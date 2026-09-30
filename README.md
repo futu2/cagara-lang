@@ -41,7 +41,7 @@ ORDER BY revenue DESC NULLS LAST;
 - Hindley–Milner type inference with extensible records, so column types flow through the pipeline.
 - Explicit nulls: the right side of a left join and aggregates like `sum` are `maybe`.
 - Modules via `import "file.cagara"`, plus a standard library written in Cagara (`prelude.cagara`).
-- ANSI SQL by default, or any [sqlglot](https://github.com/tobymao/sqlglot) dialect via `--dialect postgres|mysql|...`.
+- ANSI SQL by default, with dialect support and test coverage described in [`docs/SQL-DIALECTS.md`](docs/SQL-DIALECTS.md).
 - A formatter (`cagara fmt`) and a language server (`cagara lsp`) with diagnostics, hover, go-to-definition and completion.
 
 ## Install
@@ -63,6 +63,7 @@ cagara lsp
 
 ## Learn more
 
+- [A short language guide](docs/LEARN.md) and [nullability reference](docs/NULLABILITY.md)
 - [`examples/`](examples): filtering, aggregation, windows, joins, modules, error messages
 - [`docs/PLAN.md`](docs/PLAN.md): design and architecture
 - Editor support: [VS Code](editors/vscode) · [Neovim](editors/nvim)

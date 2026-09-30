@@ -617,7 +617,12 @@ fn examples_are_consistent() {
     ] {
         let ws = Workspace::open(&dir.join(f));
         assert!(ws.diags.is_empty(), "{f}: {:?}", ws.diags);
-        consistent(&ws);
+        let results = consistent(&ws);
+        if f != "errors.cagara" {
+            for (name, result) in results {
+                assert!(result.is_ok(), "{f} / `{name}`: {result:?}");
+            }
+        }
     }
 }
 

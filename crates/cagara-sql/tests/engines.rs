@@ -69,6 +69,12 @@ const CASES: &[(&str, &[&str])] = &[
         "lj = users & leftJoin (orders & select { user_id = .user_id, one = 1 }) (.<id == .>user_id) & select { id = .id, m = isNull .one } & order [asc .id]",
         &["1|0", "1|0", "2|1", "3|0"],
     ),
+    // Nullable columns from the missing side are handled explicitly before
+    // aggregation; the match count excludes the synthetic unmatched row.
+    (
+        "ljagg = users & leftJoin orders (.<id == .>user_id) & agg { id = group .id, total = coalesce 0.0 (sum (coalesce 0.0 .amount)), n = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0)) } & order [asc .id]",
+        &["1|10.0|2", "2|0.0|0", "3|1.0|1"],
+    ),
     // A constant group key groups everything, and nothing from nothing.
     (
         "cg = nums & select { c = 2, x = .id } & agg { c = group .c, n = count }",

@@ -86,6 +86,19 @@ fn table_is_plain_select() {
 }
 
 #[test]
+fn shipped_valid_examples_compile_to_sql() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    for file in ["report.cagara", "public.cagara", "schema.cagara"] {
+        let ws = Workspace::open(&dir.join(file));
+        assert!(ws.diags.is_empty(), "{file}: {:?}", ws.diags);
+        for (name, rel) in root_queries(&ws) {
+            let rel = rel.unwrap_or_else(|d| panic!("{file} / `{name}`: {d}"));
+            compile(&rel, Options::default()).unwrap_or_else(|e| panic!("{file} / `{name}`: {e}"));
+        }
+    }
+}
+
+#[test]
 fn filter_select_order_limit_fuse() {
     let s = sql(
         "q = users\n  & where (.age >= 18 && .active)\n  & select { id = .id, label = upper .name }\n  & order [asc .label]\n  & limit 10\n",

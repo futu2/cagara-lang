@@ -64,6 +64,8 @@ pub enum Expr {
     Lit(Lit),
     /// Scalar SQL template with `$n` placeholders.
     Tpl(String, Vec<Expr>),
+    /// Membership test against a compile-time list of expressions.
+    In(Box<Expr>, Vec<Expr>, bool),
     /// Aggregate SQL template; arguments must be row-phase.
     Agg(String, Vec<Expr>),
     /// Grouping key (`group e`).
@@ -88,6 +90,10 @@ impl Expr {
             Expr::Tpl(_, args) => args
                 .iter()
                 .try_fold(Phase::Const, |acc, a| rules::mix(acc, a.phase()?)),
+            Expr::In(value, list, _) => list
+                .iter()
+                .chain(std::iter::once(value.as_ref()))
+                .try_fold(Phase::Const, |acc, a| rules::mix(acc, a.phase()?)),
             Expr::Agg(_, args) => {
                 args.iter()
                     .try_for_each(|a| row_only(a, "an aggregate argument"))?;
@@ -110,6 +116,10 @@ impl Expr {
         match self {
             Expr::Col(..) | Expr::Lit(_) => vec![],
             Expr::Tpl(_, a) | Expr::Agg(_, a) => a.iter().collect(),
+            Expr::In(value, list, _) => list
+                .iter()
+                .chain(std::iter::once(value.as_ref()))
+                .collect(),
             Expr::Group(k) => vec![k.as_ref()],
             Expr::Win(_, a, s) => a
                 .iter()
@@ -149,6 +159,15 @@ pub enum JoinKind {
     Left,
     Right,
     Full,
+    Semi,
+    Anti,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetKind {
+    Union,
+    Intersect,
+    Except,
 }
 
 /// Closed, compiler-known key mappers (the basis of pick / omit / rename).
@@ -174,6 +193,7 @@ pub enum Rel {
     Order(Box<Rel>, Vec<(Expr, bool)>),
     Limit(Box<Rel>, i64),
     Offset(Box<Rel>, i64),
+    Distinct(Box<Rel>),
     KeyMap(Box<Rel>, KeyMapper),
     /// `left & inner right on`; output columns are left-wins on collision.
     Join {
@@ -181,6 +201,12 @@ pub enum Rel {
         left: Box<Rel>,
         right: Box<Rel>,
         on: Expr,
+    },
+    /// A set operation over two relations with the same output row.
+    Set {
+        kind: SetKind,
+        left: Box<Rel>,
+        right: Box<Rel>,
     },
     /// The stage written at `Loc` (transparent for schema and lowering).
     At(Loc, Box<Rel>),
@@ -196,9 +222,11 @@ impl Rel {
             | Rel::Order(r, _)
             | Rel::Limit(r, _)
             | Rel::Offset(r, _)
+            | Rel::Distinct(r)
             | Rel::KeyMap(r, _)
             | Rel::At(_, r) => vec![r],
             Rel::Join { left, right, .. } => vec![left, right],
+            Rel::Set { left, right, .. } => vec![left, right],
         }
     }
 

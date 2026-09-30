@@ -38,8 +38,11 @@ impl Default for Options {
 /// `CONCAT` for MySQL / T-SQL, `LIMIT` → `TOP` / `FETCH`).
 pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
     cagara_hir::schema::schema(rel)?;
-    let st = lower::Lowerer::default().rel(rel)?;
-    let mut stmt = sqlglot_rust::Statement::Select(st.into_statement());
+    let mut lowerer = lower::Lowerer::for_rel(rel);
+    let st = lowerer.rel(rel)?;
+    let mut select = st.into_statement();
+    select.ctes = lowerer.take_ctes();
+    let mut stmt = sqlglot_rust::Statement::Select(select);
     if opts.optimize {
         stmt = sqlglot_rust::optimizer::optimize(stmt).map_err(|e| format!("optimizer: {e}"))?;
     }

@@ -27,7 +27,7 @@ cargo build --release
 The extension runs `cagara lsp`, looking for `cagara` in this order:
 
 1. the `cagara.path` setting;
-2. `target/release/cagara`, then `target/debug/cagara`, in an open
+2. `target/release/cagara`, then `target/debug/cagara`, in an open trusted
    workspace folder;
 3. `cagara` on `PATH`.
 

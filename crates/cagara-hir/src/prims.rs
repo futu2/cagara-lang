@@ -57,6 +57,10 @@ fn list(v: Value) -> EResult<Vec<Value>> {
     }
 }
 
+fn expressions(v: Value) -> EResult<Vec<Expr>> {
+    list(v)?.into_iter().map(lift).collect()
+}
+
 fn strings(v: Value) -> EResult<Vec<String>> {
     list(v)?.into_iter().map(string).collect()
 }
@@ -187,6 +191,12 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
             let n = count(next(), "offset")?;
             Value::Query(Rel::Offset(Box::new(query(next())?), n))
         }
+        Prim::Distinct => Value::Query(Rel::Distinct(Box::new(query(next())?))),
+        Prim::In => {
+            let values = expressions(next())?;
+            let value = lift(next())?;
+            checked(Expr::In(Box::new(value), values, false))?
+        }
         Prim::Join(kind) => {
             let right = query(next())?;
             let on = lift(next())?;
@@ -196,6 +206,15 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
                 left: Box::new(left),
                 right: Box::new(right),
                 on,
+            })
+        }
+        Prim::Set(kind) => {
+            let left = query(next())?;
+            let right = query(next())?;
+            Value::Query(Rel::Set {
+                kind,
+                left: Box::new(left),
+                right: Box::new(right),
             })
         }
         Prim::Group => checked(Expr::Group(Box::new(lift(next())?)))?,

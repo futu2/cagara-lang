@@ -6,8 +6,8 @@ use crate::{analysis, uri};
 use cagara_hir::workspace::Workspace;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
-    PublishDiagnostics,
+    DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
+    DidSaveTextDocument, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
     Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting, GotoDefinition,
@@ -30,9 +30,50 @@ pub type Res<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 struct Doc {
     path: PathBuf,
-    /// Last text the client sent, to rebuild `ws` after a panic.
     text: String,
+}
+
+struct State {
+    docs: HashMap<String, Doc>,
+    /// All open buffers share one module graph. The selected root is changed
+    /// for each request so imported unsaved files are visible everywhere.
     ws: Workspace,
+}
+
+impl State {
+    fn new() -> Self {
+        Self {
+            docs: HashMap::new(),
+            ws: Workspace::from_source(""),
+        }
+    }
+
+    fn buffers(&self) -> HashMap<PathBuf, String> {
+        self.docs
+            .values()
+            .map(|d| (d.path.clone(), d.text.clone()))
+            .collect()
+    }
+
+    fn rebuild(&mut self) {
+        let Some((path, text)) = self
+            .docs
+            .values()
+            .next()
+            .map(|d| (d.path.clone(), d.text.clone()))
+        else {
+            self.ws = Workspace::from_source("");
+            return;
+        };
+        let buffers = self.buffers();
+        self.ws = Workspace::open_with_buffers(&path, text, &buffers);
+    }
+
+    fn select(&mut self, key: &str) -> bool {
+        self.docs
+            .get(key)
+            .is_some_and(|d| self.ws.set_root_path(&d.path))
+    }
 }
 
 /// Why a request got no result.
@@ -85,7 +126,7 @@ fn serve(conn: &Connection) -> Res<()> {
     };
     conn.initialize(serde_json::to_value(caps)?)?;
     // Keyed by the URI string: `Uri` has interior mutability.
-    let mut docs: HashMap<String, Doc> = HashMap::new();
+    let mut state = State::new();
     for msg in &conn.receiver {
         match msg {
             Message::Request(req) => {
@@ -93,12 +134,12 @@ fn serve(conn: &Connection) -> Res<()> {
                     break;
                 }
                 let Request { id, method, params } = req;
-                let r = catch_unwind(AssertUnwindSafe(|| request(&mut docs, &method, params)));
+                let r = catch_unwind(AssertUnwindSafe(|| request(&mut state, &method, params)));
                 let resp = match r {
                     Ok(Ok(v)) => Response::new_ok(id, v),
                     Ok(Err((code, msg))) => Response::new_err(id, code as i32, msg),
                     Err(p) => {
-                        rebuild(&mut docs);
+                        rebuild(&mut state);
                         let msg = format!("internal error in {method}: {}", panic_message(&*p));
                         Response::new_err(id, ErrorCode::InternalError as i32, msg)
                     }
@@ -107,11 +148,11 @@ fn serve(conn: &Connection) -> Res<()> {
             }
             Message::Notification(n) => {
                 let method = n.method.clone();
-                match catch_unwind(AssertUnwindSafe(|| notification(conn, &mut docs, n))) {
+                match catch_unwind(AssertUnwindSafe(|| notification(conn, &mut state, n))) {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => eprintln!("cagara lsp: {method}: {e}"),
                     Err(p) => {
-                        rebuild(&mut docs);
+                        rebuild(&mut state);
                         eprintln!(
                             "cagara lsp: internal error in {method}: {}",
                             panic_message(&*p)
@@ -127,16 +168,12 @@ fn serve(conn: &Connection) -> Res<()> {
 
 /// A panic may have left a workspace half-updated (completion edits the
 /// text in place); start each one over from what the client last sent.
-fn rebuild(docs: &mut HashMap<String, Doc>) {
-    for d in docs.values_mut() {
-        if let Ok(ws) = catch_unwind(|| Workspace::open_with(&d.path, d.text.clone())) {
-            d.ws = ws;
-        }
-    }
+fn rebuild(state: &mut State) {
+    let _ = catch_unwind(AssertUnwindSafe(|| state.rebuild()));
 }
 
 fn request(
-    docs: &mut HashMap<String, Doc>,
+    state: &mut State,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, Fail> {
@@ -144,9 +181,11 @@ fn request(
         HoverRequest::METHOD => {
             let p: HoverParams = serde_json::from_value(params).map_err(bad_params)?;
             let tp = p.text_document_position_params;
-            let h = docs
-                .get(tp.text_document.uri.as_str())
-                .and_then(|d| analysis::hover(&d.ws, tp.position));
+            let key = tp.text_document.uri.as_str().to_string();
+            let h = state
+                .select(&key)
+                .then(|| analysis::hover(&state.ws, tp.position))
+                .flatten();
             json(serde_json::to_value(h.map(|value| Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
@@ -158,10 +197,12 @@ fn request(
         GotoDefinition::METHOD => {
             let p: GotoDefinitionParams = serde_json::from_value(params).map_err(bad_params)?;
             let tp = p.text_document_position_params;
-            let locs: Vec<Location> = docs
-                .get(tp.text_document.uri.as_str())
-                .map(|d| analysis::definition(&d.ws, tp.position))
-                .unwrap_or_default()
+            let key = tp.text_document.uri.as_str().to_string();
+            let locs: Vec<Location> = if state.select(&key) {
+                analysis::definition(&state.ws, tp.position)
+            } else {
+                vec![]
+            }
                 .into_iter()
                 .filter_map(|(path, range)| {
                     Some(Location {
@@ -177,9 +218,10 @@ fn request(
         References::METHOD => {
             let p: ReferenceParams = serde_json::from_value(params).map_err(bad_params)?;
             let tp = p.text_document_position;
+            let key = tp.text_document.uri.as_str().to_string();
             let uri = tp.text_document.uri;
-            let locs: Option<Vec<Location>> = docs.get(uri.as_str()).map(|d| {
-                analysis::references(&d.ws, tp.position, p.context.include_declaration)
+            let locs: Option<Vec<Location>> = state.select(&key).then(|| {
+                analysis::references(&state.ws, tp.position, p.context.include_declaration)
                     .into_iter()
                     .map(|range| Location {
                         uri: uri.clone(),
@@ -192,9 +234,9 @@ fn request(
         DocumentHighlightRequest::METHOD => {
             let p: DocumentHighlightParams = serde_json::from_value(params).map_err(bad_params)?;
             let tp = p.text_document_position_params;
-            let hs: Option<Vec<DocumentHighlight>> =
-                docs.get(tp.text_document.uri.as_str()).map(|d| {
-                    analysis::highlights(&d.ws, tp.position)
+            let key = tp.text_document.uri.as_str().to_string();
+            let hs: Option<Vec<DocumentHighlight>> = state.select(&key).then(|| {
+                    analysis::highlights(&state.ws, tp.position)
                         .into_iter()
                         .map(|(range, kind)| DocumentHighlight {
                             range,
@@ -206,24 +248,25 @@ fn request(
         }
         DocumentSymbolRequest::METHOD => {
             let p: DocumentSymbolParams = serde_json::from_value(params).map_err(bad_params)?;
-            let ss = docs
-                .get(p.text_document.uri.as_str())
-                .map(|d| analysis::symbols(&d.ws));
+            let key = p.text_document.uri.as_str().to_string();
+            let ss = state.select(&key).then(|| analysis::symbols(&state.ws));
             json(serde_json::to_value(ss.map(DocumentSymbolResponse::Nested)))
         }
         Completion::METHOD => {
             let p: CompletionParams = serde_json::from_value(params).map_err(bad_params)?;
             let tp = p.text_document_position;
-            let items = docs
-                .get_mut(tp.text_document.uri.as_str())
-                .map(|d| analysis::completion(&mut d.ws, tp.position));
+            let key = tp.text_document.uri.as_str().to_string();
+            let items = state
+                .select(&key)
+                .then(|| analysis::completion(&state.ws, tp.position));
             json(serde_json::to_value(items.map(CompletionResponse::Array)))
         }
         Formatting::METHOD => {
             let p: DocumentFormattingParams = serde_json::from_value(params).map_err(bad_params)?;
-            match docs.get(p.text_document.uri.as_str()) {
-                None => Ok(serde_json::Value::Null),
-                Some(d) => match analysis::format(&d.ws) {
+            let key = p.text_document.uri.as_str().to_string();
+            match state.select(&key) {
+                false => Ok(serde_json::Value::Null),
+                true => match analysis::format(&state.ws) {
                     Ok(edits) => json(serde_json::to_value(edits)),
                     Err(e) => Err((ErrorCode::InternalError, e.to_string())),
                 },
@@ -233,7 +276,7 @@ fn request(
     }
 }
 
-fn notification(conn: &Connection, docs: &mut HashMap<String, Doc>, n: Notification) -> Res<()> {
+fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<()> {
     match n.method.as_str() {
         DidOpenTextDocument::METHOD => {
             let p: lsp_types::DidOpenTextDocumentParams = serde_json::from_value(n.params)?;
@@ -242,30 +285,46 @@ fn notification(conn: &Connection, docs: &mut HashMap<String, Doc>, n: Notificat
             };
             let path = path.canonicalize().unwrap_or(path);
             let text = p.text_document.text;
-            let ws = Workspace::open_with(&path, text.clone());
-            let doc = Doc { path, text, ws };
-            publish(conn, p.text_document.uri.clone(), &doc)?;
-            docs.insert(p.text_document.uri.as_str().to_string(), doc);
+            state.docs.insert(
+                p.text_document.uri.as_str().to_string(),
+                Doc { path, text },
+            );
+            state.rebuild();
+            publish_all(conn, state)?;
         }
         DidChangeTextDocument::METHOD => {
             let p: lsp_types::DidChangeTextDocumentParams = serde_json::from_value(n.params)?;
-            let (Some(doc), Some(change)) = (
-                docs.get_mut(p.text_document.uri.as_str()),
-                p.content_changes.into_iter().last(),
-            ) else {
+            let Some(change) = p.content_changes.into_iter().last() else {
                 return Ok(());
             };
-            doc.text = change.text.clone();
-            let root = doc.ws.root;
-            if !doc.ws.set_source(root, change.text.clone()) {
-                // Imports changed: loading files is outside salsa.
-                doc.ws = Workspace::open_with(&doc.path, change.text);
+            let Some(doc) = state.docs.get_mut(p.text_document.uri.as_str()) else {
+                return Ok(());
+            };
+            doc.text = change.text;
+            state.rebuild();
+            publish_all(conn, state)?;
+        }
+        DidSaveTextDocument::METHOD => {
+            let p: lsp_types::DidSaveTextDocumentParams = serde_json::from_value(n.params)?;
+            if let (Some(doc), Some(text)) = (
+                state.docs.get_mut(p.text_document.uri.as_str()),
+                p.text,
+            ) {
+                doc.text = text;
             }
-            publish(conn, p.text_document.uri, doc)?;
+            // A save may have changed an imported file that is not open, so
+            // reload the graph from disk while retaining all open overlays.
+            state.rebuild();
+            publish_all(conn, state)?;
+        }
+        DidChangeWatchedFiles::METHOD => {
+            let _: lsp_types::DidChangeWatchedFilesParams = serde_json::from_value(n.params)?;
+            state.rebuild();
+            publish_all(conn, state)?;
         }
         DidCloseTextDocument::METHOD => {
             let p: lsp_types::DidCloseTextDocumentParams = serde_json::from_value(n.params)?;
-            docs.remove(p.text_document.uri.as_str());
+            state.docs.remove(p.text_document.uri.as_str());
             let params = PublishDiagnosticsParams {
                 uri: p.text_document.uri,
                 diagnostics: vec![],
@@ -275,14 +334,32 @@ fn notification(conn: &Connection, docs: &mut HashMap<String, Doc>, n: Notificat
                 PublishDiagnostics::METHOD.into(),
                 params,
             )))?;
+            state.rebuild();
+            publish_all(conn, state)?;
         }
         _ => {}
     }
     Ok(())
 }
 
-fn publish(conn: &Connection, uri: Uri, doc: &Doc) -> Res<()> {
-    let diagnostics = analysis::diagnostics(&doc.ws)
+fn publish_all(conn: &Connection, state: &mut State) -> Res<()> {
+    let docs: Vec<(String, PathBuf)> = state
+        .docs
+        .iter()
+        .map(|(uri, doc)| (uri.clone(), doc.path.clone()))
+        .collect();
+    for (key, path) in docs {
+        if !state.ws.set_root_path(&path) {
+            continue;
+        }
+        let uri = key.parse().map_err(|e| format!("invalid document URI: {e}"))?;
+        publish(conn, uri, &state.ws)?;
+    }
+    Ok(())
+}
+
+fn publish(conn: &Connection, uri: Uri, ws: &Workspace) -> Res<()> {
+    let diagnostics = analysis::diagnostics(ws)
         .into_iter()
         .map(|(range, message)| Diagnostic {
             range,

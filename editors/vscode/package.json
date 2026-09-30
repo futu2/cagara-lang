@@ -45,7 +45,7 @@
           "type": "string",
           "default": "",
           "scope": "machine-overridable",
-          "description": "Path to the cagara executable; the extension runs `cagara lsp`. When empty, target/release or target/debug of the open workspace is tried, then cagara on PATH."
+          "description": "Path to the cagara executable; the extension runs `cagara lsp`. When empty in a trusted workspace, target/release or target/debug is tried, then cagara on PATH."
         },
         "cagara.trace.server": {
           "type": "string",

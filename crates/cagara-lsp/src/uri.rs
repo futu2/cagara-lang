@@ -1,40 +1,16 @@
-//! `file://` URIs to paths and back (lsp-types 0.97 no longer uses `url`).
+//! `file://` URIs to paths and back.
 
 use lsp_types::Uri;
 use std::path::{Path, PathBuf};
+use url::Url;
 
 pub fn to_path(uri: &Uri) -> Option<PathBuf> {
-    let rest = uri.as_str().strip_prefix("file://")?;
-    Some(PathBuf::from(decode(rest)?))
+    let url = Url::parse(uri.as_str()).ok()?;
+    (url.scheme() == "file").then(|| url.to_file_path().ok())?
 }
 
 pub fn from_path(path: &Path) -> Option<Uri> {
-    let mut s = String::from("file://");
-    for b in path.to_str()?.bytes() {
-        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
-            s.push(b as char);
-        } else {
-            s.push_str(&format!("%{b:02X}"));
-        }
-    }
-    s.parse().ok()
-}
-
-fn decode(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' {
-            let h = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
-            out.push(u8::from_str_radix(h, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(b[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
+    Url::from_file_path(path).ok()?.as_str().parse().ok()
 }
 
 #[cfg(test)]
@@ -50,5 +26,11 @@ mod tests {
             "file:///home/me/my%20queries/r%C3%A9port.cagara"
         );
         assert_eq!(to_path(&u).unwrap(), p);
+    }
+
+    #[test]
+    fn rejects_non_file_uris() {
+        let uri: Uri = "untitled:cagara".parse().unwrap();
+        assert!(to_path(&uri).is_none());
     }
 }

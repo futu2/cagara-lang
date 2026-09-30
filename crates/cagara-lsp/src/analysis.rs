@@ -454,9 +454,9 @@ pub fn symbols(ws: &Workspace) -> Vec<DocumentSymbol> {
 /// in scope plus the lambda parameters around the cursor. Operators and
 /// `__` primitives are left out. The client filters by prefix.
 ///
-/// Takes the workspace mutably: column completion checks a probed copy of
-/// the text and then restores it.
-pub fn completion(ws: &mut Workspace, pos: Position) -> Vec<CompletionItem> {
+/// Column completion checks a speculative workspace snapshot, leaving the
+/// shared live module graph untouched.
+pub fn completion(ws: &Workspace, pos: Position) -> Vec<CompletionItem> {
     let text = &ws.modules[ws.root].text;
     let Some(offset) = offset_at(text, pos) else {
         return vec![];
@@ -526,17 +526,16 @@ fn dot_context(text: &str, offset: usize) -> Dot {
 /// `PROBE_FIELD` written there, which records what its row is known to
 /// have (a table's columns, a join side's, or those used next to it), and
 /// then the text is restored. Nothing if the row is unknown.
-fn field_completion(ws: &mut Workspace, start: usize, end: usize) -> Vec<CompletionItem> {
-    let root = ws.root;
-    let original = ws.modules[root].text.clone();
+fn field_completion(ws: &Workspace, start: usize, end: usize) -> Vec<CompletionItem> {
+    let mut snapshot = ws.snapshot();
+    let root = snapshot.root;
+    let original = snapshot.modules[root].text.clone();
     let probed = format!("{}{PROBE_FIELD}{}", &original[..start], &original[end..]);
     let mut fields: Vec<(String, String)> = Vec::new();
-    if ws.set_source(root, probed) {
-        let tc = check(ws);
+    if snapshot.set_source(root, probed) {
+        let tc = check(&snapshot);
         fields = tc.probe_fields(root).map(<[_]>::to_vec).unwrap_or_default();
     }
-    let restored = ws.set_source(root, original);
-    debug_assert!(restored, "restoring the text keeps its imports");
     fields
         .into_iter()
         .filter(|(n, _)| n != PROBE_FIELD)
@@ -795,7 +794,7 @@ mod tests {
             here.contains("sum : expr { age = int, id = int, name = string } int -> "),
             "{h}"
         );
-        assert_eq!(general.matches("sum : ").count(), 4, "{h}");
+        assert_eq!(general.matches("sum : ").count(), 2, "{h}");
         // Operators hover at their symbol, under their definition name.
         let h = hover(&ws, pos(4, 15)).unwrap();
         assert!(h.contains("_+_ : "), "{h}");

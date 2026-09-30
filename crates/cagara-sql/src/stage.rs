@@ -20,6 +20,7 @@ pub struct Stage {
     pub order_by: Vec<OrderByItem>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub distinct: bool,
     pub has_agg: bool,
     pub has_win: bool,
 }
@@ -193,6 +194,7 @@ impl Stage {
             order_by: vec![],
             limit: None,
             offset: None,
+            distinct: false,
             has_agg: false,
             has_win: false,
         }
@@ -230,6 +232,7 @@ impl Stage {
             && self.order_by.is_empty()
             && self.limit.is_none()
             && self.offset.is_none()
+            && !self.distinct
             && !self.has_agg
             && !self.has_win
             && self
@@ -255,7 +258,7 @@ impl Stage {
         SelectStatement {
             comments: vec![],
             ctes: vec![],
-            distinct: false,
+            distinct: self.distinct,
             top: None,
             columns,
             from: Some(FromClause { source: self.from }),
@@ -522,6 +525,14 @@ pub fn lower_expr(e: &ir::Expr, r: &Resolver) -> Result<Expr, String> {
     match e {
         ir::Expr::Col(side, n) => r(*side, n),
         ir::Expr::Lit(l) => Ok(lit(l)),
+        ir::Expr::In(value, list, negated) => Ok(Expr::InList {
+            expr: Box::new(lower_expr(value, r)?),
+            list: list
+                .iter()
+                .map(|item| lower_expr(item, r))
+                .collect::<Result<_, _>>()?,
+            negated: *negated,
+        }),
         ir::Expr::Tpl(sql, args) | ir::Expr::Agg(sql, args) => template(sql, all(args)?),
         ir::Expr::Group(k) => lower_expr(k, r),
         ir::Expr::Win(sql, args, spec) => {

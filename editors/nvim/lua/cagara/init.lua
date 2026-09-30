@@ -2,6 +2,7 @@
 --
 --   require("cagara").setup({
 --     cmd = nil,          -- server command; default: see M.server_cmd
+--     allow_local = false, -- opt in to executing target/{debug,release}/cagara
 --     root_markers = { "Cargo.toml", ".git" },
 --     on_attach = nil,    -- function(client, bufnr)
 --     capabilities = nil, -- e.g. from a completion plugin
@@ -11,6 +12,7 @@ local M = {}
 
 local defaults = {
   cmd = nil,
+  allow_local = false,
   root_markers = { "Cargo.toml", ".git" },
   on_attach = nil,
   capabilities = nil,
@@ -26,7 +28,7 @@ local exe = vim.fn.has("win32") == 1 and "cagara.exe" or "cagara"
 ---@param dir string?
 ---@return string[]
 function M.server_cmd(dir)
-  if dir then
+  if M.config.allow_local and dir then
     for _, profile in ipairs({ "release", "debug" }) do
       local found = vim.fs.find("target/" .. profile .. "/" .. exe, { path = dir, upward = true, type = "file" })[1]
       if found then

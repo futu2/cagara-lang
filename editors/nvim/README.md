@@ -33,15 +33,17 @@ require("cagara").setup()
 ```lua
 require("cagara").setup({
   cmd = { "/path/to/cagara", "lsp" }, -- default: see below
+  allow_local = true,                  -- opt in to a repo-local target build
   root_markers = { "Cargo.toml", ".git" },
   on_attach = function(client, bufnr) end,
   capabilities = nil,                -- e.g. require("cmp_nvim_lsp").default_capabilities()
 })
 ```
 
-Without `cmd`, the plugin runs `cagara lsp` with `target/release/cagara` or
-`target/debug/cagara` found upward from the file (a checkout of this
-repository), else `cagara` on `PATH`.
+Without `cmd`, the plugin runs `cagara lsp` from `PATH`. Set
+`allow_local = true` to opt in to `target/release/cagara` or
+`target/debug/cagara` found upward from the file; this prevents an untrusted
+checkout from being executed just by opening a buffer.
 
 Neovim 0.11+ maps the usual keys by default (`K` hover, `grr` references,
 `gO` symbols, `<C-x><C-o>` completion); `gd` needs a mapping to

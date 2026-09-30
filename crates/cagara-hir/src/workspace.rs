@@ -86,6 +86,9 @@ pub struct Workspace {
     file_diags: Vec<Vec<Diag>>,
     by_path: HashMap<PathBuf, usize>,
     stack: Vec<PathBuf>,
+    /// Unsaved contents supplied by an editor. These take precedence over
+    /// files on disk while imports are loaded.
+    overlays: HashMap<PathBuf, String>,
 }
 
 impl Workspace {
@@ -101,6 +104,7 @@ impl Workspace {
             file_diags: Vec::new(),
             by_path: HashMap::new(),
             stack: Vec::new(),
+            overlays: HashMap::new(),
         };
         ws.add(PathBuf::from(PRELUDE_PATH), PRELUDE_SRC.to_string());
         ws
@@ -139,10 +143,72 @@ impl Workspace {
     /// unsaved) contents; imports resolve relative to `path` and are read
     /// from disk. Used by the language server.
     pub fn open_with(path: &Path, text: String) -> Self {
+        let mut overlays = HashMap::new();
+        overlays.insert(normalize(path), text.clone());
+        Self::open_with_buffers(path, text, &overlays)
+    }
+
+    /// Workspace rooted at `path`, loading every open buffer as an overlay.
+    /// Imports use an overlay when one exists and otherwise read from disk.
+    /// Buffers not reachable from the root are also loaded so another open
+    /// document can become the root without rebuilding the server's state.
+    pub fn open_with_buffers(
+        path: &Path,
+        text: String,
+        buffers: &HashMap<PathBuf, String>,
+    ) -> Self {
+        let root = normalize(path);
         let mut ws = Self::empty();
-        ws.root = ws.add(path.to_path_buf(), text);
+        ws.overlays = buffers
+            .iter()
+            .map(|(p, text)| (normalize(p), text.clone()))
+            .collect();
+        ws.overlays.entry(root.clone()).or_insert(text.clone());
+        let root_text = ws
+            .overlays
+            .get(&root)
+            .cloned()
+            .unwrap_or(text);
+        ws.root = ws.add(root.clone(), root_text);
+        let remaining: Vec<(PathBuf, String)> = ws
+            .overlays
+            .iter()
+            .filter(|(p, _)| !ws.by_path.contains_key(*p))
+            .map(|(p, text)| (p.clone(), text.clone()))
+            .collect();
+        for (p, text) in remaining {
+            ws.add(p, text);
+        }
         ws.rebuild_diags();
         ws
+    }
+
+    /// Select a loaded module as the root used by analysis and evaluation.
+    pub fn set_root_path(&mut self, path: &Path) -> bool {
+        let path = normalize(path);
+        let Some(&root) = self.by_path.get(&path) else {
+            return false;
+        };
+        self.root = root;
+        true
+    }
+
+    /// Return the loaded module for a path, if it is present in this graph.
+    pub fn module_for_path(&self, path: &Path) -> Option<usize> {
+        self.by_path.get(&normalize(path)).copied()
+    }
+
+    /// Rebuild this graph from the loaded module texts. Used for speculative
+    /// editor queries so probing a field never mutates the live workspace.
+    pub fn snapshot(&self) -> Self {
+        let root = self.modules[self.root].path.clone();
+        let buffers: HashMap<_, _> = self
+            .modules
+            .iter()
+            .filter(|m| m.path != Path::new(PRELUDE_PATH))
+            .map(|m| (m.path.clone(), m.text.clone()))
+            .collect();
+        Self::open_with_buffers(&root, self.modules[self.root].text.clone(), &buffers)
     }
 
     fn add(&mut self, path: PathBuf, text: String) -> usize {
@@ -229,7 +295,7 @@ impl Workspace {
     fn import(&mut self, from: &Path, text: &str, imp: &Import) -> Option<usize> {
         let base = from.parent().unwrap_or(Path::new("."));
         let raw = base.join(&imp.path);
-        let target = raw.canonicalize().unwrap_or(raw);
+        let target = normalize(&raw);
         if let Some(&i) = self.by_path.get(&target) {
             return Some(i);
         }
@@ -239,9 +305,15 @@ impl Workspace {
             self.import_diags.push(make_diag(from, text, offset, msg));
             return None;
         }
-        match std::fs::read_to_string(&target) {
-            Ok(t) => Some(self.add(target, t)),
-            Err(e) => {
+        match self
+            .overlays
+            .get(&target)
+            .cloned()
+            .or_else(|| std::fs::read_to_string(&target).ok())
+        {
+            Some(t) => Some(self.add(target, t)),
+            None => {
+                let e = std::fs::read_to_string(&target).expect_err("missing imported file");
                 let msg = format!("cannot import `{}`: {e}", imp.path);
                 self.import_diags.push(make_diag(from, text, offset, msg));
                 None
@@ -266,6 +338,10 @@ impl Workspace {
             None => self.diag(e.module, 0, e.message.clone()),
         }
     }
+}
+
+fn normalize(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Syntax errors of a file, and overloads missing a signature.
@@ -335,5 +411,28 @@ fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: S
         message,
         source: text[line_start..line_end].trim_end().to_string(),
         width,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Workspace;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn open_buffers_override_imports_and_share_a_graph() {
+        let root = PathBuf::from("/tmp/cagara-shared/root.cagara");
+        let imported = PathBuf::from("/tmp/cagara-shared/lib.cagara");
+        let mut buffers: HashMap<PathBuf, String> = HashMap::new();
+        buffers.insert(
+            root.clone(),
+            "import \"lib.cagara\" as lib\nq = lib.value\n".into(),
+        );
+        buffers.insert(imported.clone(), "value = 42\n".into());
+        let ws = Workspace::open_with_buffers(&root, buffers[&root].clone(), &buffers);
+        assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+        assert!(ws.module_for_path(Path::new("/tmp/cagara-shared/lib.cagara")).is_some());
+        assert_eq!(ws.modules[ws.root].module.defs[0].name, "q");
     }
 }

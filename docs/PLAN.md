@@ -108,7 +108,8 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 133 tests, no clippy warnings):
+Done and tested with focused HIR/SQL suites, `cargo check --workspace`, and
+the VS Code extension compile:
 
 - Lexer, parser, AST lowering (28 tests), including recovery, losslessness,
   and a nesting / chain-length limit (expressions, types, projection
@@ -130,9 +131,9 @@ Done and tested (`cargo test --workspace`: 133 tests, no clippy warnings):
   so an edit that adds or removes a definition updates scopes, checks, and
   evaluation. `Workspace::set_source` applies an edit; it returns `false`
   when the imports changed, since loading files stays outside salsa.
-- Language server (`cagara lsp`, crate `cagara-lsp`, 12 tests): full-text sync, one workspace
-  per open document updated with `set_source` (reloaded when imports
-  change). Publishes all diagnostics for the file (syntax, type, schema)
+- Language server (`cagara lsp`, crate `cagara-lsp`): full-text sync, one shared
+  workspace/module graph for all open documents, and unsaved-buffer overlays
+  passed to importers (reloaded when imports change). Publishes all diagnostics for the file (syntax, type, schema)
   with UTF-16 ranges; hover shows the inferred type (every candidate of an
   overload set); go-to-definition jumps to the name, including
   `alias.name` into imports. Names are resolved on the AST, so lambda
@@ -146,8 +147,8 @@ Done and tested (`cargo test --workspace`: 133 tests, no clippy warnings):
   which adds nothing to its row but records what the row is known to
   have, then the text is restored. This works on half-typed lines; an
   open predicate outside a query only knows the columns used beside it. Prelude definitions have no
-  location. Imported files are read from disk, and edits to them are not
-  watched.
+  location. The VS Code client registers `.cagara` file watching, while the
+  Neovim client opts into repo-local binaries explicitly.
 - Type checker (24 tests): HM with let-polymorphism for top-level definitions,
   monomorphic lambdas, Rémy-style rows, rigid (checked) signatures, constant
   lifting into `expr` with deferred int→float / string→date / timestamp
@@ -175,12 +176,14 @@ Done and tested (`cargo test --workspace`: 133 tests, no clippy warnings):
   literals before reporting ambiguity. Works through imports and aliases.
 - Nullability, strict and explicit: `maybe a` is a real type, and type
   variables in signatures stand for non-null types, so `expr r a` and
-  `expr r (maybe a)` are disjoint overloads. Operators reject `maybe`
-  arguments; `coalesce`, `just`, `isNull`, `isNotNull`, `isTrue` handle
-  nulls. Outer joins make the missing side's columns `maybe` (never twice);
-  join predicates see the plain types. `sum` / `avg` / `min` / `max`,
-  `lag` / `lead`, `sumOver` / `avgOver` return `maybe`; counts do not. Join
-  kinds are separate primitives (`__leftJoin`, ...) so the checker sees them.
+  `expr r (maybe a)` are disjoint. Operators and aggregate/window inputs
+  reject `maybe`; use `coalesce` explicitly before passing a nullable column.
+  `sum` / `avg` / `min` / `max`, `lag` / `lead`, `sumOver` / `avgOver` return
+  `maybe`; `count`, `countOf`, `countDistinct`, and `countOver` return non-null
+  counts. `just`, `isNull`, `isNotNull`, and `isTrue` handle nulls. Outer joins
+  make the missing side's columns `maybe` (never twice); join predicates see
+  the plain types. Join kinds are separate primitives (`__leftJoin`, ...) so
+  the checker sees them.
 - Evaluator, prelude, imports with aliases, cycle and duplicate detection.
 - IR validation: missing columns, join sides, key-mapper collisions, nested
   aggregates, ungrouped columns, filtering on aggregates/windows.
@@ -190,12 +193,19 @@ Done and tested (`cargo test --workspace`: 133 tests, no clippy warnings):
   overload count in the checker. A definition that nothing uses is still
   rejected when its overloads cannot be satisfied for any type
   (`bad = .age + "x"`), while leftover literals keep their polymorphic type.
+- Checker performance and incrementality: union-find path compression,
+  versioned variable state, and cached overload fitting avoid retrying an
+  overload unless its inputs changed. Salsa stores raw diagnostic spans and
+  messages, rendering them only outside the query so dependent edits do not
+  invalidate diagnostics unnecessarily.
 - SQL lowering for where/select/agg/order/limit/offset/keyMap/joins/windows,
   frames, constant-only global aggregates, join-input inlining, dialect
   rewriting (postgres, mysql, sqlite, duckdb, tsql, bigquery, snowflake),
-  and `--optimize` (19 end-to-end tests), plus differential tests that run
-  the same queries on SQLite and DuckDB (`tests/engines.rs`; skipped when a
-  shell is missing, required in CI).
+  CASE, casts, `distinct`, membership, semi/anti joins, set operations, and
+  automatic CTE reuse for repeated relational subtrees. `--optimize` remains
+  opt-in, with differential tests that run the same queries on SQLite and
+  DuckDB (`tests/engines.rs`; skipped when a shell is missing, required in
+  CI).
 - Date and string prelude: `currentDate`, `now`, `add{Days,Weeks,Months,
   Quarters,Years,Hours,Minutes,Seconds}`, `trunc{Year,Quarter,Month,Week,
   Day,Hour,Minute}`, `year` / `month` / `dayOfWeek` / ..., `daysBetween`,
@@ -260,15 +270,16 @@ Known gaps:
     delimiters; int overflow is a diagnostic; trailing comments anywhere;
     `{ | r }`; `<>` looser than `+` / `-`; generated-program and
     token-soup property tests).
-12. **Language server and CLI.** One shared workspace with open buffers fed
-    to their importers, reloaded on save / watched-file events; the
+12. ~~Language server and CLI~~ (done; see Status): one shared workspace with
+    open buffers fed to their importers, reloaded on save / watched-file events; the
     completion probe on a snapshot; `url`-based URI conversion; CLI
     `args_os`, broken pipe, and `--types --only` exit code; trust gating for
     repo-local binaries in the editor plugins.
-13. **Checker performance.** Union-find path compression and re-checking an
-    overload only when its variables change (a 250-operator chain takes
+13. ~~Checker performance~~ (done; see Status): union-find path compression
+    and re-checking an overload only when its variables change (a 250-operator chain takes
     1.8 s); spans out of salsa results so edits to an import do not re-check
     every dependent.
-14. **Language.** Conditionals (`CASE`), `distinct`, set operations, `in` /
-    semi-joins, `cast`, CTEs for reused definitions; a null-polymorphic
-    type variable to halve the `maybe` overloads.
+14. ~~Language~~ (done; see Status): conditionals (`CASE`), `distinct`, set
+    operations, `in` / semi/anti-joins, `cast`, automatic CTEs for repeated
+    relational subtrees, and strict aggregate/window nullability requiring
+    explicit `coalesce`.

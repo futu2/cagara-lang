@@ -27,9 +27,14 @@ pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
             }
             Ok(c)
         }
-        Rel::Limit(r, _) | Rel::Offset(r, _) | Rel::At(_, r) => schema(r),
+        Rel::Limit(r, _) | Rel::Offset(r, _) | Rel::Distinct(r) | Rel::At(_, r) => schema(r),
         Rel::KeyMap(r, m) => Ok(m.apply(&schema(r)?)?.into_iter().map(|(_, new)| new).collect()),
-        Rel::Join { left, right, on, .. } => {
+        Rel::Join {
+            kind,
+            left,
+            right,
+            on,
+        } => {
             let (lc, rc) = (schema(left)?, schema(right)?);
             for (side, n) in on.columns() {
                 let (cols, what) = match side {
@@ -42,9 +47,24 @@ pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
                 }
             }
             rules::place(Place::JoinOn, on.phase()?)?;
+            if matches!(kind, crate::ir::JoinKind::Semi | crate::ir::JoinKind::Anti) {
+                return Ok(lc);
+            }
             let named = |cs: Vec<String>| cs.into_iter().map(|c| (c, ())).collect::<Vec<_>>();
             let out = rules::join_columns(&named(lc), &named(rc));
             Ok(out.into_iter().map(|(c, ())| c).collect())
+        }
+        Rel::Set { left, right, .. } => {
+            let lc = schema(left)?;
+            let rc = schema(right)?;
+            if lc != rc {
+                return Err(format!(
+                    "set-operation inputs must have the same columns; left has [{}], right has [{}]",
+                    lc.join(", "),
+                    rc.join(", ")
+                ));
+            }
+            Ok(lc)
         }
     }
 }

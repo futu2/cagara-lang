@@ -21,6 +21,21 @@ _$_ = f => x => f x
 _>>>_ = f => g => x => g (f x)
 id = x => x
 
+# ── scalar SQL expressions ─────────────────────────────────────────────────
+
+# Typed conditionals lower to a searched SQL CASE expression. Both branches
+# are checked at the same expression phase, so this also works after agg or
+# select when the surrounding stage permits that phase.
+ifThenElse : expr r bool -> expr r a -> expr r a -> expr r a =
+  sql "CASE WHEN $1 THEN $2 ELSE $3 END"
+caseWhen = ifThenElse
+
+# Explicit casts are deliberately named by their result type. There is no
+# implicit conversion between ordinary expressions.
+toInt : expr r a -> expr r int = sql "CAST($1 AS INT)"
+toFloat : expr r a -> expr r float = sql "CAST($1 AS FLOAT)"
+toBool : expr r a -> expr r bool = sql "CAST($1 AS BOOLEAN)"
+
 # ── query pipeline ─────────────────────────────────────────────────────────
 
 table = __table
@@ -31,6 +46,9 @@ agg = __agg
 order = __order
 limit = __limit
 offset = __offset
+distinct = __distinct
+inList = __in
+in = inList
 asc = __asc
 desc = __desc
 group = __group
@@ -52,6 +70,14 @@ inner = __innerJoin
 leftJoin = __leftJoin
 rightJoin = __rightJoin
 fullJoin = __fullJoin
+semiJoin = __semiJoin
+antiJoin = __antiJoin
+
+# Set operations require both queries to have the same row. They preserve the
+# columns and order of the left input; SQL uses the corresponding set operator.
+union = __union
+intersect = __intersect
+except = __except
 
 # Join operators, between `&` and every expression operator:
 # `users & teachers ? .<user_name == .>teacher_name`. The `<` / `>` mark the
@@ -75,27 +101,20 @@ omit = keys => keyMap (drop keys)
 rename = mapping => keyMap (replace mapping)
 
 # ── aggregates (depth 1: arguments must be row expressions) ───────────────
-# Type variables in signatures are non-null; `maybe a` is spelled out.
+# Type variables in signatures are non-null; nullable inputs must be handled
+# explicitly with `coalesce`.
 # `sum` / `avg` / `min` / `max` are NULL for an all-NULL or empty input, so
 # they return `maybe`: write `coalesce 0 (sum .x)` for a number.
 
 count : agg (expr r int) = sql "COUNT(*)"
 countOf : expr r a -> agg (expr r int) = sql "COUNT($1)"
-countOf : expr r (maybe a) -> agg (expr r int) = sql "COUNT($1)"
 countDistinct : expr r a -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
-countDistinct : expr r (maybe a) -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
 sum : expr r int -> agg (expr r (maybe int)) = sql "SUM($1)"
-sum : expr r (maybe int) -> agg (expr r (maybe int)) = sql "SUM($1)"
 sum : expr r float -> agg (expr r (maybe float)) = sql "SUM($1)"
-sum : expr r (maybe float) -> agg (expr r (maybe float)) = sql "SUM($1)"
 avg : expr r int -> agg (expr r (maybe float)) = sql "AVG($1)"
-avg : expr r (maybe int) -> agg (expr r (maybe float)) = sql "AVG($1)"
 avg : expr r float -> agg (expr r (maybe float)) = sql "AVG($1)"
-avg : expr r (maybe float) -> agg (expr r (maybe float)) = sql "AVG($1)"
 min : expr r a -> agg (expr r (maybe a)) = sql "MIN($1)"
-min : expr r (maybe a) -> agg (expr r (maybe a)) = sql "MIN($1)"
 max : expr r a -> agg (expr r (maybe a)) = sql "MAX($1)"
-max : expr r (maybe a) -> agg (expr r (maybe a)) = sql "MAX($1)"
 
 # ── window functions (depth 1) ────────────────────────────────────────────
 # spec = { partition = [..], order = [asc .x, desc .y], frame = .. }
@@ -105,17 +124,11 @@ rank : winspec r -> win (expr r int) = sql "RANK()"
 denseRank : winspec r -> win (expr r int) = sql "DENSE_RANK()"
 # `lag` / `lead` are NULL at the partition edge; frames may be empty.
 lag : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LAG($1)"
-lag : winspec r -> expr r (maybe a) -> win (expr r (maybe a)) = sql "LAG($1)"
 lead : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LEAD($1)"
-lead : winspec r -> expr r (maybe a) -> win (expr r (maybe a)) = sql "LEAD($1)"
 sumOver : winspec r -> expr r int -> win (expr r (maybe int)) = sql "SUM($1)"
-sumOver : winspec r -> expr r (maybe int) -> win (expr r (maybe int)) = sql "SUM($1)"
 sumOver : winspec r -> expr r float -> win (expr r (maybe float)) = sql "SUM($1)"
-sumOver : winspec r -> expr r (maybe float) -> win (expr r (maybe float)) = sql "SUM($1)"
 avgOver : winspec r -> expr r int -> win (expr r (maybe float)) = sql "AVG($1)"
-avgOver : winspec r -> expr r (maybe int) -> win (expr r (maybe float)) = sql "AVG($1)"
 avgOver : winspec r -> expr r float -> win (expr r (maybe float)) = sql "AVG($1)"
-avgOver : winspec r -> expr r (maybe float) -> win (expr r (maybe float)) = sql "AVG($1)"
 countOver : winspec r -> win (expr r int) = sql "COUNT(*)"
 
 rows = __rows

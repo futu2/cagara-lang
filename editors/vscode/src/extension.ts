@@ -33,6 +33,9 @@ async function start(): Promise<void> {
   const serverOptions: ServerOptions = { run, debug: run };
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "cagara" }],
+    synchronize: {
+      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.cagara"),
+    },
   };
   client = new LanguageClient("cagara", "Cagara Language Server", serverOptions, clientOptions);
   try {
@@ -54,18 +57,23 @@ async function stop(): Promise<void> {
   }
 }
 
-/** The configured path, else a build in an open workspace folder, else PATH. */
+/** The configured path, else a trusted workspace build, else PATH. */
 function cagaraPath(): string {
   const exe = process.platform === "win32" ? "cagara.exe" : "cagara";
   const configured = vscode.workspace.getConfiguration("cagara").get<string>("path", "").trim();
   if (configured) {
     return configured;
   }
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    for (const profile of ["release", "debug"]) {
-      const candidate = path.join(folder.uri.fsPath, "target", profile, exe);
-      if (fs.existsSync(candidate)) {
-        return candidate;
+  // Do not execute a repository-local binary in an untrusted workspace.
+  // Configured paths and PATH are still available, so users can explicitly
+  // choose a trusted installation.
+  if (vscode.workspace.isTrusted) {
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      for (const profile of ["release", "debug"]) {
+        const candidate = path.join(folder.uri.fsPath, "target", profile, exe);
+        if (fs.existsSync(candidate)) {
+          return candidate;
+        }
       }
     }
   }

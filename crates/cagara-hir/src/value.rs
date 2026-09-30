@@ -1,7 +1,7 @@
 //! Runtime values of compile-time evaluation. A query definition evaluates to
 //! `Value::Query(Rel)`; column expressions evaluate to `Value::Expr`.
 
-use crate::ir::{Bound, Expr, Frame, JoinKind, KeyMapper, Lit, Rel};
+use crate::ir::{Bound, Expr, Frame, JoinKind, KeyMapper, Lit, Rel, SetKind};
 use cagara_syntax::ast::{self, Span};
 use std::rc::Rc;
 
@@ -16,7 +16,10 @@ pub enum Prim {
     Order,
     Limit,
     Offset,
+    Distinct,
+    In,
     Join(JoinKind),
+    Set(SetKind),
     Group,
     Asc,
     Desc,
@@ -42,10 +45,17 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__order", Prim::Order),
     ("__limit", Prim::Limit),
     ("__offset", Prim::Offset),
+    ("__distinct", Prim::Distinct),
+    ("__in", Prim::In),
     ("__innerJoin", Prim::Join(JoinKind::Inner)),
     ("__leftJoin", Prim::Join(JoinKind::Left)),
     ("__rightJoin", Prim::Join(JoinKind::Right)),
     ("__fullJoin", Prim::Join(JoinKind::Full)),
+    ("__semiJoin", Prim::Join(JoinKind::Semi)),
+    ("__antiJoin", Prim::Join(JoinKind::Anti)),
+    ("__union", Prim::Set(SetKind::Union)),
+    ("__intersect", Prim::Set(SetKind::Intersect)),
+    ("__except", Prim::Set(SetKind::Except)),
     ("__group", Prim::Group),
     ("__asc", Prim::Asc),
     ("__desc", Prim::Desc),
@@ -71,7 +81,10 @@ impl Prim {
             Group | Asc | Desc | KeepOnly | DropKeys | Replace | Prefix | Suffix | Preceding
             | Following => 1,
             Where | Select | AggStage | Order | Limit | Offset | KeyMap | Table | Rows => 2,
+            Distinct => 1,
+            In => 2,
             Join(_) => 3,
+            Set(_) => 2,
         }
     }
 }

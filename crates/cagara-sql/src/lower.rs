@@ -3,17 +3,40 @@
 //! meaning (e.g. filtering after aggregation, windows, or LIMIT).
 
 use crate::stage::{and_all, col, ident_style, lower_expr, qualify, Stage};
-use cagara_hir::ir::{Expr as IrExpr, JoinKind, Rel, Side};
+use cagara_hir::ir::{Expr as IrExpr, JoinKind, Rel, SetKind, Side};
 use sqlglot_rust::ast::{
-    Expr, JoinClause, JoinType, OrderByItem, QuoteStyle, TableRef, TableSource,
+    Expr, JoinClause, JoinType, OrderByItem, QuoteStyle, SetOperationStatement,
+    SetOperationType, Statement, TableRef, TableSource,
 };
+use std::collections::HashMap;
 
-#[derive(Default)]
 pub struct Lowerer {
     next: usize,
+    next_cte: usize,
+    counts: Vec<(Rel, usize)>,
+    cte_names: HashMap<String, String>,
+    building: Vec<Rel>,
+    ctes: Vec<sqlglot_rust::ast::Cte>,
 }
 
 impl Lowerer {
+    pub fn for_rel(rel: &Rel) -> Self {
+        let mut counts = Vec::new();
+        count_rel(rel, &mut counts);
+        Lowerer {
+            next: 0,
+            next_cte: 0,
+            counts,
+            cte_names: HashMap::new(),
+            building: Vec::new(),
+            ctes: Vec::new(),
+        }
+    }
+
+    pub fn take_ctes(self) -> Vec<sqlglot_rust::ast::Cte> {
+        self.ctes
+    }
+
     fn alias(&mut self) -> String {
         self.next += 1;
         format!("t{}", self.next)
@@ -82,6 +105,7 @@ impl Lowerer {
             && st.order_by.is_empty()
             && st.limit.is_none()
             && st.offset.is_none()
+            && !st.distinct
             && !st.has_agg
             && !st.has_win;
         match st.from {
@@ -135,6 +159,31 @@ impl Lowerer {
     }
 
     pub fn rel(&mut self, rel: &Rel) -> Result<Stage, String> {
+        if self.building.is_empty() && self.is_cte_candidate(rel) {
+            let key = format!("{rel:?}");
+            if let Some(name) = self.cte_names.get(&key).cloned() {
+                return self.cte_stage(&name, rel);
+            }
+            self.next_cte += 1;
+            let name = format!("cagara_cte{}", self.next_cte);
+            self.cte_names.insert(key, name.clone());
+            self.building.push(rel.clone());
+            let body = self.rel_inner(rel)?;
+            self.building.pop();
+            self.ctes.push(sqlglot_rust::ast::Cte {
+                name: name.clone(),
+                name_quote_style: QuoteStyle::None,
+                columns: vec![],
+                query: Box::new(Statement::Select(body.into_statement())),
+                materialized: None,
+                recursive: false,
+            });
+            return self.cte_stage(&name, rel);
+        }
+        self.rel_inner(rel)
+    }
+
+    fn rel_inner(&mut self, rel: &Rel) -> Result<Stage, String> {
         Ok(match rel {
             Rel::At(_, r) => self.rel(r)?,
             Rel::Table {
@@ -267,6 +316,14 @@ impl Lowerer {
                 st.offset = Some(*n);
                 st
             }
+            Rel::Distinct(r) => {
+                let mut st = self.rel(r)?;
+                if st.limit.is_some() || st.offset.is_some() {
+                    st = self.wrap(st);
+                }
+                st.distinct = true;
+                st
+            }
             Rel::KeyMap(r, m) => {
                 let mut st = self.rel(r)?;
                 let pairs = m.apply(&st.names())?;
@@ -283,6 +340,42 @@ impl Lowerer {
                 right,
                 on,
             } => {
+                if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                    // A semi/anti join is an existence predicate: it keeps
+                    // the left relation's cardinality and columns while the
+                    // right relation only decides whether a matching row
+                    // exists.
+                    let left_stage = self.rel(left)?;
+                    let right_stage = self.rel(right)?;
+                    let left = self.derived(left_stage);
+                    let right = self.derived(right_stage);
+                    let find = |items: &[(String, Expr)], n: &str| {
+                        items
+                            .iter()
+                            .find(|(k, _)| k == n)
+                            .map(|(_, e)| e.clone())
+                            .ok_or_else(|| format!("internal: join input has no column `{n}`"))
+                    };
+                    let predicate = lower_expr(on, &|side, n| match side {
+                        Side::Left => find(&left.items, n),
+                        Side::Right => find(&right.items, n),
+                        Side::Single => Err(format!("join predicates need `.<{n}` or `.>{n}`")),
+                    })?;
+                    let mut subquery = Stage::new(right.from, right.items);
+                    subquery.joins = right.joins;
+                    subquery.wheres.push(predicate);
+                    let exists = Expr::Exists {
+                        subquery: Box::new(sqlglot_rust::Statement::Select(
+                            subquery.into_statement(),
+                        )),
+                        negated: matches!(kind, JoinKind::Anti),
+                    };
+                    let mut st = Stage::new(left.from, left.items);
+                    st.joins = left.joins;
+                    st.wheres = left.wheres;
+                    st.wheres.push(exists);
+                    return Ok(st);
+                }
                 // Where an inlined input's filters may go without changing
                 // the result: a filter on a side whose unmatched rows are not
                 // kept can move to WHERE; the right side of a left join can
@@ -294,6 +387,7 @@ impl Lowerer {
                     JoinKind::Inner | JoinKind::Left => (true, true),
                     JoinKind::Right => (false, true),
                     JoinKind::Full => (false, false),
+                    JoinKind::Semi | JoinKind::Anti => unreachable!(),
                 };
                 // Sides whose unmatched rows are kept with NULLs for the other.
                 let (left_null, right_null) = match kind {
@@ -301,6 +395,7 @@ impl Lowerer {
                     JoinKind::Left => (false, true),
                     JoinKind::Right => (true, false),
                     JoinKind::Full => (true, true),
+                    JoinKind::Semi | JoinKind::Anti => unreachable!(),
                 };
                 let l = self.rel(left)?;
                 let r = self.rel(right)?;
@@ -340,6 +435,7 @@ impl Lowerer {
                     JoinKind::Left => JoinType::Left,
                     JoinKind::Right => JoinType::Right,
                     JoinKind::Full => JoinType::Full,
+                    JoinKind::Semi | JoinKind::Anti => unreachable!(),
                 };
                 st.joins.push(JoinClause {
                     join_type,
@@ -349,7 +445,80 @@ impl Lowerer {
                 });
                 st
             }
+            Rel::Set { kind, left, right } => {
+                let left = self.rel(left)?;
+                let right = self.rel(right)?;
+                let names = left.names();
+                let op = match kind {
+                    SetKind::Union => SetOperationType::Union,
+                    SetKind::Intersect => SetOperationType::Intersect,
+                    SetKind::Except => SetOperationType::Except,
+                };
+                let stmt = Statement::SetOperation(SetOperationStatement {
+                    comments: vec![],
+                    op,
+                    all: false,
+                    left: Box::new(Statement::Select(left.into_statement())),
+                    right: Box::new(Statement::Select(right.into_statement())),
+                    order_by: vec![],
+                    limit: None,
+                    offset: None,
+                    query_options: None,
+                });
+                let alias = self.alias();
+                Stage::new(
+                    TableSource::Subquery {
+                        query: Box::new(stmt),
+                        alias: Some(alias.clone()),
+                        alias_quote_style: QuoteStyle::None,
+                    },
+                    names
+                        .iter()
+                        .map(|n| (n.clone(), col(Some(&alias), n)))
+                        .collect(),
+                )
+            }
         })
+    }
+
+    fn is_cte_candidate(&self, rel: &Rel) -> bool {
+        if matches!(rel.bare(), Rel::Table { .. }) {
+            return false;
+        }
+        self.counts
+            .iter()
+            .any(|(candidate, count)| count > &1 && candidate == rel)
+    }
+
+    fn cte_stage(&self, name: &str, rel: &Rel) -> Result<Stage, String> {
+        let columns = cagara_hir::schema::schema(rel)?;
+        let table = TableRef {
+            catalog: None,
+            schema: None,
+            name: name.to_string(),
+            alias: None,
+            temporal: None,
+            name_quote_style: ident_style(name),
+            alias_quote_style: QuoteStyle::None,
+        };
+        Ok(Stage::new(
+            TableSource::Table(table),
+            columns
+                .iter()
+                .map(|n| (n.clone(), col(None, n)))
+                .collect(),
+        ))
+    }
+}
+
+fn count_rel(rel: &Rel, counts: &mut Vec<(Rel, usize)>) {
+    if let Some((_, count)) = counts.iter_mut().find(|(candidate, _)| candidate == rel) {
+        *count += 1;
+    } else {
+        counts.push((rel.clone(), 1));
+    }
+    for child in rel.children() {
+        count_rel(child, counts);
     }
 }
 

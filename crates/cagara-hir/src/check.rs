@@ -36,9 +36,10 @@
 //!
 //! - Nullability is explicit: `maybe a` is a type, and type variables in
 //!   signatures stand for non-null types, so `expr r a` and
-//!   `expr r (maybe a)` are disjoint overloads. Operators need non-null
-//!   arguments (`coalesce` / `isNotNull` handle nulls); outer joins make the
-//!   far side's columns `maybe`; `sum` / `avg` / `min` / `max` return `maybe`.
+//!   `expr r (maybe a)` are disjoint. Operators and aggregate/window inputs
+//!   need non-null arguments (`coalesce` handles nulls); outer
+//!   joins make the far side's columns `maybe`; aggregate/window results may
+//!   still return `maybe`.
 //!
 //! Known limits: `prefix` / `suffix` and key lists that are not literals give
 //! an unconstrained row (the schema validator checks them).
@@ -156,7 +157,10 @@ enum Cons {
         right: Ty,
         out: Ty,
         nullable: (bool, bool),
+        left_only: bool,
     },
+    /// Set operations require both inputs to expose the same row.
+    Set { left: Ty, right: Ty, out: Ty },
     /// A literal of scalar type `lit` used where `target` is expected, once
     /// `target` is known (int widens to float, string to date / timestamp).
     Lit { lit: &'static str, target: Ty },
@@ -220,11 +224,18 @@ impl Cons {
                 right,
                 out,
                 nullable,
+                left_only,
             } => Cons::JoinOut {
                 left: f(left),
                 right: f(right),
                 out: f(out),
                 nullable: *nullable,
+                left_only: *left_only,
+            },
+            Cons::Set { left, right, out } => Cons::Set {
+                left: f(left),
+                right: f(right),
+                out: f(out),
             },
             Cons::Lit { lit, target } => Cons::Lit {
                 lit,
@@ -284,6 +295,14 @@ pub struct TypeError {
     pub module: usize,
     pub def: usize,
     pub diag: Diag,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RawTypeError {
+    module: usize,
+    def: usize,
+    span: Span,
+    message: String,
 }
 
 /// Result of checking every definition in a workspace.
@@ -360,7 +379,16 @@ pub fn check(ws: &Workspace) -> TypeCheck {
     };
     for &input in &ws.inputs {
         let mc = module_check(&ws.db, input);
-        out.errors.extend(mc.errors.iter().cloned());
+        out.errors.extend(mc.errors.iter().map(|e| TypeError {
+            module: e.module,
+            def: e.def,
+            diag: diag_in(
+                &ws.modules[e.module].path,
+                &ws.modules[e.module].text,
+                e.span,
+                e.message.clone(),
+            ),
+        }));
         out.types.extend(mc.types.clone());
         out.holes.extend(mc.holes.clone());
         out.choices.extend(mc.choices.clone());
@@ -417,7 +445,7 @@ fn check_runs() -> usize {
 #[derive(Debug, Clone, PartialEq)]
 struct ModuleCheck {
     schemes: HashMap<(usize, usize), Scheme>,
-    errors: Vec<TypeError>,
+    errors: Vec<RawTypeError>,
     types: HashMap<(usize, usize), String>,
     holes: HashMap<(usize, usize), usize>,
     choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
@@ -471,6 +499,7 @@ fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> M
         errors: Vec::new(),
         span: Span::default(),
         trail: Vec::new(),
+        fit_cache: HashMap::new(),
         holes: HashMap::new(),
         choices: HashMap::new(),
         probe: None,
@@ -524,6 +553,7 @@ struct VarInfo {
     row_or_win: bool,
     /// From a signature's type variable: cannot become `maybe _`.
     nonnull: bool,
+    version: u64,
 }
 
 struct Checker<'w> {
@@ -535,11 +565,12 @@ struct Checker<'w> {
     failed: HashSet<(usize, usize)>,
     active: Vec<(usize, usize)>,
     pending: Vec<(Cons, Span)>,
-    errors: Vec<TypeError>,
+    errors: Vec<RawTypeError>,
     /// Location of the argument being checked (for deferred literals).
     span: Span,
     /// Previous state of every variable binding, for trial unification.
     trail: Vec<(u32, VarInfo)>,
+    fit_cache: HashMap<(usize, Vec<usize>, String), Vec<usize>>,
     holes: HashMap<(usize, usize), usize>,
     choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
     /// Input row of the `PROBE_FIELD` column being checked.
@@ -556,6 +587,20 @@ fn row_or_tail(fs: Vec<(String, Ty)>, tail: Ty) -> Ty {
         tail
     } else {
         row(fs, tail)
+    }
+}
+
+fn contains_nullable_expr(t: &TypeExpr) -> bool {
+    match t {
+        TypeExpr::App { head, args, .. } => {
+            (head == "expr"
+                && args.len() == 2
+                && matches!(&args[1], TypeExpr::App { head, .. } if head == "maybe"))
+                || args.iter().any(contains_nullable_expr)
+        }
+        TypeExpr::Record { fields, .. } => fields.iter().any(|(_, t)| contains_nullable_expr(t)),
+        TypeExpr::Fun(a, b) => contains_nullable_expr(a) || contains_nullable_expr(b),
+        TypeExpr::Error(_) => false,
     }
 }
 
@@ -580,6 +625,7 @@ impl<'w> Checker<'w> {
             bound: None,
             row_or_win,
             nonnull,
+            version: 0,
         });
         self.vars.len() as u32 - 1
     }
@@ -601,6 +647,24 @@ impl<'w> Checker<'w> {
             }
         }
         t
+    }
+
+    /// Resolve a variable chain and collapse it to the first non-variable.
+    /// Changes are trailed because overload fitting temporarily rolls back
+    /// unification, just like ordinary bindings.
+    fn resolve_compress(&mut self, t: &Ty) -> Ty {
+        let Ty::Var(v) = t else {
+            return t.clone();
+        };
+        let Some(bound) = self.vars[*v as usize].bound.clone() else {
+            return Ty::Var(*v);
+        };
+        let resolved = self.resolve_compress(&bound);
+        if resolved != bound {
+            self.trail.push((*v, self.vars[*v as usize].clone()));
+            self.vars[*v as usize].bound = Some(resolved.clone());
+        }
+        resolved
     }
 
     /// Row fields and the tail after following bound variables.
@@ -648,7 +712,7 @@ impl<'w> Checker<'w> {
     // ── unification ────────────────────────────────────────────────────────
 
     fn bind(&mut self, v: u32, t: Ty) -> U {
-        let t = self.resolve(&t);
+        let t = self.resolve_compress(&t);
         if t == Ty::Var(v) {
             return Ok(());
         }
@@ -663,7 +727,12 @@ impl<'w> Checker<'w> {
             match &t {
                 Ty::Var(u) => {
                     self.trail.push((*u, self.vars[*u as usize].clone()));
-                    self.vars[*u as usize].row_or_win = true
+                    if !self.vars[*u as usize].row_or_win {
+                        self.vars[*u as usize].row_or_win = true;
+                        self.vars[*u as usize].version = self.vars[*u as usize]
+                            .version
+                            .wrapping_add(1);
+                    }
                 }
                 Ty::Con("row" | "win", _) => {}
                 Ty::Con("agg", _) => return Err(UNGROUPED.into()),
@@ -679,19 +748,25 @@ impl<'w> Checker<'w> {
             match &t {
                 Ty::Var(u) => {
                     self.trail.push((*u, self.vars[*u as usize].clone()));
-                    self.vars[*u as usize].nonnull = true
+                    if !self.vars[*u as usize].nonnull {
+                        self.vars[*u as usize].nonnull = true;
+                        self.vars[*u as usize].version = self.vars[*u as usize]
+                            .version
+                            .wrapping_add(1);
+                    }
                 }
                 Ty::Con("maybe", _) => return Err(NULLABLE.into()),
                 _ => {}
             }
         }
         self.vars[v as usize].bound = Some(t);
+        self.vars[v as usize].version = self.vars[v as usize].version.wrapping_add(1);
         Ok(())
     }
 
     /// Unify `actual` with `expected` (the order only affects messages).
     fn unify(&mut self, actual: &Ty, expected: &Ty) -> U {
-        let (a, e) = (self.resolve(actual), self.resolve(expected));
+        let (a, e) = (self.resolve_compress(actual), self.resolve_compress(expected));
         match (&a, &e) {
             (Ty::Var(v), _) => self.bind(*v, e.clone()),
             (_, Ty::Var(v)) => self.bind(*v, a.clone()),
@@ -859,11 +934,11 @@ impl<'w> Checker<'w> {
                 self.generalize(&t, cons)
             }
             Err(e) => {
-                let diag = diag_in(self.env.path, self.env.text, e.span, e.msg);
-                self.errors.push(TypeError {
+                self.errors.push(RawTypeError {
                     module: m,
                     def: i,
-                    diag,
+                    span: e.span,
+                    message: e.msg,
                 });
                 self.failed.insert((m, i));
                 let v = self.fresh();
@@ -874,6 +949,7 @@ impl<'w> Checker<'w> {
             }
         };
         self.schemes.insert((m, i), scheme.clone());
+        self.fit_cache.clear();
         Some(scheme)
     }
 
@@ -1053,6 +1129,11 @@ impl<'w> Checker<'w> {
     }
 
     fn fitting(&mut self, m: usize, cands: &[usize], target: &Ty) -> Vec<usize> {
+        let fingerprint = self.fingerprint(target);
+        let key = (m, cands.to_vec(), fingerprint);
+        if let Some(fits) = self.fit_cache.get(&key) {
+            return fits.clone();
+        }
         let mut out = Vec::new();
         for &i in cands {
             let s = self.cand_scheme(m, i);
@@ -1060,7 +1141,62 @@ impl<'w> Checker<'w> {
                 out.push(i);
             }
         }
+        self.fit_cache.insert(key, out.clone());
         out
+    }
+
+    fn fingerprint(&self, t: &Ty) -> String {
+        let mut out = String::new();
+        self.fingerprint_into(t, &mut out);
+        out
+    }
+
+    fn fingerprint_into(&self, t: &Ty, out: &mut String) {
+        match self.resolve(t) {
+            Ty::Var(v) => {
+                out.push_str("v");
+                out.push_str(&v.to_string());
+                out.push(':');
+                out.push_str(&self.vars[v as usize].version.to_string());
+            }
+            Ty::Rigid(v, _) => {
+                out.push_str("r");
+                out.push_str(&v.to_string());
+            }
+            Ty::Gen(v) => {
+                out.push_str("g");
+                out.push_str(&v.to_string());
+            }
+            Ty::Con(n, args) => {
+                out.push_str(n);
+                out.push('(');
+                for a in args {
+                    self.fingerprint_into(&a, out);
+                    out.push(',');
+                }
+                out.push(')');
+            }
+            Ty::Fun(a, b) => {
+                out.push_str("fun(");
+                self.fingerprint_into(&a, out);
+                self.fingerprint_into(&b, out);
+                out.push(')');
+            }
+            Ty::Row(fs, tail) => {
+                out.push_str("row(");
+                for (name, ty) in fs {
+                    out.push_str(&name);
+                    out.push('=');
+                    self.fingerprint_into(&ty, out);
+                    out.push(',');
+                }
+                self.fingerprint_into(&tail, out);
+                out.push(')');
+            }
+            Ty::Empty => out.push_str("empty"),
+            Ty::Labels(ls) => out.push_str(&format!("labels{ls:?}")),
+            Ty::Renames(ps) => out.push_str(&format!("renames{ps:?}")),
+        }
     }
 
     /// Type of a use of an overload set: the candidates' common shape.
@@ -1133,8 +1269,17 @@ impl<'w> Checker<'w> {
     /// is flexible (a plain `expr` may be used at any phase).
     fn annotation(&mut self, t: &TypeExpr) -> Result<Ty, String> {
         let mut res = t;
-        while let TypeExpr::Fun(_, r) = res {
+        let mut args = Vec::new();
+        while let TypeExpr::Fun(a, r) = res {
+            args.push(a.as_ref());
             res = r;
+        }
+        if matches!(res, TypeExpr::App { head, .. } if head == "agg" || head == "win")
+            && args.iter().any(|a| contains_nullable_expr(a))
+        {
+            return Err(
+                "aggregate/window inputs cannot use `maybe`; use `coalesce` first".into(),
+            );
         }
         // A plain `expr` result takes the phase of an `agg` / `win`
         // argument (a scalar template over an aggregate is an aggregate).
@@ -1589,6 +1734,7 @@ impl<'w> Checker<'w> {
                 let (x, y) = (x[0].clone(), y[0].clone());
                 self.coerce(&x, &y)
             }
+            (Ty::Labels(_), Ty::Con("list", y)) => self.unify(&con("string"), &y[0]),
             _ => self.unify(&a, &e),
         }
     }
@@ -1682,12 +1828,24 @@ impl<'w> Checker<'w> {
                 let r = self.fresh();
                 fun(i, fun(query(r.clone()), query(r)))
             }
+            Distinct => {
+                let r = self.fresh();
+                fun(query(r.clone()), query(r))
+            }
+            In => {
+                let (r, a) = (self.fresh(), self.fresh());
+                fun(
+                    list(a.clone()),
+                    fun(expr(con("row"), r.clone(), a), expr(con("row"), r, con("bool"))),
+                )
+            }
             Join(kind) => {
                 let nullable = match kind {
                     JoinKind::Inner => (false, false),
                     JoinKind::Left => (false, true),
                     JoinKind::Right => (true, false),
                     JoinKind::Full => (true, true),
+                    JoinKind::Semi | JoinKind::Anti => (false, false),
                 };
                 let (l, r, pred, out) = (self.fresh(), self.fresh(), self.fresh(), self.fresh());
                 self.pending.push((
@@ -1703,9 +1861,22 @@ impl<'w> Checker<'w> {
                     right: r.clone(),
                     out: out.clone(),
                     nullable,
+                    left_only: matches!(kind, JoinKind::Semi | JoinKind::Anti),
                 };
                 self.pending.push((c, sp));
                 fun(query(r), fun(pred, fun(query(l), query(out))))
+            }
+            Set(_) => {
+                let (l, r, out) = (self.fresh(), self.fresh(), self.fresh());
+                self.pending.push((
+                    Cons::Set {
+                        left: l.clone(),
+                        right: r.clone(),
+                        out: out.clone(),
+                    },
+                    sp,
+                ));
+                fun(query(l), fun(query(r), query(out)))
             }
             Group => {
                 let (r, a) = (self.fresh(), self.fresh());
@@ -1932,6 +2103,13 @@ impl<'w> Checker<'w> {
                 })?;
                 Ok(true)
             }
+            Cons::Set { left, right, out } => {
+                self.unify(left, right)
+                    .map_err(|m| format!("set-operation inputs: {m}"))?;
+                self.unify(out, left)
+                    .map_err(|m| format!("set-operation output: {m}"))?;
+                Ok(true)
+            }
             Cons::Lit { lit, target } => match self.resolve(target) {
                 Ty::Var(_) => Ok(false),
                 _ => self.lift(lit, target).map(|_| true),
@@ -1979,6 +2157,7 @@ impl<'w> Checker<'w> {
                 right,
                 out,
                 nullable,
+                left_only,
             } => {
                 let (lf, lt) = self.flatten(left);
                 let (rf, rt) = self.flatten(right);
@@ -1999,6 +2178,10 @@ impl<'w> Checker<'w> {
                     || (nullable.1 && rf.iter().any(|(_, t)| open(t)))
                 {
                     return Ok(false);
+                }
+                if *left_only {
+                    self.unify(&row(lf, Ty::Empty), out)?;
+                    return Ok(true);
                 }
                 let wrap = |this: &Self, on: bool, (k, t): (String, Ty)| match this.resolve(&t) {
                     Ty::Con("maybe", _) => (k, t),

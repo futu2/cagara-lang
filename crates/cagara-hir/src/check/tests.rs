@@ -78,7 +78,7 @@ fn row_polymorphic_predicate() {
 fn aggregate_types_print_wrapped() {
     assert_eq!(
         ty("total = sum .amount\n", "total"),
-        "agg (expr { amount = a | b } (maybe c))"
+        "agg (expr { amount = a | b } (maybe a))"
     );
     assert_eq!(
         ty(
@@ -364,8 +364,8 @@ fn outer_joins_make_the_missing_side_maybe() {
 }
 
 #[test]
-fn aggregates_are_nullable() {
-    let src = format!("{NULLABLE}q = people & agg {{ n = count, c = countOf .email, s = sum .score, t = coalesce \"\" (max .email) }}\n");
+fn aggregate_nullability_is_explicit() {
+    let src = format!("{NULLABLE}q = people & agg {{ n = count, c = countOf .id, s = sum (coalesce 0 .score), t = coalesce \"\" (max (coalesce \"\" .email)) }}\n");
     assert_eq!(
         ty(&src, "q"),
         "query { n = int, c = int, s = maybe int, t = string }"
@@ -374,7 +374,7 @@ fn aggregates_are_nullable() {
         "q = orders & agg { r = sum .amount } & where (.r > 100.0)\n",
         "q",
     );
-    assert!(e.contains("maybe float") && e.contains("nullable"), "{e}");
+    assert!(e.contains("maybe float") && e.contains("coalesce"), "{e}");
     ty(
         "q = orders & agg { r = coalesce 0.0 (sum .amount) } & where (.r > 100.0)\n",
         "q",
@@ -384,6 +384,31 @@ fn aggregates_are_nullable() {
         "q"
     )
     .contains("belong in `agg`"));
+    let e = err(
+        &format!("{NULLABLE}q = people & agg {{ s = sum .score }}\n"),
+        "q",
+    );
+    assert!(
+        e.contains("no overload of `sum`") && e.contains("maybe int"),
+        "{e}"
+    );
+    let e = err(
+        &format!(
+            "{NULLABLE}spec = {{ partition = [.id], order = [desc .id] }}\nq = people & select {{ l = lag spec .email }}\n"
+        ),
+        "q",
+    );
+    assert!(e.contains("non-null") && e.contains("coalesce"), "{e}");
+    let e = err(
+        &format!("{NULLABLE}q = people & agg {{ c = countOf .email }}\n"),
+        "q",
+    );
+    assert!(e.contains("non-null") && e.contains("maybe"), "{e}");
+    let e = err(
+        "bad : expr r (maybe a) -> agg (expr r (maybe a)) = sql \"SUM($1)\"\n",
+        "bad",
+    );
+    assert!(e.contains("aggregate/window inputs cannot use `maybe`"), "{e}");
 }
 
 #[test]

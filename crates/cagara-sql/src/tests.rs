@@ -149,6 +149,40 @@ fn join_uses_sides() {
 }
 
 #[test]
+fn distinct_case_cast_and_membership() {
+    let s = sql(
+        "q = users & where (inList [1, 2] .id) & distinct\n\
+         & select { id = .id, label = ifThenElse (.id == 1) \"yes\" \"no\", n = toFloat .id }\n",
+        "q",
+    );
+    assert!(s.starts_with("SELECT DISTINCT"), "{s}");
+    assert!(s.contains("id IN (1, 2)"), "{s}");
+    assert!(s.contains("CASE WHEN (id = 1) THEN 'yes' ELSE 'no' END"), "{s}");
+    assert!(s.contains("CAST(id AS FLOAT) AS n"), "{s}");
+}
+
+#[test]
+fn set_operations_and_reused_queries_use_sql_set_ops_and_ctes() {
+    let s = sql(
+        "active = users & where .active\nq = union active active\n",
+        "q",
+    );
+    assert!(s.contains("WITH cagara_cte"), "{s}");
+    assert!(s.contains("UNION"), "{s}");
+    assert_eq!(s.matches("WHERE active").count(), 1, "{s}");
+}
+
+#[test]
+fn semi_and_anti_joins_use_exists_without_right_columns() {
+    let semi = sql("q = users & semiJoin users (.<id == .>id)\n", "q");
+    assert!(semi.contains("EXISTS"), "{semi}");
+    assert!(!semi.contains("JOIN"), "{semi}");
+    let anti = sql("q = users & antiJoin users (.<id == .>id)\n", "q");
+    assert!(anti.contains("NOT EXISTS"), "{anti}");
+    assert!(!anti.contains("JOIN"), "{anti}");
+}
+
+#[test]
 fn pick_omit_rename() {
     assert_eq!(
         sql("q = users & pick [\"id\", \"name\"]\n", "q"),

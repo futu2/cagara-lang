@@ -24,7 +24,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Engines for the differential tests (crates/cagara-sql/tests/engines.rs).
+      # Ubuntu's sqlite3 predates the `floor` date modifier (3.46).
+      - name: Install SQLite and DuckDB shells
+        run: |
+          mkdir -p "$RUNNER_TEMP/engines" && cd "$RUNNER_TEMP/engines"
+          curl -sSfLo sqlite.zip https://www.sqlite.org/2025/sqlite-tools-linux-x64-3500400.zip
+          curl -sSfLo duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.3.2/duckdb_cli-linux-amd64.zip
+          unzip -oq sqlite.zip && unzip -oq duckdb.zip && chmod +x sqlite3 duckdb
+          echo "$RUNNER_TEMP/engines" >> "$GITHUB_PATH"
       - run: cargo test --workspace --locked
+        env:
+          CAGARA_REQUIRE_ENGINES: "1"
 
   vscode:
     name: VS Code extension

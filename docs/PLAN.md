@@ -82,6 +82,21 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
   unmatched rows). Constant ORDER BY / GROUP BY keys are dropped (SQL would
   read `1` as a position); an all-constant grouping keeps its "no rows in,
   no rows out" meaning with `HAVING COUNT(*) > 0`.
+- **Order is kept across derived tables.** SQL does not keep a derived
+  table's order, so wrapping a stage moves its ORDER BY to the outer query
+  (the inner keeps it only for LIMIT / OFFSET); a sort key that is not an
+  output column is passed out as a hidden `__kN` column. Join inputs drop
+  an ORDER BY that no LIMIT needs.
+- **Semantics that differ per engine are pinned.** NULLs sort last in
+  both directions (the clause is left out where it is the default and
+  emulated with a leading `CASE WHEN x IS NULL` key where the dialect has
+  no NULLS LAST); int `/` truncates toward zero (`CAGARA_IDIV`: `DIV`,
+  `DIVIDE`, or exact arithmetic where `/` is decimal); `%` is `MOD` for
+  BigQuery; `length` counts trailing spaces on T-SQL; month arithmetic
+  clamps on SQLite (`floor`, SQLite 3.46+); a condition used as a T-SQL
+  column becomes `CASE WHEN p THEN 1 WHEN NOT (p) THEN 0 END`. Trino /
+  Presto / Athena and Spark / Databricks have their own intrinsic
+  spellings. Joins keep the left column on a shared name (by design).
 - **Identifiers are quoted when needed** (not a lowercase word, or
   reserved), in the dialect's quotes; string literals double backslashes
   for dialects that treat `\` as an escape.
@@ -93,7 +108,7 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 
 ## Status
 
-Done and tested (`cargo test --workspace`: 119 tests, no clippy warnings):
+Done and tested (`cargo test --workspace`: 124 tests, no clippy warnings):
 
 - Lexer, parser, AST lowering (21 tests), including recovery, losslessness,
   and a nesting / chain-length limit that reports a syntax error instead of
@@ -172,7 +187,9 @@ Done and tested (`cargo test --workspace`: 119 tests, no clippy warnings):
 - SQL lowering for where/select/agg/order/limit/offset/keyMap/joins/windows,
   frames, constant-only global aggregates, join-input inlining, dialect
   rewriting (postgres, mysql, sqlite, duckdb, tsql, bigquery, snowflake),
-  and `--optimize` (19 end-to-end tests).
+  and `--optimize` (19 end-to-end tests), plus differential tests that run
+  the same queries on SQLite and DuckDB (`tests/engines.rs`; skipped when a
+  shell is missing, required in CI).
 - Date and string prelude: `currentDate`, `now`, `add{Days,Weeks,Months,
   Quarters,Years,Hours,Minutes,Seconds}`, `trunc{Year,Quarter,Month,Week,
   Day,Hour,Minute}`, `year` / `month` / `dayOfWeek` / ..., `daysBetween`,
@@ -226,11 +243,11 @@ Known gaps:
    template results follow `agg` / `win` arguments; key mappers must leave
    a column; outer joins wait for column types before adding `maybe`;
    shared `rules.rs`; consistency test).
-10. **SQL semantics.** Keep ORDER BY when a stage is wrapped; integer `/`
-    per dialect (`CAGARA_IDIV`); explicit NULLS FIRST / LAST; T-SQL `LEN`
-    and boolean select items; error on an unresolved `$n` in a template;
-    Trino / Spark intrinsic families; silent column collisions in
-    self-joins. Add differential tests that run the SQL on DuckDB / SQLite.
+10. ~~SQL semantics~~ (done: ORDER BY kept across derived tables; int
+    division and `%` per dialect; NULLs last everywhere; T-SQL `LEN` and
+    condition columns; `$n` errors in templates; Trino / Spark families;
+    differential tests on SQLite and DuckDB, run in CI. Joins stay
+    left-wins on a shared column name, now documented).
 11. **Parser and formatter.** Strings stop at a newline; `at(Ident)` checks
     respect the column-0 boundary (`x :\ny = 1`); depth limits for types and
     projection chains; recovery keeps closing delimiters; int overflow is a

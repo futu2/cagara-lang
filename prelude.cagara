@@ -27,6 +27,7 @@ table = __table
 where = __where
 select = __select
 agg = __agg
+# `order [asc .x, desc .y]`; NULLs sort last in either direction.
 order = __order
 limit = __limit
 offset = __offset
@@ -44,6 +45,9 @@ _&-_ = q => n => limit n q
 
 # `left & inner right (.<k == .>k)`
 # Outer joins make the columns of the side that may be missing `maybe`.
+# The output has the left input's columns, then the right input's that the
+# left does not have: on a shared name the left column wins (`rename`,
+# `prefix`, or `omit` the right one to keep both).
 inner = __innerJoin
 leftJoin = __leftJoin
 rightJoin = __rightJoin
@@ -135,16 +139,18 @@ _&&_ : expr r bool -> expr r bool -> expr r bool = sql "$1 AND $2"
 _||_ : expr r bool -> expr r bool -> expr r bool = sql "$1 OR $2"
 not : expr r bool -> expr r bool = sql "NOT $1"
 
-# Arithmetic is overloaded on int and float (no implicit conversions).
+# Arithmetic is overloaded on int and float (no implicit conversions). On
+# ints, `/` truncates toward zero and `%` keeps the dividend's sign, in every
+# dialect.
 _+_ : expr r int -> expr r int -> expr r int = sql "$1 + $2"
 _+_ : expr r float -> expr r float -> expr r float = sql "$1 + $2"
 _-_ : expr r int -> expr r int -> expr r int = sql "$1 - $2"
 _-_ : expr r float -> expr r float -> expr r float = sql "$1 - $2"
 _*_ : expr r int -> expr r int -> expr r int = sql "$1 * $2"
 _*_ : expr r float -> expr r float -> expr r float = sql "$1 * $2"
-_/_ : expr r int -> expr r int -> expr r int = sql "$1 / $2"
+_/_ : expr r int -> expr r int -> expr r int = sql "CAGARA_IDIV($1, $2)"
 _/_ : expr r float -> expr r float -> expr r float = sql "$1 / $2"
-_%_ : expr r int -> expr r int -> expr r int = sql "$1 % $2"
+_%_ : expr r int -> expr r int -> expr r int = sql "CAGARA_MOD($1, $2)"
 negate : expr r int -> expr r int = sql "-$1"
 negate : expr r float -> expr r float = sql "-$1"
 

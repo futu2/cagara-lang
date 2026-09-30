@@ -120,7 +120,7 @@ fn window_then_filter_wraps() {
         "q",
     );
     assert!(
-        s.contains("ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at DESC)"),
+        s.contains("ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at DESC NULLS LAST)"),
         "{s}"
     );
     assert!(s.contains("(SELECT"), "{s}");
@@ -286,8 +286,15 @@ fn dialects_rewrite_every_block() {
     assert!(dialect(q, "q", "postgres").unwrap().contains("name || '!'"));
     let my = dialect(q, "q", "mysql").unwrap();
     assert!(!my.contains("||"), "`||` is OR in MySQL: {my}");
+    // MySQL has no NULLS LAST: a leading `IS NULL` key sorts them last.
     assert!(
-        my.contains("CONCAT(name, '!') AS s") && my.contains("ORDER BY CONCAT(name, '!')"),
+        my.contains("CONCAT(name, '!') AS s")
+            && my.contains("ORDER BY CASE WHEN CONCAT(name, '!') IS NULL THEN 1 ELSE 0 END, CONCAT(name, '!') LIMIT 10"),
+        "{my}"
+    );
+    // The outer query keeps the order (a derived table's order is lost).
+    assert!(
+        my.contains("AS t1 ORDER BY CASE WHEN s IS NULL THEN 1 ELSE 0 END, s LIMIT"),
         "{my}"
     );
     assert!(
@@ -301,7 +308,7 @@ fn dialects_rewrite_every_block() {
     )
     .unwrap();
     assert!(
-        ts.contains("ORDER BY id OFFSET 5 ROWS FETCH NEXT 3 ROWS ONLY"),
+        ts.contains("ORDER BY CASE WHEN id IS NULL THEN 1 ELSE 0 END, id OFFSET 5 ROWS FETCH NEXT 3 ROWS ONLY"),
         "{ts}"
     );
     let ts = dialect(
@@ -314,7 +321,15 @@ fn dialects_rewrite_every_block() {
         ts.contains("TOP 3") && ts.contains("CONCAT(name, name)"),
         "{ts}"
     );
-    assert!(dialect(q, "q", "tsql")
+    // The order carries out of the paged derived table, so T-SQL's OFFSET
+    // has the ORDER BY it needs.
+    let ts = dialect(q, "q", "tsql").unwrap();
+    assert!(
+        ts.contains("SELECT TOP 10")
+            && ts.contains("AS t1 ORDER BY CASE WHEN s IS NULL THEN 1 ELSE 0 END, s OFFSET 5 ROWS"),
+        "{ts}"
+    );
+    assert!(dialect("q = users & offset 5\n", "q", "tsql")
         .unwrap_err()
         .contains("needs an `order` before `offset`"));
     // Joins and windows go through every dialect.
@@ -329,10 +344,13 @@ fn dialects_rewrite_every_block() {
         "snowflake",
     ] {
         let s = dialect(j, "q", d).unwrap_or_else(|e| panic!("{d}: {e}"));
-        assert!(
-            s.contains("ROW_NUMBER() OVER (ORDER BY t1.amount DESC)"),
-            "{d}: {s}"
-        );
+        // NULLs sort last: explicit only where DESC puts them first.
+        let want = if matches!(d, "postgres" | "snowflake") {
+            "ROW_NUMBER() OVER (ORDER BY t1.amount DESC NULLS LAST)"
+        } else {
+            "ROW_NUMBER() OVER (ORDER BY t1.amount DESC)"
+        };
+        assert!(s.contains(want), "{d}: {s}");
     }
 }
 
@@ -419,7 +437,7 @@ fn date_arithmetic_per_dialect() {
             "addMonths 2 .at",
             &[
                 ("postgres", "(at + 2 * INTERVAL '1' MONTH)::TIMESTAMP"),
-                ("sqlite", "DATETIME(at, 2 || ' months')"),
+                ("sqlite", "DATETIME(at, 2 || ' months', 'floor')"),
                 (
                     "bigquery",
                     "CAST(DATETIME_ADD(CAST(at AS DATETIME), INTERVAL 2 MONTH) AS TIMESTAMP)",
@@ -536,7 +554,8 @@ fn string_functions_per_dialect() {
             "length .s",
             &[
                 ("mysql", "CHAR_LENGTH(s)"),
-                ("tsql", "LEN(s)"),
+                // LEN ignores trailing spaces.
+                ("tsql", "(LEN(s + 'x') - 1)"),
                 ("bigquery", "LENGTH(s)"),
             ],
         ),
@@ -714,7 +733,7 @@ fn constant_keys_are_not_positions() {
     let o = "o = users & select { a = .name, b = 1 } & order [asc .b, asc .a]\n";
     assert_eq!(
         sql(o, "o"),
-        "SELECT name AS a, 1 AS b FROM public.users ORDER BY name"
+        "SELECT name AS a, 1 AS b FROM public.users ORDER BY name NULLS LAST"
     );
     // A constant group key is dropped; HAVING keeps an empty input empty.
     let g = "g = users & select { c = 2, name = .name } & agg { c = group .c, n = count }\n";
@@ -792,4 +811,134 @@ fn intrinsics_are_lowered_inside_window_specs() {
         s.contains("PARTITION BY CAST(EXTRACT(YEAR FROM created_at) AS INT)"),
         "{s}"
     );
+}
+
+#[test]
+fn order_survives_a_derived_table() {
+    // `where` on a window needs a derived table; SQL does not keep its order,
+    // so the outer query sorts again, by a hidden column when the key is
+    // not an output.
+    let q = "q = users & order [desc .age] & select { id = .id, rn = rowNumber { order = [asc .id] } } & where (.rn <= 3)\n";
+    assert_eq!(
+        sql(q, "q"),
+        "SELECT id, rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY id NULLS LAST) AS rn, age AS __k1 \
+         FROM public.users) AS t2 WHERE (rn <= 3) ORDER BY __k1 DESC NULLS LAST"
+    );
+    // With a LIMIT the inner query keeps it too.
+    let p = "p = users & order [asc .name] & limit 3 & where (.age > 1) & select { n = .name }\n";
+    assert_eq!(
+        sql(p, "p"),
+        "SELECT name AS n FROM (SELECT id, name, age, active FROM public.users ORDER BY name NULLS LAST LIMIT 3) AS t1 \
+         WHERE (age > 1) ORDER BY name NULLS LAST"
+    );
+    // A join does not keep its inputs' order: no ORDER BY in a join input.
+    let j = "j = (users & order [asc .name] & select { id = .id, n = .name }) & inner orders (.<id == .>user_id) & select { n = .n }\n";
+    assert!(!sql(j, "j").contains("ORDER BY"), "{}", sql(j, "j"));
+}
+
+#[test]
+fn template_placeholders_must_stand_alone() {
+    let bad = [
+        (
+            "f : expr r int -> expr r int = sql \"x$1\"",
+            "must stand alone",
+        ),
+        (
+            "f : expr r int -> expr r string = sql \"'$1'\"",
+            "must stand alone",
+        ),
+        // Caught at the definition already.
+        (
+            "f : expr r int -> expr r int = sql \"$2 + 1\"",
+            "placeholders up to $2",
+        ),
+    ];
+    for (f, msg) in bad {
+        let e = error(&format!("{f}\nq = users & select {{ y = f .age }}\n"), "q");
+        assert!(e.contains(msg), "{f}: {e}");
+    }
+}
+
+#[test]
+fn tsql_conditions_as_columns_become_bits() {
+    let q = "q = users & select { e = .age > 1, n = isNull (just .name), a = .active }\n";
+    let s = dialect(q, "q", "tsql").unwrap();
+    assert!(
+        s.contains("CASE WHEN age > 1 THEN 1 WHEN NOT (age > 1) THEN 0 END AS e"),
+        "{s}"
+    );
+    assert!(
+        s.contains("CASE WHEN name IS NULL THEN 1 WHEN NOT (name IS NULL) THEN 0 END AS n"),
+        "{s}"
+    );
+    // A bool column already is a bit.
+    assert!(s.contains(", active AS a FROM"), "{s}");
+}
+
+#[test]
+fn trino_and_spark_spellings() {
+    let src = "ev : query { i = int, j = int, s = string, d = date, t = timestamp } = table \"p\" \"ev\"\n";
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        (
+            ".i / .j",
+            &[
+                ("trino", "(i / j)"),
+                ("spark", "DIV(i, j)"),
+                ("duckdb", "DIVIDE(i, j)"),
+                ("bigquery", "DIV(i, j)"),
+                ("mysql", "CAST(((i - (i % j)) / j) AS SIGNED)"),
+            ],
+        ),
+        (".i % .j", &[("bigquery", "MOD(i, j)")]),
+        (
+            "dayOfWeek .d",
+            &[
+                ("trino", "(EXTRACT(DOW FROM d) % 7)"),
+                ("spark", "(EXTRACT(DOW FROM d) - 1)"),
+            ],
+        ),
+        (
+            "addMonths 1 .d",
+            &[
+                ("trino", "DATE_ADD('month', 1, d)"),
+                ("spark", "ADD_MONTHS(d, 1)"),
+            ],
+        ),
+        (
+            "addDays 2 .t",
+            &[("spark", "(t + MAKE_INTERVAL(0, 0, 0, 2, 0, 0, 0))")],
+        ),
+        (
+            "truncMonth .d",
+            &[
+                ("trino", "DATE_TRUNC('MONTH', d)"),
+                ("spark", "TRUNC(d, 'MONTH')"),
+            ],
+        ),
+        (
+            "daysBetween .d .d",
+            &[
+                ("trino", "DATE_DIFF('day', d, d)"),
+                ("spark", "DATEDIFF(d, d)"),
+            ],
+        ),
+        (
+            "right 2 .s",
+            &[("trino", "SUBSTRING(s, GREATEST(LENGTH(s) - 2 + 1, 1))")],
+        ),
+        (
+            "toString .i",
+            &[
+                ("trino", "CAST(i AS VARCHAR)"),
+                ("spark", "CAST(i AS STRING)"),
+            ],
+        ),
+    ];
+    for (e, want) in cases {
+        let q = format!("{src}q = ev & select {{ x = {e} }}\n");
+        for (d, frag) in *want {
+            let s = dialect(&q, "q", d).unwrap_or_else(|m| panic!("{e} / {d}: {m}"));
+            assert!(s.contains(frag), "{e} / {d}: {s}");
+        }
+    }
 }

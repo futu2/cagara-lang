@@ -19,17 +19,48 @@ impl Lowerer {
         format!("t{}", self.next)
     }
 
-    fn wrap(&mut self, st: Stage) -> Stage {
+    /// Put a stage behind a derived table. Its order carries over to the
+    /// outer query, since SQL does not keep the order of a derived table;
+    /// the inner query keeps it only when a LIMIT / OFFSET needs it. A sort
+    /// key that is not an output column is passed out as a hidden one.
+    fn wrap(&mut self, mut st: Stage) -> Stage {
         let names = st.names();
+        let paged = st.limit.is_some() || st.offset.is_some();
+        let mut outer_order = Vec::new();
+        for k in &st.order_by {
+            let name = match st.items.iter().find(|(_, e)| *e == k.expr) {
+                Some((n, _)) => n.clone(),
+                None => {
+                    let n = self.hidden();
+                    st.items.push((n.clone(), k.expr.clone()));
+                    n
+                }
+            };
+            outer_order.push(OrderByItem {
+                expr: col(None, &name),
+                ..k.clone()
+            });
+        }
+        if !paged {
+            st.order_by.clear();
+        }
         let from = TableSource::Subquery {
             query: Box::new(sqlglot_rust::Statement::Select(st.into_statement())),
             alias: Some(self.alias()),
             alias_quote_style: QuoteStyle::None,
         };
-        Stage::new(
+        let mut out = Stage::new(
             from,
             names.iter().map(|n| (n.clone(), col(None, n))).collect(),
-        )
+        );
+        out.order_by = outer_order;
+        out
+    }
+
+    /// Name of a hidden pass-through column (users cannot write `__` names).
+    fn hidden(&mut self) -> String {
+        self.next += 1;
+        format!("__k{}", self.next)
     }
 
     /// Turn a stage into a join input. A projection / filter over a plain
@@ -79,8 +110,13 @@ impl Lowerer {
         }
     }
 
-    /// A join input behind a derived table.
-    fn derived(&mut self, st: Stage) -> JoinInput {
+    /// A join input behind a derived table. A join does not keep the order
+    /// of its inputs, so ORDER BY stays only where a LIMIT / OFFSET needs it
+    /// (T-SQL rejects it otherwise).
+    fn derived(&mut self, mut st: Stage) -> JoinInput {
+        if st.limit.is_none() && st.offset.is_none() {
+            st.order_by.clear();
+        }
         let alias = self.alias();
         let names = st.names();
         JoinInput {
@@ -202,11 +238,13 @@ impl Lowerer {
                 for (k, asc) in ks {
                     let expr = st.resolve(k)?;
                     // A constant sorts nothing, and `ORDER BY 1` is a position.
+                    // NULLs sort last in either direction; `dialect` spells
+                    // that per target.
                     if !is_literal(&expr) {
                         order.push(OrderByItem {
                             expr,
                             ascending: *asc,
-                            nulls_first: None,
+                            nulls_first: Some(false),
                         });
                     }
                 }

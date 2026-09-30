@@ -342,6 +342,35 @@ pub fn template(sql: &str, args: Vec<Expr>) -> Result<Expr, String> {
     }
     let parsed = sqlglot_rust::parse_expr(&text)
         .ok_or_else(|| format!("cannot parse SQL template `{sql}`"))?;
+    // Every placeholder must be a whole term naming an argument: `x$1` or
+    // `'$1'` would be left in the SQL instead of substituted.
+    let bad = std::cell::Cell::new(false);
+    let n = args.len();
+    let _ = transform_deep(parsed.clone(), &|e| {
+        match &e {
+            Expr::Column {
+                table: None, name, ..
+            } if name.to_ascii_lowercase().contains(ARG) => {
+                let k = name.to_ascii_lowercase()[..]
+                    .strip_prefix(ARG)
+                    .and_then(|k| k.parse::<usize>().ok());
+                if !k.is_some_and(|k| (1..=n).contains(&k)) {
+                    bad.set(true);
+                }
+            }
+            Expr::Column { .. } | Expr::StringLiteral(_) if format!("{e:?}").contains(ARG) => {
+                bad.set(true)
+            }
+            _ => {}
+        }
+        e
+    });
+    if bad.get() {
+        return Err(format!(
+            "SQL template `{sql}`: each `$n` must stand alone (not inside a name or string) \
+             and name one of its {n} argument(s)"
+        ));
+    }
     let args: Vec<Expr> = args.into_iter().map(paren).collect();
     Ok(subst(parsed, &args))
 }
@@ -518,7 +547,11 @@ pub fn lower_expr(e: &ir::Expr, r: &Resolver) -> Result<Expr, String> {
                         Ok(format!(
                             "{} {}",
                             place(lower_expr(k, r)?, &mut args),
-                            if *asc { "ASC" } else { "DESC" }
+                            if *asc {
+                                "ASC NULLS LAST"
+                            } else {
+                                "DESC NULLS LAST"
+                            }
                         ))
                     })
                     .collect::<Result<_, String>>()?;

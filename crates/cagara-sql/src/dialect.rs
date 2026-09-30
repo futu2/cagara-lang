@@ -11,7 +11,8 @@
 
 use crate::stage::transform_deep;
 use sqlglot_rust::ast::{
-    BinaryOperator, Expr, QuoteStyle, SelectItem, SelectStatement, TableSource,
+    BinaryOperator, Expr, OrderByItem, QuoteStyle, SelectItem, SelectStatement, TableSource,
+    UnaryOperator,
 };
 use sqlglot_rust::{Dialect, Statement};
 
@@ -78,8 +79,22 @@ fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
     for item in &mut sel.columns {
         if let SelectItem::Expr { expr: e, .. } = item {
             ex(e);
+            // T-SQL has no boolean values, only conditions: a condition as a
+            // column becomes 1 / 0, and stays NULL when it is unknown.
+            if tsql(to) && is_condition(e) {
+                let p = std::mem::replace(e, Expr::Null);
+                *e = Expr::Case {
+                    operand: None,
+                    when_clauses: vec![
+                        (p.clone(), Expr::Number("1".into())),
+                        (not(p), Expr::Number("0".into())),
+                    ],
+                    else_clause: None,
+                };
+            }
         }
     }
+    nulls_last(&mut sel.order_by, to);
     sel.where_clause.as_mut().map(ex);
     sel.having.as_mut().map(ex);
     sel.group_by.iter_mut().for_each(ex);
@@ -155,6 +170,42 @@ fn expr(e: Expr, to: Dialect) -> Expr {
     } else {
         e
     };
+    // Window specs sort NULLs last too.
+    let e = transform_deep(e, &|e| match e {
+        Expr::Function {
+            name,
+            args,
+            distinct,
+            filter,
+            over: Some(mut spec),
+            order_by,
+            within_group,
+        } => {
+            nulls_last(&mut spec.order_by, to);
+            Expr::Function {
+                name,
+                args,
+                distinct,
+                filter,
+                over: Some(spec),
+                order_by,
+                within_group,
+            }
+        }
+        Expr::TypedFunction {
+            func,
+            filter,
+            over: Some(mut spec),
+        } => {
+            nulls_last(&mut spec.order_by, to);
+            Expr::TypedFunction {
+                func,
+                filter,
+                over: Some(spec),
+            }
+        }
+        other => other,
+    });
     let mut sel = empty();
     sel.columns = vec![SelectItem::Expr {
         expr: e.clone(),
@@ -167,6 +218,94 @@ fn expr(e: Expr, to: Dialect) -> Expr {
             _ => e,
         },
         _ => e,
+    }
+}
+
+/// Where a dialect sorts NULLs by default: `(last when ascending, last when
+/// descending, has NULLS FIRST / LAST)`, or `None` when it is not known
+/// (ANSI leaves it to the implementation).
+fn null_order(d: Dialect) -> Option<(bool, bool, bool)> {
+    use Dialect::*;
+    Some(match d {
+        DuckDb | Trino | Presto | Athena => (true, true, true),
+        Postgres | Oracle | Snowflake | Redshift | Materialize | RisingWave => (true, false, true),
+        Sqlite | BigQuery | Spark | Databricks | Hive => (false, true, true),
+        _ if mysql(d) || tsql(d) => (false, true, false),
+        _ => return None,
+    })
+}
+
+/// Sort keys marked NULLS LAST, for the target: the clause is dropped where
+/// it is the default, and emulated with a leading `CASE WHEN x IS NULL`
+/// key where the dialect has no such clause.
+fn nulls_last(items: &mut Vec<OrderByItem>, to: Dialect) {
+    let Some((asc_last, desc_last, syntax)) = null_order(to) else {
+        return;
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for mut it in std::mem::take(items) {
+        if it.nulls_first != Some(false) {
+            out.push(it);
+            continue;
+        }
+        let default_last = if it.ascending { asc_last } else { desc_last };
+        if default_last {
+            it.nulls_first = None;
+        } else if !syntax {
+            let is_null = Expr::IsNull {
+                expr: Box::new(it.expr.clone()),
+                negated: false,
+            };
+            out.push(OrderByItem {
+                expr: Expr::Case {
+                    operand: None,
+                    when_clauses: vec![(is_null, Expr::Number("1".into()))],
+                    else_clause: Some(Box::new(Expr::Number("0".into()))),
+                },
+                ascending: true,
+                nulls_first: None,
+            });
+            it.nulls_first = None;
+        }
+        out.push(it);
+    }
+    *items = out;
+}
+
+/// An expression that is a condition rather than a value in T-SQL.
+fn is_condition(e: &Expr) -> bool {
+    match e {
+        Expr::BinaryOp { op, .. } => matches!(
+            op,
+            BinaryOperator::Eq
+                | BinaryOperator::Neq
+                | BinaryOperator::Lt
+                | BinaryOperator::Gt
+                | BinaryOperator::LtEq
+                | BinaryOperator::GtEq
+                | BinaryOperator::And
+                | BinaryOperator::Or
+        ),
+        Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            ..
+        } => true,
+        Expr::IsNull { .. }
+        | Expr::IsBool { .. }
+        | Expr::Like { .. }
+        | Expr::ILike { .. }
+        | Expr::InList { .. }
+        | Expr::Between { .. }
+        | Expr::Exists { .. } => true,
+        Expr::Nested(e) => is_condition(e),
+        _ => false,
+    }
+}
+
+fn not(e: Expr) -> Expr {
+    Expr::UnaryOp {
+        op: UnaryOperator::Not,
+        expr: Box::new(Expr::Nested(Box::new(e))),
     }
 }
 

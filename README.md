@@ -32,7 +32,7 @@ FROM (SELECT user_id, SUM(amount) AS revenue, COUNT(*) AS n
       WHERE (status = 'paid')
       GROUP BY user_id) AS t1
 WHERE (n >= 5)
-ORDER BY revenue DESC;
+ORDER BY revenue DESC NULLS LAST;
 ```
 
 ## Features

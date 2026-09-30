@@ -16,7 +16,8 @@
 //! | `CAGARA_TO_DATE(x)` / `CAGARA_TO_TIMESTAMP(x)` / `CAGARA_TO_STRING(x)` | casts |
 //! | `CAGARA_LEFT(s, n)` / `CAGARA_RIGHT(s, n)` | first / last `n` characters        |
 //! | `CAGARA_STRPOS(s, sub)`             | 1-based position of `sub` in `s`, 0 if absent |
-//! | `CAGARA_LENGTH(s)`                  | length in characters                      |
+//! | `CAGARA_LENGTH(s)`                  | length in characters (trailing spaces count) |
+//! | `CAGARA_IDIV(a, b)` / `CAGARA_MOD(a, b)` | integer division truncated toward zero, and its remainder |
 //!
 //! `kind` is `DATE` or `TIMESTAMP`. Dialects not named below get the ANSI /
 //! Postgres spelling.
@@ -35,6 +36,8 @@ enum Fam {
     Tsql,
     BigQuery,
     Snowflake,
+    Trino,
+    Spark,
 }
 
 fn fam(d: Dialect) -> Fam {
@@ -45,6 +48,8 @@ fn fam(d: Dialect) -> Fam {
         Dialect::Tsql | Dialect::Fabric => Fam::Tsql,
         Dialect::BigQuery => Fam::BigQuery,
         Dialect::Snowflake => Fam::Snowflake,
+        Dialect::Trino | Dialect::Presto | Dialect::Athena => Fam::Trino,
+        Dialect::Spark | Dialect::Databricks => Fam::Spark,
         _ => Fam::Ansi,
     }
 }
@@ -121,10 +126,12 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
         ("CAGARA_TO_STRING", 1) => match f {
             // MySQL's CAST accepts CHAR, not TEXT / VARCHAR.
             Fam::Mysql => cast(a[0].clone(), DataType::Char(None)),
+            Fam::Trino => cast(a[0].clone(), DataType::Varchar(None)),
+            Fam::Spark => cast(a[0].clone(), DataType::String),
             _ => cast(a[0].clone(), DataType::Text),
         },
         ("CAGARA_LEFT", 2) => match f {
-            Fam::Sqlite => func("SUBSTR", vec![a[0].clone(), n("1"), a[1].clone()]),
+            Fam::Sqlite | Fam::Trino => func("SUBSTR", vec![a[0].clone(), n("1"), a[1].clone()]),
             _ => func("LEFT", a.to_vec()),
         },
         ("CAGARA_RIGHT", 2) => match f {
@@ -134,24 +141,55 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
                 let tail = func("SUBSTR", vec![x, neg(k.clone()), k.clone()]);
                 case(bin(k, BinaryOperator::LtEq, n("0")), s(""), tail)
             }
+            // No RIGHT: start n characters from the end (past it for n <= 0).
+            Fam::Trino => {
+                let (x, k) = (a[0].clone(), a[1].clone());
+                let from = bin(
+                    bin(
+                        func("LENGTH", vec![x.clone()]),
+                        BinaryOperator::Minus,
+                        atomic(k),
+                    ),
+                    BinaryOperator::Plus,
+                    n("1"),
+                );
+                func("SUBSTR", vec![x, func("GREATEST", vec![from, n("1")])])
+            }
             _ => func("RIGHT", a.to_vec()),
         },
         // sqlglot spells LENGTH as LEN for BigQuery (which has no LEN); MySQL's
-        // LENGTH counts bytes.
+        // LENGTH counts bytes; T-SQL's LEN ignores trailing spaces, so it
+        // measures `s + 'x'` instead.
         ("CAGARA_LENGTH", 1) => match f {
             Fam::Mysql => func("CHAR_LENGTH", a.to_vec()),
-            Fam::Tsql => func("LEN", a.to_vec()),
+            Fam::Tsql => {
+                let padded = bin(atomic(a[0].clone()), BinaryOperator::Plus, s("x"));
+                atomic(bin(
+                    func("LEN", vec![padded]),
+                    BinaryOperator::Minus,
+                    n("1"),
+                ))
+            }
             _ => func("LENGTH", a.to_vec()),
         },
         ("CAGARA_STRPOS", 2) => {
             let (x, sub) = (a[0].clone(), a[1].clone());
             match f {
                 Fam::Mysql => func("LOCATE", vec![sub, x]),
-                Fam::Sqlite => func("INSTR", vec![x, sub]),
+                Fam::Sqlite | Fam::Spark => func("INSTR", vec![x, sub]),
                 Fam::Tsql | Fam::Snowflake => func("CHARINDEX", vec![sub, x]),
                 _ => func("STRPOS", vec![x, sub]),
             }
         }
+        ("CAGARA_IDIV", 2) => idiv(a[0].clone(), a[1].clone(), f),
+        ("CAGARA_MOD", 2) => match f {
+            Fam::BigQuery => func("MOD", a.to_vec()),
+            _ => bin(
+                atomic(a[0].clone()),
+                BinaryOperator::Modulo,
+                atomic(a[1].clone()),
+            ),
+        },
         _ => return None,
     })
 }
@@ -201,13 +239,44 @@ fn add(ts: bool, unit: &str, x: Expr, count: Expr, f: Fam) -> Option<Expr> {
         Fam::Sqlite => {
             let plural = format!(" {}s", unit.to_ascii_lowercase());
             let modifier = bin(count, BinaryOperator::Concat, s(&plural));
-            func(if ts { "DATETIME" } else { "DATE" }, vec![x, modifier])
+            let mut args = vec![x, modifier];
+            // Past the end of a shorter month: the last day, as elsewhere
+            // (Jan 31 + 1 month = Feb 29), not an overflow into the next
+            // month. `floor` needs SQLite 3.46.
+            if matches!(unit, "MONTH" | "YEAR") {
+                args.push(s("floor"));
+            }
+            func(if ts { "DATETIME" } else { "DATE" }, args)
         }
         Fam::Duck => {
             let to = format!("TO_{unit}S");
             same(bin(atomic(x), BinaryOperator::Plus, func(&to, vec![count])))
         }
         Fam::Tsql | Fam::Snowflake => func("DATEADD", vec![kw(unit), count, x]),
+        // Same type as `x` for dates and timestamps.
+        Fam::Trino => func("DATE_ADD", vec![s(&unit.to_ascii_lowercase()), count, x]),
+        Fam::Spark => match (ts, unit) {
+            (false, "DAY") => func("DATE_ADD", vec![x, count]),
+            (false, "MONTH") => func("ADD_MONTHS", vec![x, count]),
+            (false, _) => func(
+                "ADD_MONTHS",
+                vec![x, bin(count, BinaryOperator::Multiply, n("12"))],
+            ),
+            // make_interval(years, months, weeks, days, hours, mins, secs)
+            (true, u) => {
+                let slot = match u {
+                    "YEAR" => 0,
+                    "MONTH" => 1,
+                    "DAY" => 3,
+                    "HOUR" => 4,
+                    "MINUTE" => 5,
+                    _ => 6,
+                };
+                let mut args = vec![n("0"); 7];
+                args[slot] = count;
+                bin(atomic(x), BinaryOperator::Plus, func("MAKE_INTERVAL", args))
+            }
+        },
         Fam::BigQuery => {
             let iv = Expr::Interval {
                 value: Box::new(count),
@@ -239,7 +308,10 @@ fn trunc(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
     Some(match f {
         // Postgres truncates a date as a timestamp: cast back.
         Fam::Ansi | Fam::Duck => cast(func("DATE_TRUNC", vec![s(unit), x]), ty()),
-        Fam::Snowflake => func("DATE_TRUNC", vec![s(unit), x]),
+        Fam::Snowflake | Fam::Trino => func("DATE_TRUNC", vec![s(unit), x]),
+        // TRUNC keeps a date a date; DATE_TRUNC is for timestamps.
+        Fam::Spark if ts => func("DATE_TRUNC", vec![s(unit), x]),
+        Fam::Spark => func("TRUNC", vec![x, s(unit)]),
         Fam::Tsql => func(
             "DATETRUNC",
             vec![kw(if unit == "WEEK" { "ISO_WEEK" } else { unit }), x],
@@ -379,6 +451,11 @@ fn part(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
         // Postgres's EXTRACT is numeric; the others are already integers.
         Fam::Ansi => cast(extract(x), DataType::Int),
         Fam::Duck | Fam::Tsql | Fam::Snowflake => extract(x),
+        // ISO day of week, 1 = Monday .. 7 = Sunday.
+        Fam::Trino if unit == "DOW" => bin(extract(x), BinaryOperator::Modulo, n("7")),
+        // 1 = Sunday .. 7 = Saturday.
+        Fam::Spark if unit == "DOW" => bin(extract(x), BinaryOperator::Minus, n("1")),
+        Fam::Trino | Fam::Spark => extract(x),
         Fam::Mysql => match unit {
             "DOW" => bin(func("DAYOFWEEK", vec![x]), BinaryOperator::Minus, n("1")),
             "DOY" => func("DAYOFYEAR", vec![x]),
@@ -426,9 +503,36 @@ fn days_between(a: Expr, b: Expr, f: Fam) -> Expr {
             let jd = |e: Expr| func("JULIANDAY", vec![e]);
             cast(bin(jd(b), BinaryOperator::Minus, jd(a)), DataType::Int)
         }
-        Fam::Duck => func("DATE_DIFF", vec![s("day"), a, b]),
+        Fam::Duck | Fam::Trino => func("DATE_DIFF", vec![s("day"), a, b]),
+        Fam::Spark => func("DATEDIFF", vec![b, a]),
         Fam::Tsql | Fam::Snowflake => func("DATEDIFF", vec![kw("DAY"), a, b]),
         Fam::BigQuery => func("DATE_DIFF", vec![b, a, kw("DAY")]),
+    }
+}
+
+// ── integer division ───────────────────────────────────────────────────────
+
+/// `a / b` on integers, truncated toward zero (as in Postgres, SQLite,
+/// T-SQL, Trino). Elsewhere `/` gives a decimal or float.
+fn idiv(a: Expr, b: Expr, f: Fam) -> Expr {
+    let slash = |a: Expr, b: Expr| bin(atomic(a), BinaryOperator::Divide, atomic(b));
+    match f {
+        Fam::Ansi | Fam::Sqlite | Fam::Tsql | Fam::Trino => atomic(slash(a, b)),
+        Fam::Duck => func("DIVIDE", vec![a, b]),
+        Fam::BigQuery => func("DIV", vec![a, b]),
+        Fam::Spark => func("DIV", vec![a, b]),
+        // `/` rounds to a few decimals here, which can round a quotient up
+        // to the next integer; `a - a % b` is an exact multiple of `b`.
+        Fam::Mysql | Fam::Snowflake => {
+            let rem = bin(atomic(a.clone()), BinaryOperator::Modulo, atomic(b.clone()));
+            let exact = slash(bin(atomic(a), BinaryOperator::Minus, atomic(rem)), b);
+            if f == Fam::Mysql {
+                // MySQL casts to SIGNED, not BIGINT.
+                cast(exact, DataType::UserDefined("SIGNED".into()))
+            } else {
+                func("TRUNC", vec![exact])
+            }
+        }
     }
 }
 

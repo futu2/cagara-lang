@@ -532,9 +532,14 @@ impl Fmt<'_> {
         })
     }
 
-    /// `name = value` in a record or record type.
+    /// `name = value`, or the shorthand `.name` for `name = .name`, which is
+    /// not a node the value printer can be applied to.
     fn field(&self, n: &SyntaxNode, value: impl Fn(&SyntaxNode) -> R) -> R {
         let els = sig(n);
+        // The shorthand: a single `.name` token in place of `name = .name`.
+        if let [only] = els.as_slice() {
+            return Ok(self.tok(&token(Some(only), K::Field)?));
+        }
         let [name, eq, v] = els.as_slice() else {
             return Err(Bail);
         };

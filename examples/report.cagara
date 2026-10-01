@@ -36,7 +36,7 @@ running = orders
 # Joins name the side each column comes from. `select {.a, .b}` keeps the
 # names as they are; `update` recomputes or renames a column in place.
 order_names = orders
-  & select {.user_id, .amount, order_id = .id}
+  & select { .user_id, .amount, order_id = .id }
   & inner users (.<user_id == .>id)
   & select { order_id = .order_id, name = .name, amount = .amount }
 

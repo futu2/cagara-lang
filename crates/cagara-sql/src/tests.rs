@@ -407,14 +407,32 @@ fn join_inputs_are_inlined_when_safe() {
     // An update before a join needs no derived table.
     let s = sql("q = orders & select { order_id = .id, user_id = .user_id } & inner users (.<user_id == .>id) & select { o = .order_id, n = .name }\n", "q");
     assert_eq!(s, "SELECT t1.id AS o, t2.name AS n FROM public.orders AS t1 INNER JOIN public.users AS t2 ON t1.user_id = t2.id");
-    // Left join: the preserved side's filter goes to WHERE, the other into ON.
+    // An outer join's input is a relation, so a filter on either side stays
+    // in that side's derived table. Hoisting the preserved side's filter to
+    // WHERE would drop the unmatched rows the join keeps; hoisting the
+    // null-extended side's into ON would widen the input back to the
+    // unfiltered relation.
     let s = sql("q = orders & where (.amount > 10.0) & leftJoin (users & where .active) (.<user_id == .>id)\n", "q");
-    assert!(!s.contains("(SELECT"), "{s}");
-    assert!(
-        s.contains("ON (t1.user_id = t2.id) AND t2.active WHERE (t1.amount > 10.0)"),
-        "{s}"
+    assert_eq!(
+        s,
+        "SELECT t1.id, t1.user_id, t1.amount, t1.status, t1.created_at, t2.name, t2.age, t2.active \
+         FROM (SELECT id, user_id, amount, status, created_at FROM public.orders WHERE (amount > 10.0)) AS t1 \
+         LEFT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id"
     );
-    // Right / full join: a filtered null-extended side keeps a derived table.
+    // The null-extended side of a left join may still keep its filter in ON,
+    // which is what lets `nasc`-style filters stay inline; but only when the
+    // preserved side contributes no filter of its own.
+    let s = sql(
+        "q = orders & leftJoin (users & where .active) (.<user_id == .>id)\n",
+        "q",
+    );
+    assert_eq!(
+        s,
+        "SELECT t1.id, t1.user_id, t1.amount, t1.status, t1.created_at, t2.name, t2.age, t2.active \
+         FROM public.orders AS t1 \
+         LEFT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id"
+    );
+    // Right / full join: every filtered side keeps a derived table.
     let s = sql(
         "q = orders & where (.amount > 10.0) & fullJoin users (.<user_id == .>id)\n",
         "q",
@@ -428,6 +446,19 @@ fn join_inputs_are_inlined_when_safe() {
         "q",
     );
     assert!(s.contains("(SELECT"), "{s}");
+    // A right join's *right* input is the preserved side, so a filter there
+    // stays in its derived table rather than becoming an ON predicate (which
+    // would resurrect the filtered-out rows as unmatched ones).
+    let s = sql(
+        "q = orders & rightJoin (users & where .active) (.<user_id == .>id)\n",
+        "q",
+    );
+    assert_eq!(
+        s,
+        "SELECT t1.id, t1.user_id, t1.amount, t1.status, t1.created_at, t2.name, t2.age, t2.active \
+         FROM public.orders AS t1 \
+         RIGHT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id"
+    );
     // Chains of joins stay flat, including a self-join with an updated column.
     let s = sql("q = orders & inner users (.<user_id == .>id) & leftJoin (users & select { uid = .id, name = .name, age = .age, active = .active }) (.<user_id == .>uid)\n", "q");
     assert!(!s.contains("(SELECT"), "{s}");
@@ -495,6 +526,29 @@ fn dialects_rewrite_every_block() {
     assert!(dialect("q = users & offset 5\n", "q", "tsql")
         .unwrap_err()
         .contains("needs an `order` before `offset`"));
+    // A lone `offset` is not valid everywhere, so the "no limit" is spelled
+    // per dialect: MySQL's max BIGINT, SQLite's `LIMIT -1`, and for T-SQL a
+    // FETCH count, since `OFFSET .. ROWS` is not a statement on its own.
+    let solo = "q = users & order [asc .id] & offset 5\n";
+    let my = dialect(solo, "q", "mysql").unwrap();
+    assert!(my.contains("LIMIT 18446744073709551615 OFFSET 5"), "{my}");
+    let sq = dialect(solo, "q", "sqlite").unwrap();
+    assert!(
+        sq.ends_with("ORDER BY id NULLS LAST LIMIT -1 OFFSET 5"),
+        "{sq}"
+    );
+    // SQLite rejects the MySQL spelling (`datatype mismatch`), so the two
+    // must not share a branch.
+    assert!(!sq.contains("18446744073709551615"), "{sq}");
+    let ts = dialect(solo, "q", "tsql").unwrap();
+    assert!(
+        ts.contains("OFFSET 5 ROWS FETCH NEXT 9223372036854775807 ROWS ONLY"),
+        "T-SQL needs a FETCH with OFFSET: {ts}"
+    );
+    // Dialects that accept a bare OFFSET keep it.
+    let pg = dialect(solo, "q", "postgres").unwrap();
+    assert!(pg.contains("ORDER BY id OFFSET 5"), "{pg}");
+    assert!(!pg.contains("LIMIT"), "{pg}");
     // Joins and windows go through every dialect.
     let j = "q = orders & leftJoin users (.<user_id == .>id) & select { n = coalesce \"?\" .name <> \"!\", rn = rowNumber { order = [desc .amount] } }\n";
     for d in [

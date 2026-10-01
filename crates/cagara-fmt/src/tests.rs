@@ -20,6 +20,46 @@ const SOURCES: &[(&str, &str)] = &[
     ("errors", include_str!("../../../examples/errors.cagara")),
 ];
 
+/// A definition the formatter cannot lay out is printed verbatim, so a
+/// construct it does not understand used to pass every test above: the output
+/// was stable, kept its comments, and simply never changed. This pins that
+/// each construct is actually reformatted, by feeding it a deliberately
+/// unformatted spelling and requiring a change.
+#[test]
+fn every_construct_is_actually_reformatted() {
+    // A field shorthand is the case that regressed: `field` used to require
+    // `name = value` and bail on `.name`, silently printing the whole
+    // definition as written.
+    for (src, want) in [
+        ("q = t & select {.a, .b}\n", "q = t & select { .a, .b }\n"),
+        (
+            "q = t & select {.a, x = .b + 1}\n",
+            "q = t & select { .a, x = .b + 1 }\n",
+        ),
+        (
+            "t : query {a = int, b = string} = table \"s\" \"t\"\n",
+            "t : query { a = int, b = string } = table \"s\" \"t\"\n",
+        ),
+        ("q=t&where(.a>1)\n", "q = t & where (.a > 1)\n"),
+        ("q = t & update {.a}\n", "q = t & update { .a }\n"),
+    ] {
+        assert_eq!(fmt(src), want, "input: {src:?}");
+        assert_ne!(fmt(src), src, "not reformatted at all: {src:?}");
+    }
+    // The shorthand must survive in every position it is allowed in, and the
+    // result must still parse to the same program (the `fmt` helper checks
+    // idempotence, and `format` checks the token skeleton).
+    for src in [
+        "q = t & select {.a}\n",
+        "q = t & select {.a, .b, .c}\n",
+        "q = t & update {.a, .b}\n",
+        "q = t & agg {k = group .k, n = count}\n",
+        "q = t & select {\n  .a,\n  .b\n}\n",
+    ] {
+        let _ = fmt(src);
+    }
+}
+
 #[test]
 fn repo_sources_are_stable_and_keep_every_comment() {
     for (name, src) in SOURCES {
@@ -39,6 +79,10 @@ fn repo_sources_are_stable_and_keep_every_comment() {
                 .all(|l| l.chars().count() <= WIDTH || !l.contains(' ')),
             "{name}: {out}"
         );
+        // A definition printed verbatim comes back byte-identical, which the
+        // checks above cannot see. Every shipped source is already formatted,
+        // so a change here means the formatter learned (or forgot) something.
+        assert_eq!(out, *src, "{name}: not in canonical form");
     }
 }
 

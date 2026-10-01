@@ -67,14 +67,29 @@ fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
         source(&mut j.table, to)?;
     }
 
-    // `offset` alone: MySQL needs a LIMIT (its documented idiom is the
-    // largest BIGINT UNSIGNED); T-SQL's OFFSET needs an ORDER BY.
+    // `offset` alone: a lone OFFSET is not valid everywhere, so spell the
+    // "no limit" the dialect needs.
+    //
+    //   * MySQL has no OFFSET of its own; its documented idiom is the largest
+    //     BIGINT UNSIGNED as the LIMIT.
+    //   * SQLite rejects a bare `OFFSET` outright, and *also* rejects the
+    //     MySQL trick above (`datatype mismatch`): its spelling is `LIMIT -1`.
+    //   * T-SQL rejects `OFFSET n ROWS` with no FETCH — the two are one
+    //     syntactic unit — and additionally requires an ORDER BY. Setting the
+    //     limit here is what makes sqlglot emit
+    //     `OFFSET n ROWS FETCH NEXT m ROWS ONLY`.
     if sel.offset.is_some() && sel.limit.is_none() {
         if mysql(to) {
             sel.limit = Some(Expr::Number("18446744073709551615".into()));
-        }
-        if tsql(to) && sel.order_by.is_empty() {
-            return Err("T-SQL needs an `order` before `offset`".into());
+        } else if matches!(to, Dialect::Sqlite) {
+            sel.limit = Some(Expr::Number("-1".into()));
+        } else if tsql(to) {
+            if sel.order_by.is_empty() {
+                return Err("T-SQL needs an `order` before `offset`".into());
+            }
+            // `FETCH NEXT` needs a row count; mimic sqlglot's own choice for
+            // "all remaining rows" on this dialect.
+            sel.limit = Some(Expr::Number("9223372036854775807".into()));
         }
     }
 

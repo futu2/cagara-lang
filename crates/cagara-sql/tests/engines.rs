@@ -117,11 +117,87 @@ const CASES: &[(&str, &[&str])] = &[
         "kws = kw & select { order = .order, userId = .userId, id = .id }",
         &["5|9|1"],
     ),
+    // A join input is a relation, so a filter on it decides which rows that
+    // side contributes, and it must stay in the side's derived table. These
+    // cases pin the two ways hoisting goes wrong.
+    //
+    // The right input of a right join is the *preserved* side. Hoisting its
+    // filter into ON would widen the input back to the unfiltered relation,
+    // resurrecting user 1 as an unmatched row; here the filter keeps users 2
+    // and 3, neither of which has an order, so both survive with NULL order
+    // columns and user 1 must not appear.
+    (
+        "rj = orders & rightJoin (users & where (.id > 1)) (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc .oid]",
+        &["NULL|NULL|bob", "12|1.0|it's a\\b "],
+    ),
+    // Hoisting a filter to WHERE would drop the null-extended rows. For a
+    // right join the *left* input is null-extended, so filtering it must
+    // still leave every right row: users 2 and 3 have no matching order and
+    // must survive as NULL.
+    (
+        "rjonleft = (orders & where (.amount > 4.5)) & rightJoin users (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc .oid]",
+        &[
+            "10|5.5|ann",
+            "NULL|NULL|bob",
+            "NULL|NULL|it's a\\b ",
+        ],
+    ),
+    // A full join preserves both sides, so a filter on either input keeps a
+    // derived table.
+    (
+        "fj = orders & fullJoin (users & where (.id > 2)) (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc .oid]",
+        &[
+            "12|1.0|it's a\\b ",
+            "10|5.5|NULL",
+            "11|4.5|NULL",
+        ],
+    ),
+    (
+        "fj2 = (orders & where (.amount > 4.5)) & fullJoin (users & where (.id > 2)) (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc .oid]",
+        &["NULL|NULL|it's a\\b ", "10|5.5|NULL"],
+    ),
+    // The mirror case on the other side: a left join filtered on its
+    // preserved (left) input, and one filtered on its null-extended input.
+    (
+        "ljonleft = (users & where (.id > 2)) & leftJoin orders (.<id == .>user_id) & select { n = .name, amount = .amount } & order [asc .n]",
+        &["it's a\\b |1.0"],
+    ),
+    (
+        "ljonright = users & leftJoin (orders & where (.amount > 4.5)) (.<id == .>user_id) & select { n = .name, amount = .amount } & order [asc .n, asc .amount]",
+        &["ann|5.5", "bob|NULL", "it's a\\b |NULL"],
+    ),
+    // An inner join is the exception: both sides may hoist their filters to
+    // WHERE, since the filter only decides which rows match. No order is
+    // placed by a user above 1, so this returns nothing.
+    (
+        "ij = (orders & where (.amount > 4.5)) & inner (users & where (.id > 1)) (.<user_id == .>id) & select { oid = .id, n = .name } & order [asc .n]",
+        &[],
+    ),
+    // The same filters without excluding the matching user, so the inner
+    // join does return rows.
+    (
+        "ij2 = (orders & where (.amount > 4.5)) & inner (users & where (.id > 0)) (.<user_id == .>id) & select { oid = .id, n = .name } & order [asc .oid]",
+        &["10|ann"],
+    ),
+    // A lone `offset` needs a "no limit" that the engine accepts: SQLite
+    // rejects a bare OFFSET and the MySQL max-BIGINT spelling (`datatype
+    // mismatch`), so it needs `LIMIT -1`.
+    (
+        "offsolo = nums & order [asc .id] & offset 2 & select { id = .id }",
+        &["3", "4"],
+    ),
+    // A limit and an offset together, which every engine spells the same way.
+    (
+        "offlim = nums & order [asc .id] & offset 1 & limit 2 & select { id = .id }",
+        &["2", "3"],
+    ),
     // A set-operation branch with its own LIMIT: the set operator's own tail
     // would otherwise swallow it (`SELECT ... LIMIT 3 UNION SELECT ... LIMIT
-    // 2` is a parse error on both engines), so the branch is wrapped.
+    // 2` is a parse error on both engines), so the branch is wrapped. A set
+    // operation does not define a row order, so the result is sorted outside
+    // it rather than relying on the engine's union order.
     (
-        "setlim = union (nums & select { id = .id } & order [asc .id] & limit 2) (nums & select { id = .id } & order [desc .id] & limit 2)",
+        "setlim = (union (nums & select { id = .id } & order [asc .id] & limit 2) (nums & select { id = .id } & order [desc .id] & limit 2)) & order [asc .id]",
         &["1", "2", "3", "4"],
     ),
 ];

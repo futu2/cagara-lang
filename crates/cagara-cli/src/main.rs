@@ -7,6 +7,7 @@
 //! formats files in place. `cagara lsp` runs the language server over stdio.
 
 use cagara_hir::{check, root_queries_checked, Workspace};
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -149,6 +150,10 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> ExitCode {
     }
 
     let mut printed = 0;
+    // One failing helper is reported both as itself and through every query
+    // that uses it, so the same diagnostic can arrive more than once. Print
+    // each distinct one once, in the order it first appears.
+    let mut seen: HashSet<String> = HashSet::new();
     for (name, result) in root_queries_checked(&ws, &tc) {
         if only.as_deref().is_some_and(|o| o != name) {
             continue;
@@ -172,8 +177,10 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> ExitCode {
                 printed += 1;
             }
             Err(e) => {
-                eprintln!("{e}");
                 failed = true;
+                if seen.insert(e.clone()) {
+                    eprintln!("{e}");
+                }
             }
         }
     }

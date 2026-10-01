@@ -89,10 +89,9 @@ impl Lowerer {
     /// Turn a stage into a join input. A projection / filter over a plain
     /// table (or over an earlier join) is inlined with qualified columns
     /// instead of becoming a derived table, as long as its filters may move
-    /// (`can_place`: to WHERE for a preserved side, into ON for the right
-    /// side of a left join; see the join case). A side the join may
-    /// null-extend (`null_ext`) is only inlined when it projects bare
-    /// columns: a computed column (`1`, `coalesce ..`) must be computed
+    /// (`can_place`: an inner join's inputs only — see the join case). A side
+    /// the join may null-extend (`null_ext`) is only inlined when it projects
+    /// bare columns: a computed column (`1`, `coalesce ..`) must be computed
     /// before the join, or it is not NULL on unmatched rows.
     fn join_input(&mut self, st: Stage, can_place: bool, null_ext: bool) -> JoinInput {
         let bare = st
@@ -410,17 +409,36 @@ impl Lowerer {
                     st.wheres.push(exists);
                     return Ok(st);
                 }
-                // Where an inlined input's filters may go without changing
-                // the result: a filter on a side whose unmatched rows are not
-                // kept can move to WHERE; the right side of a left join can
-                // take its filter into ON; the other cases need a derived table.
-                // Filters of the preserved side move to WHERE; those of a left
-                // join's right side move into ON. The null-extended side of a
-                // right / full join keeps a derived table.
+                // `can_place` says a side's filters may leave its input and be
+                // placed by the caller. Only an inner join may do that: a
+                // filter there changes only which rows match, and both sides
+                // are discarded equally, so it does not matter which side of
+                // the join it sits on.
+                //
+                // Every other kind keeps each side's filters in that side's
+                // derived table, because a join input is a *relation* and its
+                // filter decides which rows it contributes. Hoisting is wrong
+                // in both directions:
+                //
+                //   * into ON widens the input back to the unfiltered
+                //     relation. `orders & rightJoin (users & where (.id > 1))`
+                //     would regain user 1 as an unmatched right row, and
+                //     `orders & fullJoin (users & where (.id > 2))` would
+                //     regain users 1 and 2.
+                //   * into WHERE drops the null-extended rows. For a right
+                //     join, `WHERE t1.amount > 4.5` removes not only the left
+                //     rows that fail it but also every row where the left side
+                //     is NULL — that is, the unmatched right rows the join
+                //     exists to keep.
+                //
+                //   kind   left_ok  right_ok
+                //   inner  true     true
+                //   left   false    false
+                //   right  false    false
+                //   full   false    false
                 let (left_ok, right_ok) = match kind {
-                    JoinKind::Inner | JoinKind::Left => (true, true),
-                    JoinKind::Right => (false, true),
-                    JoinKind::Full => (false, false),
+                    JoinKind::Inner => (true, true),
+                    JoinKind::Left | JoinKind::Right | JoinKind::Full => (false, false),
                     JoinKind::Semi | JoinKind::Anti => unreachable!(),
                 };
                 // Sides whose unmatched rows are kept with NULLs for the other.
@@ -446,8 +464,12 @@ impl Lowerer {
                 })?;
                 let items = cagara_hir::rules::join_columns(&l.items, &r.items);
                 let mut wheres = l.wheres;
+                // Only an inner join can have extracted filters to place, and
+                // there either side may go to WHERE. For every other kind both
+                // sides keep their filters in a derived table, so `r.wheres`
+                // is empty and the predicate stands alone.
                 let on = match kind {
-                    JoinKind::Inner | JoinKind::Right => {
+                    JoinKind::Inner => {
                         wheres.extend(r.wheres);
                         pred
                     }

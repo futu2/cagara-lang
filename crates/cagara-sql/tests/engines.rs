@@ -370,9 +370,7 @@ const REPORT_CASES: &[(&str, &[&str], bool)] = &[
     // The latest three orders per user, newest first.
     (
         "latest",
-        &[
-            "6|1|1", "5|1|2", "4|1|3", "8|3|1", "7|3|2", "9|4|1",
-        ],
+        &["6|1|1", "5|1|2", "4|1|3", "8|3|1", "7|3|2", "9|4|1"],
         true,
     ),
     // A running total per user, in order of `created_at`.
@@ -388,8 +386,15 @@ const REPORT_CASES: &[(&str, &[&str], bool)] = &[
     (
         "order_names",
         &[
-            "1|ann|10.0", "2|ann|20.0", "3|ann|30.0", "4|ann|40.0", "5|ann|50.0", "6|ann|60.0",
-            "7|cy|70.0", "8|cy|80.0", "9|dee|90.0",
+            "1|ann|10.0",
+            "2|ann|20.0",
+            "3|ann|30.0",
+            "4|ann|40.0",
+            "5|ann|50.0",
+            "6|ann|60.0",
+            "7|cy|70.0",
+            "8|cy|80.0",
+            "9|dee|90.0",
         ],
         true,
     ),
@@ -488,4 +493,3 @@ fn the_report_example_runs_on_every_engine() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     eprintln!("{ran} report runs");
 }
-

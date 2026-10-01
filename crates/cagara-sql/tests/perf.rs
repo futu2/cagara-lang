@@ -73,7 +73,10 @@ fn time_check(src: &str) -> (Duration, usize) {
     assert!(
         tc.errors.is_empty(),
         "benchmark program has type errors: {:?}",
-        tc.errors.iter().map(|e| &e.diag.message).collect::<Vec<_>>()
+        tc.errors
+            .iter()
+            .map(|e| &e.diag.message)
+            .collect::<Vec<_>>()
     );
     (d, tc.errors.len())
 }
@@ -101,10 +104,7 @@ const LIMIT: Duration = Duration::from_secs(10);
 #[track_caller]
 fn assert_under(label: &str, d: Duration) {
     println!("{label}: {d:?}");
-    assert!(
-        d < LIMIT,
-        "{label} took {d:?}, over the {LIMIT:?} budget"
-    );
+    assert!(d < LIMIT, "{label} took {d:?}, over the {LIMIT:?} budget");
 }
 
 #[test]

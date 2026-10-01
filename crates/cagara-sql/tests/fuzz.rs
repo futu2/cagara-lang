@@ -267,7 +267,10 @@ fn stage(rng: &mut Rng, row: &Row) -> Option<(String, Row)> {
                 }
                 None => String::new(),
             };
-            Some((format!("agg {{ {key} = group .{key}, n = count{agg} }}"), out))
+            Some((
+                format!("agg {{ {key} = group .{key}, n = count{agg} }}"),
+                out,
+            ))
         }
         6 => Some((format!("order [{}]", sort_order(rng, row)), row.clone())),
         7 => Some((format!("limit {}", 1 + rng.below(50)), row.clone())),
@@ -342,8 +345,8 @@ fn check_pipeline(src: &str, seed: u64) {
     for (_, result) in root_queries_checked(&ws, &tc) {
         let Ok(rel) = result else { continue };
         for d in ["ansi", "postgres", "sqlite", "duckdb", "mysql", "tsql"] {
-            let dialect = Dialect::from_str(d)
-                .unwrap_or_else(|| panic!("seed {seed}: unknown dialect {d}"));
+            let dialect =
+                Dialect::from_str(d).unwrap_or_else(|| panic!("seed {seed}: unknown dialect {d}"));
             let opts = Options {
                 dialect,
                 pretty: false,
@@ -408,8 +411,14 @@ fn every_pair_of_stages_is_lowered() {
 fn pipeline_shorthands_match_their_long_forms() {
     let shorthands: &[(&str, &str)] = &[
         ("q = users &? .age > 1\n", "q = users & where (.age > 1)\n"),
-        ("q = users &= { x = .id }\n", "q = users & select { x = .id }\n"),
-        ("q = users &* { n = count }\n", "q = users & agg { n = count }\n"),
+        (
+            "q = users &= { x = .id }\n",
+            "q = users & select { x = .id }\n",
+        ),
+        (
+            "q = users &* { n = count }\n",
+            "q = users & agg { n = count }\n",
+        ),
         ("q = users &. [asc .id]\n", "q = users & order [asc .id]\n"),
         ("q = users &- 5\n", "q = users & limit 5\n"),
     ];
@@ -447,7 +456,8 @@ fn the_generator_reaches_sql() {
         }
     }
     assert_eq!(
-        compiled, total,
+        compiled,
+        total,
         "only {compiled}/{total} generated programs reached SQL; examples that did not:\n{}",
         examples.join("")
     );

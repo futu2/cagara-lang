@@ -185,7 +185,10 @@ fn types_only_selects_one_definition() {
     let text = stdout(&out);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(text.contains("q : query { x = int }"), "{text}");
-    assert!(!text.contains("t : query"), "only `q` was asked for: {text}");
+    assert!(
+        !text.contains("t : query"),
+        "only `q` was asked for: {text}"
+    );
 }
 
 /// A `--only` naming nothing is an error, not a silent success.
@@ -343,13 +346,20 @@ fn a_flag_missing_its_value_is_rejected() {
 #[test]
 fn fmt_rewrites_in_place_and_is_idempotent() {
     let dir = TempDir::new("fmt");
-    let f = dir.write("t.cagara", "q   =   t &    select{x=.a}\nt : query{a=int} = table \"s\" \"t\"\n");
+    let f = dir.write(
+        "t.cagara",
+        "q   =   t &    select{x=.a}\nt : query{a=int} = table \"s\" \"t\"\n",
+    );
     let out = cagara([OsStr::new("fmt"), f.as_os_str()]);
     assert!(out.status.success(), "{}", stderr(&out));
     let once = std::fs::read_to_string(&f).unwrap();
     let out = cagara([OsStr::new("fmt"), f.as_os_str()]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(once, std::fs::read_to_string(&f).unwrap(), "fmt is not idempotent");
+    assert_eq!(
+        once,
+        std::fs::read_to_string(&f).unwrap(),
+        "fmt is not idempotent"
+    );
     assert!(!once.contains("select{x=.a}"), "still unformatted: {once}");
 }
 
@@ -361,7 +371,11 @@ fn fmt_check_reports_without_rewriting() {
     let f = dir.write("t.cagara", src);
     let out = cagara([OsStr::new("fmt"), OsStr::new("--check"), f.as_os_str()]);
     assert!(!out.status.success(), "{}", stderr(&out));
-    assert_eq!(std::fs::read_to_string(&f).unwrap(), src, "file was rewritten");
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        src,
+        "file was rewritten"
+    );
 
     // An already-formatted file passes.
     let f2 = dir.write("ok.cagara", "q = t\n");
@@ -378,7 +392,11 @@ fn fmt_leaves_an_unparseable_file_unchanged() {
     let out = cagara([OsStr::new("fmt"), f.as_os_str()]);
     assert!(!out.status.success(), "{}", stdout(&out));
     assert!(stderr(&out).contains("error"), "{}", stderr(&out));
-    assert_eq!(std::fs::read_to_string(&f).unwrap(), src, "file was rewritten");
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        src,
+        "file was rewritten"
+    );
 }
 
 /// `fmt -` reads stdin and writes the formatted text to stdout.

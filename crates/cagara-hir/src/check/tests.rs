@@ -866,7 +866,9 @@ fn a_long_operator_chain_is_checked_or_reported_but_never_crashes() {
         let e = vec![".a"; n + 1].join(" + ");
         format!("t : query {{ a = int }} = table \"s\" \"t\"\nq = t & select {{ x = {e} }}\n")
     };
-    for n in [1, 2, 10, 40, 80, 100, 120, 140, 150, 160, 180, 190, 200, 250, 300, 1000] {
+    for n in [
+        1, 2, 10, 40, 80, 100, 120, 140, 150, 160, 180, 190, 200, 250, 300, 1000,
+    ] {
         let ws = Workspace::from_source(&chain(n));
         // Either the parser rejected it (a diagnostic) or the checker ran.
         // The point is that neither panics or recurses until the stack ends.

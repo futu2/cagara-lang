@@ -534,7 +534,9 @@ mod tests {
         let e = template_errors("$1 + $0");
         assert!(e.iter().any(|m| m.contains("1-based")), "{e:?}");
         assert!(
-            template_errors("$1 + $2 + $0").iter().any(|m| m.contains("1-based")),
+            template_errors("$1 + $2 + $0")
+                .iter()
+                .any(|m| m.contains("1-based")),
             "$0 must be rejected even beside a valid higher placeholder"
         );
     }

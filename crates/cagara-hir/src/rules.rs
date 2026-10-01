@@ -8,6 +8,37 @@ use crate::ir::Phase;
 pub const JOIN_ONLY: &str =
     "`.<x` and `.>x` refer to the inputs of a join and can only be used in a join predicate";
 
+/// Fields of a window spec record (`{ partition = [..], order = [..], frame = .. }`).
+/// The checker gives them their types and the evaluator reads them, so the
+/// names live here instead of being spelled out in both.
+pub mod winspec {
+    pub const PARTITION: &str = "partition";
+    pub const ORDER: &str = "order";
+    pub const FRAME: &str = "frame";
+
+    /// Every field, in the order diagnostics list them.
+    pub const ALL: &[&str] = &[PARTITION, ORDER, FRAME];
+
+    /// `partition, order, frame`, for an error message.
+    pub fn names() -> String {
+        ALL.join(", ")
+    }
+
+    /// Is `name` a window spec field?
+    pub fn is_field(name: &str) -> bool {
+        ALL.contains(&name)
+    }
+}
+
+/// The operators that build a pipeline at the level of `&`. A stage built
+/// with one of these is located at its argument (the stage) rather than at the
+/// whole pipeline, so a diagnostic points at the stage that failed.
+///
+/// These spell out the `_op_` names the lexer gives each symbol: they are
+/// ordinary definitions in `prelude.cagara` (`_&?_ = q => pred => where pred q`),
+/// so the language, not Rust, decides what a shorthand means.
+pub const PIPES: &[&str] = &["_&_", "_&=_", "_&?_", "_&*_", "_&._", "_&-_"];
+
 /// A plain column (`.x`) in a join predicate.
 pub fn needs_side(n: &str) -> String {
     format!("join predicates must say which input a column comes from: `.<{n}` (left) or `.>{n}` (right)")
@@ -109,4 +140,34 @@ pub fn join_columns<T: Clone>(left: &[(String, T)], right: &[(String, T)]) -> Ve
             .cloned(),
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The names the checker and the evaluator must agree on. Both used to
+    /// spell them out, so a rename in one place silently desynchronized them.
+    #[test]
+    fn shared_names_are_the_ones_the_prelude_uses() {
+        assert_eq!(winspec::ALL, ["partition", "order", "frame"]);
+        assert!(winspec::is_field("partition"));
+        assert!(!winspec::is_field("qualify"));
+        assert_eq!(winspec::names(), "partition, order, frame");
+
+        // The pipe operators are `_op_` spellings of the `&` shorthands, and
+        // every one of them is defined in `prelude.cagara`.
+        let prelude = include_str!("../../../prelude.cagara");
+        for op in PIPES {
+            assert_eq!(
+                op.matches('&').count(),
+                1,
+                "`{op}` is not a pipe operator spelling"
+            );
+            assert!(
+                prelude.contains(op),
+                "`{op}` is in PIPES but not defined in the prelude"
+            );
+        }
+    }
 }

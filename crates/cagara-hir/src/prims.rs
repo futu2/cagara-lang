@@ -117,7 +117,8 @@ fn bound(v: Value) -> EResult<Bound> {
 fn win_spec(v: Value) -> EResult<WinSpec> {
     let Value::Record(fs) = v else {
         return err(format!(
-            "a window function expects {{ partition, order, frame }}, found {}",
+            "a window function expects {{ {} }}, found {}",
+            crate::rules::winspec::names(),
             v.kind()
         ));
     };
@@ -128,20 +129,24 @@ fn win_spec(v: Value) -> EResult<WinSpec> {
     };
     for (k, v) in fs {
         match k.as_str() {
-            "partition" => spec.partition = lift_all(list(v)?)?,
-            "order" => spec.order = list(v)?.into_iter().map(sort_key).collect::<EResult<_>>()?,
-            "frame" => match v {
+            crate::rules::winspec::PARTITION => spec.partition = lift_all(list(v)?)?,
+            crate::rules::winspec::ORDER => {
+                spec.order = list(v)?.into_iter().map(sort_key).collect::<EResult<_>>()?
+            }
+            crate::rules::winspec::FRAME => match v {
                 Value::Frame(f) => spec.frame = Some(f),
                 o => {
                     return err(format!(
-                        "`frame` must be a frame such as `wholePartition`, found {}",
+                        "`{}` must be a frame such as `wholePartition`, found {}",
+                        crate::rules::winspec::FRAME,
                         o.kind()
                     ))
                 }
             },
             other => {
                 return err(format!(
-                    "unknown window spec field `{other}`; expected partition, order, frame"
+                    "unknown window spec field `{other}`; expected {}",
+                    crate::rules::winspec::names()
                 ))
             }
         }

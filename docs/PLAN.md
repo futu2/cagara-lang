@@ -167,7 +167,7 @@ the VS Code extension compile:
   open predicate outside a query only knows the columns used beside it. Prelude definitions have no
   location. The VS Code client registers `.cagara` file watching, while the
   Neovim client opts into repo-local binaries explicitly.
-- Type checker (24 tests): HM with let-polymorphism for top-level definitions,
+- Type checker (30 tests): HM with let-polymorphism for top-level definitions,
   monomorphic lambdas, Rémy-style rows, rigid (checked) signatures, constant
   lifting into `expr` with deferred int→float / string→date / timestamp
   widening,
@@ -261,9 +261,55 @@ the VS Code extension compile:
   their source span (`Rel::At`, transparent to schema and lowering), so an
   IR-validator error points at the innermost failing stage. Diagnostics show
   the source line with the span underlined.
-- CLI with `file:line:col` diagnostics and non-zero exit on errors.
+- CLI with `file:line:col` diagnostics and non-zero exit on errors, covered by
+  21 integration tests over the output modes (`--types`, `--only`, `--pretty`),
+  dialect selection, usage errors, exit codes, and `cagara fmt` (in place,
+  `--check`, stdin, and an unparseable file left alone).
 - Examples: `examples/report.cagara`, `public.cagara` + `schema.cagara`,
-  `errors.cagara`.
+  `errors.cagara`. `examples/report.cagara` is compiled and run against
+  SQLite and DuckDB by `crates/cagara-sql/tests/engines.rs`, so the whole
+  worked example is verified end to end rather than only compiled.
+- Template `$n` placeholders are validated at the definition:
+  placeholders must be exactly `$1 ..= $n`, each standing alone. `$0` (not an
+  argument), a gap (`$1` and `$3` with no `$2`), a bare `$`, and a `$n` glued
+  to a name are all diagnostics there, before the backend sees the text. Only
+  the maximum placeholder used to be read, so `$1 + $0` compiled and silently
+  dropped the `$0`, and a gap reached the backend's generic "cannot parse"
+  message.
+- The completion probe belongs to the definition under the cursor. Checking a
+  module runs every definition, and the probe is a single shared slot, so a
+  later definition used to take it — replacing a known row with its own empty
+  one, or discarding the answer outright.
+- The parser's depth budgets are low enough that nothing downstream aborts.
+  Two separate budgets, because the two constructs fail differently:
+  - **Expressions** (`MAX_DEPTH`, 192). A left-associative chain is one level
+    of parser recursion but a left-nested AST of that depth, and the checker
+    descends it recursively. At 256 a 200-operator chain aborted the `cagara`
+    binary with `SIGABRT` instead of reporting anything.
+  - **Pipelines** (`MAX_PIPE_CHAIN`, 10). A pipeline is one relational node per
+    stage, and the checker, evaluator, and SQL lowerer each descend that chain.
+    The binding constraint is a *spawned* thread's 2 MiB default stack — where
+    the language server works — not the main thread's 8 MiB: eleven mixed
+    `where` / `update` stages were enough to abort. Ten is still more than any
+    example uses (six). The lowerer's `where` chain is peeled iteratively now,
+    which is what would let this rise.
+- Fuzzing beyond token soup: `crates/cagara-sql/tests/fuzz.rs` generates
+  *valid* programs (tracking the columns each stage produces, so they really
+  compile) and runs each through parse, check, evaluate, schema validation,
+  and lowering into six dialects. `the_generator_reaches_sql` fails if the
+  generator stops reaching SQL, so the fuzzer cannot rot into vacuity.
+- Compile-time benchmarks: `crates/cagara-sql/tests/perf.rs` bounds the
+  checker on long pipelines, long operator chains, wide records, and many
+  definitions, and separately checks the *scaling* from 10 to 100 operators,
+  so an exponential regression trips even on a fast machine. Its pipeline
+  sizes stay well inside `MAX_PIPE_CHAIN`, since a spawned test thread has the
+  same small stack as the language server and the benchmark must measure the
+  checker rather than the stack.
+- The SQL lowerer's schema computation is an explicit post-order walk with a
+  memo (`cagara-hir/src/schema.rs`), not recursion. It is asked for a
+  subtree's columns from inside lowering, so recursing stacked a second walk
+  of that subtree on the one already in progress; the memo also makes repeated
+  subtrees free.
 
 Known gaps:
 
@@ -276,22 +322,22 @@ Known gaps:
 - `--optimize` runs sqlglot's optimizer (constant folding, boolean
   simplification, pushdown). Tests pin that it keeps filters outside
   window / LIMIT / aggregate boundaries; it stays opt-in.
-- **`offset` without `limit` is not spelled for SQLite.** SQLite rejects a
-  lone `OFFSET`, and the rewriter only adds the missing `LIMIT` for MySQL
-  (and requires an `order` for T-SQL). A query that offsets without a limit
-  therefore compiles to SQL that SQLite refuses.
+- **A pipeline is capped at 10 stages** (`MAX_PIPE_CHAIN`), and expressions at
+  192 levels (`MAX_DEPTH`). Both are the parser refusing input the rest of the
+  pipeline would otherwise descend until the stack ends; the pipeline bound is
+  the low one because the language server compiles on a spawned thread with a
+  2 MiB stack. Real queries are far below either. Raising the pipeline bound
+  means making the checker's, evaluator's, and lowerer's recursive descents
+  iterative (the lowerer's `where` chain and the schema walk already are).
 - **Smaller gaps from the same review:** `open_with_buffers` can add one
-  file twice (duplicate diagnostics); a nested definition check takes the
-  completion probe from the definition being completed; template `$n`
-  validation misses `$0`, gaps, and a `$n` inside a name or a type;
-  `qualify` rewrites a bare keyword in a template into `t1.DAY`; the
-  reserved-word list misses MySQL 8 words such as `rank`; `MAX_DEPTH`
-  reports recursion for a deep but terminating program.
-- **Names still hardcoded in Rust, not Cagara:** the six pipeline-operator
-  names (`eval.rs`), the window-spec field names (checker and evaluator),
-  and user-facing names inside error strings (`coalesce`, `isNull`, `agg`,
-  `where`, `group`, `wholePartition`). These
-  need a prelude marker or a shared constant before they can move.
+  file twice (duplicate diagnostics); `qualify` rewrites a bare keyword in a
+  template into `t1.DAY`; the reserved-word list misses MySQL 8 words such as
+  `rank`; `MAX_DEPTH` reports recursion for a deep but terminating program.
+- **Names still hardcoded in Rust, not Cagara:** user-facing names inside
+  error strings (`coalesce`, `isNull`, `agg`, `where`, `group`,
+  `wholePartition`). These are diagnostic prose rather than dispatch keys, and
+  need a prelude marker before they can move. The pipeline-operator names and
+  the window-spec field names are shared constants now (see Roadmap 22).
 
 ## Roadmap
 
@@ -371,5 +417,34 @@ Known gaps:
     `prefix`, `suffix`, `Rel::KeyMap`, `KeyMapper`, `Cons::KeyMap`, and the
     `Labels` type: selecting columns is ordinary `select`, and every row is
     named by a field list.
-21. Next: `offset` without `limit` for SQLite, and the smaller gaps from the
-    same review (see Known gaps).
+21. ~~`offset` without `limit`, template placeholders, the completion probe,
+    and the remaining small gaps~~ (done; see Status): SQLite gets `LIMIT -1`
+    (the MySQL max-BIGINT idiom is rejected by SQLite with `datatype
+    mismatch`), T-SQL gets a `FETCH`; templates validate `$0`, gaps, a bare
+    `$`, and a `$n` inside a name; the completion probe is keyed to its
+    definition; the parser's expression depth budget was lowered so the
+    checker can walk the deepest chain it accepts.
+22. ~~Shared names, and a wider test suite~~ (done): the pipeline-operator
+    names and the window-spec field names are constants in `cagara-hir`'s
+    `rules.rs`, used by the checker, the evaluator, and pinned by a test that
+    also checks every pipe operator is defined in the prelude. Tests added:
+    CLI integration coverage of the output modes, dialects, usage errors, and
+    `cagara fmt` (4 -> 21 tests); a valid-program fuzzer over the whole
+    pipeline (`cagara-sql/tests/fuzz.rs`), which pins that its generator
+    really reaches SQL rather than only emitting type errors; the worked
+    example run against SQLite and DuckDB; and compile-time benchmarks
+    (`cagara-sql/tests/perf.rs`) that bound the checker on long pipelines,
+    long operator chains, wide records, and many definitions, plus a scaling
+    check that a quadratic jump trips.
+23. ~~Inputs that aborted the compiler~~ (done; see Status): an operator chain
+    between the parser's budget and what the checker could walk, and a
+    pipeline of more than a few dozen stages, each ended in a `SIGABRT` rather
+    than a diagnostic. Now bounded by two parser budgets (`MAX_DEPTH` 192 for
+    expressions, `MAX_PIPE_CHAIN` 10 for pipelines, sized for a spawned
+    thread's 2 MiB stack because that is where the language server runs), with
+    the schema walk made iterative and the lowerer's `where` chain peeled.
+24. Next: the remaining smaller gaps (see Known gaps) — `open_with_buffers`
+    adding a file twice, `qualify` rewriting a bare keyword, the reserved-word
+    list, and `MAX_DEPTH` reporting recursion for a deep terminating program.
+    Raising `MAX_PIPE_CHAIN` needs the lowerer's remaining recursive descents
+    (and the checker's and evaluator's) peeled iteratively.

@@ -579,8 +579,12 @@ struct Checker<'w> {
     fit_cache: HashMap<(usize, Vec<usize>, String), Vec<usize>>,
     holes: HashMap<(usize, usize), usize>,
     choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
-    /// Input row of the `PROBE_FIELD` column being checked.
-    probe: Option<Ty>,
+    /// Input row of the `PROBE_FIELD` column being checked, and the definition
+    /// that referenced it. The probe is text the LSP spliced in, so it can
+    /// only appear in one definition; recording it once at the end would let
+    /// a later definition (one whose own probe row is unknown, such as a
+    /// helper over an open parameter) overwrite the answer.
+    probe: Option<(usize, Ty)>,
     probe_fields: Option<Vec<(String, String)>>,
     /// Names, column references, and literals of the definition being
     /// checked, with their types there. A literal also keeps its own type,
@@ -914,9 +918,14 @@ impl<'w> Checker<'w> {
             };
             self.use_types.insert((m, sp.start, sp.end), shown);
         }
-        if let Some(p) = self.probe.take() {
-            // Whatever the definition learned about the probe's row, even
-            // if it failed later on.
+        // Whatever the definition learned about the probe's row, even if it
+        // failed later on. Only the definition that actually referenced the
+        // probe may record it, and it must *not* consume the probe otherwise:
+        // with more than one definition checked in a module, a plain `take()`
+        // let a later definition steal the probe and either replace a known
+        // row with its own empty one or discard the answer outright.
+        if self.probe.as_ref().is_some_and(|(owner, _)| *owner == i) {
+            let (_, p) = self.probe.take().expect("checked just above");
             let (fs, _) = self.flatten(&p);
             self.probe_fields = Some(fs.iter().map(|(k, t)| (k.clone(), self.show(t))).collect());
         }
@@ -1525,8 +1534,11 @@ impl<'w> Checker<'w> {
                 let phase = self.fresh_col_phase();
                 let (tail, a) = (self.fresh(), self.fresh());
                 let r = if n == PROBE_FIELD {
-                    // Completion probe: adds no column, remembers the row.
-                    self.probe = Some(tail.clone());
+                    // Completion probe: adds no column, remembers the row and
+                    // which definition asked, so a later definition's empty
+                    // probe cannot overwrite this one.
+                    let owner = self.active.last().map(|(_, d)| *d).unwrap_or(usize::MAX);
+                    self.probe = Some((owner, tail.clone()));
                     tail
                 } else {
                     row(vec![(n.clone(), a.clone())], tail)
@@ -1769,11 +1781,12 @@ impl<'w> Checker<'w> {
         self.unify(&tail, &Ty::Empty)?;
         for (k, t) in fs {
             let want = match k.as_str() {
-                "partition" | "order" => list(sortkey(r.clone())),
-                "frame" => con("frame"),
+                rules::winspec::PARTITION | rules::winspec::ORDER => list(sortkey(r.clone())),
+                rules::winspec::FRAME => con("frame"),
                 o => {
                     return Err(format!(
-                        "unknown window spec field `{o}`; expected partition, order, frame"
+                        "unknown window spec field `{o}`; expected {}",
+                        rules::winspec::names()
                     ))
                 }
             };

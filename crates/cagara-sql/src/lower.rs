@@ -183,6 +183,38 @@ impl Lowerer {
     }
 
     fn rel_inner(&mut self, rel: &Rel) -> Result<Stage, String> {
+        // Peel a run of `where` / `limit` / `offset` / `distinct` / `at`
+        // stages iteratively.
+        //
+        // Every arm below starts with `self.rel(r)`, so a pipeline (one node
+        // per stage) used one stack frame per stage. On the main thread's
+        // 8 MiB stack that survived ~48 stages, but the language server lowers
+        // on a spawned thread whose default stack is 2 MiB, where a
+        // fifteen-stage pipeline overflowed and took the server down. The
+        // peeled stages are re-applied innermost-first, which is exactly the
+        // order the recursion produced, so the result is unchanged.
+        //
+        // Only `where` is peeled here: it is what a pipeline is built from.
+        // A chain of other stages still recurses, and is bounded by the
+        // parser's `MAX_PIPE_CHAIN`.
+        if matches!(rel, Rel::Where(..)) {
+            let mut stages: Vec<(&Rel, &IrExpr)> = Vec::new();
+            let mut base = rel;
+            while let Rel::Where(inner, p) = base {
+                stages.push((base, p));
+                base = inner;
+            }
+            let mut st = self.rel(base)?;
+            for (node, p) in stages.into_iter().rev() {
+                if st.has_agg || st.has_win || st.limit.is_some() || st.offset.is_some() {
+                    st = self.wrap(st);
+                }
+                let e = st.resolve(p)?;
+                st.wheres.push(e);
+                let _ = node;
+            }
+            return Ok(st);
+        }
         Ok(match rel {
             Rel::At(_, r) => self.rel(r)?,
             Rel::Table {

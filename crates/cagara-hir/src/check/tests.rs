@@ -849,3 +849,50 @@ fn outer_joins_wrap_once_even_through_helpers() {
         Ok("query { w = int, n = int }")
     );
 }
+
+/// A long left-associative chain is one level of parser recursion but a
+/// left-nested AST of that depth, and the checker walks it recursively. With
+/// the parser's budget at 256 the checker ran out of stack on a 200-operator
+/// chain: the `cagara` binary aborted (`SIGABRT`) rather than reporting
+/// anything, so a user could crash the compiler with a long expression. The
+/// parser budget is now low enough that the checker never sees a chain it
+/// cannot descend.
+///
+/// This runs at every length around the limit, since the failure appeared in a
+/// window (200..250) rather than at one value.
+#[test]
+fn a_long_operator_chain_is_checked_or_reported_but_never_crashes() {
+    let chain = |n: usize| {
+        let e = vec![".a"; n + 1].join(" + ");
+        format!("t : query {{ a = int }} = table \"s\" \"t\"\nq = t & select {{ x = {e} }}\n")
+    };
+    for n in [1, 2, 10, 40, 80, 100, 120, 140, 150, 160, 180, 190, 200, 250, 300, 1000] {
+        let ws = Workspace::from_source(&chain(n));
+        // Either the parser rejected it (a diagnostic) or the checker ran.
+        // The point is that neither panics or recurses until the stack ends.
+        let tc = check(&ws);
+        let _ = tc.errors.len();
+    }
+}
+
+/// The deepest chain the parser accepts must also check, so the parser's
+/// budget stays below what the rest of the pipeline can walk. `MAX_DEPTH` in
+/// `cagara-syntax` is 192; a chain of that many operators is rejected, and one
+/// comfortably under it is accepted and checked.
+#[test]
+fn the_parser_budget_leaves_the_checker_room() {
+    let chain = |n: usize| {
+        let e = vec![".a"; n + 1].join(" + ");
+        format!("t : query {{ a = int }} = table \"s\" \"t\"\nq = t & select {{ x = {e} }}\n")
+    };
+    // Well inside the budget: accepted and well-typed.
+    let ws = Workspace::from_source(&chain(100));
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    assert!(check(&ws).errors.is_empty(), "{:?}", check(&ws).errors);
+    // Past it: a syntax diagnostic, not a crash.
+    let ws = Workspace::from_source(&chain(300));
+    assert!(
+        !ws.diags.is_empty(),
+        "a chain past the parser budget must be reported"
+    );
+}

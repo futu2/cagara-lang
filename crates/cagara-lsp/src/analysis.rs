@@ -1020,4 +1020,24 @@ mod tests {
         }
         assert_eq!(position_of(t, 6), pos(1, 2));
     }
+
+    /// The probe is spliced into whichever definition holds the cursor, but
+    /// checking a module runs every definition. The recorded row must belong
+    /// to the definition under the cursor, not to whichever definition
+    /// happened to be checked last.
+    #[test]
+    fn the_probe_belongs_to_the_definition_being_completed() {
+        // The cursor sits after `n = .` inside `c`, and `helper` follows it.
+        let afterwards = "users : query { id = int, age = int } = table \"p\" \"users\"\n\
+                          c = users & select { n = .\n\
+                          helper = u => u & where (.age > 0)\n";
+        assert_eq!(fields(afterwards, pos(1, 26)), ["id", "age"]);
+
+        // The same file with the definitions swapped: `c` is still the
+        // definition under the cursor, and still the one that knows the row.
+        let before = "users : query { id = int, age = int } = table \"p\" \"users\"\n\
+                      helper = u => u & where (.age > 0)\n\
+                      c = users & select { n = .\n";
+        assert_eq!(fields(before, pos(2, 26)), ["id", "age"]);
+    }
 }

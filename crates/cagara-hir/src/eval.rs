@@ -22,10 +22,6 @@ pub struct Evaluator<'w> {
     depth: usize,
 }
 
-/// The pipe and its stage shorthands: a query built by `q op x` is located
-/// at `x` (the stage), not the whole pipeline.
-const PIPES: &[&str] = &["_&_", "_&=_", "_&?_", "_&*_", "_&._", "_&-_"];
-
 /// Deepest application nesting. `active` already catches recursion between
 /// definitions; this catches a definition that applies *itself* as a value
 /// (`f = x => f x`), which is not a definition cycle but still never ends.
@@ -188,7 +184,7 @@ impl<'w> Evaluator<'w> {
                 if m != 0 {
                     if let Value::Query(r) = v {
                         let pipe = args.len() == 2
-                            && matches!(&f.kind, ExprKind::Name(n) if PIPES.contains(&n.as_str()));
+                            && matches!(&f.kind, ExprKind::Name(n) if crate::rules::PIPES.contains(&n.as_str()));
                         let span = if pipe { args[1].span } else { e.span };
                         v = Value::Query(match r {
                             r @ Rel::At(..) => r,
@@ -286,12 +282,7 @@ fn template_def(sql: &str, ty: Option<&TypeExpr>) -> EResult<Value> {
     } else {
         arity
     };
-    let used = max_placeholder(sql);
-    if used != expr_args {
-        return err(format!(
-            "template uses placeholders up to ${used} but its signature has {expr_args} expression argument(s)"
-        ));
-    }
+    check_placeholders(sql, expr_args)?;
     let t = Rc::new(Template {
         sql: sql.to_string(),
         kind,
@@ -314,24 +305,87 @@ fn shape(t: &TypeExpr) -> (usize, &TypeExpr) {
     }
 }
 
-fn max_placeholder(sql: &str) -> usize {
+/// A template's `$n` placeholders must be exactly `$1 ..= $expr_args`, each
+/// standing alone. Anything else is a mistake that would otherwise surface as
+/// missing SQL or a confusing error from the backend:
+///
+///   * `$0` is not a placeholder (they are 1-based), and used to pass silently
+///     whenever a higher `$n` was present, because only the maximum was read.
+///   * a gap (`$1` and `$3` but no `$2`) would leave one argument unused.
+///   * a `$` with no digits — or a trailing `$` — is not a placeholder at all.
+///   * `$n` inside a name or a string never reaches the backend as a
+///     placeholder; `stage::template` rejects it, but the definition is the
+///     better place to say so.
+fn check_placeholders(sql: &str, expr_args: usize) -> EResult<()> {
     let b = sql.as_bytes();
-    let mut max = 0;
+    let mut seen = vec![false; expr_args + 1];
     let mut i = 0;
+    let mut highest = 0;
     while i < b.len() {
-        if b[i] == b'$' {
-            let j = (i + 1..b.len())
-                .find(|&j| !b[j].is_ascii_digit())
-                .unwrap_or(b.len());
-            if let Ok(n) = sql[i + 1..j].parse::<usize>() {
-                max = max.max(n);
-            }
-            i = j;
-        } else {
+        if b[i] != b'$' {
             i += 1;
+            continue;
         }
+        // `$` inside a Cagara string literal cannot occur here (the lexer ends
+        // the literal), so every `$` is a candidate placeholder.
+        let start = i;
+        let mut j = i + 1;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j == i + 1 {
+            return err(format!(
+                "SQL template `{sql}`: a `$` at byte {start} is not a placeholder \
+                 (digits must follow it, as in `$1`)"
+            ));
+        }
+        let n: usize = match sql[i + 1..j].parse() {
+            Ok(n) => n,
+            Err(_) => {
+                return err(format!(
+                    "SQL template `{sql}`: the placeholder `{}` is too large to be an \
+                     argument position",
+                    &sql[i..j]
+                ))
+            }
+        };
+        // `$n` may not be glued to a name or another `$`; `stage::template`
+        // would leave it in the SQL instead of substituting it.
+        let glued = |c: u8| c == b'_' || c.is_ascii_alphanumeric() || c == b'$';
+        if b.get(j).copied().is_some_and(glued) || (i > 0 && glued(b[i - 1])) {
+            return err(format!(
+                "SQL template `{sql}`: `{}` must stand alone (not inside a name or string)",
+                &sql[i..j]
+            ));
+        }
+        if n == 0 {
+            return err(format!(
+                "SQL template `{sql}`: placeholders are 1-based, so `$0` is not an argument"
+            ));
+        }
+        if n > expr_args {
+            return err(format!(
+                "template uses placeholders up to ${n} but its signature has {expr_args} \
+                 expression argument(s)"
+            ));
+        }
+        seen[n] = true;
+        highest = highest.max(n);
+        i = j;
     }
-    max
+    if let Some(missing) = (1..=highest).find(|&n| !seen[n]) {
+        return err(format!(
+            "SQL template `{sql}`: `$1 .. ${highest}` are used but `${missing}` is missing; \
+             placeholders must number every argument from 1"
+        ));
+    }
+    if highest < expr_args {
+        return err(format!(
+            "template uses placeholders up to ${highest} but its signature has {expr_args} \
+             expression argument(s)"
+        ));
+    }
+    Ok(())
 }
 
 /// `t : query { a = int, b = string } = table "s" "t"` gives the table its
@@ -460,5 +514,74 @@ mod tests {
             e.iter().any(|m| m.contains("too many open overloads")),
             "{e:?}"
         );
+    }
+
+    /// A two-argument template with `sql` substituted into it, used by a query
+    /// so the definition is evaluated rather than only type-checked.
+    fn template_errors(sql: &str) -> Vec<String> {
+        errors(&format!(
+            "t : query {{ a = int, b = int }} = table \"s\" \"t\"\n\
+             f : expr r int -> expr r int -> expr r int = sql \"{sql}\"\n\
+             q = t & select {{ y = f .a .b }}\n"
+        ))
+    }
+
+    #[test]
+    fn template_placeholder_zero_is_rejected() {
+        // `$0` is not an argument, but used to pass whenever a higher `$n` was
+        // present, because only the maximum placeholder was read: `$1 + $0`
+        // silently compiled and left the `$0` out of the SQL.
+        let e = template_errors("$1 + $0");
+        assert!(e.iter().any(|m| m.contains("1-based")), "{e:?}");
+        assert!(
+            template_errors("$1 + $2 + $0").iter().any(|m| m.contains("1-based")),
+            "$0 must be rejected even beside a valid higher placeholder"
+        );
+    }
+
+    #[test]
+    fn template_placeholder_gaps_are_rejected() {
+        // `$1` and `$3` with no `$2` leaves one argument unused. Previously the
+        // maximum matched the arity, so this reached the backend, which
+        // reported only that the template could not be substituted.
+        let src = "t : query { a = int, b = int, c = int } = table \"s\" \"t\"\n\
+                   f : expr r int -> expr r int -> expr r int -> expr r int = sql \"$1 + $3\"\n\
+                   q = t & select { y = f .a .b .c }\n";
+        let e = errors(src);
+        assert!(e.iter().any(|m| m.contains("`$2` is missing")), "{e:?}");
+    }
+
+    #[test]
+    fn a_bare_dollar_is_rejected() {
+        // A trailing `$` used to be ignored outright, so the template compiled
+        // with the `$` left in the SQL.
+        for sql in ["$1 + $", "$1 + $$2", "$ 1", "$"] {
+            let e = template_errors(sql);
+            assert!(
+                e.iter().any(|m| m.contains("not a placeholder")),
+                "{sql}: {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_placeholder_inside_a_name_is_rejected_at_the_definition() {
+        // The backend rejects these too, but only once the definition is used
+        // and only with a generic message; the definition is the better place.
+        for sql in ["x$1 + $2", "$1x + $2", "$1_$2"] {
+            let e = template_errors(sql);
+            assert!(
+                e.iter().any(|m| m.contains("must stand alone")),
+                "{sql}: {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn well_formed_templates_are_accepted() {
+        // Every argument, in any order, with placeholders standing alone.
+        assert!(template_errors("$1 + $2").is_empty());
+        assert!(template_errors("$2 - $1").is_empty());
+        assert!(template_errors("CAST($1 AS int) + $2").is_empty());
     }
 }

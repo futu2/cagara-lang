@@ -228,8 +228,15 @@ const ENGINES: &[Engine] = &[
     },
 ];
 
-/// Rows of the last statement, or `None` when the shell is not installed.
+/// Rows of the last statement under the shared [`SETUP`], or `None` when the
+/// shell is not installed.
 fn run(e: &Engine, sql: &str) -> Option<Result<Vec<String>, String>> {
+    run_script(e, SETUP, sql)
+}
+
+/// Rows of the last statement in `sql`, after `setup` has been run. `None`
+/// when the shell is not installed.
+fn run_script(e: &Engine, setup: &str, sql: &str) -> Option<Result<Vec<String>, String>> {
     let mut child = match Command::new(e.shell)
         .args(e.args)
         .stdin(Stdio::piped())
@@ -240,7 +247,7 @@ fn run(e: &Engine, sql: &str) -> Option<Result<Vec<String>, String>> {
         Ok(c) => c,
         Err(_) => return None,
     };
-    let script = format!("{SETUP}{sql};\n");
+    let script = format!("{setup}{sql};\n");
     child
         .stdin
         .take()
@@ -322,3 +329,163 @@ fn engines_agree() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     eprintln!("{ran} engine runs");
 }
+
+/// The tables `examples/report.cagara` queries, with rows chosen so every
+/// clause of the report has something to say.
+///
+/// SQLite has no `CREATE SCHEMA`, and rejects `public.users` outright, so the
+/// two engines get their own setup. DuckDB needs the schema spelled out
+/// because the example names one.
+const REPORT_SETUP_SQLITE: &str = "\
+CREATE TABLE users (id INTEGER, name TEXT, age INTEGER, active BOOLEAN);
+INSERT INTO users VALUES (1, 'ann', 34, 1), (2, 'bob', 17, 1), (3, 'cy', 29, 0), (4, 'dee', 41, 1);
+CREATE TABLE orders (id INTEGER, user_id INTEGER, amount DOUBLE, status TEXT, created_at DATE);
+INSERT INTO orders VALUES
+  (1, 1, 10.0, 'paid', '2024-01-01'), (2, 1, 20.0, 'paid', '2024-01-02'),
+  (3, 1, 30.0, 'paid', '2024-01-03'), (4, 1, 40.0, 'paid', '2024-01-04'),
+  (5, 1, 50.0, 'paid', '2024-01-05'), (6, 1, 60.0, 'paid', '2024-01-06'),
+  (7, 3, 70.0, 'paid', '2024-02-01'), (8, 3, 80.0, 'pending', '2024-02-02'),
+  (9, 4, 90.0, 'paid', '2024-02-03');
+";
+
+const REPORT_SETUP_DUCKDB: &str = "\
+CREATE SCHEMA IF NOT EXISTS public;
+CREATE TABLE public.users (id INTEGER, name TEXT, age INTEGER, active BOOLEAN);
+INSERT INTO public.users VALUES (1, 'ann', 34, TRUE), (2, 'bob', 17, TRUE), (3, 'cy', 29, FALSE), (4, 'dee', 41, TRUE);
+CREATE TABLE public.orders (id INTEGER, user_id INTEGER, amount DOUBLE, status TEXT, created_at DATE);
+INSERT INTO public.orders VALUES
+  (1, 1, 10.0, 'paid', '2024-01-01'), (2, 1, 20.0, 'paid', '2024-01-02'),
+  (3, 1, 30.0, 'paid', '2024-01-03'), (4, 1, 40.0, 'paid', '2024-01-04'),
+  (5, 1, 50.0, 'paid', '2024-01-05'), (6, 1, 60.0, 'paid', '2024-01-06'),
+  (7, 3, 70.0, 'paid', '2024-02-01'), (8, 3, 80.0, 'pending', '2024-02-02'),
+  (9, 4, 90.0, 'paid', '2024-02-03');
+";
+
+/// `(definition in `report.cagara`, expected rows, order-independent?)`.
+const REPORT_CASES: &[(&str, &[&str], bool)] = &[
+    // Adult, active users, ordered by the uppercased label, capped at 10.
+    ("adults", &["1|ANN|35", "4|DEE|42"], true),
+    // Only users with at least five paid orders; `ann` has six, `cy` one.
+    ("revenue", &["1|210.0|6"], true),
+    // The latest three orders per user, newest first.
+    (
+        "latest",
+        &[
+            "6|1|1", "5|1|2", "4|1|3", "8|3|1", "7|3|2", "9|4|1",
+        ],
+        true,
+    ),
+    // A running total per user, in order of `created_at`.
+    (
+        "running",
+        &[
+            "1|10.0", "2|30.0", "3|60.0", "4|100.0", "5|150.0", "6|210.0", "7|70.0", "8|150.0",
+            "9|90.0",
+        ],
+        true,
+    ),
+    // Every order joined to its user.
+    (
+        "order_names",
+        &[
+            "1|ann|10.0", "2|ann|20.0", "3|ann|30.0", "4|ann|40.0", "5|ann|50.0", "6|ann|60.0",
+            "7|cy|70.0", "8|cy|80.0", "9|dee|90.0",
+        ],
+        true,
+    ),
+    // Every user, including those with no orders.
+    (
+        "user_totals",
+        &["1|210.0|6", "2|0.0|0", "3|150.0|2", "4|90.0|1"],
+        true,
+    ),
+    // The shorthand spelling of the same, restricted to active users and
+    // ordered by the descending total.
+    (
+        "active_totals",
+        &["1|ann|210.0", "4|dee|90.0", "2|bob|0.0"],
+        false,
+    ),
+];
+
+/// Run the real `examples/report.cagara` against every engine. The focused
+/// cases above pin individual rules; this pins that a whole, realistic file
+/// compiles and runs, which is what a user actually does.
+#[test]
+fn the_report_example_runs_on_every_engine() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/report.cagara");
+    let src = std::fs::read_to_string(path).expect("read examples/report.cagara");
+    let ws = Workspace::from_source(&src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let mut ran = 0;
+    let mut failures = Vec::new();
+    for e in ENGINES {
+        let setup = if e.shell == "sqlite3" {
+            REPORT_SETUP_SQLITE
+        } else {
+            REPORT_SETUP_DUCKDB
+        };
+        let opts = Options {
+            dialect: Dialect::from_str(e.dialect).expect("dialect"),
+            ..Options::default()
+        };
+        for (name, want, unordered) in REPORT_CASES {
+            let (_, rel) = rels
+                .iter()
+                .find(|(n, _)| n == *name)
+                .unwrap_or_else(|| panic!("report.cagara has no `{name}`"));
+            let rel = rel
+                .as_ref()
+                .unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
+            let sql =
+                compile(rel, opts).unwrap_or_else(|m| panic!("`{name}` / {}: {m}", e.dialect));
+            // SQLite has no schemas at all, so the example's `public.` has to
+            // come off before its shell can resolve the names. The rewrite is
+            // confined to this test; what is verified is the rest of the SQL.
+            let sql = if e.shell == "sqlite3" {
+                sql.replace("public.", "")
+            } else {
+                sql
+            };
+            match run_script(e, setup, &sql) {
+                None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
+                    panic!(
+                        "`{}` is not installed (CAGARA_REQUIRE_ENGINES is set)",
+                        e.shell
+                    )
+                }
+                None => {
+                    eprintln!("skipping {}: `{}` is not installed", e.dialect, e.shell);
+                    break;
+                }
+                Some(Err(m)) => failures.push(format!("`{name}` on {}: {m}", e.shell)),
+                Some(Ok(rows)) => {
+                    ran += 1;
+                    let ok = if *unordered {
+                        // Compare as sorted multisets: this test is about the
+                        // SQL compiling and computing the right rows, not
+                        // about a report's own row order.
+                        let mut got = rows.clone();
+                        let mut expected: Vec<String> =
+                            want.iter().map(|s| s.to_string()).collect();
+                        got.sort_unstable();
+                        expected.sort_unstable();
+                        got == expected
+                    } else {
+                        rows == want.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+                    };
+                    if !ok {
+                        failures.push(format!(
+                            "`{name}` on {}: got {rows:?}, want {want:?}\n  {sql}",
+                            e.shell
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    eprintln!("{ran} report runs");
+}
+

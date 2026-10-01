@@ -1,6 +1,8 @@
-# Module import with an alias; pick / omit / rename are all keyMap.
+# Module import with an alias; `select {.a, .b}` chooses columns and `update`
+# recomputes or renames them.
 import "schema.cagara" as s
 
+# Drop `password_hash` by selecting the columns that are published, and give
+# `name` its public label.
 public_users = s.users
-  & omit ["password_hash"]
-  & rename { name = "display_name" }
+  & select {.id, display_name = .name}

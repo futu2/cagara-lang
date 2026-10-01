@@ -41,6 +41,10 @@ toBool : expr r a -> expr r bool = sql "CAST($1 AS BOOLEAN)"
 table = __table
 where = __where
 select = __select
+# `update {..}` is `select` merged over the input row: a name the input
+# already has keeps its position and takes the new expression, and a name it
+# does not have is appended. Columns not listed are passed through.
+update = __update
 agg = __agg
 # `order [asc .x, desc .y]`; NULLs sort last in either direction.
 order = __order
@@ -64,7 +68,7 @@ _&-_ = q => n => limit n q
 # `left & inner right (.<k == .>k)`
 # Outer joins make the columns of the side that may be missing `maybe`.
 # The output has the left input's columns, then the right input's that the
-# left does not have: on a shared name the left column wins (`rename`,
+# left does not have: on a shared name the left column wins (`update`,
 # `prefix`, or `omit` the right one to keep both).
 inner = __innerJoin
 leftJoin = __leftJoin
@@ -87,18 +91,8 @@ _<?_ = leftJoin
 _?>_ = rightJoin
 _<?>_ = fullJoin
 
-# ── key mapping: pick / omit / rename are all keyMap ──────────────────────
-
-keyMap = __keyMap
-only = __only
-drop = __drop
-replace = __replace
-prefix = __prefix
-suffix = __suffix
-
-pick = keys => keyMap (only keys)
-omit = keys => keyMap (drop keys)
-rename = mapping => keyMap (replace mapping)
+# `select {a = .a, b = .b}` is written `select {.a, .b}`. To recompute or
+# rename a column use `update`, which keeps the row and merges over it.
 
 # ── aggregates (depth 1: arguments must be row expressions) ───────────────
 # Type variables in signatures are non-null; nullable inputs must be handled

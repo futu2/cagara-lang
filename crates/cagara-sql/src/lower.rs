@@ -5,8 +5,8 @@
 use crate::stage::{and_all, col, ident_style, lower_expr, qualify, Stage};
 use cagara_hir::ir::{Expr as IrExpr, JoinKind, Rel, SetKind, Side};
 use sqlglot_rust::ast::{
-    Expr, JoinClause, JoinType, OrderByItem, QuoteStyle, SetOperationStatement,
-    SetOperationType, Statement, TableRef, TableSource,
+    Expr, JoinClause, JoinType, OrderByItem, QuoteStyle, SetOperationStatement, SetOperationType,
+    Statement, TableRef, TableSource,
 };
 use std::collections::HashMap;
 
@@ -237,6 +237,39 @@ impl Lowerer {
                 st.has_win |= new_win;
                 st
             }
+            Rel::Update(r, fs) => {
+                let mut st = self.rel(r)?;
+                // Like `select`, but the input's columns are kept in place:
+                // each updated name takes the new expression, and a name the
+                // input does not have is appended. An unlisted column is
+                // passed through as itself.
+                let new_win = fs
+                    .iter()
+                    .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
+                // As in `select`: a projection after `distinct` would dedupe
+                // on the projected columns instead of the input row, and a
+                // window must not fold into a stage that already has one.
+                if st.limit.is_some()
+                    || st.offset.is_some()
+                    || st.distinct
+                    || (new_win && (st.has_agg || st.has_win))
+                {
+                    st = self.wrap(st);
+                }
+                let input: Vec<(String, ())> = st.names().into_iter().map(|c| (c, ())).collect();
+                let out = cagara_hir::schema::merge_columns(&input, fs)?;
+                let mut items = Vec::with_capacity(out.len());
+                for name in out {
+                    let e = match fs.iter().find(|(n, _)| *n == name) {
+                        Some((_, e)) => st.resolve(e)?,
+                        None => st.item(&name)?,
+                    };
+                    items.push((name, e));
+                }
+                st.items = items;
+                st.has_win |= new_win;
+                st
+            }
             Rel::Agg(r, fs) => {
                 let mut st = self.rel(r)?;
                 // `distinct` must dedupe the input rows before they are
@@ -340,21 +373,6 @@ impl Lowerer {
                     // table, sort outside it (see `Rel::Order`).
                     st = self.wrap(st);
                 }
-                st
-            }
-            Rel::KeyMap(r, m) => {
-                let mut st = self.rel(r)?;
-                // As in `select`: picking or renaming after `distinct` would
-                // dedupe on the new columns.
-                if st.distinct {
-                    st = self.wrap(st);
-                }
-                let pairs = m.apply(&st.names())?;
-                let items = pairs
-                    .into_iter()
-                    .map(|(old, new)| Ok((new, st.item(&old)?)))
-                    .collect::<Result<_, String>>()?;
-                st.items = items;
                 st
             }
             Rel::Join {
@@ -539,10 +557,7 @@ impl Lowerer {
         };
         Ok(Stage::new(
             TableSource::Table(table),
-            columns
-                .iter()
-                .map(|n| (n.clone(), col(None, n)))
-                .collect(),
+            columns.iter().map(|n| (n.clone(), col(None, n))).collect(),
         ))
     }
 }

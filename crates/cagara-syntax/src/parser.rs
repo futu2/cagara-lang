@@ -558,11 +558,17 @@ impl<'a> Parser<'a> {
     fn record(&mut self) {
         self.start(K::RecordExpr);
         self.bump(); // {
-        while self.at_inner(Token::Ident) {
+                     // A field is `name = expr`, or the shorthand `.name` for
+                     // `name = .name` (`select {.id, .name}`, the replacement for `pick`).
+        while self.at_inner(Token::Ident) || self.at(Token::Field) {
             self.start(K::RecordField);
-            self.bump();
-            self.expect(Token::Eq, "`=` in record");
-            self.expr();
+            if self.at(Token::Field) {
+                self.bump();
+            } else {
+                self.bump();
+                self.expect(Token::Eq, "`=` in record");
+                self.expr();
+            }
             self.finish();
             if self.at(Token::Comma) {
                 self.bump();

@@ -33,9 +33,10 @@ running = orders
       sumOver { partition = [.user_id], order = [asc .created_at], frame = runningFrame } .amount
   }
 
-# Joins name the side each column comes from.
+# Joins name the side each column comes from. `select {.a, .b}` keeps the
+# names as they are; `update` recomputes or renames a column in place.
 order_names = orders
-  & rename { id = "order_id" }
+  & select {.user_id, .amount, order_id = .id}
   & inner users (.<user_id == .>id)
   & select { order_id = .order_id, name = .name, amount = .amount }
 

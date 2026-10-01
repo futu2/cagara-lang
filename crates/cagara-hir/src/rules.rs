@@ -44,7 +44,7 @@ pub fn place(place: Place, p: Phase) -> Result<(), String> {
         (Place::Agg, Row) => {
             "uses a column that is not grouped; wrap it in `group` or aggregate it"
         }
-        (Place::Agg, Win) => "is a window function; use it in a `select` stage after `agg`",
+        (Place::Agg, Win) => "is a window function; compute it in a `select` stage after `agg`",
         (Place::Key, Agg | Win) => {
             "sort and partition keys must be plain column expressions; \
              compute aggregates or windows in an earlier stage"

@@ -48,7 +48,7 @@ const CASES: &[(&str, &[&str])] = &[
     // rows, and a projection before it defines the row being deduped.
     ("d1 = dupes & distinct & agg { n = count }", &["3"]),
     (
-        "d2 = dupes & distinct & omit [\"id\"] & select { k = .k } & order [asc .k]",
+        "d2 = dupes & distinct & select {.k} & order [asc .k]",
         &["x", "x", "y"],
     ),
     (

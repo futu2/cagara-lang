@@ -1,7 +1,7 @@
 //! Runtime values of compile-time evaluation. A query definition evaluates to
 //! `Value::Query(Rel)`; column expressions evaluate to `Value::Expr`.
 
-use crate::ir::{Bound, Expr, Frame, JoinKind, KeyMapper, Lit, Rel, SetKind};
+use crate::ir::{Bound, Expr, Frame, JoinKind, Lit, Rel, SetKind};
 use cagara_syntax::ast::{self, Span};
 use std::rc::Rc;
 
@@ -12,6 +12,7 @@ pub enum Prim {
     Table,
     Where,
     Select,
+    Update,
     AggStage,
     Order,
     Limit,
@@ -23,12 +24,6 @@ pub enum Prim {
     Group,
     Asc,
     Desc,
-    KeyMap,
-    KeepOnly,
-    DropKeys,
-    Replace,
-    Prefix,
-    Suffix,
     Rows,
     UnboundedPreceding,
     UnboundedFollowing,
@@ -41,6 +36,7 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__table", Prim::Table),
     ("__where", Prim::Where),
     ("__select", Prim::Select),
+    ("__update", Prim::Update),
     ("__agg", Prim::AggStage),
     ("__order", Prim::Order),
     ("__limit", Prim::Limit),
@@ -59,12 +55,6 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__group", Prim::Group),
     ("__asc", Prim::Asc),
     ("__desc", Prim::Desc),
-    ("__keyMap", Prim::KeyMap),
-    ("__only", Prim::KeepOnly),
-    ("__drop", Prim::DropKeys),
-    ("__replace", Prim::Replace),
-    ("__prefix", Prim::Prefix),
-    ("__suffix", Prim::Suffix),
     ("__rows", Prim::Rows),
     ("__unboundedPreceding", Prim::UnboundedPreceding),
     ("__unboundedFollowing", Prim::UnboundedFollowing),
@@ -78,9 +68,8 @@ impl Prim {
         use Prim::*;
         match self {
             UnboundedPreceding | UnboundedFollowing | CurrentRow => 0,
-            Group | Asc | Desc | KeepOnly | DropKeys | Replace | Prefix | Suffix | Preceding
-            | Following => 1,
-            Where | Select | AggStage | Order | Limit | Offset | KeyMap | Table | Rows => 2,
+            Group | Asc | Desc | Preceding | Following => 1,
+            Where | Select | Update | AggStage | Order | Limit | Offset | Table | Rows => 2,
             Distinct => 1,
             In => 2,
             Join(_) => 3,
@@ -135,7 +124,6 @@ pub enum Value {
     Query(Rel),
     Frame(Frame),
     Bound(Bound),
-    Mapper(KeyMapper),
 }
 
 impl Value {
@@ -153,7 +141,6 @@ impl Value {
             Value::Query(_) => "a query",
             Value::Frame(_) => "a window frame",
             Value::Bound(_) => "a frame bound",
-            Value::Mapper(_) => "a key mapper",
         }
     }
 }

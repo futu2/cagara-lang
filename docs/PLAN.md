@@ -8,9 +8,17 @@ core stays minimal; the user-facing library is written in Cagara itself
 
 - Pipelines over queries: `users & where (.age >= 18) & select { id = .id }`.
 - Columns as expressions: `.x` for a single input, `.<x` / `.>x` for join sides.
-- One level of aggregation and windowing: `agg` and `win` results cannot be
-  nested or mixed with ungrouped columns; later stages see them as plain columns.
-- No "keys" concept: `pick`, `omit`, `rename` are all built on `keyMap`.
+- One level of aggregation and windowing: an `agg` field is one aggregate
+  expression and aggregates cannot nest; a `win` is an expression like any
+  other and may be composed (`rowNumber spec + 1`), but not used in a
+  `where`, a sort or partition key, or a join predicate. Later stages see
+  either as a plain column.
+- Columns: `select` replaces the whole row, `update` merges over it (a name
+  the input has keeps its position, a new name is appended, the rest pass
+  through).
+- No "keys" concept and no key mappers: `select {.a, .b}` chooses columns
+  (a field `{.x}` is short for `{x = .x}`) and `update` recomputes or renames
+  them. Every row a stage produces is known from its field list.
 - Modules via `import "path.cagara" [as alias]`; prelude is implicit.
 - Incremental parsing with salsa, lossless syntax trees with rowan.
 - SQL through sqlglot-rust: ANSI by default, any sqlglot dialect via `--dialect`.
@@ -41,8 +49,9 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
   definition and use site, which candidate (or which of its own holes) each
   overloaded use means; evaluation is keyed by definition plus hole
   assignment, and closures capture it.
-- **Rust provides only primitives.** About 20 `__` functions (table, where,
-  select, agg, order, limit/offset, join, group, asc/desc, key mappers, frame
+- **Rust provides only primitives.** About 15 `__` functions (table, where,
+  select, update, agg, order, limit/offset, join, group, asc/desc,
+  frame
   bounds) plus the `sql "..."` template mechanism. `__` names are visible only
   inside the prelude. The one other thing Rust owns is the per-dialect
   spelling of the `CAGARA_*` date and string functions: sqlglot cannot
@@ -54,20 +63,21 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
 - **Phases wrap expressions.** Surface types are `expr r a`, `agg (expr r a)`,
   and `win (expr r a)`. Internally `expr` has a phase slot (`row`/`agg`/`win`
   or a variable). A plain `expr` in a signature is phase-polymorphic (so `_+_`
-  works on aggregates too), except when the result is `agg`/`win`, where its
-  `expr` arguments must be row-phase: the depth-1 rule, in the types.
+  works on aggregates and windows too), except when the result is `agg`/`win`:
+  then its `expr` arguments must be row-phase, the depth-1 rule in the types.
 - **Column references can be `row` or `win`, never `agg`.** That is how
   ungrouped columns in `agg` are rejected by the checker.
-- **Query stages are deferred constraints.** `where`, `select`/`agg`, and
-  joins create constraints solved once their inputs are known; unsolved ones
-  travel with a definition's type scheme and are re-instantiated at each use.
+- **Query stages are deferred constraints.** `where`, `select`/`update`/`agg`,
+  and joins create constraints solved once their inputs are known; unsolved
+  ones travel with a definition's type scheme and are re-instantiated at
+  each use.
 - **Phases are structural in the IR.** Aggregate and window nodes accept only
-  row-phase arguments, which enforces the depth-1 rule.
+  row-phase arguments, which is what enforces the depth-1 nesting rule.
 - **One set of placement rules.** Which phase may appear in `where`,
-  `select`, `agg`, keys, and join predicates, how phases combine, the join
-  output columns, and key-mapper validity live in `rules.rs` /
-  `KeyMapper::apply`, used by the checker (once a phase type is known) and
-  the IR validator alike. A test checks that every definition the checker
+  `select`/`update`, `agg`, keys, and join predicates, how phases combine, the
+  join output columns, and the `update` merge order live in `rules.rs` /
+  `schema::merge_columns`, used by the checker (once a phase type is known)
+  and the IR validator alike. A test checks that every definition the checker
   accepts, including the examples, also evaluates and validates.
 - **A `sql` template's result follows its `agg` / `win` arguments.**
   `inc : agg (expr r int) -> expr r int` is an aggregate (the arguments
@@ -165,11 +175,13 @@ the VS Code extension compile:
   errors (`.name + 1`), missing/removed columns, phase errors, join-side
   errors, and bad window spec fields before evaluation, with the error at the
   offending argument. `--types` prints inferred types.
-- Typed key mappers: literal lists and records of strings get label types, so
-  `pick` / `omit` / `rename` compute their output row statically (missing
-  columns, duplicates, and collisions are type errors, and later stages and
-  joins are checked). Stage constraints wait for the query's row, so printed
-  types keep declaration order.
+- Selecting columns: a field `{.x}` is short for `{x = .x}`, so `select`
+  chooses and computes columns with one form. Every row is static — a field
+  list names every output column — which is why `pick` / `omit` (and the
+  `Labels` type, `keyMap`, and their primitives) are gone. The `update`
+  constraint merges its field record over the input row, keeping positions.
+  Stage constraints wait for the query's row, so printed types keep
+  declaration order.
 - Overloading: a name defined more than once, each with a signature, is an
   overload set (prelude: `+ - * / negate sum avg` on int and float).
   Strings concatenate with `<>` (right-assoc, just looser than `+` / `-`). Pipeline
@@ -205,22 +217,22 @@ the VS Code extension compile:
   (`bad = .age + "x"`), while leftover literals keep their polymorphic type.
 - The checker and the evaluator accept the same programs. `asc` / `desc` take
   an expression rather than a sort key (`asc (desc .x)` is a type error), a
-  key mapper's list or record must hold strings, and a `sql` template must
-  have the signature that gives it its arity and phase — all of which the
+  `select` field must be a column expression or constant, and a `sql` template
+  must have the signature that gives it its arity and phase — all of which the
   evaluator would otherwise reject after the checker had accepted them.
 - Checker performance and incrementality: union-find path compression,
   versioned variable state, and cached overload fitting avoid retrying an
   overload unless its inputs changed. Salsa stores raw diagnostic spans and
   messages, rendering them only outside the query so dependent edits do not
   invalidate diagnostics unnecessarily.
-- SQL lowering for where/select/agg/order/limit/offset/keyMap/joins/windows,
+- SQL lowering for where/select/update/agg/order/limit/offset/joins/windows,
   frames, constant-only global aggregates, join-input inlining, dialect
   rewriting (postgres, mysql, sqlite, duckdb, tsql, bigquery, snowflake) over
   every block — derived tables, CTE bodies, set-operation branches, join
   inputs — and every expression slot (including ORDER BY and a join's ON),
   CASE, casts, `distinct`, membership, semi/anti joins, set operations, and
   automatic CTE reuse for repeated relational subtrees. `distinct` is a
-  lowering barrier: a projection, aggregate, window, or key mapper that
+  lowering barrier: a projection, aggregate, or window that
   follows it sees the deduped rows instead of folding into the DISTINCT, and
   ORDER BY is always emitted outside it (an emulated NULLS LAST key may not
   appear in a DISTINCT select list). A branch of a set operation that has
@@ -255,10 +267,6 @@ the VS Code extension compile:
 
 Known gaps:
 
-- **Non-static key mappers** (`prefix`, `suffix`, or a column list that is
-  not a literal) give an unconstrained row; the IR validator checks them. A
-  literal list or record must hold strings, so `only [1]` and `rename { id =
-  5 }` are now type errors.
 - **No implicit conversions (by design).** `.age * 1.5` and `.amount +
   .user_id` are type errors; only literals take the type their context
   needs, like Haskell's numeric literals. Duplicate overload candidates with
@@ -282,7 +290,7 @@ Known gaps:
 - **Names still hardcoded in Rust, not Cagara:** the six pipeline-operator
   names (`eval.rs`), the window-spec field names (checker and evaluator),
   and user-facing names inside error strings (`coalesce`, `isNull`, `agg`,
-  `where`, `group`, `keyMap`, `only`, `replace`, `wholePartition`). These
+  `where`, `group`, `wholePartition`). These
   need a prelude marker or a shared constant before they can move.
 
 ## Roadmap
@@ -301,11 +309,10 @@ Known gaps:
    identifier quoting and literal escaping, constant sort / group keys,
    `--` from negative numbers, intrinsics inside window specs, language
    server survives malformed messages and panics).
-9. ~~Checker and IR validator agree~~ (done: label lists and rename
-   records unify by content; open `select` phases stay out of `agg`;
-   template results follow `agg` / `win` arguments; key mappers must leave
-   a column; outer joins wait for column types before adding `maybe`;
-   shared `rules.rs`; consistency test).
+9. ~~Checker and IR validator agree~~ (done: open `select` phases stay out
+   of `agg`; template results follow `agg` / `win` arguments; stages
+   account for the columns they produce; outer joins wait for column types
+   before adding `maybe`; shared `rules.rs`; consistency test).
 10. ~~SQL semantics~~ (done: ORDER BY kept across derived tables; int
     division and `%` per dialect; NULLs last everywhere; T-SQL `LEN` and
     condition columns; `$n` errors in templates; Trino / Spark families;
@@ -338,10 +345,10 @@ Known gaps:
     `atomic` helpers unified; clippy clean (was 10 warnings).
 16. ~~Checker guards from the second review~~ (done; see Status): a chain of
     forward-referenced definitions is reported instead of overflowing the
-    stack; `asc` / `desc` reject a sort key; a key mapper's list or record
-    must hold strings; a `sql` template needs a type signature.
-17. ~~`distinct` lowering~~ (done; see Status): a projection, aggregate,
-    window, or key mapper after `distinct` no longer folds into it, and
+    stack; `asc` / `desc` reject a sort key; a `sql` template needs a type
+    signature.
+17. ~~`distinct` lowering~~ (done; see Status): a projection, aggregate, or
+    window after `distinct` no longer folds into it, and
     ORDER BY is emitted outside the DISTINCT — which also makes the T-SQL
     NULLS LAST emulation valid. SQLite differential cases cover it.
 18. ~~Set-operation branches and the salsa / `Workspace` text desync~~ (done;
@@ -350,5 +357,19 @@ Known gaps:
     and the workspace text are updated together, so a refused edit cannot
     strand the db on text the workspace never took, and a span that is not a
     char boundary of the rendered text no longer panics.
-19. Next: `offset` without `limit` for SQLite, and the smaller gaps from the
+19. ~~`update`~~ (done; see Status): `update {..}` merges a field record over
+    the query's row — a name the input has keeps its position and takes the
+    new expression, a new name is appended, the rest pass through — and
+    replaces `rename` / `replace` (with the `Renames` type,
+    `KeyMapper::Replace`, and `Prim::Replace`). An earlier attempt also made
+    `agg` / `win` top-level-only (rejecting `rowNumber spec + 1`); that was
+    reverted, since a window is an expression like any other and the
+    one-level rule belongs to `agg` nesting alone.
+20. ~~Field shorthand, and no key mappers~~ (done; see Status): a record field
+    `{.x}` is short for `{x = .x}`, so `select {.a, .b}` chooses columns and
+    `pick` / `omit` are gone. With them went `keyMap`, `only`, `drop`,
+    `prefix`, `suffix`, `Rel::KeyMap`, `KeyMapper`, `Cons::KeyMap`, and the
+    `Labels` type: selecting columns is ordinary `select`, and every row is
+    named by a field list.
+21. Next: `offset` without `limit` for SQLite, and the smaller gaps from the
     same review (see Known gaps).

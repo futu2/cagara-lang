@@ -2,7 +2,7 @@
 //! saturation. Phase rules are checked as soon as an expression is built, so
 //! errors point at the offending application.
 
-use crate::ir::{Bound, Expr, Frame, KeyMapper, Lit, Rel, WinSpec};
+use crate::ir::{Bound, Expr, Frame, Lit, Rel, WinSpec};
 use crate::value::{err, EResult, Prim, Template, TplKind, Value};
 
 pub fn lift(v: Value) -> EResult<Expr> {
@@ -30,6 +30,11 @@ fn checked(e: Expr) -> EResult<Value> {
 pub fn build_tpl(t: &Template, args: Vec<Value>) -> EResult<Value> {
     let sql = t.sql.clone();
     match t.kind {
+        // A scalar template is top-level like any other expression: it may
+        // wrap a window or an aggregate, but it cannot be mixed with one. If
+        // its arguments already are one, the whole template is that phase,
+        // which keeps `inc : agg (expr r int) -> expr r int = sql "$1 + 1"`
+        // an aggregate rather than an aggregate inside a scalar.
         TplKind::Scalar => checked(Expr::Tpl(sql, lift_all(args)?)),
         TplKind::Agg => checked(Expr::Agg(sql, lift_all(args)?)),
         TplKind::Win => {
@@ -59,10 +64,6 @@ fn list(v: Value) -> EResult<Vec<Value>> {
 
 fn expressions(v: Value) -> EResult<Vec<Expr>> {
     list(v)?.into_iter().map(lift).collect()
-}
-
-fn strings(v: Value) -> EResult<Vec<String>> {
-    list(v)?.into_iter().map(string).collect()
 }
 
 fn query(v: Value) -> EResult<Rel> {
@@ -172,6 +173,10 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
             let fs = fields(next())?;
             Value::Query(Rel::Select(Box::new(query(next())?), fs))
         }
+        Prim::Update => {
+            let fs = fields(next())?;
+            Value::Query(Rel::Update(Box::new(query(next())?), fs))
+        }
         Prim::AggStage => {
             let fs = fields(next())?;
             Value::Query(Rel::Agg(Box::new(query(next())?), fs))
@@ -220,35 +225,6 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
         Prim::Group => checked(Expr::Group(Box::new(lift(next())?)))?,
         Prim::Asc => Value::Dir(lift(next())?, true),
         Prim::Desc => Value::Dir(lift(next())?, false),
-        Prim::KeyMap => {
-            let m = match next() {
-                Value::Mapper(m) => m,
-                o => {
-                    return err(format!(
-                        "`keyMap` expects a key mapper such as `only [..]`, found {}",
-                        o.kind()
-                    ))
-                }
-            };
-            Value::Query(Rel::KeyMap(Box::new(query(next())?), m))
-        }
-        Prim::KeepOnly => Value::Mapper(KeyMapper::Only(strings(next())?)),
-        Prim::DropKeys => Value::Mapper(KeyMapper::Drop(strings(next())?)),
-        Prim::Replace => match next() {
-            Value::Record(fs) => Value::Mapper(KeyMapper::Replace(
-                fs.into_iter()
-                    .map(|(old, v)| Ok((old, string(v)?)))
-                    .collect::<EResult<_>>()?,
-            )),
-            o => {
-                return err(format!(
-                    "`replace` expects {{ old = \"new\" }}, found {}",
-                    o.kind()
-                ))
-            }
-        },
-        Prim::Prefix => Value::Mapper(KeyMapper::Prefix(string(next())?)),
-        Prim::Suffix => Value::Mapper(KeyMapper::Suffix(string(next())?)),
         Prim::Rows => {
             let (start, end) = (bound(next())?, bound(next())?);
             if start == Bound::UnboundedFollowing

@@ -19,11 +19,9 @@
 //! - Top-level definitions are generalized; lambda parameters are monomorphic.
 //!   Signatures are checked: their type variables are rigid.
 //!
-//! - Key mappers are typed by their literal column lists: a list of string
-//!   literals has a `Labels` type and a record of string literals a `Renames`
-//!   type (both still unify with `list string` / records of strings), so
-//!   `pick ["id"]`, `omit [..]` and `rename { a = "b" }` compute their output
-//!   row statically, with the same rules as the IR validator.
+//! - Selecting columns is `select`; `{a = .a, b = .b}` is spelled `{.a, .b}`.
+//!   `update` merges a field record over the input row, so a name the input
+//!   has keeps its position and a new name is appended.
 //!
 //! - Overloading: a name defined more than once (each with a signature) is an
 //!   overload set. Each use gets the candidates' common shape and an
@@ -45,7 +43,7 @@
 //! an unconstrained row (the schema validator checks them).
 
 use crate::db::ModuleInput;
-use crate::ir::{JoinKind, KeyMapper, Phase};
+use crate::ir::{JoinKind, Phase};
 use crate::lower::parse_module;
 use crate::resolve::{module_own, module_scope};
 use crate::rules::{self, Place};
@@ -67,10 +65,6 @@ pub enum Ty {
     /// Fields plus a tail (`Empty`, a variable, or a rigid variable).
     Row(Vec<(String, Ty)>, Box<Ty>),
     Empty,
-    /// A list of string literals (`["id", "name"]`); a `list string`.
-    Labels(Vec<String>),
-    /// A record of string literals (`{ id = "key" }`); a closed record of strings.
-    Renames(Vec<(String, String)>),
 }
 
 fn con(n: &'static str) -> Ty {
@@ -90,9 +84,6 @@ fn list(a: Ty) -> Ty {
 }
 fn sortkey(r: Ty) -> Ty {
     Ty::Con("sortkey", vec![r])
-}
-fn mapper(payload: Ty) -> Ty {
-    Ty::Con("mapper", vec![payload])
 }
 fn row(fs: Vec<(String, Ty)>, tail: Ty) -> Ty {
     Ty::Row(fs, Box::new(tail))
@@ -171,11 +162,13 @@ enum Cons {
     /// A literal of scalar type `lit` used where `target` is expected, once
     /// `target` is known (int widens to float, string to date / timestamp).
     Lit { lit: &'static str, target: Ty },
-    /// `keyMap mapper`: output row from the input row, once both are known.
-    KeyMap { mapper: Ty, input: Ty, output: Ty },
     /// `row` (a query's columns) must contain the `req` row, once `row` is
     /// known (so the query's column order is kept).
     Within { req: Ty, row: Ty },
+    /// `update fields`: like `Project`, but merged over the input row —
+    /// listed names replace the ones they match in place, and names the input
+    /// does not have are appended.
+    Update { fields: Ty, input: Ty, output: Ty },
     /// Use of an overload set at type `target`.
     Overload {
         name: String,
@@ -248,18 +241,18 @@ impl Cons {
                 lit,
                 target: f(target),
             },
-            Cons::KeyMap {
-                mapper,
-                input,
-                output,
-            } => Cons::KeyMap {
-                mapper: f(mapper),
-                input: f(input),
-                output: f(output),
-            },
             Cons::Within { req, row } => Cons::Within {
                 req: f(req),
                 row: f(row),
+            },
+            Cons::Update {
+                fields,
+                input,
+                output,
+            } => Cons::Update {
+                fields: f(fields),
+                input: f(input),
+                output: f(output),
             },
             Cons::Overload {
                 name,
@@ -690,10 +683,6 @@ impl<'w> Checker<'w> {
                     fs.extend(more);
                     cur = self.resolve(&tail);
                 }
-                Ty::Renames(ps) => {
-                    fs.extend(ps.into_iter().map(|(k, _)| (k, con("string"))));
-                    return (fs, Ty::Empty);
-                }
                 other => return (fs, other),
             }
         }
@@ -742,9 +731,8 @@ impl<'w> Checker<'w> {
                     self.trail.push((*u, self.vars[*u as usize].clone()));
                     if !self.vars[*u as usize].row_or_win {
                         self.vars[*u as usize].row_or_win = true;
-                        self.vars[*u as usize].version = self.vars[*u as usize]
-                            .version
-                            .wrapping_add(1);
+                        self.vars[*u as usize].version =
+                            self.vars[*u as usize].version.wrapping_add(1);
                     }
                 }
                 Ty::Con("row" | "win", _) => {}
@@ -763,9 +751,8 @@ impl<'w> Checker<'w> {
                     self.trail.push((*u, self.vars[*u as usize].clone()));
                     if !self.vars[*u as usize].nonnull {
                         self.vars[*u as usize].nonnull = true;
-                        self.vars[*u as usize].version = self.vars[*u as usize]
-                            .version
-                            .wrapping_add(1);
+                        self.vars[*u as usize].version =
+                            self.vars[*u as usize].version.wrapping_add(1);
                     }
                 }
                 Ty::Con("maybe", _) => return Err(NULLABLE.into()),
@@ -779,39 +766,17 @@ impl<'w> Checker<'w> {
 
     /// Unify `actual` with `expected` (the order only affects messages).
     fn unify(&mut self, actual: &Ty, expected: &Ty) -> U {
-        let (a, e) = (self.resolve_compress(actual), self.resolve_compress(expected));
+        let (a, e) = (
+            self.resolve_compress(actual),
+            self.resolve_compress(expected),
+        );
         match (&a, &e) {
             (Ty::Var(v), _) => self.bind(*v, e.clone()),
             (_, Ty::Var(v)) => self.bind(*v, a.clone()),
             (Ty::Rigid(x, _), Ty::Rigid(y, _)) if x == y => Ok(()),
             (Ty::Empty, Ty::Empty) => Ok(()),
-            // Label lists and rename records are compared by content: a key
-            // mapper built from one must not stand for another.
-            (Ty::Labels(x), Ty::Labels(y)) if x == y => Ok(()),
-            (Ty::Labels(_), Ty::Labels(_)) => Err(self.mismatch(&a, &e)),
-            (Ty::Renames(x), Ty::Renames(y)) => {
-                let (mut x, mut y) = (x.clone(), y.clone());
-                x.sort();
-                y.sort();
-                if x == y {
-                    Ok(())
-                } else {
-                    Err(self.mismatch(&a, &e))
-                }
-            }
-            (
-                Ty::Row(..) | Ty::Renames(..),
-                Ty::Row(..) | Ty::Empty | Ty::Rigid(..) | Ty::Renames(..),
-            )
-            | (Ty::Empty | Ty::Rigid(..), Ty::Row(..) | Ty::Renames(..)) => self.unify_rows(&a, &e),
-            (Ty::Labels(ls), Ty::Con("list", x)) | (Ty::Con("list", x), Ty::Labels(ls)) => {
-                if ls.is_empty() {
-                    // `[]` fits any element type.
-                    return Ok(());
-                }
-                let x = x[0].clone();
-                self.unify(&x, &con("string"))
-            }
+            (Ty::Row(..), Ty::Row(..) | Ty::Empty | Ty::Rigid(..))
+            | (Ty::Empty | Ty::Rigid(..), Ty::Row(..)) => self.unify_rows(&a, &e),
             (Ty::Con(x, xs), Ty::Con(y, ys)) if x == y && xs.len() == ys.len() => {
                 for (p, q) in xs.clone().iter().zip(ys.clone().iter()) {
                     self.unify(p, q)?;
@@ -873,7 +838,15 @@ impl<'w> Checker<'w> {
 
     fn mismatch(&self, a: &Ty, e: &Ty) -> String {
         if let (Some(x), Some(y)) = (phase_of(a), phase_of(e)) {
-            return rules::clash(x, y);
+            // An `agg` / `win` where a row expression is expected is an
+            // argument that nests one (a plain `expr` parameter, or the
+            // argument of an aggregate or window function).
+            return match (y, x) {
+                (Phase::Row, Phase::Agg | Phase::Win) => {
+                    rules::nested("this argument", x).unwrap_err()
+                }
+                _ => rules::clash(x, y),
+            };
         }
         let join = |t: &Ty| matches!(t, Ty::Con("join", _));
         let plain = |t: &Ty| matches!(t, Ty::Row(..) | Ty::Empty);
@@ -1240,8 +1213,6 @@ impl<'w> Checker<'w> {
                 out.push(')');
             }
             Ty::Empty => out.push_str("empty"),
-            Ty::Labels(ls) => out.push_str(&format!("labels{ls:?}")),
-            Ty::Renames(ps) => out.push_str(&format!("renames{ps:?}")),
         }
     }
 
@@ -1323,9 +1294,7 @@ impl<'w> Checker<'w> {
         if matches!(res, TypeExpr::App { head, .. } if head == "agg" || head == "win")
             && args.iter().any(|a| contains_nullable_expr(a))
         {
-            return Err(
-                "aggregate/window inputs cannot use `maybe`; use `coalesce` first".into(),
-            );
+            return Err("aggregate/window inputs cannot use `maybe`; use `coalesce` first".into());
         }
         // A plain `expr` result takes the phase of an `agg` / `win`
         // argument (a scalar template over an aggregate is an aggregate).
@@ -1342,6 +1311,10 @@ impl<'w> Checker<'w> {
         let phase = match res {
             TypeExpr::App { head, .. } if head == "agg" || head == "win" => con("row"),
             _ => match wrapped.as_slice() {
+                // A plain `expr` parameter is phase-polymorphic over row and
+                // aggregate (so `_+_` works on aggregates), but never over
+                // `win`: a window is the whole of a field, so it is not an
+                // argument to anything.
                 [] => self.fresh(),
                 ["agg"] => con("agg"),
                 ["win"] => con("win"),
@@ -1476,7 +1449,7 @@ impl<'w> Checker<'w> {
                     .collect();
                 row(fs, self.inst(&tail, map, gens))
             }
-            t @ (Ty::Var(_) | Ty::Rigid(..) | Ty::Empty | Ty::Labels(_) | Ty::Renames(_)) => t,
+            t @ (Ty::Var(_) | Ty::Rigid(..) | Ty::Empty) => t,
         }
     }
 
@@ -1526,7 +1499,7 @@ impl<'w> Checker<'w> {
                     .collect();
                 row(fs, self.gen(&tail, map, gens))
             }
-            t @ (Ty::Gen(_) | Ty::Empty | Ty::Labels(_) | Ty::Renames(_)) => t,
+            t @ (Ty::Gen(_) | Ty::Empty) => t,
         }
     }
 
@@ -1659,35 +1632,16 @@ impl<'w> Checker<'w> {
                     let t = self.infer(env, v)?;
                     out.push((k.clone(), t));
                 }
-                let lits: Option<Vec<(String, String)>> = fs
-                    .iter()
-                    .map(|(k, v)| match &v.kind {
-                        ExprKind::Lit(ast::Lit::Str(s)) => Some((k.clone(), s.clone())),
-                        _ => None,
-                    })
-                    .collect();
-                match lits {
-                    Some(ps) if !ps.is_empty() => Ok(Ty::Renames(ps)),
-                    _ => Ok(row(out, Ty::Empty)),
-                }
+                Ok(row(out, Ty::Empty))
             }
             ExprKind::List(xs) => {
-                let lits: Option<Vec<String>> = xs
-                    .iter()
-                    .map(|x| match &x.kind {
-                        ExprKind::Lit(ast::Lit::Str(s)) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                if let Some(ls) = lits {
-                    return Ok(Ty::Labels(ls));
-                }
                 let mut ts = Vec::new();
                 for x in xs {
                     ts.push((self.infer(env, x)?, x.span));
                 }
                 let Some((first, _)) = ts.first() else {
-                    unreachable!("empty lists are `Labels`")
+                    // An empty list has no element to go on; it fits any.
+                    return Ok(list(self.fresh()));
                 };
                 // A list of column expressions is a list of sort / partition
                 // keys, so `[asc .x, .y]` has one element type.
@@ -1772,7 +1726,7 @@ impl<'w> Checker<'w> {
                 self.key_phase(&p)?;
                 self.unify(&r, &want)
             }
-            (Ty::Row(..) | Ty::Empty | Ty::Renames(_), Ty::Con("winspec", w)) => {
+            (Ty::Row(..) | Ty::Empty, Ty::Con("winspec", w)) => {
                 let r = w[0].clone();
                 self.winspec(&a, &r)
             }
@@ -1780,7 +1734,6 @@ impl<'w> Checker<'w> {
                 let (x, y) = (x[0].clone(), y[0].clone());
                 self.coerce(&x, &y)
             }
-            (Ty::Labels(_), Ty::Con("list", y)) => self.unify(&con("string"), &y[0]),
             _ => self.unify(&a, &e),
         }
     }
@@ -1859,6 +1812,16 @@ impl<'w> Checker<'w> {
                 self.pending.push((c, sp));
                 fun(f, fun(query(a), query(b)))
             }
+            Update => {
+                let (f, a, b) = (self.fresh(), self.fresh(), self.fresh());
+                let c = Cons::Update {
+                    fields: f.clone(),
+                    input: a.clone(),
+                    output: b.clone(),
+                };
+                self.pending.push((c, sp));
+                fun(f, fun(query(a), query(b)))
+            }
             Order => {
                 let (req, r) = (self.fresh(), self.fresh());
                 self.pending.push((
@@ -1882,7 +1845,10 @@ impl<'w> Checker<'w> {
                 let (r, a) = (self.fresh(), self.fresh());
                 fun(
                     list(a.clone()),
-                    fun(expr(con("row"), r.clone(), a), expr(con("row"), r, con("bool"))),
+                    fun(
+                        expr(con("row"), r.clone(), a),
+                        expr(con("row"), r, con("bool")),
+                    ),
                 )
             }
             Join(kind) => {
@@ -1938,28 +1904,6 @@ impl<'w> Checker<'w> {
                 let (r, a) = (self.fresh(), self.fresh());
                 fun(expr(con("row"), r.clone(), a), sortkey(r))
             }
-            KeyMap => {
-                let (mp, a, b) = (self.fresh(), self.fresh(), self.fresh());
-                self.pending.push((
-                    Cons::KeyMap {
-                        mapper: mp.clone(),
-                        input: a.clone(),
-                        output: b.clone(),
-                    },
-                    sp,
-                ));
-                fun(mp, fun(query(a), query(b)))
-            }
-            KeepOnly | DropKeys | Replace => {
-                let tag = match p {
-                    KeepOnly => "only",
-                    DropKeys => "drop",
-                    _ => "replace",
-                };
-                let arg = self.fresh();
-                fun(arg.clone(), mapper(Ty::Con(tag, vec![arg])))
-            }
-            Prefix | Suffix => fun(s, mapper(con("opaque"))),
             Rows => fun(con("bound"), fun(con("bound"), con("frame"))),
             UnboundedPreceding | UnboundedFollowing | CurrentRow => con("bound"),
             Preceding | Following => fun(i, con("bound")),
@@ -2167,38 +2111,86 @@ impl<'w> Checker<'w> {
                 Ty::Var(_) => Ok(false),
                 _ => self.unify(row, req).map(|_| true),
             },
-            Cons::KeyMap {
-                mapper,
+            Cons::Update {
+                fields,
                 input,
                 output,
             } => {
-                let km = match self.key_mapper(mapper)? {
-                    Some(Some(km)) => km,
-                    // Waiting for the mapper.
-                    None => return Ok(false),
-                    // Not static (`prefix`, a computed list): the IR
-                    // validator checks it; the output stays unconstrained.
-                    Some(None) => return Ok(true),
-                };
-                let (fs, tail) = self.flatten(input);
-                if matches!(tail, Ty::Var(_)) {
+                // The record of new values must be known, and so must the
+                // input's columns: the output depends on both.
+                let (fs, tail) = self.flatten(fields);
+                match tail {
+                    Ty::Empty => {}
+                    Ty::Var(_) if fs.is_empty() => return Ok(false),
+                    _ => {
+                        return Err(format!(
+                            "`update` expects a record of column expressions, found {}",
+                            self.show(fields)
+                        ))
+                    }
+                }
+                if fs.is_empty() {
+                    return Err("`update` needs at least one field".into());
+                }
+                let mut seen: Vec<String> = Vec::new();
+                for (n, _) in &fs {
+                    if seen.contains(n) {
+                        return Err(format!("field `{n}` appears twice in `update`"));
+                    }
+                    seen.push(n.clone());
+                }
+                // Each updated expression is checked exactly like a `select`
+                // field: row-phase, over the input row. A scalar constant is
+                // allowed and lifted the same way.
+                let mut values = Vec::new();
+                for (l, t) in &fs {
+                    match self.resolve(t) {
+                        Ty::Con(s, sa) if sa.is_empty() && SCALARS.contains(&s) => {
+                            values.push((l.clone(), None, t.clone()))
+                        }
+                        Ty::Con("expr", a) => {
+                            let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
+                            if is_join(&self.resolve(&r)) {
+                                return Err(format!("field `{l}`: {}", rules::JOIN_ONLY));
+                            }
+                            self.stage_phase(&p, false)
+                                .map_err(|m| format!("field `{l}` {m}"))?;
+                            if matches!(self.resolve(input), Ty::Var(_)) {
+                                return Ok(false);
+                            }
+                            self.unify(input, &r)
+                                .map_err(|m| format!("field `{l}`: {m}"))?;
+                            values.push((l.clone(), Some(v.clone()), v));
+                        }
+                        o => {
+                            return Err(format!(
+                                "field `{l}` of `update` must be a column expression or \
+                                 constant, found {}",
+                                self.show(&o)
+                            ))
+                        }
+                    }
+                }
+                let (ifs, itail) = self.flatten(input);
+                if matches!(itail, Ty::Var(_)) {
                     return Ok(false);
                 }
-                let names: Vec<String> = fs.iter().map(|(k, _)| k.clone()).collect();
-                let cols = km
-                    .apply(&names)?
+                let named = ifs.iter().map(|(k, _)| (k.clone(), ())).collect::<Vec<_>>();
+                let cols = crate::schema::merge_columns(&named, &fs)?;
+                // Each output column keeps the input's type, unless the field
+                // list replaced it; a name the input does not have is new, so
+                // its type comes from the new expression alone.
+                let out = cols
                     .into_iter()
-                    .map(|(old, new)| {
-                        let t = fs.iter().find(|(k, _)| *k == old).map(|(_, t)| t.clone());
-                        (new, t.expect("key mapper output comes from the input"))
+                    .map(|name| {
+                        let old = ifs.iter().find(|(k, _)| *k == name).map(|(_, t)| t.clone());
+                        match values.iter().find(|(k, _, _)| *k == name) {
+                            Some((_, _, v)) => (name, v.clone()),
+                            None => (name, old.unwrap_or_else(|| self.fresh())),
+                        }
                     })
                     .collect();
-                let tail = if matches!(km, KeyMapper::Only(_)) {
-                    Ty::Empty
-                } else {
-                    tail
-                };
-                self.unify(&row_or_tail(cols, tail), output)?;
+                self.unify(&row_or_tail(out, itail), output)?;
                 Ok(true)
             }
             Cons::JoinOut {
@@ -2243,71 +2235,6 @@ impl<'w> Checker<'w> {
                 Ok(true)
             }
         }
-    }
-
-    /// The static key mapper of a `mapper` type: `None` = not known yet,
-    /// `Some(None)` = known but not static.
-    fn key_mapper(&self, t: &Ty) -> Result<Option<Option<KeyMapper>>, String> {
-        let payload = match self.resolve(t) {
-            Ty::Var(_) => return Ok(None),
-            Ty::Con("mapper", a) => self.resolve(&a[0]),
-            o => {
-                return Err(format!(
-                    "`keyMap` expects a key mapper such as `only [..]`, found {}",
-                    self.show(&o)
-                ))
-            }
-        };
-        let (tag, arg) = match &payload {
-            Ty::Var(_) => return Ok(None),
-            Ty::Con("opaque", _) => return Ok(Some(None)),
-            Ty::Con(tag, a) => (*tag, self.resolve(&a[0])),
-            o => return Err(format!("not a key mapper: {}", self.show(o))),
-        };
-        Ok(match (tag, arg) {
-            (_, Ty::Var(_)) => None,
-            ("only", Ty::Labels(ls)) => Some(Some(KeyMapper::Only(ls))),
-            ("drop", Ty::Labels(ls)) => Some(Some(KeyMapper::Drop(ls))),
-            ("only" | "drop", Ty::Con("list", elem)) => match self.resolve(&elem[0]) {
-                Ty::Var(_) => return Ok(None),
-                Ty::Con("string", _) => Some(None),
-                o => {
-                    return Err(format!(
-                        "a key mapper's column list must hold strings, found {}",
-                        self.show(&o)
-                    ))
-                }
-            },
-            ("replace", Ty::Renames(ps)) => Some(Some(KeyMapper::Replace(ps))),
-            ("replace", Ty::Empty) => Some(Some(KeyMapper::Replace(vec![]))),
-            ("replace", Ty::Row(fs, _)) => {
-                for (k, t) in &fs {
-                    match self.resolve(t) {
-                        Ty::Var(_) => return Ok(None),
-                        Ty::Con("string", _) => {}
-                        o => {
-                            return Err(format!(
-                                "a `replace` record must hold strings, but `{k}` is {}",
-                                self.show(&o)
-                            ))
-                        }
-                    }
-                }
-                Some(None)
-            }
-            ("only" | "drop", o) => {
-                return Err(format!(
-                    "`{tag}` expects a list of column names, found {}",
-                    self.show(&o)
-                ))
-            }
-            (_, o) => {
-                return Err(format!(
-                    "`replace` expects {{ old = \"new\" }}, found {}",
-                    self.show(&o)
-                ))
-            }
-        })
     }
 
     /// Phase rules for one `select` / `agg` field (messages follow the label).
@@ -2428,14 +2355,6 @@ impl Printer {
                 }
             },
             Ty::Empty => "{}".into(),
-            Ty::Labels(ls) => {
-                let ls: Vec<String> = ls.iter().map(|l| format!("{l:?}")).collect();
-                format!("[{}]", ls.join(", "))
-            }
-            Ty::Renames(ps) => {
-                let ps: Vec<String> = ps.iter().map(|(k, v)| format!("{k} = {v:?}")).collect();
-                format!("{{ {} }}", ps.join(", "))
-            }
             Ty::Row(fs, tail) => {
                 let body: Vec<String> = fs
                     .iter()

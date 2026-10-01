@@ -55,7 +55,41 @@ user_orders = users
 
 `.<id` and `.>user_id` are only used in the join predicate. Outside it, `.id`
 refers to the joined output row; when both inputs have the same name, the left
-column wins. Rename a column before joining if both values are needed.
+column wins. Give a column a new name with `update` before joining if both
+values are needed.
+
+`select` chooses the columns of the output row. A field `{.name}` is short for
+`{name = .name}`, and it mixes with computed fields:
+
+```haskell
+picked = users & select {.id, label = upper .name}
+```
+
+`select` replaces the whole row; `update` merges over it. A name the input
+already has keeps its position and takes the new expression, a name it does
+not have is appended, and everything else passes through:
+
+```haskell
+greeting = users & update { age = .age + 1, display_name = .name }
+```
+
+So `update` renames or recomputes a column, while `select` chooses the
+columns to publish:
+
+```haskell
+public_users = schema.users
+  & select {.id, display_name = .name}
+```
+
+`agg` and windows do not nest: an `agg` field is one aggregate expression. A
+window is an ordinary expression, so it may take part in a computation — but
+it is computed per row, so it cannot go in a `where`, a sort key, or a join
+predicate. Compute it in its own stage and filter the new column later:
+
+```haskell
+ranked = orders & select { id = .id, rn = rowNumber { order = [desc .amount] } }
+top = ranked & where (.rn <= 3)
+```
 
 The long stage names are the easiest form to learn first. Cagara also has
 shorthands: `&?` for `where`, `&=` for `select`, `&*` for `agg`, `&.` for
@@ -75,5 +109,5 @@ automatically. Use an alias to make a module's exported definitions explicit:
 ```haskell
 import "schema.cagara" as schema
 
-public_users = schema.users & omit ["password_hash"]
+public_users = schema.users & select {.id, .name}
 ```

@@ -212,48 +212,106 @@ fn join_errors() {
 }
 
 #[test]
-fn key_mappers_are_typed() {
+fn update_merges_over_the_input_row() {
+    // An overwritten field keeps its position; the rest pass through.
     assert_eq!(
-        ty("q = users & pick [\"name\", \"id\"]\n", "q"),
-        "query { name = string, id = int }"
+        ty("q = users & update { age = .age + 1 }\n", "q"),
+        "query { id = int, name = string, age = int, active = bool }"
+    );
+    // A name the input does not have is appended, in field order.
+    assert_eq!(
+        ty("q = users & update { label = .name }\n", "q"),
+        "query { id = int, name = string, age = int, active = bool, label = string }"
     );
     assert_eq!(
-        ty("q = users & omit [\"active\", \"age\"]\n", "q"),
-        "query { id = int, name = string }"
+        ty("q = users & update { age = 0, tag = \"x\" }\n", "q"),
+        "query { id = int, name = string, age = int, active = bool, tag = string }"
     );
+    // An overwrite may change a field's type.
+    assert_eq!(
+        ty("q = users & update { age = 1.5 }\n", "q"),
+        "query { id = int, name = string, age = float, active = bool }"
+    );
+    // Only the first field's own position matters: `update` is not `select`.
+    assert_eq!(
+        ty("q = users & update { name = \"x\", id = 9 }\n", "q"),
+        "query { id = int, name = string, age = int, active = bool }"
+    );
+    // It composes with the rest of the pipeline, and a later stage sees the
+    // new column.
     assert_eq!(
         ty(
-            "q = users & rename { id = \"user_id\", name = \"label\" }\n",
+            "q = users & update { n = .age + 1 } & where (.n > 3) & select { a = .n }\n",
             "q"
         ),
-        "query { user_id = int, label = string, age = int, active = bool }"
+        "query { a = int }"
     );
-    // A rename feeding a join and a later select is fully typed.
-    assert_eq!(
-        ty("q = orders & rename { id = \"order_id\" } & inner users (.<user_id == .>id) & select { o = .order_id, n = .name }\n", "q"),
-        "query { o = int, n = string }"
-    );
-    // Reusable mappers through ordinary definitions.
-    let src = "keep = pick [\"id\"]\na = users & keep\nb = orders & keep\n";
-    assert_eq!(ty(src, "a"), "query { id = int }");
-    assert_eq!(ty(src, "b"), "query { id = int }");
-    // `prefix` is not static: the row is left to the IR validator.
-    assert_eq!(ty("q = users & keyMap (prefix \"u_\")\n", "q"), "query a");
 }
 
 #[test]
-fn key_mapper_errors() {
-    assert!(err("q = users & pick [\"nope\"]\n", "q").contains("no column `nope`"));
-    assert!(err("q = users & pick [\"id\", \"id\"]\n", "q").contains("listed twice"));
-    assert!(err("q = users & rename { id = \"name\" }\n", "q").contains("`name` twice"));
-    assert!(err("q = users & omit [\"age\"] & where (.age > 1)\n", "q").contains("no column `age`"));
-    assert!(err(
-        "q = users & rename { name = \"label\" } & select { n = .name }\n",
-        "q"
-    )
-    .contains("no column `name`"));
-    assert!(err("q = users & pick 5\n", "q").contains("list of column names"));
-    // Literal lists still work as ordinary values.
+fn update_errors() {
+    // An aggregate is not allowed in `update` any more than in `select`.
+    assert!(err("q = users & update { n = count }\n", "q").contains("belong in `agg`"));
+    assert!(err("q = users & update { n = .nope }\n", "q").contains("no column `nope`"));
+    assert!(err("q = users & update { a = 1, a = 2 }\n", "q").contains("twice"));
+    assert!(err("q = users & update { }\n", "q").contains("at least one field"));
+}
+
+#[test]
+fn field_shorthand_selects_columns() {
+    // `{.a, .b}` is `{a = .a, b = .b}`: selecting columns is plain `select`
+    // now that the shorthand exists.
+    assert_eq!(
+        ty("q = users & select {.name, .id}\n", "q"),
+        "query { name = string, id = int }"
+    );
+    assert_eq!(
+        ty("q = users & select {.id, label = .name}\n", "q"),
+        "query { id = int, label = string }"
+    );
+    assert_eq!(
+        ty("q = users & select {.id, .name, .age, .active}\n", "q"),
+        "query { id = int, name = string, age = int, active = bool }"
+    );
+    // The shorthand works anywhere a record does, including `update`.
+    assert_eq!(
+        ty("q = orders & select {.id, amount = .amount + 1.0}\n", "q"),
+        "query { id = int, amount = float }"
+    );
+    assert_eq!(
+        ty("q = users & select {.id} & select {.id}\n", "q"),
+        "query { id = int }"
+    );
+    // A missing column is still a missing column.
+    assert!(err("q = users & select {.nope}\n", "q").contains("no column `nope`"));
+}
+
+#[test]
+fn update_renames_and_recomputes() {
+    // Renaming a column is `update` with the value moved to the new name;
+    // the old name keeps its place unless it is redefined.
+    assert_eq!(
+        ty(
+            "q = users & update { user_id = .id, label = .name }\n",
+            "q"
+        ),
+        "query { id = int, name = string, age = int, active = bool, user_id = int, label = string }"
+    );
+    // An update feeding a join and a later select is fully typed.
+    assert_eq!(
+        ty(
+            "q = orders & update { order_id = .id } & inner users (.<user_id == .>id) \
+             & select { o = .order_id, n = .name }\n",
+            "q"
+        ),
+        "query { o = int, n = string }"
+    );
+    // A transformation is reusable through an ordinary definition.
+    let src = "keep = q => q & select {.id}\na = users & keep\nb = orders & keep\n";
+    assert_eq!(ty(src, "a"), "query { id = int }");
+    assert_eq!(ty(src, "b"), "query { id = int }");
+    // A list of strings is just a list of strings now, so it is not a sort
+    // key: that used to be a key mapper's argument list.
     assert!(err("q = users & order [\"id\"]\n", "q").contains("type mismatch"));
 }
 
@@ -315,11 +373,9 @@ fn checker_rejects_what_the_evaluator_cannot_build() {
     // type-check and then fail in the evaluator.
     let e = err("q = users & order [asc (desc .id)]\n", "q");
     assert!(e.contains("sortkey"), "{e}");
-    // A key mapper's payload must be a string, or the evaluator dies on it.
-    let e = err("q = users & keyMap (only [1])\n", "q");
-    assert!(e.contains("strings"), "{e}");
-    let e = err("q = users & keyMap (rename { id = 5 })\n", "q");
-    assert!(e.contains("strings"), "{e}");
+    // A template needs its signature, or the evaluator cannot size it.
+    let e = err("q = users & select { x = sql \"1\" }\n", "q");
+    assert!(e.contains("signature"), "{e}");
 }
 
 #[test]
@@ -451,7 +507,10 @@ fn aggregate_nullability_is_explicit() {
         "bad : expr r (maybe a) -> agg (expr r (maybe a)) = sql \"SUM($1)\"\n",
         "bad",
     );
-    assert!(e.contains("aggregate/window inputs cannot use `maybe`"), "{e}");
+    assert!(
+        e.contains("aggregate/window inputs cannot use `maybe`"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -671,28 +730,16 @@ fn examples_are_consistent() {
 }
 
 #[test]
-fn label_lists_unify_by_content() {
-    // One key mapper parameter used at two different column lists: before,
-    // `r.b` typed as `{ id = int }` and the validator found no `id`.
+fn a_select_helper_types_at_each_use() {
+    // One helper whose stage is applied to two different rows: each use is
+    // checked against its own input, so both are valid.
     let rs = consistent_src(
-        "r = (p => { a = users & p [\"id\"], b = users & p [\"name\"] }) pick\n\
-         q = r.b & select { z = .id + 1 }\n\
-         s = (p => { a = users & p { id = \"x\" }, b = users & p { id = \"y\" } }) rename\n\
-         same = (p => { a = users & p [\"id\"], b = users & p [\"id\"] }) pick\n",
+        "h = p => users & select { id = .id } & p\n\
+         a = h (select { z = .id })\n\
+         b = users & select {.id}\n",
     );
-    assert!(
-        result(&rs, "r")
-            .as_ref()
-            .is_err_and(|e| e.contains("mismatch")),
-        "{rs:?}"
-    );
-    assert!(
-        result(&rs, "s")
-            .as_ref()
-            .is_err_and(|e| e.contains("mismatch")),
-        "{rs:?}"
-    );
-    assert!(result(&rs, "same").is_ok(), "{rs:?}");
+    assert_eq!(result(&rs, "a").as_deref(), Ok("query { z = int }"));
+    assert_eq!(result(&rs, "b").as_deref(), Ok("query { id = int }"));
 }
 
 #[test]
@@ -711,6 +758,43 @@ fn select_fields_stay_out_of_the_aggregate_phase() {
     );
     assert!(result(&rs, "ok").is_ok(), "{rs:?}");
     assert!(result(&rs, "win").is_ok(), "{rs:?}");
+}
+
+#[test]
+fn windows_compose_in_an_expression() {
+    // A window is an expression like any other: it may be the whole field, an
+    // operand, or part of a larger expression. Only a filter, a key, and a
+    // join predicate reject it (a window is computed per row).
+    let rs = consistent_src(
+        "spec = { order = [asc .id] }\n\
+         whole = users & select { id = .id, rn = rowNumber spec }\n\
+         operand = users & select { id = .id, x = rowNumber spec + 1 }\n\
+         two = users & select { id = .id, x = rowNumber spec + rowNumber spec }\n\
+         filtered = users & where (rowNumber spec <= 3)\n\
+         scoped = users & select { id = .id, rn = countOver spec }\n",
+    );
+    assert_eq!(
+        result(&rs, "whole").as_deref(),
+        Ok("query { id = int, rn = int }")
+    );
+    assert_eq!(
+        result(&rs, "operand").as_deref(),
+        Ok("query { id = int, x = int }")
+    );
+    assert_eq!(
+        result(&rs, "two").as_deref(),
+        Ok("query { id = int, x = int }")
+    );
+    assert!(
+        result(&rs, "filtered")
+            .as_ref()
+            .is_err_and(|e| e.contains("window")),
+        "{rs:?}"
+    );
+    assert_eq!(
+        result(&rs, "scoped").as_deref(),
+        Ok("query { id = int, rn = int }")
+    );
 }
 
 #[test]
@@ -737,25 +821,18 @@ fn a_scalar_template_over_an_aggregate_is_an_aggregate() {
 }
 
 #[test]
-fn key_mappers_leave_some_column() {
+fn select_needs_at_least_one_field() {
     let rs = consistent_src(
-        "a = users & pick []\n\
-         b = users & omit [\"id\", \"name\", \"age\", \"active\"]\n\
-         c = users & omit [\"id\", \"name\", \"age\"]\n",
+        "a = users & select { }\n\
+         b = users & select {.active}\n",
     );
     assert!(
         result(&rs, "a")
             .as_ref()
-            .is_err_and(|e| e.contains("no columns")),
+            .is_err_and(|e| e.contains("at least one field")),
         "{rs:?}"
     );
-    assert!(
-        result(&rs, "b")
-            .as_ref()
-            .is_err_and(|e| e.contains("no columns")),
-        "{rs:?}"
-    );
-    assert_eq!(result(&rs, "c").as_deref(), Ok("query { active = bool }"));
+    assert_eq!(result(&rs, "b").as_deref(), Ok("query { active = bool }"));
 }
 
 #[test]

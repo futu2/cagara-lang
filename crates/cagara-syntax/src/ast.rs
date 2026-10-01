@@ -354,6 +354,18 @@ impl Lower {
                 n.children()
                     .filter(|c| c.kind() == K::RecordField)
                     .filter_map(|f| {
+                        // `name = expr`, or the shorthand `.name`, which
+                        // stands for `name = .name`.
+                        if let Some(t) = token(&f, K::Field) {
+                            let name = t.text()[1..].to_string();
+                            let r = t.text_range();
+                            let sp = Span {
+                                start: r.start().into(),
+                                end: r.end().into(),
+                            };
+                            let v = self.mk(sp, ExprKind::Field(Side::Single, name.clone()));
+                            return Some((name, v));
+                        }
                         let name = token(&f, K::Ident)?.text().to_string();
                         let v = f.children().next()?;
                         Some((name, self.expr(&v)))

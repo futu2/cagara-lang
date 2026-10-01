@@ -154,7 +154,7 @@ fn running_total_frame() {
 #[test]
 fn join_uses_sides() {
     let s = sql(
-        "q = orders & rename { id = \"order_id\" } & inner users (.<user_id == .>id)\n  & select { order_id = .order_id, name = .name }\n",
+        "q = orders & select { order_id = .id, user_id = .user_id } & inner users (.<user_id == .>id)\n  & select { order_id = .order_id, name = .name }\n",
         "q",
     );
     assert!(s.contains("INNER JOIN public.users AS t2"), "{s}");
@@ -176,7 +176,10 @@ fn distinct_case_cast_and_membership() {
     );
     assert!(!s.starts_with("SELECT DISTINCT"), "{s}");
     assert!(s.contains("id IN (1, 2)"), "{s}");
-    assert!(s.contains("CASE WHEN (id = 1) THEN 'yes' ELSE 'no' END"), "{s}");
+    assert!(
+        s.contains("CASE WHEN (id = 1) THEN 'yes' ELSE 'no' END"),
+        "{s}"
+    );
     assert!(s.contains("CAST(id AS FLOAT) AS n"), "{s}");
 }
 
@@ -192,7 +195,7 @@ fn distinct_is_a_lowering_barrier() {
     );
     assert!(win.contains("FROM (SELECT DISTINCT"), "{win}");
     assert!(win.contains("ROW_NUMBER()"), "{win}");
-    let pick = sql("q = users & distinct & omit [\"age\"]\n", "q");
+    let pick = sql("q = users & distinct & select {.id, .name, .active}\n", "q");
     assert!(pick.contains("FROM (SELECT DISTINCT"), "{pick}");
     // `order` sorts outside the dedup, so an emulated NULLS LAST key never
     // lands in a DISTINCT select list (T-SQL rejects that).
@@ -201,7 +204,10 @@ fn distinct_is_a_lowering_barrier() {
         ordered.contains("FROM (SELECT DISTINCT id, name, age, active"),
         "{ordered}"
     );
-    assert!(ordered.contains("ORDER BY CASE WHEN name IS NULL"), "{ordered}");
+    assert!(
+        ordered.contains("ORDER BY CASE WHEN name IS NULL"),
+        "{ordered}"
+    );
     // A projection *before* `distinct` defines the row, so it still fuses.
     let fused = sql("q = users & select { n = .name } & distinct\n", "q");
     assert_eq!(fused, "SELECT DISTINCT name AS n FROM public.users");
@@ -299,17 +305,24 @@ fn semi_and_anti_joins_use_exists_without_right_columns() {
 }
 
 #[test]
-fn pick_omit_rename() {
+fn field_shorthand_and_update() {
+    // `{.a, .b}` is `{a = .a, b = .b}`.
     assert_eq!(
-        sql("q = users & pick [\"id\", \"name\"]\n", "q"),
+        sql("q = users & select {.id, .name}\n", "q"),
         "SELECT id, name FROM public.users"
     );
+    // An updated name the input does not have is appended.
     assert_eq!(
         sql(
-            "q = users & omit [\"active\"] & rename { name = \"label\" }\n",
+            "q = users & select {.id, .name, .age} & update { label = .name }\n",
             "q"
         ),
-        "SELECT id, name AS label, age FROM public.users"
+        "SELECT id, name, age, name AS label FROM public.users"
+    );
+    // `update` overwrites in place, so a recomputed column keeps its slot.
+    assert_eq!(
+        sql("q = users & update { age = .age + 1 }\n", "q"),
+        "SELECT id, name, age + 1 AS age, active FROM public.users"
     );
 }
 
@@ -326,7 +339,7 @@ fn errors() {
     assert!(error("q = users & where (count >= 1)\n", "q").contains("aggregate"));
     assert!(error("q = users & where (.salary > 1)\n", "q").contains("no column `salary`"));
     assert!(error("q = orders & inner users (.user_id == .id)\n", "q").contains("which input"));
-    assert!(error("q = users & pick [\"nope\"]\n", "q").contains("no column `nope`"));
+    assert!(error("q = users & select {.nope}\n", "q").contains("no column `nope`"));
     assert!(error("q = table \"s\" \"t\"\n", "q").contains("unknown"));
     assert!(error("q = q\n", "q").contains("refers to itself"));
     assert!(error(
@@ -391,8 +404,8 @@ fn nulls_and_outer_joins() {
 
 #[test]
 fn join_inputs_are_inlined_when_safe() {
-    // A rename before a join needs no derived table.
-    let s = sql("q = orders & rename { id = \"order_id\" } & inner users (.<user_id == .>id) & select { o = .order_id, n = .name }\n", "q");
+    // An update before a join needs no derived table.
+    let s = sql("q = orders & select { order_id = .id, user_id = .user_id } & inner users (.<user_id == .>id) & select { o = .order_id, n = .name }\n", "q");
     assert_eq!(s, "SELECT t1.id AS o, t2.name AS n FROM public.orders AS t1 INNER JOIN public.users AS t2 ON t1.user_id = t2.id");
     // Left join: the preserved side's filter goes to WHERE, the other into ON.
     let s = sql("q = orders & where (.amount > 10.0) & leftJoin (users & where .active) (.<user_id == .>id)\n", "q");
@@ -415,8 +428,8 @@ fn join_inputs_are_inlined_when_safe() {
         "q",
     );
     assert!(s.contains("(SELECT"), "{s}");
-    // Chains of joins stay flat, including a self-join with renamed columns.
-    let s = sql("q = orders & inner users (.<user_id == .>id) & leftJoin (users & rename { id = \"uid\", name = \"n2\", active = \"a2\" }) (.<user_id == .>uid)\n", "q");
+    // Chains of joins stay flat, including a self-join with an updated column.
+    let s = sql("q = orders & inner users (.<user_id == .>id) & leftJoin (users & select { uid = .id, name = .name, age = .age, active = .active }) (.<user_id == .>uid)\n", "q");
     assert!(!s.contains("(SELECT"), "{s}");
     assert!(
         s.contains("LEFT JOIN public.users AS t3 ON t1.user_id = t3.id"),
@@ -529,7 +542,9 @@ fn optimizer_keeps_stage_boundaries() {
 
 #[test]
 fn validator_errors_point_at_the_stage() {
-    let src = format!("{USERS}q = users\n  & keyMap (prefix \"u_\")\n  & where (.id > 1)\nb = table \"s\" \"t\" & select {{ x = .x }}\n");
+    // `q` reads the output of a definition only known at evaluation time, so
+    // the IR validator (not the checker) reports the missing column.
+    let src = format!("{USERS}u = users & select {{.id, .name}}\nq = u\n  & where (.nope > 1)\nb = table \"s\" \"t\" & select {{ x = .x }}\n");
     let ws = Workspace::from_source(&src);
     let out = root_queries(&ws);
     let get = |n: &str| {
@@ -541,9 +556,9 @@ fn validator_errors_point_at_the_stage() {
             .unwrap_err()
     };
     let d = get("q");
-    assert!(d.message.contains("no column `id`"), "{d}");
-    assert_eq!(d.source.trim(), "& where (.id > 1)", "{d}");
-    assert_eq!((d.col, d.width), (5, "where (.id > 1)".len()), "{d}");
+    assert!(d.message.contains("no column `nope`"), "{d}");
+    assert_eq!(d.source.trim(), "& where (.nope > 1)", "{d}");
+    assert_eq!((d.col, d.width), (5, "where".len()), "{d}");
     let d = get("b");
     assert!(d.message.contains("unknown"), "{d}");
     assert_eq!((d.col, d.width), (5, "table \"s\" \"t\"".len()), "{d}");
@@ -921,26 +936,31 @@ fn negative_numbers_do_not_make_comments() {
 
 #[test]
 fn identifiers_are_quoted_when_needed() {
-    let src = "t : query { id = int, order = int, userId = int } = table \"my schema\" \"select\"\n\
-               q = t & select { o = .order, u = .userId } & rename { o = \"x FROM t; DROP TABLE t; --\" }\n";
+    let src =
+        "t : query { id = int, order = int, userId = int } = table \"my schema\" \"select\"\n\
+               q = t & select { moved = .order, id = .id, userId = .userId }\n";
     assert_eq!(
         sql(src, "q"),
-        "SELECT \"order\" AS \"x FROM t; DROP TABLE t; --\", \"userId\" AS u FROM \"my schema\".\"select\""
+        "SELECT \"order\" AS moved, id, \"userId\" FROM \"my schema\".\"select\""
+    );
+    // A column name that looks like SQL is quoted, never emitted bare.
+    let src =
+        "t : query { id = int, order = int, userId = int } = table \"my schema\" \"select\"\n\
+               q = t & select { x = .order }\n";
+    assert_eq!(
+        sql(src, "q"),
+        "SELECT \"order\" AS x FROM \"my schema\".\"select\""
     );
     // The quote character itself is doubled, in each dialect's quotes.
-    let src =
-        "t : query { id = int } = table \"a`b\" \"c\\\"d\"\nq = t & rename { id = \"x]y\" }\n";
-    assert_eq!(
-        sql(src, "q"),
-        "SELECT id AS \"x]y\" FROM \"a`b\".\"c\"\"d\""
-    );
+    let src = "t : query { id = int } = table \"a`b\" \"c\\\"d\"\nq = t & update { x = .id }\n";
+    assert_eq!(sql(src, "q"), "SELECT id, id AS x FROM \"a`b\".\"c\"\"d\"");
     assert_eq!(
         dialect(src, "q", "mysql").unwrap(),
-        "SELECT id AS `x]y` FROM `a``b`.`c\"d`"
+        "SELECT id, id AS x FROM `a``b`.`c\"d`"
     );
     assert_eq!(
         dialect(src, "q", "tsql").unwrap(),
-        "SELECT id AS [x]]y] FROM [a`b].[c\"d]"
+        "SELECT id, id AS x FROM [a`b].[c\"d]"
     );
 }
 

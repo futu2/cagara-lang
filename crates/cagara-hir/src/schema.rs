@@ -1,7 +1,7 @@
 //! Output-schema computation and static validation of the relational IR:
 //! column existence, key-mapper validity, join sides, and phase placement.
 
-use crate::ir::{Expr, KeyMapper, Loc, Rel, Side};
+use crate::ir::{Expr, Loc, Rel, Side};
 use crate::rules::{self, Place};
 
 pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
@@ -18,6 +18,7 @@ pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
             Ok(c)
         }
         Rel::Select(r, fs) => projection(fs, &schema(r)?, false),
+        Rel::Update(r, fs) => merge(fs, &schema(r)?),
         Rel::Agg(r, fs) => projection(fs, &schema(r)?, true),
         Rel::Order(r, ks) => {
             let c = schema(r)?;
@@ -28,7 +29,6 @@ pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
             Ok(c)
         }
         Rel::Limit(r, _) | Rel::Offset(r, _) | Rel::Distinct(r) | Rel::At(_, r) => schema(r),
-        Rel::KeyMap(r, m) => Ok(m.apply(&schema(r)?)?.into_iter().map(|(_, new)| new).collect()),
         Rel::Join {
             kind,
             left,
@@ -102,6 +102,43 @@ fn projection(fs: &[(String, Expr)], cols: &[String], agg: bool) -> Result<Vec<S
     Ok(fs.iter().map(|(n, _)| n.clone()).collect())
 }
 
+/// Output columns of `update`: the input's, with each listed name replacing
+/// the one it matches, and names the input does not have appended in order.
+/// The input's positions are kept, so `update` reads as an overwrite.
+pub fn merge_columns<T, U>(
+    input: &[(String, T)],
+    fs: &[(String, U)],
+) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = input.iter().map(|(n, _)| n.clone()).collect();
+    if fs.is_empty() {
+        return Err("`update` needs at least one field".into());
+    }
+    for (n, _) in fs {
+        if !out.contains(n) {
+            out.push(n.clone());
+        }
+    }
+    Ok(out)
+}
+
+fn merge(fs: &[(String, Expr)], cols: &[String]) -> Result<Vec<String>, String> {
+    if fs.is_empty() {
+        return Err("`update` needs at least one field".into());
+    }
+    let mut seen = Vec::new();
+    for (n, e) in fs {
+        if seen.contains(n) {
+            return Err(format!("field `{n}` appears twice in `update`"));
+        }
+        seen.push(n.clone());
+        refs(e, cols, "update").map_err(|m| format!("field `{n}`: {m}"))?;
+        let phase = e.phase().map_err(|m| format!("field `{n}`: {m}"))?;
+        rules::place(Place::Select, phase).map_err(|m| format!("field `{n}` {m}"))?;
+    }
+    let named = cols.iter().map(|c| (c.clone(), ())).collect::<Vec<_>>();
+    merge_columns(&named, fs)
+}
+
 fn refs(e: &Expr, cols: &[String], ctx: &str) -> Result<(), String> {
     for (side, n) in e.columns() {
         match side {
@@ -116,76 +153,4 @@ fn refs(e: &Expr, cols: &[String], ctx: &str) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-impl KeyMapper {
-    /// Map input columns to `(old, new)` pairs in output order, rejecting
-    /// missing sources, duplicate selectors, output collisions, and an empty
-    /// output. The checker and the validator both use this.
-    pub fn apply(&self, cols: &[String]) -> Result<Vec<(String, String)>, String> {
-        let exists = |k: &String| {
-            if cols.contains(k) {
-                Ok(())
-            } else {
-                Err(format!("no column `{k}`; available: {}", cols.join(", ")))
-            }
-        };
-        let same = |c: &String| (c.clone(), c.clone());
-        let out: Vec<(String, String)> = match self {
-            KeyMapper::Only(ks) => {
-                distinct(ks)?;
-                ks.iter().try_for_each(exists)?;
-                ks.iter().map(same).collect()
-            }
-            KeyMapper::Drop(ks) => {
-                distinct(ks)?;
-                ks.iter().try_for_each(exists)?;
-                cols.iter().filter(|c| !ks.contains(c)).map(same).collect()
-            }
-            KeyMapper::Replace(ps) => {
-                let srcs: Vec<String> = ps.iter().map(|p| p.0.clone()).collect();
-                distinct(&srcs)?;
-                srcs.iter().try_for_each(exists)?;
-                cols.iter()
-                    .map(|c| {
-                        let new = ps
-                            .iter()
-                            .find(|p| &p.0 == c)
-                            .map_or_else(|| c.clone(), |p| p.1.clone());
-                        (c.clone(), new)
-                    })
-                    .collect()
-            }
-            KeyMapper::Prefix(p) => cols
-                .iter()
-                .map(|c| (c.clone(), format!("{p}{c}")))
-                .collect(),
-            KeyMapper::Suffix(s) => cols
-                .iter()
-                .map(|c| (c.clone(), format!("{c}{s}")))
-                .collect(),
-        };
-        if out.is_empty() {
-            return Err("key mapping leaves no columns".into());
-        }
-        let names: Vec<String> = out.iter().map(|p| p.1.clone()).collect();
-        match first_dup(&names) {
-            Some(d) => Err(format!("key mapping would produce column `{d}` twice")),
-            None => Ok(out),
-        }
-    }
-}
-
-fn first_dup(xs: &[String]) -> Option<&String> {
-    xs.iter()
-        .enumerate()
-        .find(|(i, x)| xs[..*i].contains(x))
-        .map(|(_, x)| x)
-}
-
-fn distinct(ks: &[String]) -> Result<(), String> {
-    match first_dup(ks) {
-        Some(d) => Err(format!("column `{d}` is listed twice")),
-        None => Ok(()),
-    }
 }

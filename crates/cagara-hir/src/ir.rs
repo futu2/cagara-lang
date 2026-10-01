@@ -116,10 +116,9 @@ impl Expr {
         match self {
             Expr::Col(..) | Expr::Lit(_) => vec![],
             Expr::Tpl(_, a) | Expr::Agg(_, a) => a.iter().collect(),
-            Expr::In(value, list, _) => list
-                .iter()
-                .chain(std::iter::once(value.as_ref()))
-                .collect(),
+            Expr::In(value, list, _) => {
+                list.iter().chain(std::iter::once(value.as_ref())).collect()
+            }
             Expr::Group(k) => vec![k.as_ref()],
             Expr::Win(_, a, s) => a
                 .iter()
@@ -170,16 +169,6 @@ pub enum SetKind {
     Except,
 }
 
-/// Closed, compiler-known key mappers (the basis of pick / omit / rename).
-#[derive(Debug, Clone, PartialEq)]
-pub enum KeyMapper {
-    Only(Vec<String>),
-    Drop(Vec<String>),
-    Replace(Vec<(String, String)>),
-    Prefix(String),
-    Suffix(String),
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Rel {
     Table {
@@ -189,12 +178,15 @@ pub enum Rel {
     },
     Where(Box<Rel>, Expr),
     Select(Box<Rel>, Vec<(String, Expr)>),
+    /// `update {..}`: a projection merged over the input row. A listed name
+    /// that the input already has keeps its position and takes the new
+    /// expression; a name the input does not have is appended at the end.
+    Update(Box<Rel>, Vec<(String, Expr)>),
     Agg(Box<Rel>, Vec<(String, Expr)>),
     Order(Box<Rel>, Vec<(Expr, bool)>),
     Limit(Box<Rel>, i64),
     Offset(Box<Rel>, i64),
     Distinct(Box<Rel>),
-    KeyMap(Box<Rel>, KeyMapper),
     /// `left & inner right on`; output columns are left-wins on collision.
     Join {
         kind: JoinKind,
@@ -218,12 +210,12 @@ impl Rel {
             Rel::Table { .. } => vec![],
             Rel::Where(r, _)
             | Rel::Select(r, _)
+            | Rel::Update(r, _)
             | Rel::Agg(r, _)
             | Rel::Order(r, _)
             | Rel::Limit(r, _)
             | Rel::Offset(r, _)
             | Rel::Distinct(r)
-            | Rel::KeyMap(r, _)
             | Rel::At(_, r) => vec![r],
             Rel::Join { left, right, .. } => vec![left, right],
             Rel::Set { left, right, .. } => vec![left, right],

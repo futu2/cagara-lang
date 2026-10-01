@@ -203,14 +203,14 @@ fn request(
             } else {
                 vec![]
             }
-                .into_iter()
-                .filter_map(|(path, range)| {
-                    Some(Location {
-                        uri: uri::from_path(&path)?,
-                        range,
-                    })
+            .into_iter()
+            .filter_map(|(path, range)| {
+                Some(Location {
+                    uri: uri::from_path(&path)?,
+                    range,
                 })
-                .collect();
+            })
+            .collect();
             json(serde_json::to_value(
                 (!locs.is_empty()).then_some(GotoDefinitionResponse::Array(locs)),
             ))
@@ -236,14 +236,14 @@ fn request(
             let tp = p.text_document_position_params;
             let key = tp.text_document.uri.as_str().to_string();
             let hs: Option<Vec<DocumentHighlight>> = state.select(&key).then(|| {
-                    analysis::highlights(&state.ws, tp.position)
-                        .into_iter()
-                        .map(|(range, kind)| DocumentHighlight {
-                            range,
-                            kind: Some(kind),
-                        })
-                        .collect()
-                });
+                analysis::highlights(&state.ws, tp.position)
+                    .into_iter()
+                    .map(|(range, kind)| DocumentHighlight {
+                        range,
+                        kind: Some(kind),
+                    })
+                    .collect()
+            });
             json(serde_json::to_value(hs))
         }
         DocumentSymbolRequest::METHOD => {
@@ -285,10 +285,9 @@ fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<()
             };
             let path = path.canonicalize().unwrap_or(path);
             let text = p.text_document.text;
-            state.docs.insert(
-                p.text_document.uri.as_str().to_string(),
-                Doc { path, text },
-            );
+            state
+                .docs
+                .insert(p.text_document.uri.as_str().to_string(), Doc { path, text });
             state.rebuild();
             publish_all(conn, state)?;
         }
@@ -306,10 +305,9 @@ fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<()
         }
         DidSaveTextDocument::METHOD => {
             let p: lsp_types::DidSaveTextDocumentParams = serde_json::from_value(n.params)?;
-            if let (Some(doc), Some(text)) = (
-                state.docs.get_mut(p.text_document.uri.as_str()),
-                p.text,
-            ) {
+            if let (Some(doc), Some(text)) =
+                (state.docs.get_mut(p.text_document.uri.as_str()), p.text)
+            {
                 doc.text = text;
             }
             // A save may have changed an imported file that is not open, so
@@ -352,7 +350,9 @@ fn publish_all(conn: &Connection, state: &mut State) -> Res<()> {
         if !state.ws.set_root_path(&path) {
             continue;
         }
-        let uri = key.parse().map_err(|e| format!("invalid document URI: {e}"))?;
+        let uri = key
+            .parse()
+            .map_err(|e| format!("invalid document URI: {e}"))?;
         publish(conn, uri, &state.ws)?;
     }
     Ok(())

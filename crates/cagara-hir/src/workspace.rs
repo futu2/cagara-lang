@@ -164,11 +164,7 @@ impl Workspace {
             .map(|(p, text)| (normalize(p), text.clone()))
             .collect();
         ws.overlays.entry(root.clone()).or_insert(text.clone());
-        let root_text = ws
-            .overlays
-            .get(&root)
-            .cloned()
-            .unwrap_or(text);
+        let root_text = ws.overlays.get(&root).cloned().unwrap_or(text);
         ws.root = ws.add(root.clone(), root_text);
         let remaining: Vec<(PathBuf, String)> = ws
             .overlays
@@ -457,7 +453,9 @@ mod tests {
         buffers.insert(imported.clone(), "value = 42\n".into());
         let ws = Workspace::open_with_buffers(&root, buffers[&root].clone(), &buffers);
         assert!(ws.diags.is_empty(), "{:?}", ws.diags);
-        assert!(ws.module_for_path(Path::new("/tmp/cagara-shared/lib.cagara")).is_some());
+        assert!(ws
+            .module_for_path(Path::new("/tmp/cagara-shared/lib.cagara"))
+            .is_some());
         assert_eq!(ws.modules[ws.root].module.defs[0].name, "q");
     }
 

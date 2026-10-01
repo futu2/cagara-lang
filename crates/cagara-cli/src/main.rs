@@ -76,10 +76,7 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> ExitCode {
                 Some(d) => match d.into_string() {
                     Ok(d) => only = Some(d),
                     Err(d) => {
-                        return usage(&format!(
-                            "`--only` is not valid UTF-8: `{}`",
-                            display(&d)
-                        ))
+                        return usage(&format!("`--only` is not valid UTF-8: `{}`", display(&d)))
                     }
                 },
                 None => return usage("--only needs a definition name"),
@@ -138,7 +135,10 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> ExitCode {
             }
         }
         if only.is_some() && !selected {
-            eprintln!("no definition named `{}`", only.as_deref().unwrap_or_default());
+            eprintln!(
+                "no definition named `{}`",
+                only.as_deref().unwrap_or_default()
+            );
             failed = true;
         }
         return if failed {
@@ -204,7 +204,12 @@ fn fmt(args: impl Iterator<Item = OsString>) -> ExitCode {
             }
             Some("-") => files.push(a),
             _ if !a.to_string_lossy().starts_with('-') => files.push(a),
-            _ => return usage(&format!("unexpected argument `{}` for `cagara fmt`", display(&a))),
+            _ => {
+                return usage(&format!(
+                    "unexpected argument `{}` for `cagara fmt`",
+                    display(&a)
+                ))
+            }
         }
     }
     if files.is_empty() {

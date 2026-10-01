@@ -375,9 +375,7 @@ fn flatten(e: Expr, out: &mut Vec<Expr>) {
         Expr::Function { name, args, .. } if name == "CONCAT" => out.extend(args),
         // A parenthesized concatenation, `x <> (y <> z)`, arrives as
         // `Nested(Function CONCAT)`: the walk above is bottom-up.
-        Expr::Nested(inner)
-            if matches!(*inner, Expr::Function { ref name, .. } if name == "CONCAT") =>
-        {
+        Expr::Nested(inner) if matches!(*inner, Expr::Function { ref name, .. } if name == "CONCAT") => {
             flatten(*inner, out)
         }
         other => out.push(other),

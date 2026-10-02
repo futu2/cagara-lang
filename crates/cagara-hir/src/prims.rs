@@ -190,6 +190,16 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
             let (pattern, replacement) = (string(next())?, string(next())?);
             Value::Query(Rel::MapKeys(Box::new(query(next())?), pattern, replacement))
         }
+        Prim::Prefix => {
+            let s = string(next())?;
+            // Encode prefix as mapKeys with pattern "^" and replacement s
+            Value::Query(Rel::MapKeys(Box::new(query(next())?), "^".to_string(), s))
+        }
+        Prim::Suffix => {
+            let s = string(next())?;
+            // Encode suffix as mapKeys with pattern "$" and replacement s
+            Value::Query(Rel::MapKeys(Box::new(query(next())?), "$".to_string(), s))
+        }
         Prim::AggStage => {
             let fs = fields(next())?;
             Value::Query(Rel::Agg(Box::new(query(next())?), fs))

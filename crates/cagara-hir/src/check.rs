@@ -67,6 +67,83 @@ enum Ty {
     /// Fields plus a tail (`Empty`, a variable, or a rigid variable).
     Row(Vec<(String, Ty)>, Box<Ty>),
     Empty,
+    /// Key mapping over a row: applies a key transformation to every field label.
+    MapKey(KeyMap, Box<Ty>),
+}
+
+/// Key mapping witnesses: closed, first-order transformations on field names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeyMap {
+    /// Identity: leaves all names unchanged.
+    Id,
+    /// Prefix: adds a string before each name.
+    Prefix(String),
+    /// Suffix: adds a string after each name.
+    Suffix(String),
+    /// Composition: apply the first mapper, then the second.
+    Compose(Box<KeyMap>, Box<KeyMap>),
+}
+
+impl KeyMap {
+    /// Apply this key map to a single field name.
+    fn apply(&self, name: &str) -> String {
+        match self {
+            KeyMap::Id => name.to_string(),
+            KeyMap::Prefix(p) => format!("{}{}", p, name),
+            KeyMap::Suffix(s) => format!("{}{}", name, s),
+            KeyMap::Compose(f, g) => g.apply(&f.apply(name)),
+        }
+    }
+
+    /// Normalize by eliminating identity and flattening compositions.
+    fn normalize(self) -> KeyMap {
+        match self {
+            KeyMap::Compose(f, g) => {
+                let f = f.normalize();
+                let g = g.normalize();
+                match (f, g) {
+                    (KeyMap::Id, x) | (x, KeyMap::Id) => x,
+                    (f, g) => KeyMap::Compose(Box::new(f), Box::new(g)),
+                }
+            }
+            other => other,
+        }
+    }
+}
+
+/// Reduce a MapKey term when the row is closed.
+/// Returns None if the row is open (contains a variable).
+fn reduce_mapkey(km: &KeyMap, row: &Ty) -> Option<Ty> {
+    match row {
+        Ty::Empty => Some(Ty::Empty),
+        Ty::Row(fields, tail) => {
+            // Check if tail is closed
+            match tail.as_ref() {
+                Ty::Empty => {
+                    // Closed row: apply the mapper to each field name
+                    let new_fields: Vec<(String, Ty)> = fields
+                        .iter()
+                        .map(|(name, ty)| (km.apply(name), ty.clone()))
+                        .collect();
+                    Some(Ty::Row(new_fields, Box::new(Ty::Empty)))
+                }
+                Ty::Var(_) | Ty::Rigid(..) => None, // Open tail: defer
+                Ty::MapKey(inner_km, inner_row) => {
+                    // Nested MapKey: compose and reduce
+                    let composed = KeyMap::Compose(Box::new(inner_km.clone()), Box::new(km.clone())).normalize();
+                    reduce_mapkey(&composed, inner_row)
+                }
+                _ => None, // Unexpected tail shape
+            }
+        }
+        Ty::Var(_) | Ty::Rigid(..) => None, // Open row: defer
+        Ty::MapKey(inner_km, inner_row) => {
+            // Nested MapKey: compose and try to reduce
+            let composed = KeyMap::Compose(Box::new(inner_km.clone()), Box::new(km.clone())).normalize();
+            reduce_mapkey(&composed, inner_row)
+        }
+        _ => None, // Not a row
+    }
 }
 
 fn con(n: &'static str) -> Ty {
@@ -89,6 +166,30 @@ fn sortkey(r: Ty) -> Ty {
 }
 fn row(fs: Vec<(String, Ty)>, tail: Ty) -> Ty {
     Ty::Row(fs, Box::new(tail))
+}
+
+/// Kinds separate types from rows and key/value mappers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Type,
+    Row,
+    KeyMap,
+    ValueMap,
+}
+
+/// Compute the kind of a type. Variables and rigid variables look up their
+/// kind in the `vars` vector (passed separately to avoid borrowing issues).
+fn kind_of(t: &Ty, vars: &[VarInfo]) -> Kind {
+    match t {
+        Ty::Var(v) => vars[*v as usize].kind,
+        Ty::Rigid(v, _) => vars[*v as usize].kind,
+        Ty::Gen(_) => Kind::Type, // schemes handle their own kinding
+        Ty::Con(_, _) => Kind::Type,
+        Ty::Fun(_, _) => Kind::Type,
+        Ty::Row(_, _) => Kind::Row,
+        Ty::Empty => Kind::Row,
+        Ty::MapKey(_, _) => Kind::Row,
+    }
 }
 
 const SCALARS: &[&str] = &["int", "float", "string", "bool", "date", "timestamp"];
@@ -314,6 +415,7 @@ struct Scheme {
 /// Flags of a scheme's quantified variable, copied to each instance.
 #[derive(Debug, Clone, PartialEq)]
 struct GenInfo {
+    kind: Kind,
     row_or_win: bool,
     nonnull: bool,
     /// Signature name, for printing.
@@ -558,6 +660,8 @@ fn at(span: Span) -> impl FnOnce(String) -> TyErr {
 #[derive(Clone)]
 struct VarInfo {
     bound: Option<Ty>,
+    /// The kind of this type variable.
+    kind: Kind,
     /// Phase variable of a column reference: may become `row` or `win`.
     row_or_win: bool,
     /// From a signature's type variable: cannot become `maybe _`.
@@ -634,12 +738,13 @@ impl<'w> Checker<'w> {
     // ── variables and substitution ─────────────────────────────────────────
 
     fn fresh_id(&mut self, row_or_win: bool) -> u32 {
-        self.fresh_with(row_or_win, false)
+        self.fresh_with(row_or_win, false, Kind::Type)
     }
 
-    fn fresh_with(&mut self, row_or_win: bool, nonnull: bool) -> u32 {
+    fn fresh_with(&mut self, row_or_win: bool, nonnull: bool, kind: Kind) -> u32 {
         self.vars.push(VarInfo {
             bound: None,
+            kind,
             row_or_win,
             nonnull,
             version: 0,
@@ -649,6 +754,10 @@ impl<'w> Checker<'w> {
 
     fn fresh(&mut self) -> Ty {
         Ty::Var(self.fresh_id(false))
+    }
+
+    fn fresh_row(&mut self) -> Ty {
+        Ty::Var(self.fresh_with(false, false, Kind::Row))
     }
 
     fn fresh_col_phase(&mut self) -> Ty {
@@ -694,6 +803,15 @@ impl<'w> Checker<'w> {
                     fs.extend(more);
                     cur = self.resolve(&tail);
                 }
+                Ty::MapKey(km, row) => {
+                    // Try to reduce the MapKey
+                    if let Some(reduced) = reduce_mapkey(&km, &row) {
+                        cur = reduced;
+                    } else {
+                        // Cannot reduce yet; return MapKey as tail
+                        return (fs, Ty::MapKey(km, row));
+                    }
+                }
                 other => return (fs, other),
             }
         }
@@ -708,6 +826,15 @@ impl<'w> Checker<'w> {
                 let fs = fs.into_iter().map(|(k, v)| (k, self.zonk(&v))).collect();
                 row_or_tail(fs, tail)
             }
+            Ty::MapKey(km, row) => {
+                let row = self.zonk(&row);
+                // Try to reduce after zonking
+                if let Some(reduced) = reduce_mapkey(&km, &row) {
+                    self.zonk(&reduced)
+                } else {
+                    Ty::MapKey(km, Box::new(row))
+                }
+            }
             o => o,
         }
     }
@@ -718,6 +845,7 @@ impl<'w> Checker<'w> {
             Ty::Con(_, args) => args.iter().any(|a| self.occurs(v, a)),
             Ty::Fun(a, b) => self.occurs(v, &a) || self.occurs(v, &b),
             Ty::Row(fs, tail) => fs.iter().any(|(_, t)| self.occurs(v, t)) || self.occurs(v, &tail),
+            Ty::MapKey(_, row) => self.occurs(v, row),
             _ => false,
         }
     }
@@ -781,13 +909,23 @@ impl<'w> Checker<'w> {
             self.resolve_compress(actual),
             self.resolve_compress(expected),
         );
+        // Kind check before unifying
+        let kind_a = kind_of(&a, &self.vars);
+        let kind_e = kind_of(&e, &self.vars);
+        if kind_a != kind_e {
+            return Err(format!(
+                "kind mismatch: cannot unify {:?} with {:?}",
+                kind_a, kind_e
+            ));
+        }
         match (&a, &e) {
             (Ty::Var(v), _) => self.bind(*v, e.clone()),
             (_, Ty::Var(v)) => self.bind(*v, a.clone()),
             (Ty::Rigid(x, _), Ty::Rigid(y, _)) if x == y => Ok(()),
             (Ty::Empty, Ty::Empty) => Ok(()),
-            (Ty::Row(..), Ty::Row(..) | Ty::Empty | Ty::Rigid(..))
-            | (Ty::Empty | Ty::Rigid(..), Ty::Row(..)) => self.unify_rows(&a, &e),
+            (Ty::Row(..), Ty::Row(..) | Ty::Empty | Ty::Rigid(..) | Ty::MapKey(..))
+            | (Ty::Empty | Ty::Rigid(..) | Ty::MapKey(..), Ty::Row(..))
+            | (Ty::MapKey(..), Ty::MapKey(..) | Ty::Empty | Ty::Rigid(..)) => self.unify_rows(&a, &e),
             (Ty::Con(x, xs), Ty::Con(y, ys)) if x == y && xs.len() == ys.len() => {
                 for (p, q) in xs.clone().iter().zip(ys.clone().iter()) {
                     self.unify(p, q)?;
@@ -840,7 +978,7 @@ impl<'w> Checker<'w> {
                 if ta == te {
                     return Err("incompatible row types".into());
                 }
-                let tail = self.fresh();
+                let tail = self.fresh_row();
                 self.unify(&ta, &row(only_e, tail.clone()))?;
                 self.unify(&te, &row(only_a, tail))
             }
@@ -1415,7 +1553,7 @@ impl<'w> Checker<'w> {
         if let Some(t) = names.get(name) {
             return t.clone();
         }
-        let t = Ty::Rigid(self.fresh_with(false, true), name.to_string());
+        let t = Ty::Rigid(self.fresh_with(false, true, Kind::Type), name.to_string());
         names.insert(name.to_string(), t.clone());
         t
     }
@@ -1452,7 +1590,7 @@ impl<'w> Checker<'w> {
                     return t.clone();
                 }
                 let g = &gens[k as usize];
-                let n = Ty::Var(self.fresh_with(g.row_or_win, g.nonnull));
+                let n = Ty::Var(self.fresh_with(g.row_or_win, g.nonnull, g.kind));
                 map.insert(k, n.clone());
                 n
             }
@@ -1465,6 +1603,7 @@ impl<'w> Checker<'w> {
                     .collect();
                 row(fs, self.inst(&tail, map, gens))
             }
+            Ty::MapKey(km, row) => Ty::MapKey(km, Box::new(self.inst(&row, map, gens))),
             t @ (Ty::Var(_) | Ty::Rigid(..) | Ty::Empty) => t,
         }
     }
@@ -1498,6 +1637,7 @@ impl<'w> Checker<'w> {
                 let k = *map.entry(v).or_insert_with(|| {
                     let info = &self.vars[v as usize];
                     gens.push(GenInfo {
+                        kind: info.kind,
                         row_or_win: info.row_or_win,
                         nonnull: info.nonnull,
                         name,
@@ -1515,6 +1655,7 @@ impl<'w> Checker<'w> {
                     .collect();
                 row(fs, self.gen(&tail, map, gens))
             }
+            Ty::MapKey(km, row) => Ty::MapKey(km, Box::new(self.gen(&row, map, gens))),
             t @ (Ty::Gen(_) | Ty::Empty) => t,
         }
     }
@@ -1539,7 +1680,7 @@ impl<'w> Checker<'w> {
             }
             ExprKind::Field(side, n) => {
                 let phase = self.fresh_col_phase();
-                let (tail, a) = (self.fresh(), self.fresh());
+                let (tail, a) = (self.fresh_row(), self.fresh());
                 let r = if n == PROBE_FIELD {
                     // Completion probe: adds no column, remembers the row and
                     // which definition asked, so a later definition's empty
@@ -1552,8 +1693,8 @@ impl<'w> Checker<'w> {
                 };
                 let input = match side {
                     Side::Single => r,
-                    Side::Left => Ty::Con("join", vec![r, self.fresh()]),
-                    Side::Right => Ty::Con("join", vec![self.fresh(), r]),
+                    Side::Left => Ty::Con("join", vec![r, self.fresh_row()]),
+                    Side::Right => Ty::Con("join", vec![self.fresh_row(), r]),
                 };
                 // Hover shows the column's value type, not the whole row.
                 self.uses.push((sp, a.clone(), None));
@@ -1840,6 +1981,28 @@ impl<'w> Checker<'w> {
             return Ok(());
         };
         let (input, output) = (inp[0].clone(), out[0].clone());
+
+        // Handle prefix and suffix by directly constructing MapKey types
+        match keys {
+            [("key_prefix", s)] => {
+                let mapped = Ty::MapKey(KeyMap::Prefix(s.clone()), Box::new(input.clone()));
+                self.unify(&output, &mapped).map_err(|msg| TyErr {
+                    span: self.span,
+                    msg: format!("prefix type mismatch: {}", msg),
+                })?;
+                return Ok(());
+            }
+            [("key_suffix", s)] => {
+                let mapped = Ty::MapKey(KeyMap::Suffix(s.clone()), Box::new(input.clone()));
+                self.unify(&output, &mapped).map_err(|msg| TyErr {
+                    span: self.span,
+                    msg: format!("suffix type mismatch: {}", msg),
+                })?;
+                return Ok(());
+            }
+            _ => {}
+        }
+
         let c = match keys {
             [("key_omit", k)] => Cons::Omit {
                 key: k.clone(),
@@ -1913,6 +2076,14 @@ impl<'w> Checker<'w> {
                     con("key_pattern"),
                     fun(con("key_replacement"), fun(query(r), query(out))),
                 )
+            }
+            Prefix => {
+                let (r, out) = (self.fresh_row(), self.fresh_row());
+                fun(con("key_prefix"), fun(query(r), query(out)))
+            }
+            Suffix => {
+                let (r, out) = (self.fresh_row(), self.fresh_row());
+                fun(con("key_suffix"), fun(query(r), query(out)))
             }
             Order => {
                 let (req, r) = (self.fresh(), self.fresh());
@@ -2468,6 +2639,8 @@ fn key_marker(t: &Ty) -> Option<&'static str> {
         Ty::Con("key_omit", a) if a.is_empty() => Some("key_omit"),
         Ty::Con("key_pattern", a) if a.is_empty() => Some("key_pattern"),
         Ty::Con("key_replacement", a) if a.is_empty() => Some("key_replacement"),
+        Ty::Con("key_prefix", a) if a.is_empty() => Some("key_prefix"),
+        Ty::Con("key_suffix", a) if a.is_empty() => Some("key_suffix"),
         _ => None,
     }
 }
@@ -2481,6 +2654,8 @@ fn key_marker_msg(marker: &str) -> String {
         "key_pattern" => {
             "`mapKeys` needs a literal pattern, such as `mapKeys \"^id$\" \"user_id\"`".into()
         }
+        "key_prefix" => "`prefix` needs a literal string, such as `prefix \"user_\"`".into(),
+        "key_suffix" => "`suffix` needs a literal string, such as `suffix \"_v2\"`".into(),
         _ => "`mapKeys` needs a literal replacement".into(),
     }
 }

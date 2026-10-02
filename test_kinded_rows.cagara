@@ -1,0 +1,55 @@
+# Test file for kinded rows implementation
+# This file tests the new prefix and suffix primitives
+
+# Basic prefix test
+test_prefix = users & prefix "u_"
+# Expected: { u_id = int, u_name = string, u_age = int, u_active = bool }
+
+# Basic suffix test
+test_suffix = users & suffix "_v2"
+# Expected: { id_v2 = int, name_v2 = string, age_v2 = int, active_v2 = bool }
+
+# Composition: prefix then suffix
+test_composition = users & prefix "tbl_" & suffix "_old"
+# Expected: { tbl_id_old = int, tbl_name_old = string, tbl_age_old = int, tbl_active_old = bool }
+
+# Using prefix in a where clause (type inference test)
+test_with_where = users & prefix "u_" & where (.u_id > 100)
+# Expected: query { u_id = int, u_name = string, u_age = int, u_active = bool }
+
+# Polymorphic helper function
+addPrefix = p => q => q & prefix p
+test_polymorphic = users & addPrefix "usr_"
+# Expected: { usr_id = int, usr_name = string, usr_age = int, usr_active = bool }
+
+# Combining with select
+test_with_select = users & prefix "u_" & select {.u_id, .u_name}
+# Expected: query { u_id = int, u_name = string }
+
+# Suffix with join
+test_suffix_join =
+  let left = users & prefix "u_"
+  let right = orders & prefix "o_"
+  left & innerJoin right (.u_id = .o_user_id)
+# Expected: columns from both sides with their prefixes
+
+# Multiple transformations
+test_complex = users & prefix "old_" & suffix "_backup" & where (.old_id_backup > 0)
+# Expected: query with transformed column names
+
+# Edge case: empty prefix/suffix (should work like identity)
+test_empty_prefix = users & prefix ""
+# Expected: { id = int, name = string, age = int, active = bool }
+
+test_empty_suffix = users & suffix ""
+# Expected: { id = int, name = string, age = int, active = bool }
+
+# Comparison with mapKeys (should produce same result)
+test_prefix_vs_mapkeys =
+  let with_prefix = users & prefix "u_"
+  let with_mapkeys = users & mapKeys "^" "u_"
+  # Both should have the same type
+
+# Test that literal is required (these should fail):
+# test_computed_prefix = users & prefix (upper "u_")  # Should error
+# test_computed_suffix = users & suffix (lower "_V2")  # Should error

@@ -984,3 +984,51 @@ fn map_keys_errors() {
         err("q = users & mapKeys (upper \"x\") \"y\"\n", "q").contains("needs a literal pattern")
     );
 }
+
+#[test]
+fn prefix_suffix_type_level() {
+    // prefix adds a string to the beginning of each column name
+    assert_eq!(
+        ty("q = users & prefix \"u_\"\n", "q"),
+        "query { u_id = int, u_name = string, u_age = int, u_active = bool }"
+    );
+    // suffix adds a string to the end of each column name
+    assert_eq!(
+        ty("q = users & suffix \"_v2\"\n", "q"),
+        "query { id_v2 = int, name_v2 = string, age_v2 = int, active_v2 = bool }"
+    );
+    // prefix and suffix compose correctly
+    assert_eq!(
+        ty("q = users & prefix \"u_\" & suffix \"_old\"\n", "q"),
+        "query { u_id_old = int, u_name_old = string, u_age_old = int, u_active_old = bool }"
+    );
+    // prefix/suffix need literal strings
+    assert!(
+        err("q = users & prefix (upper \"x\")\n", "q").contains("needs a literal string")
+    );
+    assert!(
+        err("q = users & suffix (upper \"x\")\n", "q").contains("needs a literal string")
+    );
+}
+
+#[test]
+fn kind_checking_basic() {
+    // Milestone 1: Basic kind checking is in place
+    // Types and rows unify correctly
+    assert_eq!(
+        ty("q = users & where .age > 30\n", "q"),
+        "query { id = int, name = string, age = int, active = bool }"
+    );
+
+    // Expressions work fine (Type kind)
+    assert_eq!(
+        ty("x = 42\n", "x"),
+        "int"
+    );
+
+    // Row variables get correct kind
+    assert_eq!(
+        ty("q = users & select {.id, .name}\n", "q"),
+        "query { id = int, name = string }"
+    );
+}

@@ -71,6 +71,10 @@ omit = __omit
 # stage covers prefix (`^` -> `u_`), suffix (`$` -> `_v2`), and a single
 # rename (`^id$` -> `user_id`); a column the pattern misses keeps its name.
 mapKeys = __mapKeys
+# `prefix "str"` prepends `str` to every column name.
+prefix = __prefix
+# `suffix "str"` appends `str` to every column name.
+suffix = __suffix
 agg = __agg
 # `order [asc .x, desc .y]`; NULLs sort last in either direction.
 order = __order

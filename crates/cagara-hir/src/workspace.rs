@@ -6,6 +6,7 @@ use crate::lower::{parse_module, ParsedModule};
 use crate::resolve::{module_own, module_scope};
 use crate::value::{EvalError, Prim};
 use cagara_syntax::ast::{Import, Module, Span};
+use salsa::Setter;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -262,7 +263,11 @@ impl Workspace {
             return false;
         }
         let file = *self.inputs[m].file(&self.db);
-        file.set_contents(&mut self.db, text.clone());
+        // Set the file's text without going through a helper: this changes
+        // what the queries parse but nothing else, so `Workspace` must update
+        // `modules[m].text` in the same breath (below) or the two phases
+        // would analyze different programs.
+        file.set_text(&mut self.db).to(text.clone());
         let path = self.modules[m].path.clone();
         // Exports of `m` feed the scopes of its importers: refresh all
         // modules (the queries recompute only what changed).

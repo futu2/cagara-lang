@@ -218,16 +218,13 @@ pub fn merge_columns<T, U>(
     Ok(out)
 }
 
+/// Columns of `update`. The checker and the evaluator both reject an empty
+/// field list and a repeated field before a `Rel` is ever built, so the only
+/// checks left here are the ones they do not do: every field's value refers
+/// to an input column and sits in the select phase. The empty case is still
+/// caught, by `merge_columns`.
 fn merge(fs: &[(String, Expr)], cols: &[String]) -> Result<Vec<String>, String> {
-    if fs.is_empty() {
-        return Err("`update` needs at least one field".into());
-    }
-    let mut seen = Vec::new();
     for (n, e) in fs {
-        if seen.contains(n) {
-            return Err(format!("field `{n}` appears twice in `update`"));
-        }
-        seen.push(n.clone());
         refs(e, cols, "update").map_err(|m| format!("field `{n}`: {m}"))?;
         let phase = e.phase().map_err(|m| format!("field `{n}`: {m}"))?;
         rules::place(Place::Select, phase).map_err(|m| format!("field `{n}` {m}"))?;

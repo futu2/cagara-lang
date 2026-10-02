@@ -6,7 +6,6 @@ pub mod syntax_kind;
 
 pub use ops::{op_name, ops, Fixity, Ops};
 pub use parser::{parse, parse_with, Parse, ParseError};
-pub use rowan::GreenNode;
 pub use syntax_kind::SyntaxKind;
 
 pub type SyntaxNode = rowan::SyntaxNode<CagaraLanguage>;

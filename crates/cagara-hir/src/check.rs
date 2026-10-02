@@ -55,7 +55,7 @@ use cagara_syntax::ast::{self, ExprKind, Side, Span, TypeExpr};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Ty {
+enum Ty {
     Var(u32),
     /// Type variable from a signature; unifies only with itself.
     Rigid(u32, String),
@@ -448,8 +448,6 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> ModuleCheck {
     let parsed = parse_module(db, file);
     let env = ModuleEnv {
         module: *input.index(db),
-        path: input.path(db),
-        text: file.text(db),
         defs: &parsed.module.defs,
         scope: module_scope(db, input),
         owns: imported
@@ -483,36 +481,15 @@ struct ModuleCheck {
     use_types: HashMap<(usize, u32, u32), String>,
 }
 
-/// What checking one module reads: its definitions, scope, and source (for
-/// diagnostics), and every module's exports (for `alias.name`). Nothing
-/// else of the workspace is needed, so a salsa query can build this view.
-pub struct ModuleEnv<'w> {
-    pub module: usize,
-    pub path: &'w std::path::Path,
-    pub text: &'w str,
-    pub defs: &'w [ast::Def],
-    pub scope: &'w HashMap<String, Binding>,
+/// What checking one module reads: its definitions and scope, and every
+/// module's exports (for `alias.name`). Nothing else of the workspace is
+/// needed, so a salsa query can build this view.
+pub(crate) struct ModuleEnv<'w> {
+    pub(crate) module: usize,
+    pub(crate) defs: &'w [ast::Def],
+    pub(crate) scope: &'w HashMap<String, Binding>,
     /// Exports of the modules it imports, by module index.
-    pub owns: HashMap<usize, &'w HashMap<String, Binding>>,
-}
-
-impl<'w> ModuleEnv<'w> {
-    pub fn of(ws: &'w Workspace, m: usize) -> Self {
-        let md = &ws.modules[m];
-        ModuleEnv {
-            module: m,
-            path: &md.path,
-            text: &md.text,
-            defs: &md.module.defs,
-            scope: &md.scope,
-            owns: ws
-                .modules
-                .iter()
-                .enumerate()
-                .map(|(i, x)| (i, &x.own))
-                .collect(),
-        }
-    }
+    pub(crate) owns: HashMap<usize, &'w HashMap<String, Binding>>,
 }
 
 /// Check one module against the schemes of the modules it may use.

@@ -69,6 +69,9 @@ enum Ty {
     Empty,
     /// Key mapping over a row: applies a key transformation to every field label.
     MapKey(KeyMap, Box<Ty>),
+    /// Merge two rows: right-wins on collision, keeps old field positions,
+    /// appends labels that occur only in the right row.
+    Merge(Box<Ty>, Box<Ty>),
 }
 
 /// Key mapping witnesses: closed, first-order transformations on field names.
@@ -146,6 +149,52 @@ fn reduce_mapkey(km: &KeyMap, row: &Ty) -> Option<Ty> {
     }
 }
 
+/// Reduce a merge of two rows, if both are closed.
+/// Implements the rule: merge old new = old fields with collisions replaced by new,
+/// plus new fields not in old (appended at end).
+fn reduce_merge(left: &Ty, right: &Ty) -> Option<Ty> {
+    // Extract fields from both sides
+    let (left_fields, left_tail) = match left {
+        Ty::Empty => (vec![], Ty::Empty),
+        Ty::Row(fields, tail) => (fields.clone(), tail.as_ref().clone()),
+        Ty::Var(_) | Ty::Rigid(..) => return None, // Open: defer
+        _ => return None,
+    };
+
+    let (right_fields, right_tail) = match right {
+        Ty::Empty => (vec![], Ty::Empty),
+        Ty::Row(fields, tail) => (fields.clone(), tail.as_ref().clone()),
+        Ty::Var(_) | Ty::Rigid(..) => return None, // Open: defer
+        _ => return None,
+    };
+
+    // Both tails must be Empty for a closed merge
+    if !matches!(left_tail, Ty::Empty) || !matches!(right_tail, Ty::Empty) {
+        return None;
+    }
+
+    // Right-wins merge: keep left field positions, replace collisions with right values,
+    // append right fields not in left
+    let mut result = left_fields.clone();
+
+    // Replace collisions
+    for (right_name, right_ty) in &right_fields {
+        if let Some(pos) = result.iter().position(|(n, _)| n == right_name) {
+            result[pos].1 = right_ty.clone();
+        }
+    }
+
+    // Append right-only fields
+    for (right_name, right_ty) in &right_fields {
+        if !left_fields.iter().any(|(n, _)| n == right_name) {
+            result.push((right_name.clone(), right_ty.clone()));
+        }
+    }
+
+    Some(Ty::Row(result, Box::new(Ty::Empty)))
+}
+
+
 fn con(n: &'static str) -> Ty {
     Ty::Con(n, vec![])
 }
@@ -189,6 +238,7 @@ fn kind_of(t: &Ty, vars: &[VarInfo]) -> Kind {
         Ty::Row(_, _) => Kind::Row,
         Ty::Empty => Kind::Row,
         Ty::MapKey(_, _) => Kind::Row,
+        Ty::Merge(_, _) => Kind::Row,
     }
 }
 
@@ -284,6 +334,8 @@ enum Cons {
         input: Ty,
         output: Ty,
     },
+    /// `merge left right`: combine two rows; right-wins on collision.
+    Merge { left: Ty, right: Ty, out: Ty },
     /// Use of an overload set at type `target`.
     Overload {
         name: String,
@@ -384,6 +436,11 @@ impl Cons {
                 replacement: replacement.clone(),
                 input: f(input),
                 output: f(output),
+            },
+            Cons::Merge { left, right, out } => Cons::Merge {
+                left: f(left),
+                right: f(right),
+                out: f(out),
             },
             Cons::Overload {
                 name,
@@ -812,6 +869,15 @@ impl<'w> Checker<'w> {
                         return (fs, Ty::MapKey(km, row));
                     }
                 }
+                Ty::Merge(left, right) => {
+                    // Try to reduce the Merge
+                    if let Some(reduced) = reduce_merge(&left, &right) {
+                        cur = reduced;
+                    } else {
+                        // Cannot reduce yet; return Merge as tail
+                        return (fs, Ty::Merge(left, right));
+                    }
+                }
                 other => return (fs, other),
             }
         }
@@ -835,6 +901,16 @@ impl<'w> Checker<'w> {
                     Ty::MapKey(km, Box::new(row))
                 }
             }
+            Ty::Merge(left, right) => {
+                let left = self.zonk(&left);
+                let right = self.zonk(&right);
+                // Try to reduce after zonking
+                if let Some(reduced) = reduce_merge(&left, &right) {
+                    self.zonk(&reduced)
+                } else {
+                    Ty::Merge(Box::new(left), Box::new(right))
+                }
+            }
             o => o,
         }
     }
@@ -846,6 +922,7 @@ impl<'w> Checker<'w> {
             Ty::Fun(a, b) => self.occurs(v, &a) || self.occurs(v, &b),
             Ty::Row(fs, tail) => fs.iter().any(|(_, t)| self.occurs(v, t)) || self.occurs(v, &tail),
             Ty::MapKey(_, row) => self.occurs(v, row),
+            Ty::Merge(left, right) => self.occurs(v, left) || self.occurs(v, right),
             _ => false,
         }
     }
@@ -923,9 +1000,10 @@ impl<'w> Checker<'w> {
             (_, Ty::Var(v)) => self.bind(*v, a.clone()),
             (Ty::Rigid(x, _), Ty::Rigid(y, _)) if x == y => Ok(()),
             (Ty::Empty, Ty::Empty) => Ok(()),
-            (Ty::Row(..), Ty::Row(..) | Ty::Empty | Ty::Rigid(..) | Ty::MapKey(..))
-            | (Ty::Empty | Ty::Rigid(..) | Ty::MapKey(..), Ty::Row(..))
-            | (Ty::MapKey(..), Ty::MapKey(..) | Ty::Empty | Ty::Rigid(..)) => self.unify_rows(&a, &e),
+            (Ty::Row(..), Ty::Row(..) | Ty::Empty | Ty::Rigid(..) | Ty::MapKey(..) | Ty::Merge(..))
+            | (Ty::Empty | Ty::Rigid(..) | Ty::MapKey(..) | Ty::Merge(..), Ty::Row(..))
+            | (Ty::MapKey(..), Ty::MapKey(..) | Ty::Empty | Ty::Rigid(..) | Ty::Merge(..))
+            | (Ty::Merge(..), Ty::Merge(..) | Ty::MapKey(..) | Ty::Empty | Ty::Rigid(..)) => self.unify_rows(&a, &e),
             (Ty::Con(x, xs), Ty::Con(y, ys)) if x == y && xs.len() == ys.len() => {
                 for (p, q) in xs.clone().iter().zip(ys.clone().iter()) {
                     self.unify(p, q)?;
@@ -2077,6 +2155,18 @@ impl<'w> Checker<'w> {
                     fun(con("key_replacement"), fun(query(r), query(out))),
                 )
             }
+            Merge => {
+                let (left, right, out) = (self.fresh_row(), self.fresh_row(), self.fresh_row());
+                self.pending.push((
+                    Cons::Merge {
+                        left: left.clone(),
+                        right: right.clone(),
+                        out: out.clone(),
+                    },
+                    sp,
+                ));
+                fun(query(left), fun(query(right), query(out)))
+            }
             Prefix => {
                 let (r, out) = (self.fresh_row(), self.fresh_row());
                 fun(con("key_prefix"), fun(query(r), query(out)))
@@ -2500,6 +2590,18 @@ impl<'w> Checker<'w> {
                 self.unify(&row_or_tail(out, itail), output)?;
                 Ok(true)
             }
+            Cons::Merge { left, right, out } => {
+                // Merge combines two rows; wait if either is open
+                let (lf, lt) = self.flatten(left);
+                let (rf, rt) = self.flatten(right);
+                if !matches!(lt, Ty::Empty) || !matches!(rt, Ty::Empty) {
+                    return Ok(false);
+                }
+                // Use merge_columns: right-wins, keeps left positions, appends right-only
+                let merged = crate::schema::merge_columns(&lf, &rf);
+                self.unify(&row(merged, Ty::Empty), out)?;
+                Ok(true)
+            }
             Cons::JoinOut {
                 left,
                 right,
@@ -2704,6 +2806,12 @@ impl Printer {
                     t => format!("{{ {} | {} }}", body.join(", "), self.ty(t, 0)),
                 }
             }
+            Ty::MapKey(km, row) => {
+                format!("mapKey({:?}, {})", km, self.ty(row, 2))
+            }
+            Ty::Merge(left, right) => {
+                format!("merge({}, {})", self.ty(left, 2), self.ty(right, 2))
+            }
             Ty::Fun(a, b) => {
                 let s = format!("{} -> {}", self.ty(a, 1), self.ty(b, 0));
                 paren(s, prec >= 1)
@@ -2734,3 +2842,5 @@ fn var_name(n: usize) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod test_merge;

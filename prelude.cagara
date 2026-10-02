@@ -71,6 +71,8 @@ omit = __omit
 # stage covers prefix (`^` -> `u_`), suffix (`$` -> `_v2`), and a single
 # rename (`^id$` -> `user_id`); a column the pattern misses keeps its name.
 mapKeys = __mapKeys
+# `merge left right` combines two queries; fields from right overwrite duplicates from left.
+merge = __merge
 # `prefix "str"` prepends `str` to every column name.
 prefix = __prefix
 # `suffix "str"` appends `str` to every column name.

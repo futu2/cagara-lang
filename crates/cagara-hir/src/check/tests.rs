@@ -1012,6 +1012,35 @@ fn prefix_suffix_type_level() {
 }
 
 #[test]
+fn deferred_mapkey_polymorphic_helpers() {
+    // Milestone 3: MapKey can be deferred over open rows, enabling polymorphic helpers
+
+    // Helper function that adds a prefix (row is polymorphic)
+    assert_eq!(
+        ty("addPrefix = p => q => q & prefix p\nresult = users & addPrefix \"u_\"\n", "result"),
+        "query { u_id = int, u_name = string, u_age = int, u_active = bool }"
+    );
+
+    // Helper function that adds a suffix
+    assert_eq!(
+        ty("addSuffix = s => q => q & suffix s\nresult = users & addSuffix \"_v2\"\n", "result"),
+        "query { id_v2 = int, name_v2 = string, age_v2 = int, active_v2 = bool }"
+    );
+
+    // Composition through helpers
+    assert_eq!(
+        ty("wrap = q => q & prefix \"tbl_\" & suffix \"_old\"\nresult = users & wrap\n", "result"),
+        "query { tbl_id_old = int, tbl_name_old = string, tbl_age_old = int, tbl_active_old = bool }"
+    );
+
+    // Higher-order: helper that takes a transformation function
+    assert_eq!(
+        ty("transform = f => q => q & f\naddU = prefix \"u_\"\nresult = users & transform addU\n", "result"),
+        "query { u_id = int, u_name = string, u_age = int, u_active = bool }"
+    );
+}
+
+#[test]
 fn kind_checking_basic() {
     // Milestone 1: Basic kind checking is in place
     // Types and rows unify correctly
@@ -1030,5 +1059,18 @@ fn kind_checking_basic() {
     assert_eq!(
         ty("q = users & select {.id, .name}\n", "q"),
         "query { id = int, name = string }"
+    );
+}
+
+#[test]
+fn merge_basic() {
+    // Milestone 4: merge as a row term
+    // The merge primitive should type-check and produce correct results
+
+    // Basic merge: right-wins semantics
+    assert_eq!(
+        ty("q = __merge users (table \"public\" \"user_updates\")\n
+            user_updates : query { id = int, name = string, active = bool } = table \"public\" \"user_updates\"\n", "q"),
+        "query { id = int, name = string, age = int, active = bool }"
     );
 }

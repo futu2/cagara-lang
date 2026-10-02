@@ -204,6 +204,7 @@ endsWith : expr r string -> expr r string -> expr r bool =
 toString : expr r int -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r float -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r date -> expr r string = sql "CAGARA_TO_STRING($1)"
+toString : expr r timestamp -> expr r string = sql "CAGARA_TO_STRING($1)"
 
 # ── dates and timestamps ───────────────────────────────────────────────────
 # String literals widen to `date` / `timestamp`: `.created_at >= "2024-01-01"`.

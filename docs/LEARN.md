@@ -21,13 +21,14 @@ output you can reproduce with the `cagara` binary.
 - [10. Window functions](#10-window-functions)
 - [11. Set operations and `distinct`](#11-set-operations-and-distinct)
 - [12. Functions, types, and the prelude](#12-functions-types-and-the-prelude)
-- [13. Writing your own SQL with `sql` templates](#13-writing-your-own-sql-with-sql-templates)
-- [14. Modules](#14-modules)
-- [15. What the compiler emits](#15-what-the-compiler-emits)
-- [16. Command line](#16-command-line)
-- [17. Errors you will meet](#17-errors-you-will-meet)
-- [18. Style guide](#18-style-guide)
-- [19. Where to go next](#19-where-to-go-next)
+- [13. String and date functions in practice](#13-string-and-date-functions-in-practice)
+- [14. Writing your own SQL with `sql` templates](#14-writing-your-own-sql-with-sql-templates)
+- [15. Modules](#15-modules)
+- [16. What the compiler emits](#16-what-the-compiler-emits)
+- [17. Command line](#17-command-line)
+- [18. Errors you will meet](#18-errors-you-will-meet)
+- [19. Style guide](#19-style-guide)
+- [20. Where to go next](#20-where-to-go-next)
 
 ---
 
@@ -979,9 +980,323 @@ String literals widen to `date` and `timestamp`, so comparisons read naturally:
 recent = orders & where (.created_at >= "2024-01-01")
 ```
 
+The next section is a working reference for the string and date halves of that
+list: argument order, which types each function accepts, and the traps the
+signatures alone do not tell you about.
+
 ---
 
-## 13. Writing your own SQL with `sql` templates
+## 13. String and date functions in practice
+
+The lists in [section 12](#12-functions-types-and-the-prelude) say what exists.
+This section says how to *use* it. All of these examples share one table:
+
+```haskell
+orders : query { id = int, email = string, name = string, amount = float, status = string, created_at = timestamp, due = date } =
+  table "public" "orders"
+```
+
+### Strings
+
+Every string function takes the string it operates on **last**, which is what
+makes partial application work. The argument order is therefore:
+
+| Call | Meaning | Emitted |
+|---|---|---|
+| `upper s`, `lower s` | case conversion | `UPPER(s)` |
+| `trim s`, `ltrim s`, `rtrim s` | strip whitespace | `TRIM(s)` |
+| `length s` | number of characters, as `int` | `LENGTH(s)` |
+| `substring start len s` | `len` characters from `start` | `SUBSTRING(s, start, len)` |
+| `left n s`, `right n s` | first / last `n` characters | `LEFT(s, n)` |
+| `replaceAll from to s` | every occurrence of `from` | `REPLACE(s, from, to)` |
+| `strpos sub s` | 1-based position of `sub`, `0` if absent | `STRPOS(s, sub)` |
+| `contains sub s` | is `sub` in `s`? | `STRPOS(s, sub) > 0` |
+| `startsWith prefix s`, `endsWith suffix s` | prefix / suffix test | `LEFT` / `RIGHT` comparison |
+| `like pattern s`, `ilike pattern s` | `LIKE` / case-insensitive `LIKE` | `s LIKE pattern` |
+| `concat a b` / `a <> b` | concatenation | `a \|\| b` |
+
+The order is the reverse of the SQL spelling, deliberately: `substring 1 3 .s`
+reads "three characters from position 1 of `.s`", and because the subject is
+last, `substring 1 3` is itself a reusable function.
+
+```haskell
+clean = orders & select {
+  .id,
+  slug = replaceAll " " "-" (trim .name),
+  initial = left 1 .name,
+  tail = right 3 .name,
+  n = length .name,
+  local = left (strpos "@" .email - 1) .email,
+  domain = lower (substring (strpos "@" .email + 1) 99 .email)
+}
+```
+
+```sql
+SELECT id, REPLACE(TRIM(name), ' ', '-') AS slug, LEFT(name, 1) AS initial,
+       RIGHT(name, 3) AS tail, LENGTH(name) AS n,
+       LEFT(email, (STRPOS(email, '@') - 1)) AS local,
+       LOWER(SUBSTRING(email, (STRPOS(email, '@') + 1), 99)) AS domain
+FROM public.orders;
+```
+
+Splitting an email on `@` is the canonical example because it shows the pattern
+you will reuse constantly: `strpos` gives a 1-based position, arithmetic on it is
+ordinary `int` arithmetic, and `substring` is a normal function that takes the
+result. There is no dedicated `split`; a long `len` is the usual way to say "to
+the end of the string".
+
+#### `contains` is not `like`
+
+These two are easy to reach for interchangeably, and they are not the same:
+
+```haskell
+a = orders & select { .id, has_at = contains "@" .email, plain = like "a%b" .name }
+```
+
+```sql
+SELECT id, STRPOS(email, '@') > 0 AS has_at, name LIKE 'a%b' AS plain FROM public.orders;
+```
+
+`like` takes a **pattern**, where `%` matches any run of characters and `_`
+matches exactly one. `contains`, `startsWith`, and `endsWith` are plain substring
+tests built on `strpos`, so `%` and `_` are literal characters there — which is
+what you want when testing for text a user typed:
+
+```haskell
+# Finds a literal percent sign; like "%100%%" would need escaping.
+a = orders & where (contains "100%" .status)
+```
+
+Note the argument order on `like` too: **the pattern comes first** —
+`like "paid%" .status` — because `.status` is the subject. And `strpos` returns
+`0` for "not found", never `NULL` and never a negative number, so on a miss
+`strpos "@" .email - 1` is `-1` rather than a null; guard with `contains` first
+when a miss is possible.
+
+#### Positions and counts are 1-based
+
+`substring`, `left`, `right`, and `strpos` all count from 1, as in SQL. A `start`
+of `0` or a negative `len` is passed through to the engine rather than clamped,
+so the prelude does not hide the dialect's behaviour there — keep positions and
+lengths positive. `length` counts characters, and trailing spaces count, since it
+is a character count rather than a trimmed one.
+
+### Dates and timestamps
+
+Two types are involved, and the prelude is strict about which function accepts
+which. A `date` is a calendar day; a `timestamp` is a point in time. String
+literals widen to *either*, depending on what the surrounding context expects.
+
+| Function | `date` | `timestamp` | Result |
+|---|---|---|---|
+| `currentDate` (no argument) | — | — | `date` |
+| `now` / `currentTimestamp` (no argument) | — | — | `timestamp` |
+| `year`, `quarter`, `month`, `day`, `dayOfWeek`, `dayOfYear` | ✓ | ✓ | `int` |
+| `hour`, `minute` | ✗ | ✓ | `int` |
+| `truncYear`, `truncQuarter`, `truncMonth`, `truncWeek` | ✓ | ✓ | same type in |
+| `truncDay`, `truncHour`, `truncMinute` | ✗ | ✓ | `timestamp` |
+| `addDays`, `addWeeks`, `addMonths`, `addQuarters`, `addYears` | ✓ | ✓ | same type in |
+| `addHours`, `addMinutes`, `addSeconds` | ✗ | ✓ | `timestamp` |
+| `daysBetween start end` | ✓ | — | `int` |
+| `toDate` / `toTimestamp` | converts | converts | see below |
+| `toString` | ✓ | ✓ | `string` |
+
+The asymmetry is the point: a calendar day has no hour, and adding two hours to a
+`date` has no answer that is still a `date`. Asking anyway is a type error that
+names the fix:
+
+```haskell
+bad = orders & select {.id, h = hour .due}
+```
+
+```
+error: field `due`: type mismatch: expected timestamp, found date
+```
+
+Convert first with `toTimestamp` when you genuinely want the time:
+
+```haskell
+t = orders & select {.id, h = hour (toTimestamp .due)}
+```
+
+#### Widening: what a string literal can and cannot become
+
+A string literal widens to `date` or `timestamp` where one is expected, which is
+why comparisons read naturally:
+
+```haskell
+recent = orders & where (.created_at >= "2024-01-01" && .created_at < "2025-01-01")
+```
+
+But widening is driven by the **expected type**, and a bare literal passed to an
+overloaded function gives the checker nothing to go on. That split explains two
+results that look inconsistent until you see the rule:
+
+```haskell
+ok   = orders & select { x = daysBetween "2024-01-01" "2024-02-01" }  # both widen to date
+ok2  = orders & select { x = .due > "2024-01-01" }                    # widens for the comparison
+bad  = orders & select { x = addDays 7 "2024-01-01" }                 # error: string, not date
+bad2 = orders & select { x = year "2024-01-01" }                      # error: string, not date
+```
+
+`daysBetween` has a single overload whose parameter is `date`, so the literal
+widens. `addDays` and `year` are each overloaded across `date` and `timestamp`,
+so a bare literal is ambiguous and stays a `string`. The fix is to say which one
+you mean, with `toDate` / `toTimestamp`:
+
+```haskell
+ok = orders & select { x = addDays 7 (toDate "2024-01-01") }
+```
+
+```sql
+SELECT CAST((DATE '2024-01-01' + 7 * INTERVAL '1' DAY) AS DATE) AS x FROM public.orders;
+```
+
+#### `toDate` / `toTimestamp` / `toString`
+
+Conversions are explicit, in both directions:
+
+| Call | From | To |
+|---|---|---|
+| `toDate x` | `timestamp` or `string` | `date` |
+| `toTimestamp x` | `date` or `string` | `timestamp` |
+| `toString x` | `int`, `float`, `date`, or `timestamp` | `string` |
+
+```haskell
+t = orders & select {
+  .id,
+  day = toDate .created_at,
+  midnight = toTimestamp .due,
+  stamped = toTimestamp "2024-01-01 08:30:00",
+  label = toString .due,
+  ts_label = toString .created_at
+}
+```
+
+```sql
+SELECT id, CAST(created_at AS DATE) AS day, CAST(due AS TIMESTAMP) AS midnight,
+       TIMESTAMP '2024-01-01 08:30:00' AS stamped,
+       CAST(due AS TEXT) AS label, CAST(created_at AS TEXT) AS ts_label
+FROM public.orders;
+```
+
+Note that `toString` on a `date` and on a `timestamp` both render the value's
+text form directly; wrapping one in the other first is only about *which* form
+you want, not about what the cast accepts. If you want the date part of a
+timestamp as text, `toString (toDate .created_at)` still says that explicitly.
+
+#### Adding, truncating, and bucketing
+
+`add*` functions shift a value by a signed count — negative goes back — and
+`trunc*` functions return the start of the containing period:
+
+```haskell
+t = orders & select {
+  .id,
+  next_month = addMonths 1 .created_at,
+  back_30 = addDays (-30) .created_at,
+  month_start = truncMonth .created_at,
+  week_start = truncWeek .created_at,
+  q = quarter .created_at,
+  dow = dayOfWeek .created_at,
+  overdue = .due < currentDate,
+  age_days = daysBetween .due currentDate
+}
+```
+
+```sql
+SELECT id, CAST((created_at + 1 * INTERVAL '1' MONTH) AS TIMESTAMP) AS next_month,
+       CAST((created_at + (-30) * INTERVAL '1' DAY) AS TIMESTAMP) AS back_30,
+       CAST(DATE_TRUNC('MONTH', created_at) AS TIMESTAMP) AS month_start,
+       CAST(DATE_TRUNC('WEEK', created_at) AS TIMESTAMP) AS week_start,
+       CAST(EXTRACT(QUARTER FROM created_at) AS INT) AS q,
+       CAST(EXTRACT(DOW FROM created_at) AS INT) AS dow,
+       due < CURRENT_DATE AS overdue, (CURRENT_DATE - due) AS age_days
+FROM public.orders;
+```
+
+Three details worth remembering:
+
+- **`dayOfWeek` is 0 for Sunday**, matching Postgres' `DOW` rather than ISO.
+  **`truncWeek` starts the week on Monday**, matching ISO. Those two conventions
+  differ from each other, so check which one a given report needs.
+- **`daysBetween start end`** is positive when `end` is later, and its argument
+  order follows subject-last like everything else, so `daysBetween .created_at`
+  is a function of the end date. It takes `date`, not `timestamp`; use `toDate`
+  on a timestamp first.
+- **`addWeeks` and `addQuarters` are defined in Cagara** as 7 days and 3 months,
+  not as dialect primitives — visible in the generated SQL as the
+  `INTERVAL '1' DAY` / `MONTH` spellings. `addHours`, `addMinutes`, and
+  `addSeconds` exist only for `timestamp`.
+
+Truncation is what makes date bucketing work, because the result is still a date
+you can group and sort by:
+
+```haskell
+monthly = orders & agg {
+  month_start = group (truncMonth .created_at),
+  orders = count,
+  revenue = sum .amount
+}
+```
+
+```sql
+SELECT CAST(DATE_TRUNC('MONTH', created_at) AS TIMESTAMP) AS month_start,
+       COUNT(*) AS orders, SUM(amount) AS revenue
+FROM public.orders GROUP BY CAST(DATE_TRUNC('MONTH', created_at) AS TIMESTAMP);
+```
+
+Use `group` on the truncated expression rather than grouping the raw timestamp:
+`group .created_at` would give one row per instant, not one per month.
+
+### Partial application and composition
+
+Because the subject is last, these functions are all reusable transformations,
+which is the idiomatic way to name a cleaning step once:
+
+```haskell
+normalize = trim >>> lower              # a function of a string
+clean = orders & select {.id, email = .email & normalize}
+half = substring 1 2                    # a function of a string
+week_ago = addDays (-7)                 # a function of a date
+```
+
+Only `clean` is a query, so it is the only one that emits SQL:
+
+```sql
+SELECT id, LOWER(TRIM(email)) AS email FROM public.orders;
+```
+
+### Why these are not plain SQL
+
+Every date and string operation above calls a `CAGARA_*` intrinsic rather than
+spelling ANSI SQL directly, so that
+[`crates/cagara-sql/src/intrinsics.rs`](../crates/cagara-sql/src/intrinsics.rs)
+can emit the right thing per dialect. The same expression therefore lowers
+differently depending on `--dialect`:
+
+```haskell
+t = orders & select {.id, y = year .created_at, d = dayOfWeek .created_at}
+```
+
+```sql
+-- ansi / postgres
+CAST(EXTRACT(YEAR FROM created_at) AS INT), CAST(EXTRACT(DOW FROM created_at) AS INT)
+
+-- mysql: DAYOFWEEK is 1-based from Sunday, so 1 is subtracted to keep 0 = Sunday
+EXTRACT(YEAR FROM created_at), (DAYOFWEEK(created_at) - 1)
+```
+
+Note that MySQL adjustment specifically: it exists so that `dayOfWeek` means the
+same thing on every engine. This is the reason to check the
+[dialect reference](SQL-DIALECTS.md) before trusting a lightly tested engine —
+the *semantics* are supposed to be constant across dialects, and where a dialect
+needed adjusting, that document says so. `ilike` is another example: SQLite has
+no `ILIKE`, so it lowers to `LOWER(s) LIKE LOWER(pattern)`.
+
+---
+
+## 14. Writing your own SQL with `sql` templates
 
 When the prelude does not have what you need, a `sql` template drops down to
 SQL text with `$1`, `$2`, ... placeholders:
@@ -1010,7 +1325,7 @@ unrecognized intrinsic is a compile error rather than SQL passed through. See
 
 ---
 
-## 14. Modules
+## 15. Modules
 
 Imports are relative to the importing file. The prelude is always available.
 
@@ -1044,7 +1359,7 @@ public_users = s.users & select { .id, display_name = .name }
 
 ---
 
-## 15. What the compiler emits
+## 16. What the compiler emits
 
 You do not write subqueries, but the compiler does, and knowing when helps you
 read the output.
@@ -1091,7 +1406,7 @@ window, `LIMIT`, and aggregate boundaries.
 
 ---
 
-## 16. Command line
+## 17. Command line
 
 ```
 cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
@@ -1143,7 +1458,7 @@ in [`editors/vscode`](../editors/vscode) and [`editors/nvim`](../editors/nvim).
 
 ---
 
-## 17. Errors you will meet
+## 18. Errors you will meet
 
 Cagara's diagnostics are a feature: they name the column, the fix, or both. The
 common ones, with the fix:
@@ -1170,7 +1485,7 @@ the computation one stage earlier.
 
 ---
 
-## 18. Style guide
+## 19. Style guide
 
 - Put one stage per line in a pipeline. `cagara fmt` will do this for you.
 - Prefer `select` when you are deciding what to publish and `update` when you
@@ -1188,7 +1503,7 @@ the computation one stage earlier.
 
 ---
 
-## 19. Where to go next
+## 20. Where to go next
 
 - [`examples/report.cagara`](../examples/report.cagara) — filtering, aggregation,
   windows, joins, nulls, and shorthands in one file; compiled and executed

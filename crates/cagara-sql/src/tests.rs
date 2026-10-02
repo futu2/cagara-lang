@@ -1181,6 +1181,17 @@ fn trino_and_spark_spellings() {
                 ("spark", "CAST(i AS STRING)"),
             ],
         ),
+        // `timestamp` is a supported `toString` overload, not just `date`.
+        (
+            "toString .t",
+            &[
+                ("ansi", "CAST(t AS TEXT)"),
+                ("mysql", "CAST(t AS CHAR)"),
+                ("trino", "CAST(t AS VARCHAR)"),
+                ("spark", "CAST(t AS STRING)"),
+            ],
+        ),
+        ("toString .d", &[("ansi", "CAST(d AS TEXT)")]),
     ];
     for (e, want) in cases {
         let q = format!("{src}q = ev & select {{ x = {e} }}\n");

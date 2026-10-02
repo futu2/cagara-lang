@@ -193,7 +193,7 @@ pub enum Rel {
     Limit(Box<Rel>, i64),
     Offset(Box<Rel>, i64),
     Distinct(Box<Rel>),
-    /// `left & inner right on`; output columns are left-wins on collision.
+    /// `left & innerJoin right on`; output columns are left-wins on collision.
     Join {
         kind: JoinKind,
         left: Box<Rel>,

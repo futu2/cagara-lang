@@ -510,14 +510,14 @@ mod tests {
 
     #[test]
     fn pipeline_and_join_fields() {
-        let ExprKind::App(f, args) = body("r = orders & inner users (.<user_id == .>id)") else {
+        let ExprKind::App(f, args) = body("r = orders & innerJoin users (.<user_id == .>id)") else {
             panic!()
         };
         assert_eq!(name(&f), "_&_");
         let ExprKind::App(g, gargs) = &args[1].kind else {
             panic!()
         };
-        assert_eq!(name(g), "inner");
+        assert_eq!(name(g), "innerJoin");
         let ExprKind::App(eq, sides) = &gargs[1].kind else {
             panic!()
         };

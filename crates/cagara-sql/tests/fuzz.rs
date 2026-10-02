@@ -322,7 +322,7 @@ fn program(rng: &mut Rng, i: usize) -> String {
     }
     // Sometimes join the other table, so join lowering is exercised.
     if base == "users" && rng.chance(25) {
-        let kind = rng.pick(&["inner", "leftJoin", "rightJoin"]);
+        let kind = rng.pick(&["innerJoin", "leftJoin", "rightJoin"]);
         let cond = rng.pick(&[
             ".<id == .>user_id",
             ".<age >= .>amount",

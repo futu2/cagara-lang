@@ -37,7 +37,7 @@ running = orders
 # names as they are; `update` recomputes or renames a column in place.
 order_names = orders
   & select { .user_id, .amount, order_id = .id }
-  & inner users (.<user_id == .>id)
+  & innerJoin users (.<user_id == .>id)
   & select { order_id = .order_id, name = .name, amount = .amount }
 
 # Nulls are explicit: the right side of a left join is `maybe`, and so are
@@ -51,7 +51,7 @@ user_totals = users
   }
 
 # Operator shorthands: `&?` where, `&=` select, `&+` update, `&*` agg,
-# `&.` order, `&-` limit; joins `?` inner, `<?` left, `?>` right, `<?>` full;
+# `&.` order, `&-` limit; joins `?` innerJoin, `<?` left, `?>` right, `<?>` full;
 # `??` coalesce. The same report as `user_totals`, for active users:
 active_totals = users
   &? .active

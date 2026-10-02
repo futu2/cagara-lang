@@ -154,7 +154,7 @@ fn running_total_frame() {
 #[test]
 fn join_uses_sides() {
     let s = sql(
-        "q = orders & select { order_id = .id, user_id = .user_id } & inner users (.<user_id == .>id)\n  & select { order_id = .order_id, name = .name }\n",
+        "q = orders & select { order_id = .id, user_id = .user_id } & innerJoin users (.<user_id == .>id)\n  & select { order_id = .order_id, name = .name }\n",
         "q",
     );
     assert!(s.contains("INNER JOIN public.users AS t2"), "{s}");
@@ -352,7 +352,7 @@ fn errors() {
     assert!(error("q = users & agg { n = count, name = .name }\n", "q").contains("not grouped"));
     assert!(error("q = users & where (count >= 1)\n", "q").contains("aggregate"));
     assert!(error("q = users & where (.salary > 1)\n", "q").contains("no column `salary`"));
-    assert!(error("q = orders & inner users (.user_id == .id)\n", "q").contains("which input"));
+    assert!(error("q = orders & innerJoin users (.user_id == .id)\n", "q").contains("which input"));
     assert!(error("q = users & select {.nope}\n", "q").contains("no column `nope`"));
     assert!(error("q = table \"s\" \"t\"\n", "q").contains("unknown"));
     assert!(error("q = q\n", "q").contains("refers to itself"));
@@ -419,7 +419,7 @@ fn nulls_and_outer_joins() {
 #[test]
 fn join_inputs_are_inlined_when_safe() {
     // An update before a join needs no derived table.
-    let s = sql("q = orders & select { order_id = .id, user_id = .user_id } & inner users (.<user_id == .>id) & select { o = .order_id, n = .name }\n", "q");
+    let s = sql("q = orders & select { order_id = .id, user_id = .user_id } & innerJoin users (.<user_id == .>id) & select { o = .order_id, n = .name }\n", "q");
     assert_eq!(s, "SELECT t1.id AS o, t2.name AS n FROM public.orders AS t1 INNER JOIN public.users AS t2 ON t1.user_id = t2.id");
     // An outer join's input is a relation, so a filter on either side stays
     // in that side's derived table. Hoisting the preserved side's filter to
@@ -474,7 +474,7 @@ fn join_inputs_are_inlined_when_safe() {
          RIGHT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id"
     );
     // Chains of joins stay flat, including a self-join with an updated column.
-    let s = sql("q = orders & inner users (.<user_id == .>id) & leftJoin (users & select { uid = .id, name = .name, age = .age, active = .active }) (.<user_id == .>uid)\n", "q");
+    let s = sql("q = orders & innerJoin users (.<user_id == .>id) & leftJoin (users & select { uid = .id, name = .name, age = .age, active = .active }) (.<user_id == .>uid)\n", "q");
     assert!(!s.contains("(SELECT"), "{s}");
     assert!(
         s.contains("LEFT JOIN public.users AS t3 ON t1.user_id = t3.id"),
@@ -482,7 +482,7 @@ fn join_inputs_are_inlined_when_safe() {
     );
     // A join on the right is a derived table.
     let s = sql(
-        "q = orders & inner (users & inner orders (.<id == .>user_id)) (.<user_id == .>id)\n",
+        "q = orders & innerJoin (users & innerJoin orders (.<id == .>user_id)) (.<user_id == .>id)\n",
         "q",
     );
     assert!(s.contains("INNER JOIN (SELECT"), "{s}");
@@ -888,7 +888,7 @@ fn operator_shorthands_match_the_long_forms() {
         ("q = orders &* { u = group .user_id, total = sum .amount ?? 0.0 }\n",
          "q = orders & agg { u = group .user_id, total = coalesce 0.0 (sum .amount) }\n"),
         ("q = orders & users ? .<user_id == .>id &= { a = .amount, n = .name }\n",
-         "q = orders & inner users (.<user_id == .>id) & select { a = .amount, n = .name }\n"),
+         "q = orders & innerJoin users (.<user_id == .>id) & select { a = .amount, n = .name }\n"),
         ("q = orders & users <? .<user_id == .>id &= { n = .name ?? \"?\" }\n",
          "q = orders & leftJoin users (.<user_id == .>id) & select { n = coalesce \"?\" .name }\n"),
         ("q = orders & users ?> .<user_id == .>id\n", "q = orders & rightJoin users (.<user_id == .>id)\n"),
@@ -1084,7 +1084,7 @@ fn order_survives_a_derived_table() {
          WHERE (age > 1) ORDER BY name NULLS LAST"
     );
     // A join does not keep its inputs' order: no ORDER BY in a join input.
-    let j = "j = (users & order [asc .name] & select { id = .id, n = .name }) & inner orders (.<id == .>user_id) & select { n = .n }\n";
+    let j = "j = (users & order [asc .name] & select { id = .id, n = .name }) & innerJoin orders (.<id == .>user_id) & select { n = .n }\n";
     assert!(!sql(j, "j").contains("ORDER BY"), "{}", sql(j, "j"));
 }
 

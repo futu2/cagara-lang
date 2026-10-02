@@ -109,13 +109,13 @@ _&*_ = q => fields => agg fields q
 _&._ = q => keys => order keys q
 _&-_ = q => n => limit n q
 
-# `left & inner right (.<k == .>k)`
+# `left & innerJoin right (.<k == .>k)`
 # Outer joins make the columns of the side that may be missing `maybe`.
 # The output has the left input's columns, then the right input's that the
 # left does not have: on a shared name the left column wins. To keep both,
 # rename one side in a `select` before the join (a field list is written by
 # hand, so the new name is just the name you write).
-inner = __innerJoin
+innerJoin = __innerJoin
 leftJoin = __leftJoin
 rightJoin = __rightJoin
 fullJoin = __fullJoin
@@ -138,7 +138,7 @@ infixl 3 <?
 infixl 3 ?>
 infixl 3 <?>
 
-_?_ = inner
+_?_ = innerJoin
 _<?_ = leftJoin
 _?>_ = rightJoin
 _<?>_ = fullJoin

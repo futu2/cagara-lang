@@ -103,7 +103,7 @@ fn query_output_rows() {
         "query { user_id = int, revenue = maybe float, n = int }"
     );
     assert_eq!(
-        ty("q = orders & inner users (.<user_id == .>id)\n", "q"),
+        ty("q = orders & innerJoin users (.<user_id == .>id)\n", "q"),
         "query { id = int, user_id = int, amount = float, status = string, name = string, age = int, active = bool }"
     );
     // Later stages keep the query's column order.
@@ -205,10 +205,10 @@ fn window_types() {
 
 #[test]
 fn join_errors() {
-    assert!(err("q = orders & inner users (.user_id == .id)\n", "q").contains("which input"));
+    assert!(err("q = orders & innerJoin users (.user_id == .id)\n", "q").contains("which input"));
     assert!(err("q = users & where (.<id == 1)\n", "q").contains("join predicate"));
-    assert!(err("q = orders & inner users (.<user_id == .>name)\n", "q").contains("type mismatch"));
-    assert!(err("q = orders & inner users (.<nope == .>id)\n", "q").contains("no column `nope`"));
+    assert!(err("q = orders & innerJoin users (.<user_id == .>name)\n", "q").contains("type mismatch"));
+    assert!(err("q = orders & innerJoin users (.<nope == .>id)\n", "q").contains("no column `nope`"));
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn update_renames_and_recomputes() {
     // An update feeding a join and a later select is fully typed.
     assert_eq!(
         ty(
-            "q = orders & update { order_id = .id } & inner users (.<user_id == .>id) \
+            "q = orders & update { order_id = .id } & innerJoin users (.<user_id == .>id) \
              & select { o = .order_id, n = .name }\n",
             "q"
         ),
@@ -447,7 +447,7 @@ fn outer_joins_make_the_missing_side_maybe() {
     let j = |kind: &str| {
         ty(&format!("q = orders & {kind} users (.<user_id == .>id) & select {{ o = .amount, n = .name }}\n"), "q")
     };
-    assert_eq!(j("inner"), "query { o = float, n = string }");
+    assert_eq!(j("innerJoin"), "query { o = float, n = string }");
     assert_eq!(j("leftJoin"), "query { o = float, n = maybe string }");
     assert_eq!(j("rightJoin"), "query { o = maybe float, n = string }");
     assert_eq!(j("fullJoin"), "query { o = maybe float, n = maybe string }");

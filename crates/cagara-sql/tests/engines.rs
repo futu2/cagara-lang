@@ -170,13 +170,13 @@ const CASES: &[(&str, &[&str])] = &[
     // WHERE, since the filter only decides which rows match. No order is
     // placed by a user above 1, so this returns nothing.
     (
-        "ij = (orders & where (.amount > 4.5)) & inner (users & where (.id > 1)) (.<user_id == .>id) & select { oid = .id, n = .name } & order [asc .n]",
+        "ij = (orders & where (.amount > 4.5)) & innerJoin (users & where (.id > 1)) (.<user_id == .>id) & select { oid = .id, n = .name } & order [asc .n]",
         &[],
     ),
     // The same filters without excluding the matching user, so the inner
     // join does return rows.
     (
-        "ij2 = (orders & where (.amount > 4.5)) & inner (users & where (.id > 0)) (.<user_id == .>id) & select { oid = .id, n = .name } & order [asc .oid]",
+        "ij2 = (orders & where (.amount > 4.5)) & innerJoin (users & where (.id > 0)) (.<user_id == .>id) & select { oid = .id, n = .name } & order [asc .oid]",
         &["10|ann"],
     ),
     // A lone `offset` needs a "no limit" that the engine accepts: SQLite

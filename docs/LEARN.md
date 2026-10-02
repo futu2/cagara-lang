@@ -513,7 +513,7 @@ predicate only, so `.>id` is **not** available after the join:
 ```haskell
 order_names = orders
   & select { .user_id, .amount, order_id = .id }
-  & inner users (.<user_id == .>id)
+  & innerJoin users (.<user_id == .>id)
   & select { order_id = .order_id, name = .name, amount = .amount }
 ```
 
@@ -721,13 +721,13 @@ input each column comes from**: `.<x` is the left input, `.>x` is the right.
 
 ```haskell
 user_orders = users
-  & inner orders (.<id == .>user_id)
+  & innerJoin orders (.<id == .>user_id)
   & select { id = .id, amount = .amount }
 ```
 
 | Function | Shorthand | Keeps |
 |---|---|---|
-| `inner q on` | `?` | only matching rows |
+| `innerJoin q on` | `?` | only matching rows |
 | `leftJoin q on` | `<?` | all left rows |
 | `rightJoin q on` | `?>` | all right rows |
 | `fullJoin q on` | `<?>` | all rows from both |
@@ -765,7 +765,7 @@ When you need both values, rename before joining — `update` is the tool:
 ```haskell
 order_names = orders
   & select { .user_id, .amount, order_id = .id }
-  & inner users (.<user_id == .>id)
+  & innerJoin users (.<user_id == .>id)
   & select { order_id = .order_id, name = .name, amount = .amount }
 ```
 
@@ -876,7 +876,7 @@ bad2 = orders & order [rowNumber {}]
 # sort and partition keys must be plain column expressions;
 # compute aggregates or windows in an earlier stage
 
-bad3 = orders & inner x (.<id == (.>id + rowNumber {}))
+bad3 = orders & innerJoin x (.<id == (.>id + rowNumber {}))
 # join predicates cannot contain aggregates or window functions
 ```
 

@@ -1190,3 +1190,38 @@ fn trino_and_spark_spellings() {
         }
     }
 }
+
+#[test]
+fn omit_drops_a_column_in_place() {
+    assert_eq!(
+        sql("q = users & omit \"age\"\n", "q"),
+        "SELECT id, name, active FROM public.users"
+    );
+    // The columns that stay keep their positions.
+    assert_eq!(
+        sql("q = users & omit \"name\"\n", "q"),
+        "SELECT id, age, active FROM public.users"
+    );
+    // A later stage reads the row the equation produced.
+    let s = sql("q = users & omit \"age\" & where (.active)\n", "q");
+    assert!(s.contains("WHERE"), "{s}");
+    assert!(!s.contains("age"), "{s}");
+}
+
+#[test]
+fn map_keys_renames_by_pattern() {
+    // Prefix, suffix, and a single rename are one stage with different
+    // arguments.
+    assert_eq!(
+        sql("q = users & mapKeys \"^\" \"u_\"\n", "q"),
+        "SELECT id AS u_id, name AS u_name, age AS u_age, active AS u_active FROM public.users"
+    );
+    assert_eq!(
+        sql("q = users & mapKeys \"$\" \"_v2\"\n", "q"),
+        "SELECT id AS id_v2, name AS name_v2, age AS age_v2, active AS active_v2 FROM public.users"
+    );
+    assert_eq!(
+        sql("q = users & mapKeys \"^id$\" \"user_id\"\n", "q"),
+        "SELECT id AS user_id, name, age, active FROM public.users"
+    );
+}

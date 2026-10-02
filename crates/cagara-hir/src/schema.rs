@@ -1,5 +1,5 @@
 //! Output-schema computation and static validation of the relational IR:
-//! column existence, key-mapper validity, join sides, and phase placement.
+//! column existence, key-map validity, join sides, and phase placement.
 
 use crate::ir::{Expr, Loc, Rel, Side};
 use crate::rules::{self, Place};
@@ -59,6 +59,8 @@ fn child_of(rel: &Rel) -> Option<&Rel> {
         Rel::Where(r, _)
         | Rel::Select(r, _)
         | Rel::Update(r, _)
+        | Rel::Omit(r, _)
+        | Rel::MapKeys(r, _, _)
         | Rel::Agg(r, _)
         | Rel::Order(r, _)
         | Rel::Limit(r, _)
@@ -109,6 +111,8 @@ fn finish_schema(
         }
         Rel::Select(r, fs) => projection(fs, &of(r)?, false),
         Rel::Update(r, fs) => merge(fs, &of(r)?),
+        Rel::Omit(r, k) => omit_columns(&of(r)?, k),
+        Rel::MapKeys(r, p, rep) => map_columns(&of(r)?, p, rep),
         Rel::Agg(r, fs) => projection(fs, &of(r)?, true),
         Rel::Order(r, ks) => {
             let c = of(r)?;
@@ -230,6 +234,43 @@ fn merge(fs: &[(String, Expr)], cols: &[String]) -> Result<Vec<String>, String> 
     }
     let named = cols.iter().map(|c| (c.clone(), ())).collect::<Vec<_>>();
     merge_columns(&named, fs)
+}
+
+/// Columns of `omit "k"`: the input's, minus `k`, in the input's order. The
+/// checker reaches the same columns through the row equation
+/// `input ~ { k : t | output }`; this is the validator's side of that fact.
+pub fn omit_columns(cols: &[String], key: &str) -> Result<Vec<String>, String> {
+    if !cols.iter().any(|c| c == key) {
+        return Err(format!("no column `{key}`; available: {}", cols.join(", ")));
+    }
+    Ok(cols.iter().filter(|c| *c != key).cloned().collect())
+}
+
+/// Columns of `mapKeys "p" "r"`: every input name rewritten by the pattern.
+/// One rule covers prefix (`^` → `u_`), suffix (`$` → `_v2`), and single
+/// renames (`^id$` → `user_id`). A column the pattern does not match keeps its
+/// name; an empty result and an output collision are both errors.
+pub fn map_columns(
+    cols: &[String],
+    pattern: &str,
+    replacement: &str,
+) -> Result<Vec<String>, String> {
+    let re = regex::Regex::new(pattern)
+        .map_err(|e| format!("invalid pattern {pattern:?} in `mapKeys`: {e}"))?;
+    let mut out: Vec<String> = Vec::with_capacity(cols.len());
+    for c in cols {
+        let new = re.replace_all(c, replacement).into_owned();
+        if new.is_empty() {
+            return Err(format!(
+                "the key map leaves column `{c}` with an empty name"
+            ));
+        }
+        if out.contains(&new) {
+            return Err(format!("the key map would produce column `{new}` twice"));
+        }
+        out.push(new);
+    }
+    Ok(out)
 }
 
 fn refs(e: &Expr, cols: &[String], ctx: &str) -> Result<(), String> {

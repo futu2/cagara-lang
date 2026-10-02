@@ -39,8 +39,10 @@
 //!   joins make the far side's columns `maybe`; aggregate/window results may
 //!   still return `maybe`.
 //!
-//! Known limits: `prefix` / `suffix` and key lists that are not literals give
-//! an unconstrained row (the schema validator checks them).
+//! Column names never enter the type language. The key stages (`omit`,
+//! `mapKeys`) read their key from the application and record it in a
+//! constraint, so `unify` stays an equivalence and every query the checker
+//! accepts has a fully known row (see `docs/KEYMAP-DESIGN.md`).
 
 use crate::db::ModuleInput;
 use crate::ir::{JoinKind, Phase};
@@ -169,6 +171,18 @@ enum Cons {
     /// listed names replace the ones they match in place, and names the input
     /// does not have are appended.
     Update { fields: Ty, input: Ty, output: Ty },
+    /// `omit "k"`: the row equation `input ~ { k : t | output }`. The unifier
+    /// solves this with its own leftover rule — there is no bespoke column
+    /// computation here.
+    Omit { key: String, input: Ty, output: Ty },
+    /// `mapKeys "p" "r"`: every column name rewritten by the pattern. The one
+    /// operation that invents labels, so it needs a closed input row.
+    MapKeys {
+        pattern: String,
+        replacement: String,
+        input: Ty,
+        output: Ty,
+    },
     /// Use of an overload set at type `target`.
     Overload {
         name: String,
@@ -251,6 +265,22 @@ impl Cons {
                 output,
             } => Cons::Update {
                 fields: f(fields),
+                input: f(input),
+                output: f(output),
+            },
+            Cons::Omit { key, input, output } => Cons::Omit {
+                key: key.clone(),
+                input: f(input),
+                output: f(output),
+            },
+            Cons::MapKeys {
+                pattern,
+                replacement,
+                input,
+                output,
+            } => Cons::MapKeys {
+                pattern: pattern.clone(),
+                replacement: replacement.clone(),
                 input: f(input),
                 output: f(output),
             },
@@ -1587,7 +1617,32 @@ impl<'w> Checker<'w> {
             }
             ExprKind::App(f, args) => {
                 let mut ft = self.infer(env, f)?;
+                // The key arguments of the key stages, read below.
+                let mut keys: Vec<(&'static str, String)> = Vec::new();
                 for arg in args {
+                    // A key argument (`omit "k"`, `mapKeys "p" "r"`) names a
+                    // column, so its value has to be known when the query is
+                    // checked. It is read here, where the syntax still is, and
+                    // recorded in the stage's constraint — which keeps column
+                    // names out of the type language entirely. A computed key
+                    // cannot name a column, so it is refused rather than
+                    // deferred. See docs/KEYMAP-DESIGN.md §4.
+                    if let Ty::Fun(p, r) = self.resolve(&ft) {
+                        if let Some(marker) = key_marker(&p) {
+                            let ExprKind::Lit(ast::Lit::Str(s)) = &arg.kind else {
+                                return Err(TyErr {
+                                    span: arg.span,
+                                    msg: key_marker_msg(marker),
+                                });
+                            };
+                            keys.push((marker, s.clone()));
+                            self.span = arg.span;
+                            ft = *r;
+                            self.key_stage(&keys, &ft)?;
+                            self.solve()?;
+                            continue;
+                        }
+                    }
                     let at_ = self.infer(env, arg)?;
                     self.span = arg.span;
                     ft = match self.resolve(&ft) {
@@ -1796,6 +1851,39 @@ impl<'w> Checker<'w> {
         Ok(())
     }
 
+    /// Register a key stage's constraint once its key arguments have been read
+    /// and the remaining function is `query input -> query output`. Called
+    /// after each key argument, so a partial application still gets its
+    /// constraint.
+    fn key_stage(&mut self, keys: &[(&'static str, String)], ft: &Ty) -> R<()> {
+        let Ty::Fun(p, r) = self.resolve(ft) else {
+            return Ok(());
+        };
+        let (Ty::Con("query", inp), Ty::Con("query", out)) = (&*p, &*r) else {
+            return Ok(());
+        };
+        let (input, output) = (inp[0].clone(), out[0].clone());
+        let c = match keys {
+            [("key_omit", k)] => Cons::Omit {
+                key: k.clone(),
+                input,
+                output,
+            },
+            [("key_pattern", pat), ("key_replacement", rep)] => Cons::MapKeys {
+                pattern: pat.clone(),
+                replacement: rep.clone(),
+                input,
+                output,
+            },
+            // The key list is not complete yet (`mapKeys` before the
+            // replacement, or a partial application of `omit`).
+            _ => return Ok(()),
+        };
+        let sp = self.span;
+        self.pending.push((c, sp));
+        Ok(())
+    }
+
     // ── primitives ─────────────────────────────────────────────────────────
 
     fn prim_type(&mut self, p: Prim, sp: Span) -> Ty {
@@ -1834,6 +1922,20 @@ impl<'w> Checker<'w> {
                 };
                 self.pending.push((c, sp));
                 fun(f, fun(query(a), query(b)))
+            }
+            // A key stage reads its key from the application, where the literal
+            // still is (`key_stage`), so the parameter carries a marker instead
+            // of a type. The constraint is registered once the key is in hand.
+            Omit => {
+                let (r, out) = (self.fresh(), self.fresh());
+                fun(con("key_omit"), fun(query(r), query(out)))
+            }
+            MapKeys => {
+                let (r, out) = (self.fresh(), self.fresh());
+                fun(
+                    con("key_pattern"),
+                    fun(con("key_replacement"), fun(query(r), query(out))),
+                )
             }
             Order => {
                 let (req, r) = (self.fresh(), self.fresh());
@@ -2206,6 +2308,50 @@ impl<'w> Checker<'w> {
                 self.unify(&row_or_tail(out, itail), output)?;
                 Ok(true)
             }
+            Cons::Omit { key, input, output } => {
+                // `omit` *is* this equation. The unifier's own leftover rule
+                // binds `output` to the rest of the row in the input's order,
+                // and a missing key is reported through the ordinary
+                // `missing()` path. No column computation happens here.
+                if matches!(self.resolve(input), Ty::Var(_)) {
+                    return Ok(false);
+                }
+                let t = self.fresh();
+                self.unify(input, &row(vec![(key.clone(), t)], output.clone()))?;
+                Ok(true)
+            }
+            Cons::MapKeys {
+                pattern,
+                replacement,
+                input,
+                output,
+            } => {
+                // `mapKeys` invents labels, so it needs the whole row: a
+                // variable tail may still be learned, a rigid one cannot.
+                let (ifs, itail) = self.flatten(input);
+                match itail {
+                    Ty::Var(_) => return Ok(false),
+                    Ty::Rigid(..) => {
+                        return Err(
+                            "`mapKeys` renames every column and needs a closed input row; \
+                             it cannot be used where the row is still open"
+                                .into(),
+                        )
+                    }
+                    _ => {}
+                }
+                let names: Vec<String> = ifs.iter().map(|(k, _)| k.clone()).collect();
+                // The same function the IR validator calls, so the checker and
+                // the validator cannot disagree about the new names.
+                let cols = crate::schema::map_columns(&names, pattern, replacement)?;
+                let out: Vec<(String, Ty)> = cols
+                    .iter()
+                    .zip(ifs.iter())
+                    .map(|(new, (_, t))| (new.clone(), t.clone()))
+                    .collect();
+                self.unify(&row_or_tail(out, itail), output)?;
+                Ok(true)
+            }
             Cons::JoinOut {
                 left,
                 right,
@@ -2337,6 +2483,31 @@ fn is_join(t: &Ty) -> bool {
     matches!(t, Ty::Con("join", _))
 }
 
+/// The marker type of a key parameter. A key names a column rather than being
+/// an expression, so it cannot be typed as one; the marker is what the
+/// application recognises in order to read the literal where it is written.
+fn key_marker(t: &Ty) -> Option<&'static str> {
+    match t {
+        Ty::Con("key_omit", a) if a.is_empty() => Some("key_omit"),
+        Ty::Con("key_pattern", a) if a.is_empty() => Some("key_pattern"),
+        Ty::Con("key_replacement", a) if a.is_empty() => Some("key_replacement"),
+        _ => None,
+    }
+}
+
+/// Why a key argument has to be a literal.
+fn key_marker_msg(marker: &str) -> String {
+    match marker {
+        "key_omit" => "`omit` needs a literal column name, such as `omit \"password_hash\"`: the \
+             column must be known when the query is checked"
+            .into(),
+        "key_pattern" => {
+            "`mapKeys` needs a literal pattern, such as `mapKeys \"^id$\" \"user_id\"`".into()
+        }
+        _ => "`mapKeys` needs a literal replacement".into(),
+    }
+}
+
 #[derive(Default)]
 struct Printer {
     names: HashMap<u32, String>,
@@ -2367,6 +2538,9 @@ impl Printer {
                         .clone()
                 }
             },
+            // A key parameter's marker is a `string` position, and reads as one
+            // in any signature the user sees.
+            Ty::Con("key_omit" | "key_pattern" | "key_replacement", _) => "string".into(),
             Ty::Empty => "{}".into(),
             Ty::Row(fs, tail) => {
                 let body: Vec<String> = fs

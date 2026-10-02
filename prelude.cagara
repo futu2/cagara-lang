@@ -1,7 +1,7 @@
 # Cagara prelude — imported into every module automatically.
 #
-# The Rust core provides only the `__` primitives (relational operators, key
-# mappers, window frames) and the `sql "..."` template mechanism. Everything
+# The Rust core provides only the `__` primitives (relational operators,
+# window frames) and the `sql "..."` template mechanism. Everything
 # below is ordinary Cagara. Type signatures on `sql` templates are required:
 # they give the arity and whether the result is a scalar (`expr r a`), an
 # aggregate (`agg (expr r a)`), or a window function (`win (expr r a)`).
@@ -45,6 +45,13 @@ select = __select
 # already has keeps its position and takes the new expression, and a name it
 # does not have is appended. Columns not listed are passed through.
 update = __update
+# `omit "k"` drops one column. The checker needs no rule of its own for this:
+# it is the row equation `input ~ { k : t | output }`.
+omit = __omit
+# `mapKeys "pattern" "replacement"` renames every column by a rewrite. One
+# stage covers prefix (`^` -> `u_`), suffix (`$` -> `_v2`), and a single
+# rename (`^id$` -> `user_id`); a column the pattern misses keeps its name.
+mapKeys = __mapKeys
 agg = __agg
 # `order [asc .x, desc .y]`; NULLs sort last in either direction.
 order = __order
@@ -70,8 +77,9 @@ _&-_ = q => n => limit n q
 # `left & inner right (.<k == .>k)`
 # Outer joins make the columns of the side that may be missing `maybe`.
 # The output has the left input's columns, then the right input's that the
-# left does not have: on a shared name the left column wins (`update`,
-# `prefix`, or `omit` the right one to keep both).
+# left does not have: on a shared name the left column wins. To keep both,
+# rename one side in a `select` before the join (a field list is written by
+# hand, so the new name is just the name you write).
 inner = __innerJoin
 leftJoin = __leftJoin
 rightJoin = __rightJoin
@@ -180,7 +188,8 @@ ilike : expr r string -> expr r string -> expr r bool = sql "$2 ILIKE $1"
 substring : expr r int -> expr r int -> expr r string -> expr r string = sql "SUBSTRING($3, $1, $2)"
 left : expr r int -> expr r string -> expr r string = sql "CAGARA_LEFT($2, $1)"
 right : expr r int -> expr r string -> expr r string = sql "CAGARA_RIGHT($2, $1)"
-# `replaceAll from to s`: every occurrence. (`replace` is the key mapper.)
+# `replaceAll from to s`: every occurrence. (SQL's REPLACE, not column renaming
+# — use `update` for that.)
 replaceAll : expr r string -> expr r string -> expr r string -> expr r string =
   sql "REPLACE($3, $1, $2)"
 # `strpos sub s`: position of the first `sub` in `s`; 0 if absent.

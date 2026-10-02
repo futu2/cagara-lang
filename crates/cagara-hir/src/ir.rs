@@ -182,6 +182,12 @@ pub enum Rel {
     /// that the input already has keeps its position and takes the new
     /// expression; a name the input does not have is appended at the end.
     Update(Box<Rel>, Vec<(String, Expr)>),
+    /// `omit "k"`: the input row without column `k`. In the checker this is
+    /// nothing but the row equation `input ~ { k : t | output }`.
+    Omit(Box<Rel>, String),
+    /// `mapKeys "p" "r"`: every column renamed by the pattern → replacement
+    /// rewrite. Covers prefix, suffix, and single renames.
+    MapKeys(Box<Rel>, String, String),
     Agg(Box<Rel>, Vec<(String, Expr)>),
     Order(Box<Rel>, Vec<(Expr, bool)>),
     Limit(Box<Rel>, i64),
@@ -211,6 +217,8 @@ impl Rel {
             Rel::Where(r, _)
             | Rel::Select(r, _)
             | Rel::Update(r, _)
+            | Rel::Omit(r, _)
+            | Rel::MapKeys(r, _, _)
             | Rel::Agg(r, _)
             | Rel::Order(r, _)
             | Rel::Limit(r, _)

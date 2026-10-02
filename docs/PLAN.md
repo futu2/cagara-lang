@@ -16,9 +16,15 @@ core stays minimal; the user-facing library is written in Cagara itself
 - Columns: `select` replaces the whole row, `update` merges over it (a name
   the input has keeps its position, a new name is appended, the rest pass
   through).
-- No "keys" concept and no key mappers: `select {.a, .b}` chooses columns
-  (a field `{.x}` is short for `{x = .x}`) and `update` recomputes or renames
-  them. Every row a stage produces is known from its field list.
+- Key stages, when the *names* are the point: `omit "k"` drops one column, and
+  `mapKeys "pattern" "replacement"` rewrites every name (prefix, suffix, rename,
+  and strip are all that one stage). Neither puts a column name into the type
+  language: `omit` is the row equation `input ~ { k : t | output }`, solved by
+  the unifier's own leftover rule, and `mapKeys` reads its pattern from the
+  application. See `docs/KEYMAP-DESIGN.md`.
+- `select {.a, .b}` chooses columns (a field `{.x}` is short for `{x = .x}`).
+  Every row a stage produces is known from its field list or from the key
+  stage's equation.
 - Modules via `import "path.cagara" [as alias]`; prelude is implicit.
 - Incremental parsing with salsa, lossless syntax trees with rowan.
 - SQL through sqlglot-rust: ANSI by default, any sqlglot dialect via `--dialect`.
@@ -177,11 +183,20 @@ the VS Code extension compile:
   offending argument. `--types` prints inferred types.
 - Selecting columns: a field `{.x}` is short for `{x = .x}`, so `select`
   chooses and computes columns with one form. Every row is static — a field
-  list names every output column — which is why `pick` / `omit` (and the
-  `Labels` type, `keyMap`, and their primitives) are gone. The `update`
-  constraint merges its field record over the input row, keeping positions.
-  Stage constraints wait for the query's row, so printed types keep
-  declaration order.
+  list names every output column — which is why `pick`, the `Labels` type, and
+  the key-mapper primitives are gone. The `update` constraint merges its field
+  record over the input row, keeping positions. Stage constraints wait for the
+  query's row, so printed types keep declaration order.
+- Key stages, rebuilt on row algebra. `omit "k"` adds only a constraint that
+  states `input ~ { k : t | output }`: `unify_rows`' leftover rule produces the
+  columns in the input's order, and a missing column is the ordinary `no column`
+  error, so `unify` gained no rule and no type former was added. `mapKeys "p"
+  "r"` renames every column by a regex rewrite; it is the one operation that
+  invents labels, needs a closed row, and refuses a collision or an empty name.
+  Key literals are read at the application and recorded in the constraint, so
+  they travel in a scheme: `no_id = omit "id"` gives `users` and `orders` their
+  own rows. A computed key is rejected rather than deferred, which is what keeps
+  every accepted query's row fully known (`docs/KEYMAP-DESIGN.md`).
 - Overloading: a name defined more than once, each with a signature, is an
   overload set (prelude: `+ - * / negate sum avg` on int and float).
   Strings concatenate with `<>` (right-assoc, just looser than `+` / `-`). Pipeline
@@ -205,7 +220,7 @@ the VS Code extension compile:
   the plain types. Join kinds are separate primitives (`__leftJoin`, ...) so
   the checker sees them.
 - Evaluator, prelude, imports with aliases, cycle and duplicate detection.
-- IR validation: missing columns, join sides, key-mapper collisions, nested
+- IR validation: missing columns, join sides, key-map collisions, nested
   aggregates, ungrouped columns, filtering on aggregates/windows.
 - No input aborts the compiler. Every failure is a diagnostic: nesting and
   chain length in the parser, application depth in the evaluator (so
@@ -416,7 +431,8 @@ Known gaps:
     `pick` / `omit` are gone. With them went `keyMap`, `only`, `drop`,
     `prefix`, `suffix`, `Rel::KeyMap`, `KeyMapper`, `Cons::KeyMap`, and the
     `Labels` type: selecting columns is ordinary `select`, and every row is
-    named by a field list.
+    named by a field list. (Item 25 brings one-key `omit` and a pattern renamer
+    back, on a base that needs none of that machinery.)
 21. ~~`offset` without `limit`, template placeholders, the completion probe,
     and the remaining small gaps~~ (done; see Status): SQLite gets `LIMIT -1`
     (the MySQL max-BIGINT idiom is rejected by SQLite with `datatype
@@ -448,3 +464,13 @@ Known gaps:
     list, and `MAX_DEPTH` reporting recursion for a deep terminating program.
     Raising `MAX_PIPE_CHAIN` needs the lowerer's remaining recursive descents
     (and the checker's and evaluator's) peeled iteratively.
+25. ~~Key stages on row algebra~~ (done; see Status): `omit "k"` and `mapKeys
+    "pattern" "replacement"`, replacing the removed key mappers without
+    restoring any of their machinery. `omit` is the row equation
+    `input ~ { k : t | output }`, so `unify` and `Ty` gained nothing; `mapKeys`
+    is one label-inventing rule. This is the design that followed two rejected
+    attempts — a `Labels`/`Ty::Lit` encoding made `unify` non-transitive
+    (`Lit "x" ~ string` and `string ~ Lit "y"` but not `Lit "x" ~ Lit "y"`) —
+    and `docs/KEYMAP-DESIGN.md` records both failures so they are not
+    re-proposed. The cost is one dependency (`regex`, used at check time) and
+    the refusal of computed keys.

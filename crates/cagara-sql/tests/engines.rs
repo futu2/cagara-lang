@@ -200,6 +200,25 @@ const CASES: &[(&str, &[&str])] = &[
         "setlim = (union (nums & select { id = .id } & order [asc .id] & limit 2) (nums & select { id = .id } & order [desc .id] & limit 2)) & order [asc .id]",
         &["1", "2", "3", "4"],
     ),
+    // Key stages: `omit` drops one column and `mapKeys` rewrites every name.
+    // Both are pure row operations on the query's columns, so every engine must
+    // agree with every other one about the resulting names and values.
+    (
+        "omit_b = nums & omit \"b\" & select {.id, .a} & order [asc .id]",
+        &["1|7", "2|-7", "3|7", "4|-8"],
+    ),
+    (
+        "mk_prefix = nums & mapKeys \"^\" \"n_\" & select {.n_id, .n_a} & order [asc .n_id]",
+        &["1|7", "2|-7", "3|7", "4|-8"],
+    ),
+    (
+        "mk_suffix = nums & mapKeys \"$\" \"_v2\" & select {.id_v2, .a_v2} & order [asc .id_v2]",
+        &["1|7", "2|-7", "3|7", "4|-8"],
+    ),
+    (
+        "mk_rename = nums & mapKeys \"^id$\" \"num\" & select {.num, .a} & order [asc .num]",
+        &["1|7", "2|-7", "3|7", "4|-8"],
+    ),
 ];
 
 struct Engine {

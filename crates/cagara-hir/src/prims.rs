@@ -182,6 +182,14 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
             let fs = fields(next())?;
             Value::Query(Rel::Update(Box::new(query(next())?), fs))
         }
+        Prim::Omit => {
+            let key = string(next())?;
+            Value::Query(Rel::Omit(Box::new(query(next())?), key))
+        }
+        Prim::MapKeys => {
+            let (pattern, replacement) = (string(next())?, string(next())?);
+            Value::Query(Rel::MapKeys(Box::new(query(next())?), pattern, replacement))
+        }
         Prim::AggStage => {
             let fs = fields(next())?;
             Value::Query(Rel::Agg(Box::new(query(next())?), fs))

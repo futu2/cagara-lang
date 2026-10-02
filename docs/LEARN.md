@@ -338,9 +338,109 @@ Use this to select existing columns; use `name = expr` to compute or rename.
 
 ### Fields are static
 
-Every row is fully known: a field list names every output column. There is no
-"select all except" operation, because that would make the row type depend on
-the table's runtime shape. To drop a column, name the ones you keep.
+Every row is fully known: a field list names every output column, and the
+compiler knows the resulting row before any SQL is emitted. That is what makes
+two stages possible for when the *names* are the point rather than the values:
+`omit` drops one column, and `mapKeys` rewrites names by pattern.
+
+### Dropping a column: `omit`
+
+`omit "k"` removes one column and leaves every other column exactly where it
+was:
+
+```haskell
+public_users = schema.users & omit "password_hash"
+```
+
+```sql
+SELECT id, name, age, active FROM public.users;
+```
+
+This is the one thing `select` cannot express, and the difference is worth
+knowing. `select` is a whitelist, so it fails *closed*: a column added to
+`users` tomorrow is silently not published. `omit` is a blacklist and fails
+*open*: the new column passes through. Pick whichever behaviour you want,
+deliberately.
+
+Because `omit` knows the row it produces, later stages see the column is gone:
+
+```haskell
+ok  = users & omit "age" & where (.active)
+bad = users & omit "age" & where (.age > 1)   # error: no column `age`
+```
+
+And it composes like any other transformation, because the row it produces is
+computed from the query it is applied to:
+
+```haskell
+no_id = omit "id"      # one definition...
+a = users & no_id      # ...used on different tables
+b = orders & no_id
+```
+
+`a` is `users` without `id`; `b` is `orders` without `id`. The key is a literal
+so that the column can be identified when the query is compiled, which also
+means a key cannot be passed in as a parameter.
+
+### Rewriting names: `mapKeys`
+
+`mapKeys "pattern" "replacement"` applies a regular-expression rewrite to
+**every** column name. Prefix, suffix, rename, and strip are all the same stage
+with different arguments:
+
+```haskell
+prefixed = users & mapKeys "^" "u_"          # id -> u_id, name -> u_name, ...
+suffixed = users & mapKeys "$" "_v2"         # id -> id_v2, ...
+renamed  = users & mapKeys "^id$" "user_id"  # id -> user_id, the rest untouched
+stripped = users & mapKeys "^user_" ""       # user_name -> name
+```
+
+```sql
+SELECT id AS u_id, name AS u_name, age AS u_age, active AS u_active FROM public.users;
+```
+
+A name the pattern does not match keeps its name and its position, and types
+follow the *source* column, so a rewrite never changes a column's type.
+
+Two names colliding, or a rewrite that would leave a column with no name at all,
+are both errors — dropping is `omit`'s job:
+
+```
+error: the key map would produce column `name` twice
+error: the key map leaves column `id` with an empty name
+```
+
+There is no `pick`, `keyMap`, `prefix`, `suffix`, or `Labels` type. Those
+belonged to an earlier design that put column names into the type language,
+which broke the type checker's unification; names are read from the source
+instead. See [the design note](KEYMAP-DESIGN.md) if you want the reasoning.
+
+| You want | Write |
+|---|---|
+| keep these columns | `select {.a, .b}` |
+| drop one column | `omit "b"` |
+| rename one column | `mapKeys "^a$" "b"` |
+| add a prefix or suffix to every key | `mapKeys "^" "u_"` / `mapKeys "$" "_v2"` |
+| recompute a column in place | `update {a = .a + 1}` |
+| keep both sides of a join | rename one side *before* the join |
+
+One trap is worth stating here, because the two stages look similar:
+`update {new = .old}` **appends** `new` and keeps `old` in place, so it adds a
+column rather than moving one. To rename in place, use `mapKeys`. Section
+[5](#5-choosing-columns-select-and-update) covers `update` in full.
+
+**Keeping both sides of a join.** Since a shared name resolves to the left
+column, rename on one side *before* joining. `.<x` / `.>x` belong to the join
+predicate only, so `.>id` is **not** available after the join:
+
+```haskell
+order_names = orders
+  & select { .user_id, .amount, order_id = .id }
+  & inner users (.<user_id == .>id)
+  & select { order_id = .order_id, name = .name, amount = .amount }
+```
+
+See [section 9](#9-joins) for the join output rules this follows from.
 
 ---
 

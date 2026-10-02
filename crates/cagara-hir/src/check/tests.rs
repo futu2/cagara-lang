@@ -898,3 +898,85 @@ fn the_parser_budget_leaves_the_checker_room() {
         "a chain past the parser budget must be reported"
     );
 }
+
+#[test]
+fn omit_is_a_row_equation() {
+    // `omit "k"` states `input ~ { k : t | output }`, so the unifier's own
+    // leftover rule produces the columns — in the input's order — and a missing
+    // key is the ordinary `no column` error. No bespoke rule is involved.
+    let rs = consistent_src("no_id = omit \"id\"\na = users & no_id\nb = orders & no_id\n");
+    // The equation travels in the scheme: one definition, two output rows.
+    assert_eq!(
+        result(&rs, "a").clone().expect("a checks"),
+        "query { name = string, age = int, active = bool }"
+    );
+    assert_eq!(
+        result(&rs, "b").clone().expect("b checks"),
+        "query { user_id = int, amount = float, status = string }"
+    );
+    // Order is the input's: a middle column leaves the others in place.
+    assert_eq!(
+        ty("q = users & omit \"name\"\n", "q"),
+        "query { id = int, age = int, active = bool }"
+    );
+    // A later stage sees the row the equation produced.
+    assert_eq!(
+        ty(
+            "q = users & omit \"age\" & where (.active) & select {.id}\n",
+            "q"
+        ),
+        "query { id = int }"
+    );
+}
+
+#[test]
+fn omit_errors() {
+    assert!(err("q = users & omit \"nope\"\n", "q").contains("no column `nope`"));
+    // A computed key cannot name a column when the query is checked.
+    assert!(err("q = users & omit .id\n", "q").contains("needs a literal column name"));
+    // The omitted column is gone for later stages too.
+    assert!(err("q = users & omit \"age\" & where (.age > 1)\n", "q").contains("no column `age`"));
+}
+
+#[test]
+fn map_keys_rewrites_every_name() {
+    // Prefix, suffix, and a single rename are one stage with different
+    // arguments.
+    assert_eq!(
+        ty("q = users & mapKeys \"^\" \"u_\"\n", "q"),
+        "query { u_id = int, u_name = string, u_age = int, u_active = bool }"
+    );
+    assert_eq!(
+        ty("q = users & mapKeys \"$\" \"_v2\"\n", "q"),
+        "query { id_v2 = int, name_v2 = string, age_v2 = int, active_v2 = bool }"
+    );
+    assert_eq!(
+        ty("q = users & mapKeys \"^id$\" \"user_id\"\n", "q"),
+        "query { user_id = int, name = string, age = int, active = bool }"
+    );
+    // A column the pattern does not match keeps its name and its position.
+    assert_eq!(
+        ty("q = users & mapKeys \"^a\" \"b\"\n", "q"),
+        "query { id = int, name = string, bge = int, bctive = bool }"
+    );
+    // Types follow the source column, not the new name.
+    let rs = consistent_src("q = users & mapKeys \"^\" \"c_\"\n");
+    assert_eq!(
+        result(&rs, "q").clone().expect("q checks"),
+        "query { c_id = int, c_name = string, c_age = int, c_active = bool }"
+    );
+}
+
+#[test]
+fn map_keys_errors() {
+    // Two columns cannot end up with the same name.
+    assert!(err("q = users & mapKeys \"^id$\" \"name\"\n", "q").contains("`name` twice"));
+    // Dropping is `omit`'s job, so an empty result is refused.
+    assert!(err("q = users & mapKeys \"^id$\" \"\"\n", "q").contains("empty name"));
+    // The pattern is a regex, and a bad one is reported.
+    assert!(err("q = users & mapKeys \"(\" \"x\"\n", "q").contains("invalid pattern"));
+    // A computed pattern cannot be applied when the query is checked.
+    assert!(
+        err("q = users & mapKeys (upper \"x\") \"y\"\n", "q").contains("needs a literal pattern")
+    );
+}

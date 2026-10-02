@@ -608,7 +608,8 @@ impl<'a> Parser<'a> {
         self.start(K::RecordExpr);
         self.bump(); // {
                      // A field is `name = expr`, or the shorthand `.name` for
-                     // `name = .name` (`select {.id, .name}`, the replacement for `pick`).
+                     // `name = .name`, so `select {.id, .name}` chooses columns
+                     // without naming each one twice.
         while self.at_inner(Token::Ident) || self.at(Token::Field) {
             self.start(K::RecordField);
             if self.at(Token::Field) {

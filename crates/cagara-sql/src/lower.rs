@@ -313,6 +313,30 @@ impl Lowerer {
                 st.has_win |= new_win;
                 st
             }
+            Rel::Omit(r, key) => {
+                let mut st = self.rel(r)?;
+                // As in `select`: a projection after `distinct` would dedupe on
+                // the projected columns instead of the input row.
+                if st.distinct {
+                    st = self.wrap(st);
+                }
+                st.items.retain(|(n, _)| n != key);
+                st
+            }
+            Rel::MapKeys(r, pattern, replacement) => {
+                let mut st = self.rel(r)?;
+                // A rename is semantically transparent, but a projection after
+                // `distinct` still has to move outside it (see `select`).
+                if st.distinct {
+                    st = self.wrap(st);
+                }
+                let names: Vec<String> = st.items.iter().map(|(n, _)| n.clone()).collect();
+                let cols = cagara_hir::schema::map_columns(&names, pattern, replacement)?;
+                for (item, new) in st.items.iter_mut().zip(cols) {
+                    item.0 = new;
+                }
+                st
+            }
             Rel::Agg(r, fs) => {
                 let mut st = self.rel(r)?;
                 // `distinct` must dedupe the input rows before they are

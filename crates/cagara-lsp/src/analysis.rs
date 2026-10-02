@@ -7,6 +7,7 @@ use cagara_hir::check::{check, TypeCheck, PROBE_FIELD};
 use cagara_hir::root_queries_checked;
 use cagara_hir::workspace::{Binding, Diag, Workspace};
 use cagara_syntax::ast::{Expr, ExprKind, Span};
+use line_index::{LineIndex, TextRange, TextSize, WideEncoding};
 use lsp_types::{
     CompletionItem, CompletionItemKind, DocumentHighlightKind, DocumentSymbol, Position, Range,
     SymbolKind, TextEdit,
@@ -215,11 +216,10 @@ fn occ_at(occs: &[Occ], offset: usize) -> Option<&Occ> {
         .or_else(|| occs.iter().find(|o| o.end == offset))
 }
 
-fn root_range(ws: &Workspace, start: usize, end: usize) -> Range {
-    let text = &ws.modules[ws.root].text;
+fn root_range(p: &Positions, start: usize, end: usize) -> Range {
     Range {
-        start: position_of(text, start),
-        end: position_of(text, end),
+        start: p.position(start),
+        end: p.position(end),
     }
 }
 
@@ -231,7 +231,8 @@ fn root_range(ws: &Workspace, start: usize, end: usize) -> Range {
 /// when that differs.
 pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
     let text = &ws.modules[ws.root].text;
-    let offset = offset_at(text, pos)?;
+    let p = Positions::new(text);
+    let offset = p.offset(pos)?;
     let occs = occurrences(ws);
     let Some(o) = occ_at(&occs, offset) else {
         return atom_hover(ws, offset);
@@ -328,8 +329,9 @@ fn atom_at(text: &str, e: &Expr, offset: usize, found: &mut Option<(Span, (usize
 /// lambda. The prelude has no file, so its definitions are not returned.
 pub fn definition(ws: &Workspace, pos: Position) -> Vec<(PathBuf, Range)> {
     let text = &ws.modules[ws.root].text;
+    let p = Positions::new(text);
     let occs = occurrences(ws);
-    let Some(o) = offset_at(text, pos).and_then(|off| occ_at(&occs, off)) else {
+    let Some(o) = p.offset(pos).and_then(|off| occ_at(&occs, off)) else {
         return vec![];
     };
     let (m, is) = match &o.target {
@@ -337,7 +339,7 @@ pub fn definition(ws: &Workspace, pos: Position) -> Vec<(PathBuf, Range)> {
             let root = &ws.modules[ws.root];
             return vec![(
                 root.path.clone(),
-                root_range(ws, *at, *at + (o.end - o.start)),
+                root_range(&p, *at, *at + (o.end - o.start)),
             )];
         }
         Target::Global(Binding::Def(m, i)) => (*m, vec![*i]),
@@ -348,13 +350,14 @@ pub fn definition(ws: &Workspace, pos: Position) -> Vec<(PathBuf, Range)> {
         return vec![];
     }
     let md = &ws.modules[m];
+    let mp = Positions::new(&md.text);
     is.iter()
         .map(|&i| {
             let d = &md.module.defs[i];
             let start = d.span.start as usize;
             let range = Range {
-                start: position_of(&md.text, start),
-                end: position_of(&md.text, start + d.name.len()),
+                start: mp.position(start),
+                end: mp.position(start + d.name.len()),
             };
             (md.path.clone(), range)
         })
@@ -375,8 +378,9 @@ pub fn references(ws: &Workspace, pos: Position, include_declaration: bool) -> V
 /// sites are `WRITE`, uses `READ`.
 pub fn highlights(ws: &Workspace, pos: Position) -> Vec<(Range, DocumentHighlightKind)> {
     let text = &ws.modules[ws.root].text;
+    let p = Positions::new(text);
     let occs = occurrences(ws);
-    let Some(o) = offset_at(text, pos).and_then(|off| occ_at(&occs, off)) else {
+    let Some(o) = p.offset(pos).and_then(|off| occ_at(&occs, off)) else {
         return vec![];
     };
     occs.iter()
@@ -387,7 +391,7 @@ pub fn highlights(ws: &Workspace, pos: Position) -> Vec<(Range, DocumentHighligh
             } else {
                 DocumentHighlightKind::READ
             };
-            (root_range(ws, x.start, x.end), kind)
+            (root_range(&p, x.start, x.end), kind)
         })
         .collect()
 }
@@ -398,6 +402,7 @@ pub fn highlights(ws: &Workspace, pos: Position) -> Vec<(Range, DocumentHighligh
 pub fn symbols(ws: &Workspace) -> Vec<DocumentSymbol> {
     let tc = check(ws);
     let md = &ws.modules[ws.root];
+    let p = Positions::new(&md.text);
     let sym = |name: String, detail: Option<String>, kind, range: Range, selection_range: Range| {
         DocumentSymbol {
             name,
@@ -416,7 +421,7 @@ pub fn symbols(ws: &Workspace) -> Vec<DocumentSymbol> {
         .iter()
         .filter_map(|imp| {
             let (s, e) = trimmed(&md.text, imp.span)?;
-            let r = root_range(ws, s, e);
+            let r = root_range(&p, s, e);
             Some(sym(
                 imp.path.clone(),
                 imp.alias.clone(),
@@ -441,8 +446,8 @@ pub fn symbols(ws: &Workspace) -> Vec<DocumentSymbol> {
             d.name.clone(),
             ty,
             kind,
-            root_range(ws, s, e),
-            root_range(ws, s, name_end),
+            root_range(&p, s, e),
+            root_range(&p, s, name_end),
         ));
     }
     out
@@ -458,7 +463,8 @@ pub fn symbols(ws: &Workspace) -> Vec<DocumentSymbol> {
 /// shared live module graph untouched.
 pub fn completion(ws: &Workspace, pos: Position) -> Vec<CompletionItem> {
     let text = &ws.modules[ws.root].text;
-    let Some(offset) = offset_at(text, pos) else {
+    let p = Positions::new(text);
+    let Some(offset) = p.offset(pos) else {
         return vec![];
     };
     match dot_context(text, offset) {
@@ -643,12 +649,13 @@ pub fn format(ws: &Workspace) -> Result<Vec<TextEdit>, cagara_fmt::FmtError> {
     if &out == text {
         return Ok(vec![]);
     }
+    let p = Positions::new(text);
     let range = Range {
         start: Position {
             line: 0,
             character: 0,
         },
-        end: position_of(text, text.len()),
+        end: p.position(text.len()),
     };
     Ok(vec![TextEdit {
         range,
@@ -656,33 +663,78 @@ pub fn format(ws: &Workspace) -> Result<Vec<TextEdit>, cagara_fmt::FmtError> {
     }])
 }
 
-/// Byte offset of an LSP position (UTF-16 columns).
-pub fn offset_at(text: &str, pos: Position) -> Option<usize> {
-    let mut line_start = 0;
-    for _ in 0..pos.line {
-        line_start += text[line_start..].find('\n')? + 1;
-    }
-    let line_end = text[line_start..]
-        .find('\n')
-        .map_or(text.len(), |i| line_start + i);
-    let mut units = 0;
-    for (i, c) in text[line_start..line_end].char_indices() {
-        if units >= pos.character {
-            return Some(line_start + i);
-        }
-        units += c.len_utf16() as u32;
-    }
-    Some(line_end)
+/// Byte↔position mapping for one text. Built once per request: line-index
+/// scans the text once and binary-searches after, where per-call rescans
+/// made hover and highlights O(lines × occurrences) on large files.
+struct Positions<'a> {
+    text: &'a str,
+    idx: LineIndex,
 }
 
-/// LSP position of a byte offset.
-pub fn position_of(text: &str, offset: usize) -> Position {
-    let offset = offset.min(text.len());
-    let before = &text[..offset];
-    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-    Position {
-        line: before.matches('\n').count() as u32,
-        character: before[line_start..].encode_utf16().count() as u32,
+impl<'a> Positions<'a> {
+    fn new(text: &'a str) -> Self {
+        Positions {
+            text,
+            idx: LineIndex::new(text),
+        }
+    }
+
+    /// Byte offset of an LSP position (UTF-16 columns), clamped to the
+    /// line's end; None for a line the text does not have.
+    fn offset(&self, pos: Position) -> Option<usize> {
+        let line = self.idx.line(pos.line)?;
+        let end = self.line_end(line);
+        let wide = line_index::WideLineCol {
+            line: pos.line,
+            col: pos.character,
+        };
+        let Some(lc) = self.idx.to_utf8(WideEncoding::Utf16, wide) else {
+            // A column so large the wide-character walk overflows: the line
+            // end, where a per-unit walk would also stop.
+            return Some(end);
+        };
+        let mut offset = usize::from(self.idx.offset(lc)?);
+        // `to_utf8` does not clamp the column to the line: a column past the
+        // end would land in the next line or past the text.
+        if offset > end {
+            return Some(end);
+        }
+        // A column inside a multi-byte character rounds up to its end, like
+        // walking the line's UTF-16 units does.
+        if !self.text.is_char_boundary(offset) {
+            offset += self.text[offset..].chars().next()?.len_utf8();
+        }
+        Some(offset)
+    }
+
+    /// Where a walk over a line's characters stops: its content end, before
+    /// the newline that line-index's range includes.
+    fn line_end(&self, line: TextRange) -> usize {
+        let end = usize::from(line.end());
+        if end > usize::from(line.start()) && self.text.as_bytes().get(end - 1) == Some(&b'\n') {
+            end - 1
+        } else {
+            end
+        }
+    }
+
+    /// LSP position of a byte offset, floored to a char boundary.
+    fn position(&self, offset: usize) -> Position {
+        let mut offset = offset.min(usize::from(self.idx.len()));
+        let lc = loop {
+            match self.idx.try_line_col(TextSize::new(offset as u32)) {
+                Some(lc) => break lc,
+                // Inside a multi-byte character: floor to its start.
+                None => offset -= 1,
+            }
+        };
+        Position {
+            line: lc.line,
+            character: self
+                .idx
+                .to_wide(WideEncoding::Utf16, lc)
+                .map_or(lc.col, |w| w.col),
+        }
     }
 }
 
@@ -772,7 +824,7 @@ mod tests {
         // The span starts after `"é" <> ` or at the argument; either way the
         // column counts `é` as one UTF-16 unit, not two bytes.
         let line = SRC.lines().nth(3).unwrap();
-        let byte = offset_at(SRC, r.start).unwrap() - SRC.find(line).unwrap();
+        let byte = Positions::new(SRC).offset(r.start).unwrap() - SRC.find(line).unwrap();
         assert!(line.is_char_boundary(byte), "{r:?}");
     }
 
@@ -1015,10 +1067,11 @@ mod tests {
     #[test]
     fn positions_round_trip() {
         let t = "ab\né x\n";
+        let p = Positions::new(t);
         for off in [0, 1, 3, 5, 6] {
-            assert_eq!(offset_at(t, position_of(t, off)), Some(off));
+            assert_eq!(p.offset(p.position(off)), Some(off));
         }
-        assert_eq!(position_of(t, 6), pos(1, 2));
+        assert_eq!(p.position(6), pos(1, 2));
     }
 
     /// The probe is spliced into whichever definition holds the cursor, but

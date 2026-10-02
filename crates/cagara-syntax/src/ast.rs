@@ -83,7 +83,9 @@ pub enum ExprKind {
     Field(Side, String),
     /// `e.x` — module-qualified name or record projection (resolved later)
     Proj(Box<Expr>, String),
-    App(Box<Expr>, Vec<Expr>),
+    /// Application arguments: usually one or two (operators desugar into
+    /// applications), so they live behind one allocation as a boxed slice.
+    App(Box<Expr>, Box<[Expr]>),
     Lambda(String, Box<Expr>),
     Record(Vec<(String, Expr)>),
     List(Vec<Expr>),
@@ -293,7 +295,7 @@ impl Lower {
                     ExprKind::Error
                 } else {
                     let head = cs.remove(0);
-                    ExprKind::App(Box::new(head), cs)
+                    ExprKind::App(Box::new(head), cs.into())
                 }
             }
             K::BinExpr => {
@@ -311,7 +313,7 @@ impl Lower {
                         };
                         let f = self.mk(op_span, ExprKind::Name(name.to_string()));
                         let (l, r) = (self.expr(l), self.expr(r));
-                        ExprKind::App(Box::new(f), vec![l, r])
+                        ExprKind::App(Box::new(f), vec![l, r].into())
                     }
                     _ => ExprKind::Error,
                 }
@@ -334,7 +336,7 @@ impl Lower {
                         }
                         _ => {
                             let f = self.mk(sp, ExprKind::Name("negate".to_string()));
-                            ExprKind::App(Box::new(f), vec![inner])
+                            ExprKind::App(Box::new(f), vec![inner].into())
                         }
                     }
                 }
@@ -386,6 +388,15 @@ impl Lower {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expr_stays_small() {
+        // Every AST node carries `kind`, so its size is paid by every node,
+        // not just applications. This pins the storage choice for `App`'s
+        // arguments: inline arrays (smallvec) would triple every node.
+        eprintln!("size_of::<Expr>() = {}", std::mem::size_of::<Expr>());
+        assert!(std::mem::size_of::<Expr>() <= 64);
+    }
 
     fn body(src: &str) -> ExprKind {
         let (m, errs) = lower_source(src);

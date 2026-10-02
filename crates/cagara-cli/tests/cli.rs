@@ -6,32 +6,23 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 /// A scratch directory that removes itself, so tests do not collide.
-struct TempDir(PathBuf);
+struct TempDir(tempfile::TempDir);
 
 impl TempDir {
     fn new(tag: &str) -> Self {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "cagara-cli-test-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).expect("create temp dir");
-        TempDir(p)
+        TempDir(
+            tempfile::Builder::new()
+                .prefix(&format!("cagara-cli-test-{tag}-"))
+                .tempdir()
+                .expect("create temp dir"),
+        )
     }
 
     /// Write `src` as a file and return its path.
     fn write(&self, name: &str, src: &str) -> PathBuf {
-        let p = self.0.join(name);
+        let p = self.0.path().join(name);
         std::fs::write(&p, src).expect("write source");
         p
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -303,7 +294,7 @@ fn the_dialect_changes_the_sql() {
 #[test]
 fn usage_errors_exit_2_and_compile_errors_exit_1() {
     let dir = TempDir::new("exit-codes");
-    let missing = dir.0.join("does-not-exist.cagara");
+    let missing = dir.0.path().join("does-not-exist.cagara");
     let out = cagara([&missing]);
     assert!(!out.status.success());
     assert!(!stderr(&out).is_empty(), "expected a diagnostic");

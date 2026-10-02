@@ -13,3 +13,6 @@ cagara-hir.workspace = true
 cagara-sql.workspace = true
 cagara-lsp.workspace = true
 cagara-fmt.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -8,7 +8,7 @@ use sqlglot_rust::ast::{
     Expr, JoinClause, JoinType, OrderByItem, QuoteStyle, SetOperationStatement, SetOperationType,
     Statement, TableRef, TableSource,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct Lowerer {
     next: usize,
@@ -17,12 +17,17 @@ pub struct Lowerer {
     cte_names: HashMap<String, String>,
     building: Vec<Rel>,
     ctes: Vec<sqlglot_rust::ast::Cte>,
+    /// Table names in the query: a generated CTE hides a same-named table
+    /// for the whole statement, so its name must avoid all of them.
+    tables: HashSet<String>,
 }
 
 impl Lowerer {
     pub fn for_rel(rel: &Rel) -> Self {
         let mut counts = Vec::new();
         count_rel(rel, &mut counts);
+        let mut tables = HashSet::new();
+        collect_tables(rel, &mut tables);
         Lowerer {
             next: 0,
             next_cte: 0,
@@ -30,6 +35,7 @@ impl Lowerer {
             cte_names: HashMap::new(),
             building: Vec::new(),
             ctes: Vec::new(),
+            tables,
         }
     }
 
@@ -164,7 +170,13 @@ impl Lowerer {
                 return self.cte_stage(&name, rel);
             }
             self.next_cte += 1;
-            let name = format!("cagara_cte{}", self.next_cte);
+            let mut name = format!("cagara_cte{}", self.next_cte);
+            // Unquoted identifiers are case-folded by most engines, so
+            // compare case-insensitively; skipping an extra number is free.
+            while self.tables.iter().any(|t| t.eq_ignore_ascii_case(&name)) {
+                self.next_cte += 1;
+                name = format!("cagara_cte{}", self.next_cte);
+            }
             self.cte_names.insert(key, name.clone());
             self.building.push(rel.clone());
             let body = self.rel_inner(rel)?;
@@ -634,6 +646,15 @@ fn count_rel(rel: &Rel, counts: &mut Vec<(Rel, usize)>) {
     }
     for child in rel.children() {
         count_rel(child, counts);
+    }
+}
+
+fn collect_tables(rel: &Rel, tables: &mut HashSet<String>) {
+    if let Rel::Table { name, .. } = rel {
+        tables.insert(name.clone());
+    }
+    for child in rel.children() {
+        collect_tables(child, tables);
     }
 }
 

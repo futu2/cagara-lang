@@ -279,13 +279,18 @@ fn add(ts: bool, unit: &str, x: Expr, count: Expr, f: Fam) -> Option<Expr> {
             ),
             // make_interval(years, months, weeks, days, hours, mins, secs)
             (true, u) => {
+                // A unit without its own slot would silently land in the
+                // seconds slot (a `WEEK` becomes a second), so reject it
+                // instead; the prelude spells weeks and quarters in terms of
+                // days and months.
                 let slot = match u {
                     "YEAR" => 0,
                     "MONTH" => 1,
                     "DAY" => 3,
                     "HOUR" => 4,
                     "MINUTE" => 5,
-                    _ => 6,
+                    "SECOND" => 6,
+                    _ => return None,
                 };
                 let mut args = vec![n("0"); 7];
                 args[slot] = count;

@@ -136,14 +136,16 @@ fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
     if to == Dialect::Ansi {
         return Ok(());
     }
-    let t = sqlglot_rust::dialects::transform(
+    let Statement::Select(s) = sqlglot_rust::dialects::transform(
         &Statement::Select(std::mem::replace(sel, empty())),
         Dialect::Ansi,
         to,
-    );
-    if let Statement::Select(s) = t {
-        *sel = s;
-    }
+    ) else {
+        // sqlglot's transform is supposed to pass a SELECT back through; a
+        // future version that does not must be an error, not an empty block.
+        return Err("internal: dialect transform dropped a SELECT block".into());
+    };
+    *sel = s;
     Ok(())
 }
 

@@ -100,7 +100,14 @@ pub fn format_type(name: &str, ty: &str, width: usize) -> String {
 
 /// 1-based line and column (in chars) of a byte offset.
 pub fn line_col(src: &str, offset: usize) -> (usize, usize) {
-    let before = src.get(..offset.min(src.len())).unwrap_or(src);
+    // An offset inside a multi-byte character counts as that character's
+    // start: `src.get` would otherwise fail to slice and fall back to the
+    // whole source, reporting the last line instead.
+    let mut offset = offset.min(src.len());
+    while offset > 0 && !src.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let before = &src[..offset];
     let line_start = before.rfind('\n').map_or(0, |i| i + 1);
     (
         before.matches('\n').count() + 1,

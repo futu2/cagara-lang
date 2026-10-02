@@ -225,6 +225,20 @@ fn set_operations_and_reused_queries_use_sql_set_ops_and_ctes() {
 }
 
 #[test]
+fn a_generated_cte_does_not_shadow_a_table() {
+    // `cagara_cte1` is the first generated CTE name, and a CTE hides a
+    // same-named table for the whole statement — the generated name must
+    // move out of the way (case-insensitively, as engines fold identifiers).
+    let src = "cagara_cte1 : query { id = int, name = string, age = int, active = bool } = \
+               table \"public\" \"cagara_cte1\"\n\
+               active = cagara_cte1 & where .active\n\
+               q = union active active\n";
+    let s = sql(src, "q");
+    assert!(s.contains("WITH cagara_cte2"), "{s}");
+    assert!(s.contains("FROM public.cagara_cte1"), "{s}");
+}
+
+#[test]
 fn a_set_branch_with_its_own_limit_is_wrapped() {
     // A set operator's LIMIT applies to the whole operation, so a branch
     // that has one cannot be a bare SELECT: `SELECT ... LIMIT 3 UNION

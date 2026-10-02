@@ -57,7 +57,7 @@ impl fmt::Display for Diag {
             let n = self.line.to_string();
             let pad = self
                 .source
-                .get(..self.col - 1)
+                .get(..self.col.saturating_sub(1))
                 .map_or(0, |s| s.chars().count());
             let gutter = " ".repeat(n.len());
             write!(
@@ -305,11 +305,11 @@ impl Workspace {
             .overlays
             .get(&target)
             .cloned()
-            .or_else(|| std::fs::read_to_string(&target).ok())
+            .map(Ok)
+            .unwrap_or_else(|| std::fs::read_to_string(&target))
         {
-            Some(t) => Some(self.add(target, t)),
-            None => {
-                let e = std::fs::read_to_string(&target).expect_err("missing imported file");
+            Ok(t) => Some(self.add(target, t)),
+            Err(e) => {
                 let msg = format!("cannot import `{}`: {e}", imp.path);
                 self.import_diags.push(make_diag(from, text, offset, msg));
                 None

@@ -265,10 +265,10 @@ pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     let general = format!("```cagara\n{general}\n```");
-    match here {
-        Some(t) if !(defs.len() == 1 && defs[0].1 == t) => Some(format!(
+    match (here, defs.first()) {
+        (Some(t), Some((n0, t0))) if !(defs.len() == 1 && *t0 == t) => Some(format!(
             "```cagara\n{}\n```\n---\ndefined as\n{general}",
-            sig(defs[0].0, t)
+            sig(n0, t)
         )),
         _ => Some(general),
     }

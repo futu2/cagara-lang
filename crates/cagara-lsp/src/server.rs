@@ -300,7 +300,16 @@ fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<()
                 return Ok(());
             };
             doc.text = change.text;
-            state.rebuild();
+            // A keystroke usually does not change imports: patch that module
+            // in place so salsa's memoized checks survive, and rebuild the
+            // whole graph from disk only when they do.
+            let patched = state
+                .ws
+                .module_for_path(&doc.path)
+                .is_some_and(|m| state.ws.set_source(m, doc.text.clone()));
+            if !patched {
+                state.rebuild();
+            }
             publish_all(conn, state)?;
         }
         DidSaveTextDocument::METHOD => {

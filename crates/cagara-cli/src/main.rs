@@ -19,14 +19,19 @@ const USAGE: &str =
        cagara lsp    run the language server over stdio";
 
 fn main() -> ExitCode {
-    match std::panic::catch_unwind(main_inner) {
+    match main_inner() {
         Ok(code) => code,
-        Err(p) if is_broken_pipe(&p) => ExitCode::SUCCESS,
-        Err(p) => std::panic::resume_unwind(p),
+        // A closed reader (`cagara file.cagara | head`) ends the output, not
+        // the exit status.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("cagara: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
-fn main_inner() -> ExitCode {
+fn main_inner() -> std::io::Result<ExitCode> {
     let mut rest = std::env::args_os().skip(1);
     let first = rest.next();
     if first.as_deref() == Some(OsStr::new("fmt")) {
@@ -35,23 +40,23 @@ fn main_inner() -> ExitCode {
     if first.as_deref() == Some(OsStr::new("lsp")) {
         // Editors may pass `--stdio`; stdio is the only transport.
         if let Some(a) = rest.find(|a| a != OsStr::new("--stdio")) {
-            return usage(&format!(
+            return Ok(usage(&format!(
                 "unexpected argument `{}` for `cagara lsp`",
                 display(&a)
-            ));
+            )));
         }
         return match cagara_lsp::run() {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(()) => Ok(ExitCode::SUCCESS),
             Err(e) => {
                 eprintln!("cagara lsp: {e}");
-                ExitCode::FAILURE
+                Ok(ExitCode::FAILURE)
             }
         };
     }
     compile(first.into_iter().chain(rest))
 }
 
-fn compile(mut args: impl Iterator<Item = OsString>) -> ExitCode {
+fn compile(mut args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
     let mut file: Option<PathBuf> = None;
     let mut dialect_name = String::from("ansi");
     let mut only: Option<String> = None;
@@ -65,41 +70,44 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> ExitCode {
                 Some(d) => match d.into_string() {
                     Ok(d) => dialect_name = d,
                     Err(d) => {
-                        return usage(&format!(
+                        return Ok(usage(&format!(
                             "`--dialect` is not valid UTF-8: `{}`",
                             display(&d)
-                        ))
+                        )))
                     }
                 },
-                None => return usage("--dialect needs a value"),
+                None => return Ok(usage("--dialect needs a value")),
             },
             Some("--only") => match args.next() {
                 Some(d) => match d.into_string() {
                     Ok(d) => only = Some(d),
                     Err(d) => {
-                        return usage(&format!("`--only` is not valid UTF-8: `{}`", display(&d)))
+                        return Ok(usage(&format!(
+                            "`--only` is not valid UTF-8: `{}`",
+                            display(&d)
+                        )))
                     }
                 },
-                None => return usage("--only needs a definition name"),
+                None => return Ok(usage("--only needs a definition name")),
             },
             Some("--pretty") => pretty = true,
             Some("--types") => types = true,
             Some("--optimize") => optimize = true,
             Some("-h") | Some("--help") => {
-                println!("{USAGE}");
-                return ExitCode::SUCCESS;
+                out(USAGE)?;
+                return Ok(ExitCode::SUCCESS);
             }
             _ if file.is_none() && !a.to_string_lossy().starts_with("--") => {
                 file = Some(PathBuf::from(a))
             }
-            _ => return usage(&format!("unexpected argument `{}`", display(&a))),
+            _ => return Ok(usage(&format!("unexpected argument `{}`", display(&a)))),
         }
     }
     let Some(file) = file else {
-        return usage("missing input file");
+        return Ok(usage("missing input file"));
     };
     let Some(dialect) = cagara_sql::dialect(&dialect_name) else {
-        return usage(&format!("unknown dialect `{dialect_name}`"));
+        return Ok(usage(&format!("unknown dialect `{dialect_name}`")));
     };
 
     let ws = Workspace::open(&file);
@@ -107,7 +115,7 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> ExitCode {
         for d in &ws.diags {
             eprintln!("{d}");
         }
-        return ExitCode::FAILURE;
+        return Ok(ExitCode::FAILURE);
     }
 
     // Errors in imported modules are always reported; root errors are
@@ -131,8 +139,8 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> ExitCode {
                     eprintln!("{e}");
                     failed = true;
                 }
-                (None, Some(t)) => println!("{} : {t}", d.name),
-                (None, None) => println!("{} : ?", d.name),
+                (None, Some(t)) => out(&format!("{} : {t}", d.name))?,
+                (None, None) => out(&format!("{} : ?", d.name))?,
             }
         }
         if only.is_some() && !selected {
@@ -142,11 +150,7 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> ExitCode {
             );
             failed = true;
         }
-        return if failed {
-            ExitCode::FAILURE
-        } else {
-            ExitCode::SUCCESS
-        };
+        return Ok(done(failed));
     }
 
     let mut printed = 0;
@@ -171,9 +175,9 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> ExitCode {
         }) {
             Ok(sql) => {
                 if printed > 0 {
-                    println!();
+                    out("")?;
                 }
-                println!("-- {name}\n{sql};");
+                out(&format!("-- {name}\n{sql};"))?;
                 printed += 1;
             }
             Err(e) => {
@@ -188,39 +192,37 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> ExitCode {
         eprintln!("no query definition named `{o}`");
         failed = true;
     }
-    if failed {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+    Ok(done(failed))
 }
 
 /// `cagara fmt`: rewrite files in place, or with `--check` list the files
 /// that are not formatted. Files with syntax errors are reported and left
 /// unchanged. `-` formats stdin to stdout (echoing it on failure, so editor
 /// filters never lose text).
-fn fmt(args: impl Iterator<Item = OsString>) -> ExitCode {
+fn fmt(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
     let mut check = false;
     let mut files = Vec::new();
     for a in args {
         match a.to_str() {
             Some("--check") => check = true,
             Some("-h") | Some("--help") => {
-                println!("{USAGE}");
-                return ExitCode::SUCCESS;
+                out(USAGE)?;
+                return Ok(ExitCode::SUCCESS);
             }
             Some("-") => files.push(a),
             _ if !a.to_string_lossy().starts_with('-') => files.push(a),
             _ => {
-                return usage(&format!(
+                return Ok(usage(&format!(
                     "unexpected argument `{}` for `cagara fmt`",
                     display(&a)
-                ))
+                )))
             }
         }
     }
     if files.is_empty() {
-        return usage("`cagara fmt` needs files to format (or `-` for stdin)");
+        return Ok(usage(
+            "`cagara fmt` needs files to format (or `-` for stdin)",
+        ));
     }
     let mut failed = false;
     for file in &files {
@@ -241,7 +243,7 @@ fn fmt(args: impl Iterator<Item = OsString>) -> ExitCode {
                 continue;
             }
         };
-        let out = match cagara_fmt::format(&src) {
+        let formatted = match cagara_fmt::format(&src) {
             Ok(f) if f.errors.is_empty() => Some(f.text),
             Ok(f) => {
                 for e in &f.errors {
@@ -258,42 +260,32 @@ fn fmt(args: impl Iterator<Item = OsString>) -> ExitCode {
                 None
             }
         };
-        failed |= out.is_none();
+        failed |= formatted.is_none();
         if stdin {
             let text = if check {
                 None
             } else {
-                Some(out.as_deref().unwrap_or(&src))
+                Some(formatted.as_deref().unwrap_or(&src))
             };
             if let Some(t) = text {
-                if let Err(e) = std::io::stdout().write_all(t.as_bytes()) {
-                    return if e.kind() == std::io::ErrorKind::BrokenPipe {
-                        ExitCode::SUCCESS
-                    } else {
-                        ExitCode::FAILURE
-                    };
-                }
+                std::io::stdout().write_all(t.as_bytes())?;
             }
         }
-        let Some(out) = out else { continue };
-        if out == src {
+        let Some(formatted) = formatted else { continue };
+        if formatted == src {
             continue;
         }
         if check {
-            println!("{name}");
+            out(name)?;
             failed = true;
         } else if !stdin {
-            if let Err(e) = std::fs::write(file, out) {
+            if let Err(e) = std::fs::write(file, formatted) {
                 eprintln!("{name}: {e}");
                 failed = true;
             }
         }
     }
-    if failed {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+    Ok(done(failed))
 }
 
 fn usage(msg: &str) -> ExitCode {
@@ -305,11 +297,18 @@ fn display(s: &OsStr) -> String {
     s.to_string_lossy().into_owned()
 }
 
-fn is_broken_pipe(p: &(dyn std::any::Any + Send)) -> bool {
-    let message = p
-        .downcast_ref::<&str>()
-        .map(|s| s.to_string())
-        .or_else(|| p.downcast_ref::<String>().cloned())
-        .unwrap_or_default();
-    message.contains("Broken pipe") || message.contains("broken pipe")
+/// One line to stdout. Errors — a closed reader (`| head`) included —
+/// propagate to `main`, which turns `BrokenPipe` into a clean exit.
+fn out(s: &str) -> std::io::Result<()> {
+    let mut o = std::io::stdout().lock();
+    o.write_all(s.as_bytes())?;
+    o.write_all(b"\n")
+}
+
+fn done(failed: bool) -> ExitCode {
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }

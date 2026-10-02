@@ -20,12 +20,24 @@ pub struct Evaluator<'w> {
     /// Application depth, so a self-applying closure (`f = x => f x`) is
     /// rejected instead of recursing until the stack overflows.
     depth: usize,
+    /// How many definitions are being evaluated below the one asked for.
+    /// `active` catches cycles, but a long chain of acyclic references
+    /// (`a1 = f`, `a2 = a1`, …) still costs frames per link.
+    def_depth: usize,
 }
 
 /// Deepest application nesting. `active` already catches recursion between
 /// definitions; this catches a definition that applies *itself* as a value
 /// (`f = x => f x`), which is not a definition cycle but still never ends.
+/// Legitimate code reaches it too (every `&` stage applies a prelude
+/// closure), so the diagnostic talks about nesting, not non-termination.
 const MAX_DEPTH: usize = 256;
+
+/// Deepest nesting of definition references. An evaluator runs on threads as
+/// small as 2 MiB (the language server), and in a debug build each level
+/// costs around nine frames across `inst_value` / `eval_def` / `eval`, so
+/// this stays well under it — 300 nested references overflow such a thread.
+const MAX_DEF_NESTING: usize = 64;
 
 /// Attach a location to an error that does not have one yet.
 fn at<T>(r: EResult<T>, module: usize, span: Span) -> EResult<T> {
@@ -46,6 +58,7 @@ impl<'w> Evaluator<'w> {
             cache: HashMap::new(),
             active: Vec::new(),
             depth: 0,
+            def_depth: 0,
         }
     }
 
@@ -71,8 +84,18 @@ impl<'w> Evaluator<'w> {
             );
             return at(err(msg), m, def.span);
         }
+        if self.def_depth >= MAX_DEF_NESTING {
+            let msg = format!(
+                "`{}` is used through a chain of more than {MAX_DEF_NESTING} definitions; \
+                 define a name before the definitions that use it",
+                def.name
+            );
+            return at(err(msg), m, def.span);
+        }
+        self.def_depth += 1;
         self.active.push((m, i));
         let r = self.eval_def(m, def, Rc::new(inst.clone()));
+        self.def_depth -= 1;
         self.active.pop();
         let v = r?;
         self.cache.insert(inst, v.clone());
@@ -230,7 +253,8 @@ impl<'w> Evaluator<'w> {
                 if self.depth >= MAX_DEPTH {
                     let d = &self.ws.modules[c.module].module.defs[c.inst.def.1];
                     let msg = format!(
-                        "`{}` applies itself without terminating; recursion is not supported",
+                        "`{}` evaluates more than {MAX_DEPTH} calls deep; \
+                         recursion is not supported",
                         d.name
                     );
                     return at(err(msg), c.module, c.body.span);
@@ -480,7 +504,33 @@ mod tests {
         // each application re-enters `f` for ever. This used to overflow the
         // stack (and take the language server down with it).
         let e = errors("f = x => f x\nq = f 1\n");
-        assert!(e.iter().any(|m| m.contains("applies itself")), "{e:?}");
+        assert!(
+            e.iter().any(|m| m.contains("recursion is not supported")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_chain_of_definitions_is_reported_instead_of_overflowing() {
+        // Acyclic, so the cycle check does not fire, and forward-referencing,
+        // so evaluation enters the chain from the top before anything is
+        // cached: each alias costs a nesting level. (In source order the
+        // chain is evaluated bottom-up and never nests.) The checker reports
+        // its own forward-reference limit too; this pins the evaluator's.
+        let mut src = String::from("q = a99\n");
+        for i in 0..100 {
+            if i == 0 {
+                src.push_str("a0 = 1\n");
+            } else {
+                src.push_str(&format!("a{i} = a{}\n", i - 1));
+            }
+        }
+        let e = errors(&src);
+        assert!(
+            e.iter()
+                .any(|m| m.contains("used through a chain of more than")),
+            "{e:?}"
+        );
     }
 
     #[test]

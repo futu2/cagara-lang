@@ -28,13 +28,10 @@ pub enum SyntaxKind {
     Star,
     Slash,
     Percent,
-    Amp,
-    AmpEq,
-    AmpQuestion,
-    AmpStar,
-    AmpDot,
-    AmpMinus,
-    AmpPlus,
+    /// A `&`-shorthand (`&+`, `&?`, …), whose fixity the prelude declares.
+    AmpOp,
+    /// Any other operator spelling the prelude declares (`~=`, `|>`).
+    Op,
     QuestionQuestion,
     Question,
     LtQuestion,
@@ -63,6 +60,9 @@ pub enum SyntaxKind {
     // ── nodes ────────────────────────────────────────────────
     SourceFile,
     ImportDecl,
+    /// `infixl 1 &+` / `infixr 21 ??` — gives an operator its precedence and
+    /// associativity. Only the prelude's declarations are honoured.
+    OpDecl,
     Definition,
     TypeAnn,
     /// `name arg arg` in a type (`query r`, `expr r bool`, `int`)
@@ -137,13 +137,8 @@ impl From<Token> for SyntaxKind {
             Token::Star => K::Star,
             Token::Slash => K::Slash,
             Token::Percent => K::Percent,
-            Token::Amp => K::Amp,
-            Token::AmpEq => K::AmpEq,
-            Token::AmpQuestion => K::AmpQuestion,
-            Token::AmpStar => K::AmpStar,
-            Token::AmpDot => K::AmpDot,
-            Token::AmpMinus => K::AmpMinus,
-            Token::AmpPlus => K::AmpPlus,
+            Token::AmpOp => K::AmpOp,
+            Token::Op => K::Op,
             Token::QuestionQuestion => K::QuestionQuestion,
             Token::Question => K::Question,
             Token::LtQuestion => K::LtQuestion,
@@ -174,47 +169,37 @@ impl From<Token> for SyntaxKind {
 }
 
 impl SyntaxKind {
-    /// Binary operator tokens with (left bp, right bp) and the operator
-    /// function name they desugar to (`a + b` = `_+_ a b`). Operators are
-    /// ordinary prelude definitions, so the core knows only their spelling.
-    pub fn infix(self) -> Option<(u8, u8, &'static str)> {
+    /// A token that can be an infix operator's spelling. Fixity and meaning
+    /// are not here: they come from the operator table in `crate::ops`, which
+    /// the prelude declares, so this only says what the lexer *could* have
+    /// produced.
+    pub fn is_op_symbol(self) -> bool {
         use SyntaxKind as K;
-        Some(match self {
-            // Left-assoc pipe and its stage shorthands (`q &? p` = `q & where p`).
-            K::Amp => (1, 2, "_&_"),
-            K::AmpEq => (1, 2, "_&=_"),
-            K::AmpQuestion => (1, 2, "_&?_"),
-            K::AmpStar => (1, 2, "_&*_"),
-            K::AmpDot => (1, 2, "_&._"),
-            K::AmpMinus => (1, 2, "_&-_"),
-            K::AmpPlus => (1, 2, "_&+_"),
-            // Joins: looser than every expression operator, tighter than the
-            // pipe, so `users & teachers ? .<a == .>b` needs no parentheses.
-            K::Question => (3, 4, "_?_"),
-            K::LtQuestion => (3, 4, "_<?_"),
-            K::QuestionGt => (3, 4, "_?>_"),
-            K::LtQuestionGt => (3, 4, "_<?>_"),
-            K::Dollar => (6, 5, "_$_"), // right-assoc apply
-            K::ComposeRight => (7, 8, "_>>>_"),
-            K::OrOr => (9, 10, "_||_"),
-            K::AndAnd => (11, 12, "_&&_"),
-            K::EqEq => (13, 14, "_==_"),
-            K::NotEq => (13, 14, "_!=_"),
-            K::Lt => (13, 14, "_<_"),
-            K::LtEq => (13, 14, "_<=_"),
-            K::Gt => (13, 14, "_>_"),
-            K::GtEq => (13, 14, "_>=_"),
-            // Right-assoc concatenation, looser than arithmetic so a mixed
-            // chain reads one way: `a <> b + c <> d` = `a <> (b + c) <> d`.
-            K::Diamond => (16, 15, "_<>_"),
-            K::Plus => (17, 18, "_+_"),
-            K::Minus => (17, 18, "_-_"),
-            K::Star => (19, 20, "_*_"),
-            K::Slash => (19, 20, "_/_"),
-            K::Percent => (19, 20, "_%_"),
-            // Right-assoc, tightest: `.a ?? .b ?? 0`, `.score ?? 0 + 1`.
-            K::QuestionQuestion => (22, 21, "_??_"),
-            _ => return None,
-        })
+        matches!(
+            self,
+            K::AmpOp
+                | K::Op
+                | K::ComposeRight
+                | K::AndAnd
+                | K::OrOr
+                | K::EqEq
+                | K::NotEq
+                | K::Diamond
+                | K::LtEq
+                | K::GtEq
+                | K::Lt
+                | K::Gt
+                | K::Plus
+                | K::Minus
+                | K::Star
+                | K::Slash
+                | K::Percent
+                | K::QuestionQuestion
+                | K::Question
+                | K::LtQuestion
+                | K::QuestionGt
+                | K::LtQuestionGt
+                | K::Dollar
+        )
     }
 }

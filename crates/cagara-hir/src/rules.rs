@@ -30,14 +30,17 @@ pub mod winspec {
     }
 }
 
-/// The operators that build a pipeline at the level of `&`. A stage built
-/// with one of these is located at its argument (the stage) rather than at the
-/// whole pipeline, so a diagnostic points at the stage that failed.
+/// Is `name` — the `_op_` spelling an operator desugars to — one of the
+/// pipeline stage shorthands? A stage built with one of these is located at
+/// its argument (the stage) rather than at the whole pipeline, so a
+/// diagnostic points at the stage that failed.
 ///
-/// These spell out the `_op_` names the lexer gives each symbol: they are
-/// ordinary definitions in `prelude.cagara` (`_&?_ = q => pred => where pred q`),
-/// so the language, not Rust, decides what a shorthand means.
-pub const PIPES: &[&str] = &["_&_", "_&=_", "_&?_", "_&+_", "_&*_", "_&._", "_&-_"];
+/// Which operators are stages is not listed here: an operator is a stage when
+/// it is declared at `&`'s level in `prelude.cagara`, so the language, not
+/// Rust, decides what a shorthand means.
+pub fn is_pipe_name(name: &str) -> bool {
+    cagara_syntax::ops().is_stage_name(name)
+}
 
 /// A plain column (`.x`) in a join predicate.
 pub fn needs_side(n: &str) -> String {
@@ -154,20 +157,43 @@ mod tests {
         assert!(winspec::is_field("partition"));
         assert!(!winspec::is_field("qualify"));
         assert_eq!(winspec::names(), "partition, order, frame");
+    }
 
-        // The pipe operators are `_op_` spellings of the `&` shorthands, and
-        // every one of them is defined in `prelude.cagara`.
+    /// Every stage operator is declared *and* defined in the prelude: the
+    /// declaration gives it its place in the grammar, the definition gives it
+    /// its meaning, and neither works alone.
+    #[test]
+    fn every_stage_operator_is_declared_and_defined_in_the_prelude() {
         let prelude = include_str!("../../../prelude.cagara");
-        for op in PIPES {
+        let ops = cagara_syntax::ops();
+        let stages = ops.stages();
+        assert!(
+            !stages.is_empty(),
+            "the prelude declares no stage operators"
+        );
+        for spelling in stages {
+            let pipe = ops.pipe_fixity().expect("the prelude declares `&`");
             assert_eq!(
-                op.matches('&').count(),
-                1,
-                "`{op}` is not a pipe operator spelling"
+                ops.find(spelling).map(|f| f.precedence()),
+                Some(pipe.precedence()),
+                "`{spelling}` is a stage, so it must be declared at `&`'s level"
             );
+            let name = cagara_syntax::op_name(spelling);
             assert!(
-                prelude.contains(op),
-                "`{op}` is in PIPES but not defined in the prelude"
+                prelude.contains(&format!("{name} =")),
+                "`{spelling}` is a stage operator but `{name}` is not defined in the prelude"
             );
         }
+        // The pipeline itself and every shorthand, so a new one cannot be
+        // declared without the rest of the language noticing.
+        for name in ["_&_", "_&=_", "_&?_", "_&+_", "_&*_", "_&._", "_&-_"] {
+            assert!(is_pipe_name(name), "`{name}` must be a stage operator");
+        }
+        // Join operators are declared too, but they are not stages.
+        for name in ["_?_", "_<?_", "_?>_", "_<?>_"] {
+            assert!(!is_pipe_name(name), "`{name}` is a join, not a stage");
+        }
+        assert!(!is_pipe_name("_+_"));
+        assert!(!is_pipe_name("plain"));
     }
 }

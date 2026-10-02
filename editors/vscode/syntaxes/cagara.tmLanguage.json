@@ -35,7 +35,7 @@
     },
     "definition": {
       "comment": "A top-level name at column 0, before its signature or body.",
-      "match": "^([a-zA-Z_][a-zA-Z0-9_]*|_[+\\-*/%<>=!&|$?.]+_)(?=\\s*[:=](?!=))",
+      "match": "^([a-zA-Z_][a-zA-Z0-9_]*|_[^a-zA-Z0-9_\\s]+_)(?=\\s*[:=](?!=))",
       "captures": {
         "1": { "name": "entity.name.function.cagara" }
       }
@@ -47,6 +47,11 @@
         {
           "match": "\\b(sql)\\b",
           "name": "keyword.other.sql.cagara"
+        },
+        {
+          "comment": "An operator declaration: the fixity keywords. Declaring one is how a new operator is added; see prelude.cagara.",
+          "match": "^(infixl|infixr)\\b",
+          "name": "keyword.other.fixity.cagara"
         },
         {
           "match": "\\b(true|false)\\b",
@@ -69,7 +74,7 @@
           "name": "constant.numeric.integer.cagara"
         },
         {
-          "match": "\\b_[+\\-*/%<>=!&|$?.]+_",
+          "match": "\\b_[^a-zA-Z0-9_\\s]+_",
           "name": "entity.name.function.operator.cagara"
         },
         {
@@ -77,7 +82,8 @@
           "name": "keyword.operator.arrow.cagara"
         },
         {
-          "match": "<\\?>|<\\?|\\?>|\\?\\?|&[=?*.+\\-]|>>>|&&|\\|\\||==|!=|<>|<=|>=|[&$?<>+\\-*/%|]",
+          "comment": "The `&` shorthand family, then any other operator spelling. Character classes rather than a list of spellings, so a declared operator is highlighted without editing this file.",
+          "match": "&[=!<>*/%|?$^~+.\\-]*|[=!<>*/%|?$^~]+|[+\\-]",
           "name": "keyword.operator.cagara"
         },
         {

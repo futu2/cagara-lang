@@ -367,6 +367,24 @@ fn file_diags(
         .iter()
         .map(|e| make_diag(path, text, e.offset, format!("syntax error: {}", e.message)))
         .collect();
+    // An operator's fixity is a property of the language, not of one module:
+    // the table is built once, from the prelude. A declaration anywhere else
+    // would silently do nothing (the file it appears in is already parsed by
+    // the time it could be read), so say so instead.
+    if path != Path::new(PRELUDE_PATH) {
+        for d in &parsed.module.operators {
+            out.push(make_diag(
+                path,
+                text,
+                d.span.start as usize,
+                format!(
+                    "operator `{}` must be declared in `prelude.cagara`, where \
+                     `_{}_` would be the name it desugars to",
+                    d.spelling, d.spelling
+                ),
+            ));
+        }
+    }
     let mut missing: Vec<(usize, &str)> = Vec::new();
     for (name, b) in own {
         if let Binding::Overloads(_, is) = b {
@@ -526,5 +544,25 @@ mod tests {
         assert_eq!(diag.line, 1, "{diag:?}");
         let diag = ws.diag(ws.root, "q = \"héllo\"\n".len() - 1, "boom");
         assert_eq!(diag.line, 1, "{diag:?}");
+    }
+
+    /// An operator's fixity is a property of the language, read from the
+    /// prelude when the table is built. A declaration anywhere else parses but
+    /// cannot take effect, so it is reported rather than silently ignored.
+    #[test]
+    fn an_operator_declaration_outside_the_prelude_is_reported() {
+        let ws = Workspace::from_source("infixl 1 &^\nq = 1\n");
+        assert!(
+            ws.diags
+                .iter()
+                .any(|d| d.message.contains("must be declared in `prelude.cagara`")),
+            "{:?}",
+            ws.diags
+        );
+        // The declaration is not a definition, so it produces no other error.
+        assert_eq!(ws.diags.len(), 1, "{:?}", ws.diags);
+        // And an ordinary file is unaffected.
+        let ws = Workspace::from_source("q = 1\n");
+        assert!(ws.diags.is_empty(), "{:?}", ws.diags);
     }
 }

@@ -6,6 +6,8 @@ endif
 
 syn keyword cagaraImport   import as
 syn keyword cagaraKeyword  sql
+" Fixity keywords: how an operator is declared in prelude.cagara.
+syn keyword cagaraFixity   infixl infixr
 syn keyword cagaraBoolean  true false
 syn keyword cagaraType     query expr agg win maybe list int float string bool date timestamp sortkey winspec bound frame
 
@@ -17,14 +19,17 @@ syn match   cagaraPlaceholder "\$\d\+" contained
 syn match   cagaraColumn   "\.[<>]\=\h\w*"
 syn match   cagaraFloat    "\<\d\+\.\d\+\([eE][+-]\=\d\+\)\=\>"
 syn match   cagaraNumber   "\<\d\+\>"
-syn match   cagaraOpName   "\<_[-+*/%<>=!&|$?.]\+_"
+syn match   cagaraOpName   "\<_[^a-zA-Z0-9_\s]\+_"
 syn match   cagaraArrow    "=>\|->"
-syn match   cagaraOperator "<?>\|<?\|?>\|??\|&[=?*.+-]\|>>>\|&&\|||\|==\|!=\|<>\|<=\|>=\|[&$?<>+*/%|-]"
+" Character classes rather than a list of spellings: an operator newly
+" declared in the prelude is highlighted without touching this file.
+syn match   cagaraOperator "&[=!<>*/%|?$^~+.\-]*\|[=!<>*/%|?$^~]\+\|[+-]"
 " A top-level name at column 0, before its signature or body.
-syn match   cagaraDef      "^\(\h\w*\|_[-+*/%<>=!&|$?.]\+_\)\ze\s*\(:\|=[^=]\)"
+syn match   cagaraDef      "^\(\h\w*\|_[^a-zA-Z0-9_\s]\+_\)\ze\s*\(:\|=[^=]\)"
 
 hi def link cagaraImport      Include
 hi def link cagaraKeyword     Keyword
+hi def link cagaraFixity      Keyword
 hi def link cagaraBoolean     Boolean
 hi def link cagaraType        Type
 hi def link cagaraComment     Comment

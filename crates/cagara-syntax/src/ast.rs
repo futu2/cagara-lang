@@ -2,7 +2,8 @@
 //! into applications of their operator names (`a + b` => `_+_ a b`), so the
 //! core has no built-in knowledge of arithmetic or pipelines.
 
-use crate::{parse, ParseError, SyntaxKind as K, SyntaxNode};
+use crate::ops::{op_name, Fixity, Ops};
+use crate::{ops, parse_with, ParseError, SyntaxKind as K, SyntaxNode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Span {
@@ -14,6 +15,20 @@ pub struct Span {
 pub struct Module {
     pub imports: Vec<Import>,
     pub defs: Vec<Def>,
+    /// `infixl` / `infixr` / `stage` declarations, which give operators their
+    /// fixity. Only the prelude's are honoured (see `crate::ops`); elsewhere
+    /// they are reported by `cagara-hir`.
+    pub operators: Vec<OpDecl>,
+}
+
+/// One `infixl` / `infixr` line. There is no separate "stage" form: an
+/// operator is a pipeline link because of where it is declared, not because of
+/// how it is declared (see `crate::ops::Ops::is_stage`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpDecl {
+    pub spelling: String,
+    pub fixity: Fixity,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,17 +109,25 @@ pub enum ExprKind {
     Error,
 }
 
-/// Parse and lower a source file. Parse errors are returned alongside a
-/// best-effort module (erroneous parts become `ExprKind::Error`).
+/// Parse and lower a source file with the language's operator table (the
+/// built-ins plus the prelude's declarations). Parse errors are returned
+/// alongside a best-effort module (erroneous parts become `ExprKind::Error`).
 pub fn lower_source(src: &str) -> (Module, Vec<ParseError>) {
-    let parse = parse(src);
-    let mut l = Lower { next: 0 };
+    lower_with(src, ops())
+}
+
+/// Like [`lower_source`], against an explicit operator table. Used to parse
+/// the prelude while that table is still being built.
+pub fn lower_with(src: &str, ops: &Ops) -> (Module, Vec<ParseError>) {
+    let parse = parse_with(src, ops);
+    let mut l = Lower { next: 0, ops };
     let module = l.module(&parse.syntax());
     (module, parse.errors)
 }
 
-struct Lower {
+struct Lower<'a> {
     next: ExprId,
+    ops: &'a Ops,
 }
 
 fn span(n: &SyntaxNode) -> Span {
@@ -143,7 +166,7 @@ fn unescape(s: &str) -> String {
     out
 }
 
-impl Lower {
+impl Lower<'_> {
     fn mk(&mut self, span: Span, kind: ExprKind) -> Expr {
         let id = self.next;
         self.next += 1;
@@ -168,10 +191,45 @@ impl Lower {
                         m.defs.push(d);
                     }
                 }
+                K::OpDecl => {
+                    if let Some(d) = self.op_decl(&n) {
+                        m.operators.push(d);
+                    }
+                }
                 _ => {}
             }
         }
         m
+    }
+
+    /// `infixl 1 &+` / `infixr 21 ??`: a level and a spelling.
+    ///
+    /// A declaration the parser rejected is dropped rather than recorded, so a
+    /// malformed one never takes effect: whatever the parser complained about
+    /// (a missing level, a spelling that is not an operator) has already been
+    /// reported, and an out-of-range level is refused here for the same
+    /// reason.
+    fn op_decl(&mut self, n: &SyntaxNode) -> Option<OpDecl> {
+        let keyword = token(n, K::Ident)?.text().to_string();
+        let spelling = n
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind().is_op_symbol())?
+            .text()
+            .to_string();
+        let level = token(n, K::Int)
+            .and_then(|t| t.text().parse::<u8>().ok())
+            .filter(|n| (crate::ops::MIN_LEVEL..=crate::ops::MAX_LEVEL).contains(n))?;
+        let fixity = match keyword.as_str() {
+            "infixl" => Fixity::left(level),
+            "infixr" => Fixity::right(level),
+            _ => return None,
+        };
+        Some(OpDecl {
+            spelling,
+            fixity,
+            span: span(n),
+        })
     }
 
     fn def(&mut self, n: &SyntaxNode) -> Option<Def> {
@@ -299,19 +357,21 @@ impl Lower {
                 }
             }
             K::BinExpr => {
+                // The operator is whichever token the table knows; its
+                // spelling decides the `_op_` name the parser desugared to.
                 let op = n
                     .children_with_tokens()
                     .filter_map(|e| e.into_token())
-                    .find_map(|t| t.kind().infix().map(|(_, _, name)| (name, t)));
+                    .find(|t| self.ops.find(t.text()).is_some());
                 let cs: Vec<SyntaxNode> = n.children().collect();
                 match (op, cs.as_slice()) {
-                    (Some((name, tok)), [l, r]) => {
+                    (Some(tok), [l, r]) => {
                         let r_ = tok.text_range();
                         let op_span = Span {
                             start: r_.start().into(),
                             end: r_.end().into(),
                         };
-                        let f = self.mk(op_span, ExprKind::Name(name.to_string()));
+                        let f = self.mk(op_span, ExprKind::Name(op_name(tok.text())));
                         let (l, r) = (self.expr(l), self.expr(r));
                         ExprKind::App(Box::new(f), vec![l, r].into())
                     }

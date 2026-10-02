@@ -861,11 +861,14 @@ fn unknown_intrinsic_is_an_error() {
 
 #[test]
 fn data_last_functions_compose() {
-    // Partial applications are reusable transformations.
+    // Partial applications are reusable transformations. `>>>` reads left to
+    // right and `<<<` right to left, so the two spellings of one pipeline are
+    // mirror images and have to produce the same SQL.
     let q = format!(
         "{EVENTS}nextWeek = addDays 7 >>> truncWeek\n\
          clean = trim >>> lower >>> replaceAll \"-\" \"\"\n\
-         q = ev & where (contains \"@\" .s) & select {{ w = nextWeek .d, c = clean .s, t = .s & left 3 }}\n"
+         mirrored = replaceAll \"-\" \"\" <<< lower <<< trim\n\
+         q = ev & where (contains \"@\" .s) & select {{ w = nextWeek .d, c = clean .s, m = mirrored .s, t = .s & left 3 }}\n"
     );
     let s = dialect(&q, "q", "postgres").unwrap();
     assert!(s.contains("STRPOS(s, '@') > 0"), "{s}");
@@ -874,6 +877,7 @@ fn data_last_functions_compose() {
         "{s}"
     );
     assert!(s.contains("REPLACE(LOWER(TRIM(s)), '-', '') AS c"), "{s}");
+    assert!(s.contains("REPLACE(LOWER(TRIM(s)), '-', '') AS m"), "{s}");
 }
 
 #[test]

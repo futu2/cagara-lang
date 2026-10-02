@@ -16,9 +16,28 @@
 
 # ── combinators ────────────────────────────────────────────────────────────
 
+# The fixities are Haskell's, where these are the standard combinators: `$` is
+# the loosest operator of all, application with its arguments reversed; `&` is
+# `Data.Function.(&)`, reverse application; and `>>>` / `<<<` are the two
+# directions of composition (`Control.Category`), which bind tighter than every
+# other operator so `f >>> g $ x` is `(f >>> g) $ x`.
+#
+# `f >>> g` is `f` then `g`; `f <<< g` is `g` then `f`. A pipeline read left to
+# right uses `>>>` (`.name & trim >>> lower`), and `<<<` is the mirror for a
+# composition written the other way round — the same pair as `&` and `$`.
+#
+# `&` doubles as the query pipeline, so its level is also the level the stage
+# shorthands are declared at — see below. Precedence runs from 0 (loosest) to
+# 250 (tightest); application itself is tighter than any operator.
+infixr 0 $
+infixl 1 &
+infixr 23 >>>
+infixr 23 <<<
+
 _&_ = x => f => f x
 _$_ = f => x => f x
 _>>>_ = f => g => x => g (f x)
+_<<<_ = f => g => x => f (g x)
 id = x => x
 
 # ── scalar SQL expressions ─────────────────────────────────────────────────
@@ -64,11 +83,27 @@ asc = __asc
 desc = __desc
 group = __group
 
-# Stage shorthands, at the level and associativity of `&`:
-# `q &? p` = `q & where p`, `&=` select, `&+` update, `&*` agg, `&.` order,
-# `&-` limit.
-_&=_ = q => fields => select fields q
+# Stage shorthands. The first line of each pair declares a symbol; the second
+# defines what it means. Both halves live here, and that is the whole cost of a
+# shorthand — nothing in Rust knows about `&+`:
+#
+#   infixl 1 &^                  # declare: same level as `&`, so a stage
+#   _&^_ = q => fields => ...    # define: what the shorthand does
+#
+# Level 1 is where `&` itself is declared (above, with the other combinators),
+# and that is what makes these pipeline stages rather than ordinary operators:
+# the pipe level is not a special class of operator, it is `&`'s precedence, and
+# anything declared there chains like `&` and binds looser than every
+# expression operator.
+infixl 1 &?
+infixl 1 &=
+infixl 1 &+
+infixl 1 &*
+infixl 1 &.
+infixl 1 &-
+
 _&?_ = q => pred => where pred q
+_&=_ = q => fields => select fields q
 _&+_ = q => fields => update fields q
 _&*_ = q => fields => agg fields q
 _&._ = q => keys => order keys q
@@ -95,7 +130,14 @@ except = __except
 
 # Join operators, between `&` and every expression operator:
 # `users & teachers ? .<user_name == .>teacher_name`. The `<` / `>` mark the
-# side whose rows are all kept: `<?` left, `?>` right, `<?>` both.
+# side whose rows are all kept: `<?` left, `?>` right, `<?>` both. They are
+# declared like everything else; being at level 3 rather than `&`'s level 1 is
+# what makes them ordinary operators that build a query rather than stages.
+infixl 3 ?
+infixl 3 <?
+infixl 3 ?>
+infixl 3 <?>
+
 _?_ = inner
 _<?_ = leftJoin
 _?>_ = rightJoin

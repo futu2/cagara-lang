@@ -192,6 +192,63 @@ The long names are the easiest to learn first, and they are what the compiler
 prints in error messages. Use the shorthands once a pipeline is long enough that
 the punctuation reads better.
 
+#### Where the shorthands come from
+
+A shorthand is not built into the compiler. It is two lines in
+`prelude.cagara` — one to *declare* the symbol, one to *define* what it means:
+
+```haskell
+infixl 1 &^                  # declare: same level as `&`, so a stage
+_&^_ = q => n => offset n q    # define: `q &^ n` is `offset n q`
+```
+
+The parser reads the declarations to find out what an operator's precedence
+is, and the desugared call `_&^_ q n` is an ordinary prelude definition like
+any other. So adding a shorthand to the language is those two lines and
+nothing else: the formatter, the error messages, the ten-stage pipeline
+budget and the editor grammars all follow from the declaration.
+
+There is no special form for a stage. `&`, `&+` and `+` are the same kind of
+thing — an infix operator with a precedence and an associativity — and one
+declaration form covers all of them:
+
+```haskell
+infixl 1 &+     # left-associative, precedence 1 (same as `&`)
+infixr 21 ??    # right-associative, precedence 21
+infixl 3 ?      # the join operators, at their own level
+```
+
+What makes a shorthand a *pipeline stage* is only where it sits: an operator
+declared at `&`'s precedence and associativity is a stage, and one at any
+other level — the joins at 3, or `+` at 17 — is an ordinary operator. That is
+why `q &+ {..}` chains like `q &` while `q ? on` does not, and it is the only
+reason: nothing has to mark an operator as a stage, so nothing can disagree
+with the level.
+
+Precedence is a number from 1 (loosest) to 250. A symbol may be any operator
+spelling — `&?`, `~=`, `>>` — and declaring one that already exists changes
+its fixity rather than adding a second operator. Any operator you write must
+be declared, so a typo is a compile error pointing at the operator rather than
+a silently different parse:
+
+```haskell
+bad = users &~ 5   # unknown operator `&~`; declare it in `prelude.cagara`
+```
+
+Declarations are read from the prelude only, and may not appear in your own
+files: an operator's precedence is a property of the language, not of one
+module. The two words `infixl` and `infixr` are reserved where a definition
+may start.
+
+Note the spelling boundary. A shorthand is `&` followed by operator
+punctuation, and an ordinary operator is a run of operator characters, so both
+follow from a character class rather than a list of names. Those classes are
+`&` plus any of `= ! < > * / % | ? $ ^ ~ + - .`, and `= ! < > * / % | ? $ ^ ~`
+on their own. A shorthand built from characters already in the classes is free
+— `&^`, `&>>`, `~=` all work the moment they are declared. A character never
+used in an operator before needs one line in the lexer, after which every
+spelling made of those characters is free too.
+
 ---
 
 ## 4. Columns and expressions
@@ -211,19 +268,24 @@ t = orders & select {
 
 ### Operator precedence
 
-From tightest to loosest:
+From tightest to loosest. The levels are the ones the operators are *declared*
+with in `prelude.cagara`; a larger number binds tighter, and application
+(`f x y`) is tighter than any operator.
 
 | Level | Operators | Associativity |
 |---|---|---|
-| 1 | application (`f x y`) | left |
-| 2 | `??` | right |
-| 3 | `*` `/` `%` | left |
-| 4 | `+` `-` | left |
-| 5 | `<>` (string concatenation) | right |
-| 6 | `==` `!=` `<` `<=` `>` `>=` | non-associative |
-| 7 | `&&` | right |
-| 8 | `\|\|` | right |
-| 9 | `&` and the stage/join shorthands | left |
+| — | application (`f x y`) | left |
+| 23 | `>>>` (composition) | right |
+| 21 | `??` | right |
+| 19 | `*` `/` `%` | left |
+| 17 | `+` `-` | left |
+| 15 | `<>` (string concatenation) | right |
+| 13 | `==` `!=` `<` `<=` `>` `>=` | left |
+| 11 | `&&` | left |
+| 9 | `\|\|` | left |
+| 3 | `?` `<?` `?>` `<?>` (joins) | left |
+| 1 | `&` and the stage shorthands | left |
+| 0 | `$` | right |
 
 Two consequences worth remembering:
 
@@ -234,6 +296,20 @@ a = t & select { x = .s ?? 0 + 1 }
 # <> is right-associative, like the :: of list languages
 b = t & select { l = .first <> " " <> .last }
 ```
+
+This table is a summary, not the definition: an operator's precedence is what
+its declaration says. Arithmetic, comparison, logic and the concatenation
+operators are the language's own and are fixed in the compiler; everything
+else — the pipeline, the joins, and the three combinators — is declared in the
+prelude (see [Shorthands](#shorthands)). The gaps in the numbering leave room
+for the operators Cagara has that Haskell does not.
+
+Two associativities differ from Haskell on purpose, both harmless: `&&` and
+`||` are `infixl` where Haskell writes `infixr` (both are associative, so the
+parse tree is the only difference), and the comparisons are `infixl` where
+Haskell writes `infix 4` (non-associative). Cagara's comparisons could be made
+non-associative too, but that needs a third declaration keyword, `infix`, and
+`a < b < c` is already rejected as a type error.
 
 `/` on `int` truncates toward zero and `%` keeps the dividend's sign in **every**
 dialect — the compiler emits a dialect-appropriate expression rather than
@@ -903,16 +979,33 @@ upper >>> trim      # a function: uppercase then trim
 
 The combinators:
 
-| Name | Meaning |
-|---|---|
-| `f >>> g` | `g` after `f` (composition) |
-| `x & f` | apply `f` to `x` |
-| `f $ x` | apply `f` to `x` |
+| Name | Meaning | Fixity |
+|---|---|---|
+| `f >>> g` | `g` after `f` (composition) | `infixr 23`, tighter than every other operator |
+| `x & f` | apply `f` to `x` | `infixl 1`, the pipeline |
+| `f $ x` | apply `f` to `x` | `infixr 0`, the loosest operator |
+
+These are Haskell's own fixities: `$` is `infixr 0` and `&` is `infixl 1` from
+`Data.Function`, and `>>>` is `Control.Category`'s forward composition, which
+in Haskell binds tighter than everything (as `(.)` does). Keeping composition
+tight is what makes `trim >>> lower >>> replaceAll "-" ""` read left to right
+and `f >>> g $ x` mean `(f >>> g) $ x`. They are declared in `prelude.cagara`
+next to their definitions, like every other operator.
 
 Composition with `>>>` is why subject-last matters:
 
 ```haskell
 clean = users & select {.id, e = .email & trim >>> lower}
+```
+
+Because `&` is the pipeline it is the loosest operator, so its right operand is
+a whole expression — the same as in Haskell, where `&` is `infixl 1` and `==` is
+`infix 4`. Compare after applying by parenthesising:
+
+```haskell
+# `.a & toInt` is the applied value; without the parens `&` would swallow the
+# comparison into its right operand.
+is_five = users & select { ok = (.a & toInt) == 5 }
 ```
 
 ### Overloading

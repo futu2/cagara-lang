@@ -207,7 +207,7 @@ impl<'w> Evaluator<'w> {
                 if m != 0 {
                     if let Value::Query(r) = v {
                         let pipe = args.len() == 2
-                            && matches!(&f.kind, ExprKind::Name(n) if crate::rules::PIPES.contains(&n.as_str()));
+                            && matches!(&f.kind, ExprKind::Name(n) if crate::rules::is_pipe_name(n));
                         let span = if pipe { args[1].span } else { e.span };
                         v = Value::Query(match r {
                             r @ Rel::At(..) => r,

@@ -15,7 +15,9 @@
 
 mod doc;
 
-use cagara_syntax::{parse, ParseError, SyntaxElement, SyntaxKind as K, SyntaxNode, SyntaxToken};
+use cagara_syntax::{
+    ops, parse, Fixity, ParseError, SyntaxElement, SyntaxKind as K, SyntaxNode, SyntaxToken,
+};
 use doc::{broken_group, concat, group, indent, text, Doc};
 use rowan::{NodeOrToken, WalkEvent};
 use std::cell::Cell;
@@ -191,22 +193,23 @@ fn comment_text(t: &SyntaxToken) -> Doc {
     text(t.text().trim_end())
 }
 
-/// Binding powers of a `BinExpr`'s operator.
+/// Binding powers of a `BinExpr`'s operator, from the language's operator
+/// table (the built-ins plus the prelude's declarations).
 fn bin_parts(n: &SyntaxNode) -> Result<(SyntaxNode, SyntaxToken, SyntaxNode, (u8, u8)), Bail> {
     let els = sig(n);
     let [l, op, r] = els.as_slice() else {
         return Err(Bail);
     };
     let op = op.as_token().ok_or(Bail)?.clone();
-    let (lb, rb, _) = op.kind().infix().ok_or(Bail)?;
-    Ok((node(Some(l))?, op, node(Some(r))?, (lb, rb)))
+    let bp = ops().find(op.text()).map(Fixity::precedence).ok_or(Bail)?;
+    Ok((node(Some(l))?, op, node(Some(r))?, bp))
 }
 
-fn is_pipe(k: K) -> bool {
-    matches!(
-        k,
-        K::Amp | K::AmpEq | K::AmpQuestion | K::AmpStar | K::AmpDot | K::AmpMinus | K::AmpPlus
-    )
+/// Does this operator build a pipeline stage? That is a property of the
+/// operator table — an operator is a stage when it sits at `&`'s level — so the
+/// formatter has no list of its own to keep in step.
+fn is_pipe(op: &SyntaxToken) -> bool {
+    ops().is_stage(op.text())
 }
 
 struct Fmt<'a> {
@@ -338,6 +341,9 @@ impl Fmt<'_> {
     fn item(&self, n: &SyntaxNode) -> R {
         match n.kind() {
             K::ImportDecl => self.spaced(n),
+            // `infixl 1 &+`: the keyword, an optional level, and the spelling,
+            // single-spaced.
+            K::OpDecl => self.spaced(n),
             K::Definition => self.def(n),
             _ => Err(Bail),
         }
@@ -403,7 +409,7 @@ impl Fmt<'_> {
     fn huggable(&self, n: &SyntaxNode, top: bool) -> bool {
         match n.kind() {
             K::RecordExpr | K::ListExpr | K::ParenExpr | K::Lambda => true,
-            K::BinExpr => top && bin_parts(n).is_ok_and(|(_, op, _, _)| is_pipe(op.kind())),
+            K::BinExpr => top && bin_parts(n).is_ok_and(|(_, op, _, _)| is_pipe(&op)),
             K::App => self.hugs_last_arg(n),
             _ => false,
         }
@@ -595,7 +601,7 @@ impl Fmt<'_> {
             tail.extend([Doc::Line, self.tok(op), text(" "), self.expr(e, false)?]);
         }
         let d = concat(vec![self.expr(&operands[0], false)?, indent(concat(tail))]);
-        let force = has_inner_comment(n) || (top && is_pipe(op.kind()) && ops.len() >= 2);
+        let force = has_inner_comment(n) || (top && is_pipe(&op) && ops.len() >= 2);
         Ok(if force { broken_group(d) } else { group(d) })
     }
 

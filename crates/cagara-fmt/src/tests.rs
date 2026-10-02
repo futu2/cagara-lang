@@ -42,6 +42,12 @@ fn every_construct_is_actually_reformatted() {
         ),
         ("q=t&where(.a>1)\n", "q = t & where (.a > 1)\n"),
         ("q = t & update {.a}\n", "q = t & update { .a }\n"),
+        // Operator declarations are items like any other, and a spelling the
+        // prelude has not declared still parses as a declaration.
+        (
+            "infixl   1   &^\ninfixr   21   ~>\n",
+            "infixl 1 &^\ninfixr 21 ~>\n",
+        ),
     ] {
         assert_eq!(fmt(src), want, "input: {src:?}");
         assert_ne!(fmt(src), src, "not reformatted at all: {src:?}");
@@ -288,8 +294,8 @@ struct Gen {
 }
 
 const OPS: &[&str] = &[
-    "&", "&=", "&?", "&+", "&*", "&.", "&-", "?", "<?", "?>", "<?>", "$", ">>>", "||", "&&", "==",
-    "!=", "<", "<=", ">", ">=", "<>", "+", "-", "*", "/", "%", "??",
+    "&", "&=", "&?", "&+", "&*", "&.", "&-", "?", "<?", "?>", "<?>", "$", ">>>", "<<<", "||", "&&",
+    "==", "!=", "<", "<=", ">", ">=", "<>", "+", "-", "*", "/", "%", "??",
 ];
 const NAMES: &[&str] = &["a", "users", "f", "_x1", "where", "select", "count"];
 

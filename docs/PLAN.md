@@ -63,6 +63,29 @@ IR ──stage lowering / fusion──▶ sqlglot AST ──▶ SQL text        
   spelling of the `CAGARA_*` date and string functions: sqlglot cannot
   translate them, and a dialect-specific template string would be re-parsed
   and corrupted on the way out (`docs/SQL-DIALECTS.md`).
+- **Operators are declared where they are defined.** An infix operator's
+  spelling, precedence and associativity are declared in `prelude.cagara`
+  (`infixl 1 &+`, `infixr 21 ??`, `infixl 3 ?`), and its meaning is the
+  `_spelling_` definition beside it. The parser reads those declarations to
+  build its operator table, so a new stage shorthand is two lines of Cagara —
+  the declaration and the definition — with nothing to change in Rust. There is
+  no separate stage form: `&`, `&+` and `+` are all infix operators, and an
+  operator is a *pipeline link* exactly when it is declared at `&`'s precedence
+  and associativity. The pipeline budget, the formatter's one-stage-per-line
+  rule and stage-located diagnostics all follow from that one comparison rather
+  than from a flag that could drift out of step with the level. The language's
+  own expression operators (arithmetic, comparison, logic, `<>`, `??`) keep
+  their fixity in Rust: they are language-level rather than query syntax, and
+  `*` has to be known before any declaration can be read, because the prelude's
+  own bodies multiply. The function combinators are declared in the prelude
+  with Haskell's fixities — `infixr 0 $`, `infixl 1 &`, `infixr 23 >>>` — since
+  they are defined there; `&`'s level is what the stage shorthands share.
+  A declaration anywhere but the prelude is
+  reported: precedence is a property of the language, not of a module.
+  Spellings the lexer can produce are derived from a character class (`&` plus
+  operator punctuation, or a run of `= ! < > * / % | ? $ ^ ~`), so a new
+  shorthand needs no lexer change; a genuinely new punctuation character needs
+  one line there.
 - **Templates carry their phase in the signature.** A `sql` definition must be
   annotated; its arity comes from the arrows, and the result head (`expr`,
   `agg`, `win`) decides whether it builds a scalar, aggregate, or window node.
@@ -199,11 +222,15 @@ the VS Code extension compile:
   every accepted query's row fully known (`docs/KEYMAP-DESIGN.md`).
 - Overloading: a name defined more than once, each with a signature, is an
   overload set (prelude: `+ - * / negate sum avg` on int and float).
-  Strings concatenate with `<>` (right-assoc, just looser than `+` / `-`). Pipeline
-  shorthands at the level of `&`: `&?` where, `&=` select, `&*` agg, `&.`
-  order, `&-` limit. Join operators sit between `&` and `$`: `?` inner, `<?`
-  left, `?>` right, `<?>` full (`users & teachers ? .<a == .>b`). `x ?? d`
-  is `coalesce d x` (right-assoc, tightest). Uses are resolved by trial unification against each
+  Strings concatenate with `<>` (right-assoc, just looser than `+` / `-`).
+  Infix operators are declared in the prelude, next to the definitions that
+  give them meaning: the stage shorthands `&` `&?` `&=` `&+` `&*` `&.` `&-`
+  at level 1 (the level `&` itself is declared at, which is what makes them
+  stages), and the join operators `?` `<?` `?>` `<?>` at level 3.
+  The parser builds its operator table from those declarations, so a new
+  shorthand is a declaration and a definition and nothing else. `x ?? d`
+  is `coalesce d x` (right-assoc, tightest). Uses are resolved by trial
+  unification against each
   candidate. A helper whose overloads stay open (`twice = x => x + x`) keeps
   them as holes in its scheme; every use fills them, and the evaluator
   follows the recorded choices, so one helper can be used at int and float
@@ -351,8 +378,11 @@ Known gaps:
 - **Names still hardcoded in Rust, not Cagara:** user-facing names inside
   error strings (`coalesce`, `isNull`, `agg`, `where`, `group`,
   `wholePartition`). These are diagnostic prose rather than dispatch keys, and
-  need a prelude marker before they can move. The pipeline-operator names and
-  the window-spec field names are shared constants now (see Roadmap 22).
+  need a prelude marker before they can move. The operator names are no longer
+  in this list: an operator's spelling, precedence and associativity are
+  declared in the prelude, and the table is built from those declarations (see
+  Design decisions). The window-spec field names are still shared constants
+  (see Roadmap 22).
 
 ## Roadmap
 

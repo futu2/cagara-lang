@@ -50,27 +50,6 @@ pub enum Token {
     Slash,
     #[token("%")]
     Percent,
-    #[token("&")]
-    Amp,
-    /// `q &= fields` — `q & select fields`
-    #[token("&=")]
-    AmpEq,
-    /// `q &? pred` — `q & where pred`
-    #[token("&?")]
-    AmpQuestion,
-    /// `q &* fields` — `q & agg fields`
-    #[token("&*")]
-    AmpStar,
-    /// `q &. keys` — `q & order keys`
-    #[token("&.")]
-    AmpDot,
-    /// `q &- n` — `q & limit n`
-    #[token("&-")]
-    AmpMinus,
-    /// `q &+ fields` — `q & update fields`
-    #[token("&+")]
-    AmpPlus,
-    /// `x ?? default` — `coalesce default x`
     #[token("??")]
     QuestionQuestion,
     /// `right ? on` — `inner right on`
@@ -89,6 +68,21 @@ pub enum Token {
     Dollar,
     #[token("|")]
     Bar,
+
+    /// A `&`-shorthand: `&` followed by any operator punctuation — `&`, `&?`,
+    /// `&=`, `&+`, `&*`, `&.`, `&-`, and anything of the same shape a
+    /// declaration introduces (`&^`, `&>>`). Which of them exist, and what
+    /// each one means, is decided by `prelude.cagara` (see [`crate::ops`]), so
+    /// a new stage shorthand needs no change here.
+    #[regex(r"&[=!<>*/%|?$^~+\-.]*", priority = 1)]
+    AmpOp,
+    /// Any other operator spelling (`~=`, `|>`, `>>`), so a declared operator
+    /// does not have to be a token kind. Greedy, but `-`, `+` and `.` are
+    /// deliberately outside the class: `x=-1`, `a*-1` and `{a=.b}` have to
+    /// keep lexing as a sign, a product and a field, and maximal munch would
+    /// otherwise swallow them into one spelling nobody declared.
+    #[regex(r"[=!<>*/%|?$^~]+", priority = 1)]
+    Op,
 
     #[token("(")]
     LParen,
@@ -119,9 +113,13 @@ pub enum Token {
     #[regex(r"\.>[a-zA-Z_][a-zA-Z0-9_]*")]
     RightField,
 
-    /// Plain identifiers and operator names such as `_+_` or `_&_`.
+    /// Plain identifiers and operator names such as `_+_` or `_&^_`. An
+    /// operator name is `_`, a run of punctuation, `_` — deliberately broader
+    /// than the operator classes above, because a name only has to be
+    /// *definable*: whether a spelling is an operator at all is decided by
+    /// those classes and by the prelude's declarations.
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
-    #[regex(r"_[+\-*/%<>=!&|$?.]+_")]
+    #[regex(r"_[^a-zA-Z0-9_\s]+_")]
     Ident,
 
     #[regex(r"[0-9]+")]
@@ -142,6 +140,14 @@ pub enum Token {
 impl Token {
     pub fn is_trivia(self) -> bool {
         matches!(self, Token::Whitespace | Token::Comment)
+    }
+
+    /// A token that can be the spelling in an operator declaration. Every
+    /// operator the lexer can produce answers `true`; nothing else does, so a
+    /// declaration cannot quietly make an identifier infix.
+    pub fn is_op_symbol(self) -> bool {
+        use crate::syntax_kind::SyntaxKind as K;
+        K::from(self).is_op_symbol()
     }
 }
 
@@ -191,7 +197,7 @@ mod tests {
         assert_eq!(
             kinds("& && >= > >>> => -> == ="),
             vec![
-                Token::Amp,
+                Token::AmpOp,
                 Token::AndAnd,
                 Token::GtEq,
                 Token::Gt,
@@ -243,12 +249,12 @@ mod tests {
         assert_eq!(
             kinds("&= &? &* &. &- &+ ?? ? <? ?> <?> && <= <>"),
             vec![
-                AmpEq,
-                AmpQuestion,
-                AmpStar,
-                AmpDot,
-                AmpMinus,
-                AmpPlus,
+                AmpOp,
+                AmpOp,
+                AmpOp,
+                AmpOp,
+                AmpOp,
+                AmpOp,
                 QuestionQuestion,
                 Question,
                 LtQuestion,
@@ -275,12 +281,75 @@ mod tests {
     #[test]
     fn amp_plus_is_one_token() {
         use Token::*;
-        assert_eq!(kinds("&+"), vec![AmpPlus]);
-        assert_eq!(kinds("& +"), vec![Amp, Plus]);
+        assert_eq!(kinds("&+"), vec![AmpOp]);
+        assert_eq!(kinds("& +"), vec![AmpOp, Plus]);
         // `&+` in a pipeline, next to another shorthand.
         assert_eq!(
             kinds("q &+ {a = 1} &= {.a}"),
-            vec![Ident, AmpPlus, LBrace, Ident, Eq, Int, RBrace, AmpEq, LBrace, Field, RBrace]
+            vec![Ident, AmpOp, LBrace, Ident, Eq, Int, RBrace, AmpOp, LBrace, Field, RBrace]
+        );
+    }
+
+    /// The shorthand family is not enumerated in the lexer: any `&` followed
+    /// by operator punctuation is one token, so a newly declared `&^` needs no
+    /// lexer change. `&&` stays its own operator.
+    #[test]
+    fn any_amp_shorthand_is_one_token() {
+        use Token::*;
+        for s in ["&", "&+", "&^", "&>>", "&%", "&~"] {
+            assert_eq!(kinds(s), vec![AmpOp], "{s}");
+        }
+        assert_eq!(kinds("&&"), vec![AndAnd]);
+        assert_eq!(kinds("& &"), vec![AmpOp, AmpOp]);
+    }
+
+    /// A spelling the lexer can produce must also be *definable*: the two
+    /// halves of a shorthand are the declaration and the `_name_` definition,
+    /// so if `&^` lexes as an operator then `_&^_` has to lex as a name.
+    #[test]
+    fn every_operator_spelling_has_a_definable_name() {
+        for s in [
+            "+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "<>", "&&", "||", "??", "?",
+            "<?", "?>", "<?>", "$", ">>>", "<<<", "~=", "|>", ">>", "^", "&", "&?", "&=", "&+",
+            "&*", "&.", "&-", "&^", "&>>", "&%", "&~",
+        ] {
+            let name = format!("_{s}_");
+            let toks: Vec<_> = lex(&name)
+                .into_iter()
+                .filter(|l| !l.kind.is_trivia())
+                .collect();
+            assert_eq!(toks.len(), 1, "`{name}` is not one token: {toks:?}");
+            assert_eq!(toks[0].kind, Token::Ident, "`{name}` is not a name");
+            assert_eq!(toks[0].text, name);
+        }
+    }
+
+    /// An operator spelling outside the `&` family lexes as one `Op`, so it
+    /// too can be declared; but `-`, `+` and `.` stay out of its class, so a
+    /// unary sign, a product or a field is never swallowed into one.
+    #[test]
+    fn other_operators_lex_but_never_swallow_a_sign_or_field() {
+        use Token::*;
+        assert_eq!(kinds("~="), vec![Op]);
+        assert_eq!(kinds("|>"), vec![Op]);
+        assert_eq!(kinds(">>"), vec![Op]);
+        // Maximal munch must not eat these.
+        assert_eq!(kinds("x=-1"), vec![Ident, Eq, Minus, Int]);
+        assert_eq!(kinds("a*-1"), vec![Ident, Star, Minus, Int]);
+        assert_eq!(kinds("{a=.b}"), vec![LBrace, Ident, Eq, Field, RBrace]);
+        assert_eq!(kinds("a<>-b"), vec![Ident, Diamond, Minus, Ident]);
+        // Named operators still win over the generic rule.
+        assert_eq!(
+            kinds("== >>> ?? <?> $ | ||"),
+            vec![
+                EqEq,
+                ComposeRight,
+                QuestionQuestion,
+                LtQuestionGt,
+                Dollar,
+                Bar,
+                OrOr
+            ]
         );
     }
 }

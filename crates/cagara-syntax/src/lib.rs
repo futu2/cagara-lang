@@ -1,9 +1,11 @@
 pub mod ast;
 pub mod lexer;
+pub mod ops;
 pub mod parser;
 pub mod syntax_kind;
 
-pub use parser::{parse, Parse, ParseError};
+pub use ops::{op_name, ops, Fixity, Ops};
+pub use parser::{parse, parse_with, Parse, ParseError};
 pub use rowan::GreenNode;
 pub use syntax_kind::SyntaxKind;
 

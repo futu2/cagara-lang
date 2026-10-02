@@ -1,4 +1,5 @@
 use crate::lexer::{lex, Lexeme, Token};
+use crate::ops::{ops, Ops, MAX_LEVEL, MIN_LEVEL};
 use crate::syntax_kind::SyntaxKind as K;
 use crate::{CagaraLanguage, SyntaxNode};
 use rowan::{Checkpoint, GreenNode, GreenNodeBuilder, Language};
@@ -24,6 +25,13 @@ impl Parse {
 }
 
 pub fn parse(input: &str) -> Parse {
+    parse_with(input, ops())
+}
+
+/// Parse against an explicit operator table. The table says which spellings
+/// are infix operators and how tightly they bind; `crate::ops` builds the
+/// language's table from the prelude's declarations.
+pub fn parse_with(input: &str, ops: &Ops) -> Parse {
     let mut p = Parser {
         toks: lex(input),
         pos: 0,
@@ -32,6 +40,7 @@ pub fn parse(input: &str) -> Parse {
         end: input.len(),
         depth: 0,
         bailed: false,
+        ops,
     };
     p.file();
     Parse {
@@ -53,6 +62,7 @@ struct Parser<'a> {
     /// The rest of it has been consumed, so every enclosing construct would
     /// otherwise add its own "expected ..." error while unwinding.
     bailed: bool,
+    ops: &'a Ops,
 }
 
 /// Deepest expression nesting accepted. Well below what overflows the stack
@@ -88,13 +98,17 @@ const MAX_DEPTH: usize = 192;
 /// the lowerer's `where` chain already is.
 const MAX_PIPE_CHAIN: usize = 10;
 
-/// Does this token build a pipeline stage? These are the `&`-family operators
-/// (`&`, `&?`, `&=`, `&*`, `&.`, `&-`, `&+`), which the prelude defines as the
-/// query stage shorthands.
-fn is_pipe(k: K) -> bool {
-    matches!(
-        k,
-        K::Amp | K::AmpEq | K::AmpQuestion | K::AmpStar | K::AmpDot | K::AmpMinus | K::AmpPlus
+/// The keywords that introduce an operator declaration. There is no separate
+/// form for the pipeline: `&` and `&+` are declared exactly like `+`.
+fn is_op_decl_kw(text: &str) -> bool {
+    matches!(text, "infixl" | "infixr")
+}
+
+/// A token shaped like an operator that no declaration claims.
+fn unknown_op(spelling: &str) -> String {
+    format!(
+        "unknown operator `{spelling}`; declare it in `prelude.cagara`, e.g. \
+         `infixl 1 {spelling}` for a pipeline stage (`&` is declared at level 1)"
     )
 }
 
@@ -242,11 +256,62 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 None => break,
                 Some(Token::Import) => self.import(),
+                Some(Token::Ident) if self.at_op_decl() => self.op_decl(),
                 Some(Token::Ident) => self.def(),
                 Some(_) => self.recover("expected a definition or import"),
             }
         }
         self.eat_trivia();
+        self.finish();
+    }
+
+    /// An operator declaration in item position. The tokens `infixl` and
+    /// `infixr` are reserved where a definition may start, so a line beginning
+    /// with one is always a declaration — which is also why a malformed one
+    /// says how to write it rather than "expected `=`".
+    fn at_op_decl(&self) -> bool {
+        self.peek_lex(0).is_some_and(|l| is_op_decl_kw(l.text))
+    }
+
+    /// `infixl 1 &+` / `infixr 21 ??`.
+    fn op_decl(&mut self) {
+        self.bailed = false;
+        self.start(K::OpDecl);
+        let keyword = self.peek_lex(0).map(|l| l.text).unwrap_or_default();
+        self.bump(); // infixl / infixr
+        let mut ok = true;
+        match self.peek_lex(0).and_then(|l| l.text.parse::<u8>().ok()) {
+            Some(n) if (MIN_LEVEL..=MAX_LEVEL).contains(&n) => {
+                self.bump();
+            }
+            Some(_) => {
+                self.error(format!(
+                    "operator precedence must be between {MIN_LEVEL} and {MAX_LEVEL}"
+                ));
+                self.bump();
+                ok = false;
+            }
+            None => {
+                self.error("expected a precedence level, e.g. `infixl 1 &+`");
+                ok = false;
+            }
+        }
+        if self.peek().is_some_and(Token::is_op_symbol) {
+            self.bump();
+        } else if ok {
+            // Only when the level was fine: one malformed declaration is one
+            // diagnostic, not a complaint about each missing part.
+            self.error(format!("expected an operator symbol after `{keyword}`"));
+            ok = false;
+        }
+        if !ok {
+            // Take the rest of the malformed item with it, so one bad
+            // declaration is one diagnostic rather than a cascade.
+            while self.peek().is_some() && !self.at_boundary() {
+                self.bump();
+            }
+        }
+        self.bailed = false;
         self.finish();
     }
 
@@ -417,10 +482,18 @@ impl<'a> Parser<'a> {
             if self.at_boundary() {
                 break;
             }
-            let Some(tok) = self.peek() else { break };
-            let Some((l_bp, r_bp, _)) = K::from(tok).infix() else {
+            let Some(l) = self.peek_lex(0) else { break };
+            let Some(op) = self.ops.find(l.text) else {
+                // Report a spelling nothing declares here, where the token is
+                // known to sit in operator position, instead of letting it
+                // fall through to a generic "unexpected tokens" error.
+                if l.kind.is_op_symbol() {
+                    let msg = unknown_op(l.text);
+                    self.bail(&msg);
+                }
                 break;
             };
+            let (l_bp, r_bp) = op.precedence();
             if l_bp < min_bp {
                 break;
             }
@@ -429,7 +502,7 @@ impl<'a> Parser<'a> {
                 self.bail("expression is too long");
                 break;
             }
-            if is_pipe(K::from(tok)) {
+            if self.ops.is_stage(l.text) {
                 pipes += 1;
                 if pipes >= MAX_PIPE_CHAIN {
                     self.bail("pipeline has too many stages");
@@ -593,14 +666,23 @@ impl<'a> Parser<'a> {
             }
             Some(Token::LBrace) => self.record(),
             Some(Token::LBracket) => self.list(),
-            _ => {
-                self.error("expected an expression");
-                self.start(K::ErrorNode);
-                if !self.at_closer() {
-                    self.bump();
+            _ => match self.peek_lex(0) {
+                // An operator in atom position (`q = &+ {..}` without a left
+                // operand) is still an undeclared-operator problem, not a
+                // missing expression.
+                Some(l) if l.kind.is_op_symbol() && self.ops.find(l.text).is_none() => {
+                    let msg = unknown_op(l.text);
+                    self.bail(&msg);
                 }
-                self.finish();
-            }
+                _ => {
+                    self.error("expected an expression");
+                    self.start(K::ErrorNode);
+                    if !self.at_closer() {
+                        self.bump();
+                    }
+                    self.finish();
+                }
+            },
         }
     }
 
@@ -871,6 +953,164 @@ mod tests {
                 p.errors
             );
         }
+    }
+
+    /// The real prelude's table, plus whatever this test declares on top.
+    fn ops_with(extra: &str) -> Ops {
+        Ops::with_declarations(&format!("{}{extra}", crate::ops::PRELUDE_SRC))
+    }
+
+    fn body_with(src: &str, ops: &Ops) -> String {
+        let p = crate::parse_with(src, ops);
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+        let def = p.syntax().children().next().unwrap();
+        let e = def
+            .children()
+            .filter(|c| c.kind() != K::TypeAnn)
+            .last()
+            .unwrap();
+        sexp(&e)
+    }
+
+    /// A declaration is the whole cost of a new operator: an undeclared
+    /// spelling is a syntax error, and the same spelling becomes an operator
+    /// of whatever precedence and associativity the declaration gives it.
+    #[test]
+    fn a_declaration_is_what_makes_an_operator_an_operator() {
+        // Undeclared: rejected, and told how to fix it.
+        let p = parse("q = a &^ 5\n");
+        assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+        assert!(
+            p.errors[0].message.contains("unknown operator `&^`"),
+            "{:?}",
+            p.errors
+        );
+        assert!(
+            p.errors[0].message.contains("infixl 1 &^"),
+            "{:?}",
+            p.errors
+        );
+        // The same for a spelling outside the `&` family.
+        let p = parse("q = a ~= b\n");
+        assert!(
+            p.errors[0].message.contains("unknown operator `~=`"),
+            "{:?}",
+            p.errors
+        );
+
+        // Declared at the pipe level, it is a stage: left-assoc and chaining
+        // with the shorthands the prelude already declares.
+        let ops = ops_with("infixl 1 &^\n");
+        assert_eq!(
+            body_with("q = a &^ 5 &- 1", &ops),
+            "(BinExpr (BinExpr (NameRef a) (Literal 5)) (Literal 1))"
+        );
+
+        // Declared left-associative, it groups to the left…
+        let ops = ops_with("infixl 17 **\n");
+        assert_eq!(
+            body_with("q = a ** b ** c", &ops),
+            "(BinExpr (BinExpr (NameRef a) (NameRef b)) (NameRef c))"
+        );
+        // …and right-associative to the right.
+        let ops = ops_with("infixr 17 **\n");
+        assert_eq!(
+            body_with("q = a ** b ** c", &ops),
+            "(BinExpr (NameRef a) (BinExpr (NameRef b) (NameRef c)))"
+        );
+
+        // Precedence follows the declared level: at 1 it is a pipe, at 17 it
+        // sits with `+` and so binds tighter than `&`.
+        let ops = ops_with("infixl 17 **\n");
+        assert_eq!(
+            body_with("q = a & b ** c", &ops),
+            "(BinExpr (NameRef a) (BinExpr (NameRef b) (NameRef c)))"
+        );
+    }
+
+    /// Declaring a spelling the prelude already owns changes that operator's
+    /// fixity rather than adding a second one.
+    #[test]
+    fn a_declaration_can_refix_a_builtin() {
+        let ops = ops_with("infixr 17 +\n");
+        assert_eq!(
+            body_with("q = a + b + c", &ops),
+            "(BinExpr (NameRef a) (BinExpr (NameRef b) (NameRef c)))"
+        );
+    }
+
+    /// A malformed declaration is reported and does not become an operator.
+    #[test]
+    fn malformed_declarations_are_reported() {
+        for (src, want) in [
+            ("infixl 251 &^\n", "between 0 and"),
+            ("infixl 1\n", "expected an operator symbol"),
+            ("infixl &^\n", "expected a precedence level"),
+            // `infixl` and `infixr` are reserved at item position.
+            ("infixl = 1\n", "expected a precedence level"),
+        ] {
+            let p = parse(src);
+            assert_eq!(p.errors.len(), 1, "{src:?}: {:?}", p.errors);
+            assert!(
+                p.errors[0].message.contains(want),
+                "{src:?}: {:?}",
+                p.errors
+            );
+        }
+        // The reserved words are still ordinary names inside an expression,
+        // and so is `stage`, which is not a declaration form.
+        assert!(parse("q = 1 & infixl 2\n").errors.is_empty());
+        assert_eq!(body("stage = 1"), "(Literal 1)");
+        // Level 0 is a real level: `$` is declared there.
+        assert!(parse("infixl 0 &^\n").errors.is_empty());
+    }
+
+    /// The function combinators bind where Haskell declares them, and that is
+    /// not only a matter of taste: with composition looser than the
+    /// comparisons, `toInt >>> toString == "5"` parsed as
+    /// `toInt >>> (toString == "5")`.
+    #[test]
+    fn combinators_bind_the_way_haskell_declares_them() {
+        for op in [">>>", "<<<"] {
+            // Composition is tighter than every other operator…
+            assert_eq!(
+                body(&format!("q = a {op} b == c")),
+                "(BinExpr (BinExpr (NameRef a) (NameRef b)) (NameRef c))",
+                "{op}"
+            );
+            assert_eq!(
+                body(&format!("q = a {op} b + c")),
+                "(BinExpr (BinExpr (NameRef a) (NameRef b)) (NameRef c))",
+                "{op}"
+            );
+            // …and right-associative.
+            assert_eq!(
+                body(&format!("q = a {op} b {op} c")),
+                "(BinExpr (NameRef a) (BinExpr (NameRef b) (NameRef c)))",
+                "{op}"
+            );
+            // The idiom still reads as it should: the composition is the
+            // stage's argument, so it is inside `&`.
+            assert_eq!(
+                body(&format!("q = a & b {op} c")),
+                "(BinExpr (NameRef a) (BinExpr (NameRef b) (NameRef c)))",
+                "{op}"
+            );
+        }
+        // `$` is the loosest, so it applies a whole pipeline-shaped thing, and
+        // `&` sits just above it.
+        assert_eq!(
+            body("q = a $ b & c"),
+            "(BinExpr (NameRef a) (BinExpr (NameRef b) (NameRef c)))"
+        );
+        assert_eq!(
+            body("q = a & b $ c"),
+            "(BinExpr (BinExpr (NameRef a) (NameRef b)) (NameRef c))"
+        );
+        assert_eq!(
+            body("q = a $ b $ c"),
+            "(BinExpr (NameRef a) (BinExpr (NameRef b) (NameRef c)))"
+        );
     }
 
     #[test]

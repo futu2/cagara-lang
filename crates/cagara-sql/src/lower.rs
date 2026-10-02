@@ -10,16 +10,21 @@ use sqlglot_rust::ast::{
 };
 use std::collections::{HashMap, HashSet};
 
+/// Deepest `Rel` nesting the lowerer will recurse through; see `rel_inner`.
+const MAX_LOWER_DEPTH: usize = 16;
+
 pub struct Lowerer {
     next: usize,
     next_cte: usize,
-    counts: Vec<(Rel, usize)>,
+    counts: Vec<Use>,
     cte_names: HashMap<String, String>,
     building: Vec<Rel>,
     ctes: Vec<sqlglot_rust::ast::Cte>,
     /// Table names in the query: a generated CTE hides a same-named table
     /// for the whole statement, so its name must avoid all of them.
     tables: HashSet<String>,
+    /// Current `rel_inner` nesting, bounded by `MAX_LOWER_DEPTH`.
+    depth: usize,
 }
 
 impl Lowerer {
@@ -36,6 +41,7 @@ impl Lowerer {
             building: Vec::new(),
             ctes: Vec::new(),
             tables,
+            depth: 0,
         }
     }
 
@@ -163,6 +169,19 @@ impl Lowerer {
         }
     }
 
+    /// Lower one node.
+    ///
+    /// A relation used more than once is hoisted into a CTE so its work is
+    /// shared. That is only sound when both uses want the same SQL. A use that
+    /// *fuses* — a projection, an update, a filter, an order — rewrites the
+    /// stage it is handed, folding a window or aggregate into it or wrapping
+    /// it, and the CTE body was built once without that context. Sharing it
+    /// would hand that caller the bare body, silently dropping the folding.
+    ///
+    /// So a node whose own lowering depends on how its result will be used is
+    /// never hoisted; it is lowered in place. `count_rel` records, per node,
+    /// whether any use fuses into it, and `is_cte_candidate` requires that
+    /// none does.
     pub fn rel(&mut self, rel: &Rel) -> Result<Stage, String> {
         if self.building.is_empty() && self.is_cte_candidate(rel) {
             let key = format!("{rel:?}");
@@ -195,6 +214,36 @@ impl Lowerer {
     }
 
     fn rel_inner(&mut self, rel: &Rel) -> Result<Stage, String> {
+        // The recursion below costs stack per `Rel` node, and a node chain is
+        // as long as the program's stage count. The parser bounds one
+        // *pipeline* (`MAX_PIPE_CHAIN`), but a parenthesized group restarts
+        // that count, so nesting multiplies the total and the bound does not
+        // hold here. This is the lowerer's own bound, on the recursion it
+        // actually performs.
+        //
+        // The value is set by the *smallest* stack the lowerer runs on: a
+        // spawned thread gets 2 MiB by default (the language server's, and the
+        // test harness's), and an unoptimised build uses far more stack per
+        // frame than a release one, overflowing there at around twenty levels.
+        // 16 leaves headroom on that configuration. It is well past any
+        // hand-written query — the prelude's largest pipeline is single
+        // digits — but it is a real ceiling: raising it means peeling the
+        // remaining single-input stage kinds iteratively, the way `where`
+        // already is.
+        let depth = self.depth + 1;
+        if depth > MAX_LOWER_DEPTH {
+            return Err(format!(
+                "this query nests more than {MAX_LOWER_DEPTH} stages deep; \
+                 split it with a named definition between the parts"
+            ));
+        }
+        self.depth = depth;
+        let out = self.rel_peeled(rel);
+        self.depth = depth - 1;
+        out
+    }
+
+    fn rel_peeled(&mut self, rel: &Rel) -> Result<Stage, String> {
         // Peel a run of `where` / `limit` / `offset` / `distinct` / `at`
         // stages iteratively.
         //
@@ -207,8 +256,9 @@ impl Lowerer {
         // order the recursion produced, so the result is unchanged.
         //
         // Only `where` is peeled here: it is what a pipeline is built from.
-        // A chain of other stages still recurses, and is bounded by the
-        // parser's `MAX_PIPE_CHAIN`.
+        // The remaining kinds still recurse, and are bounded by
+        // `MAX_LOWER_DEPTH` rather than the parser's per-pipeline budget,
+        // which nesting multiplies.
         if matches!(rel, Rel::Where(..)) {
             let mut stages: Vec<(&Rel, &IrExpr)> = Vec::new();
             let mut base = rel;
@@ -625,13 +675,16 @@ impl Lowerer {
         Statement::Select(outer.into_statement())
     }
 
+    /// Is this node worth sharing as a CTE? It must occur more than once, and
+    /// every occurrence must be in a position that does not fuse into it —
+    /// otherwise one call site's shape would be imposed on the other.
     fn is_cte_candidate(&self, rel: &Rel) -> bool {
         if matches!(rel.bare(), Rel::Table { .. }) {
             return false;
         }
         self.counts
             .iter()
-            .any(|(candidate, count)| count > &1 && candidate == rel)
+            .any(|u| u.count > 1 && !u.fused && &u.rel == rel)
     }
 
     fn cte_stage(&self, name: &str, rel: &Rel) -> Result<Stage, String> {
@@ -662,23 +715,68 @@ fn item(items: &[(String, Expr)], n: &str) -> Result<Expr, String> {
         .ok_or_else(|| format!("internal: join input has no column `{n}`"))
 }
 
-fn count_rel(rel: &Rel, counts: &mut Vec<(Rel, usize)>) {
-    if let Some((_, count)) = counts.iter_mut().find(|(candidate, _)| candidate == rel) {
-        *count += 1;
-    } else {
-        counts.push((rel.clone(), 1));
-    }
-    for child in rel.children() {
-        count_rel(child, counts);
+/// A node worth sharing as a CTE: how often it occurs, and whether every
+/// occurrence is reached in a context-free position.
+struct Use {
+    rel: Rel,
+    count: usize,
+    /// True when some occurrence sits where the parent fuses into it, which
+    /// makes its SQL depend on that parent. Such a node cannot be shared.
+    fused: bool,
+}
+
+/// Record every distinct `Rel` shape, how often it occurs, and whether any
+/// occurrence is used by a parent that fuses into it.
+///
+/// Two separately written but identical sub-pipelines occur "twice" and may
+/// share one CTE, so the key is structural equality.
+///
+/// An explicit walk, not recursion: the IR is a chain as deep as the program's
+/// stage count, and nesting multiplies that past what the parser bounds, so a
+/// recursive walk overflowed the stack before lowering could report anything.
+fn count_rel(rel: &Rel, uses: &mut Vec<Use>) {
+    let mut stack = vec![(rel, false)];
+    while let Some((r, fused_by_parent)) = stack.pop() {
+        match uses.iter_mut().find(|u| &u.rel == r) {
+            Some(u) => {
+                u.count += 1;
+                u.fused |= fused_by_parent;
+            }
+            None => uses.push(Use {
+                rel: r.clone(),
+                count: 1,
+                fused: fused_by_parent,
+            }),
+        }
+        // A child of a fusing parent is itself fused: the parent rewrites or
+        // wraps the stage the child produced.
+        let fuses = fuses_into_child(r);
+        stack.extend(r.children().into_iter().map(|c| (c, fuses)));
     }
 }
 
+/// Does this node's lowering rewrite the stage its input produced, so that the
+/// input's SQL depends on this parent?
+///
+/// Almost every stage kind does. A `select` *replaces* its input's columns in
+/// the same SELECT, an `agg` groups in place, a `where` appends to the WHERE,
+/// an `order` sets the ORDER BY, and so on: the input's work is not
+/// materialised, it is continued. Only the kinds that must build a new `FROM`
+/// with their inputs as subqueries — a set operation, and a join on the side it
+/// cannot inline — give their inputs a context-free life of their own.
+fn fuses_into_child(rel: &Rel) -> bool {
+    !matches!(rel.bare(), Rel::Table { .. } | Rel::Set { .. })
+}
+
+/// Every table named in the query, walked without recursion for the same
+/// reason as [`count_rel`].
 fn collect_tables(rel: &Rel, tables: &mut HashSet<String>) {
-    if let Rel::Table { name, .. } = rel {
-        tables.insert(name.clone());
-    }
-    for child in rel.children() {
-        collect_tables(child, tables);
+    let mut stack = vec![rel];
+    while let Some(r) = stack.pop() {
+        if let Rel::Table { name, .. } = r {
+            tables.insert(name.clone());
+        }
+        stack.extend(r.children());
     }
 }
 

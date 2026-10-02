@@ -1240,3 +1240,74 @@ fn map_keys_renames_by_pattern() {
         "SELECT id AS user_id, name, age, active FROM public.users"
     );
 }
+
+/// A relation used twice becomes a CTE, so its work is shared. That is only
+/// valid when both uses want the same SQL: a use that *fuses* — a projection,
+/// a filter, an order — rewrites the stage it is handed, and the CTE body was
+/// built once without that context.
+///
+/// This is the case that used to emit the left branch's window as a bare
+/// column: the input `s` was hoisted into a CTE whose body was built without
+/// the window, and the left branch was handed that body.
+#[test]
+fn a_reused_input_is_not_turned_into_a_cte_when_its_context_differs() {
+    let src = "s = users & where (.age > 20)\n\
+               q = s & select { a = .id, r = rowNumber { order = [asc .id] } }\n\
+                   & union (s & select { a = .id, r = .age })\n";
+    let s = sql(src, "q");
+    // Both branches must be what the user wrote: the window is not optional,
+    // and the other branch must still project the plain column.
+    assert_eq!(s.matches("ROW_NUMBER()").count(), 1, "{s}");
+    assert!(s.contains("age AS r"), "{s}");
+    assert!(
+        s.contains("ROW_NUMBER() OVER (ORDER BY id NULLS LAST) AS r"),
+        "{s}"
+    );
+    // The shared input's filter must not be dropped from either branch.
+    assert_eq!(s.matches("age > 20").count(), 2, "{s}");
+}
+
+/// The same input used twice in the *same* way is still shared: that is the
+/// reason the CTE exists, and the fix must not remove it. The filter runs once.
+#[test]
+fn a_reused_input_is_still_shared_when_the_uses_agree() {
+    let src = "s = users & where (.age > 20)\n\
+               q = union s s\n";
+    let s = sql(src, "q");
+    assert!(s.contains("WITH cagara_cte1"), "expected a CTE: {s}");
+    assert_eq!(s.matches("age > 20").count(), 1, "{s}");
+}
+
+/// Lowering recurses once per IR node. The parser bounds a single pipeline,
+/// but a parenthesized group restarts that count, so nesting multiplied the
+/// total and overflowed the stack (SIGABRT) instead of reporting anything.
+///
+/// The nesting is built as IR directly: the parser rejects a source this deep
+/// as a syntax error, which is the *other* half of the defence, and this test
+/// pins the lowerer's own bound independently of it.
+#[test]
+fn deeply_nested_stages_are_a_diagnostic_not_a_stack_overflow() {
+    use cagara_hir::ir::{Expr, Lit, Rel};
+    let build = |n: usize| {
+        let mut rel = Rel::Table {
+            schema: "public".into(),
+            name: "users".into(),
+            columns: Some(vec!["id".into()]),
+        };
+        for _ in 0..n {
+            rel = Rel::Order(Box::new(rel), vec![(Expr::Lit(Lit::Int(1)), true)]);
+        }
+        rel
+    };
+    // A realistic depth lowers: the bound must not reject real programs.
+    assert!(compile(&build(8), Options::default()).is_ok());
+    // Far past it is a diagnostic, whatever the stack size of the build, and
+    // no depth may abort the process.
+    for n in [64, 200, 400, 1000] {
+        let err = match compile(&build(n), Options::default()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a depth diagnostic at {n}"),
+        };
+        assert!(err.contains("nests more than"), "n={n}: {err}");
+    }
+}

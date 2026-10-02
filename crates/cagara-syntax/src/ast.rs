@@ -144,27 +144,46 @@ fn token(n: &SyntaxNode, k: K) -> Option<crate::SyntaxToken> {
         .find(|t| t.kind() == k)
 }
 
+/// The text of a string literal, with its escapes resolved.
+///
+/// Only `\n`, `\t`, `\\` and `\"` are escapes. Every other backslash is kept
+/// verbatim, backslash and all: `"a\\b"` is `a\b`, a Windows path or a regex
+/// survives as written, and a trailing `\` does not vanish. Dropping the
+/// backslash instead would silently change the value — `sql "... '\\'"` used
+/// to lose it and then fail to parse, and `"... 'x\\ty'"` used to turn into a
+/// literal tab.
 fn unescape(s: &str) -> String {
     let inner = s
         .strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
         .unwrap_or(s);
-    let mut out = String::new();
+    let mut out = String::with_capacity(inner.len());
     let mut chars = inner.chars();
     while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some(o) => out.push(o),
-                None => {}
-            }
-        } else {
+        if c != '\\' {
             out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            // Not an escape the language defines: keep it as written rather
+            // than guessing, so text and AST cannot disagree.
+            Some(o) => {
+                out.push('\\');
+                out.push(o);
+            }
+            None => out.push('\\'),
         }
     }
     out
 }
+
+/// The magnitude of `-9223372036854775808`, the one negative literal whose
+/// digits do not fit in an `i64`.
+const I64_MIN_MAGNITUDE: &str = "9223372036854775808";
 
 impl Lower<'_> {
     fn mk(&mut self, span: Span, kind: ExprKind) -> Expr {
@@ -382,10 +401,18 @@ impl Lower<'_> {
                 Some(c) => {
                     let inner = self.expr(&c);
                     match inner.kind {
-                        ExprKind::Lit(Lit::Int(v)) => ExprKind::Lit(Lit::Int(-v)),
-                        // The one literal whose digits overflow (the parser
-                        // allows it only here).
-                        ExprKind::Error if c.text() == "9223372036854775808" => {
+                        // `checked_neg` rather than `-v`: negating `i64::MIN`
+                        // overflows, which panicked in a debug build and
+                        // wrapped silently in a release one. Doubling a minus
+                        // sign on the `min` literal is the only way there, and
+                        // it yields `min` again.
+                        ExprKind::Lit(Lit::Int(v)) => match v.checked_neg() {
+                            Some(n) => ExprKind::Lit(Lit::Int(n)),
+                            None => ExprKind::Lit(Lit::Int(i64::MIN)),
+                        },
+                        // A literal too large for `i64`; the parser accepts its
+                        // digits only here, under a `-`.
+                        ExprKind::Error if c.text() == I64_MIN_MAGNITUDE => {
                             ExprKind::Lit(Lit::Int(i64::MIN))
                         }
                         ExprKind::Lit(Lit::Float(s)) => {
@@ -564,5 +591,57 @@ mod tests {
         );
         assert_eq!(body("x = - -1.5"), ExprKind::Lit(Lit::Float("1.5".into())));
         assert_eq!(body("x = -1.5"), ExprKind::Lit(Lit::Float("-1.5".into())));
+    }
+
+    /// Negating `i64::MIN` overflows. It used to panic in a debug build and
+    /// wrap silently in a release one, so a doubled minus sign on the `min`
+    /// literal aborted the compiler.
+    #[test]
+    fn negating_the_min_literal_does_not_overflow() {
+        // `-(-2^63)` is `+2^63`, which is not an `i64`. Clamping back to
+        // `min` keeps the lowering total and the value representable.
+        assert_eq!(
+            body("x = - -9223372036854775808"),
+            ExprKind::Lit(Lit::Int(i64::MIN))
+        );
+    }
+
+    /// A backslash that is not part of a defined escape has to survive: it is
+    /// how a Windows path, a regex, or a SQL string template is written.
+    /// Dropping it silently changed the value (`"a\zb"` became `"azb"`), and
+    /// a trailing backslash disappeared completely.
+    #[test]
+    fn undefined_escapes_keep_their_backslash() {
+        fn s(src: &str) -> String {
+            match body(src) {
+                ExprKind::Lit(Lit::Str(v)) => v,
+                o => panic!("not a string: {o:?}"),
+            }
+        }
+        // The defined escapes still resolve.
+        assert_eq!(s(r#"x = "a\nb""#), "a\nb");
+        assert_eq!(s(r#"x = "a\tb""#), "a\tb");
+        assert_eq!(s(r#"x = "a\\b""#), r"a\b");
+        assert_eq!(s(r#"x = "a\"b""#), "a\"b");
+        // An undefined escape keeps both characters instead of losing one.
+        assert_eq!(s(r#"x = "a\zb""#), r"a\zb");
+        // `\t` is a defined escape, so a single backslash before `t` is a tab;
+        // `\\t` is a literal backslash followed by `t`.
+        assert_eq!(s(r#"x = "C:\tmp""#), "C:\tmp");
+        assert_eq!(s(r#"x = "C:\\tmp""#), r"C:\tmp");
+        // The text `"tail\"` is not a trailing backslash, it is an escaped
+        // quote that leaves the literal open — the lexer reports that. A
+        // backslash at the end needs the escape spelling.
+        let (_, errs) = lower_source("x = \"tail\\\"\n");
+        assert!(!errs.is_empty(), "an escaped quote must not close a string");
+        assert_eq!(s(r#"x = "a\\""#), r"a\");
+        // The same unescaping serves `sql` templates, so a literal backslash
+        // reaches the backend as one rather than vanishing.
+        let (m, _) =
+            lower_source("f : expr r string -> expr r string = sql \"REPLACE($1, '\\')\"\n");
+        assert_eq!(
+            m.defs[0].body.kind,
+            ExprKind::Sql(r"REPLACE($1, '\')".into())
+        );
     }
 }

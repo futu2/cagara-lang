@@ -50,9 +50,9 @@ user_totals = users
     orders = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0))
   }
 
-# Operator shorthands: `&?` where, `&=` select, `&*` agg, `&.` order,
-# `&-` limit; joins `?` inner, `<?` left, `?>` right, `<?>` full; `??`
-# coalesce. The same report as `user_totals`, for active users:
+# Operator shorthands: `&?` where, `&=` select, `&+` update, `&*` agg,
+# `&.` order, `&-` limit; joins `?` inner, `<?` left, `?>` right, `<?>` full;
+# `??` coalesce. The same report as `user_totals`, for active users:
 active_totals = users
   &? .active
   & orders <? .<id == .>user_id

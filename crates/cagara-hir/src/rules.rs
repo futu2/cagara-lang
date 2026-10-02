@@ -37,7 +37,7 @@ pub mod winspec {
 /// These spell out the `_op_` names the lexer gives each symbol: they are
 /// ordinary definitions in `prelude.cagara` (`_&?_ = q => pred => where pred q`),
 /// so the language, not Rust, decides what a shorthand means.
-pub const PIPES: &[&str] = &["_&_", "_&=_", "_&?_", "_&*_", "_&._", "_&-_"];
+pub const PIPES: &[&str] = &["_&_", "_&=_", "_&?_", "_&+_", "_&*_", "_&._", "_&-_"];
 
 /// A plain column (`.x`) in a join predicate.
 pub fn needs_side(n: &str) -> String {

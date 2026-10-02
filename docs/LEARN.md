@@ -155,6 +155,7 @@ Every common stage has a one-token shorthand at the same precedence as `&`:
 |---|---|
 | `&?` | `where` |
 | `&=` | `select` |
+| `&+` | `update` |
 | `&*` | `agg` |
 | `&.` | `order` |
 | `&-` | `limit` |
@@ -162,15 +163,29 @@ Every common stage has a one-token shorthand at the same precedence as `&`:
 These are equivalent pairs:
 
 ```haskell
-a = users &? (.age > 1) &= {.id} &. [asc .id] &- 2
-b = users & where (.age > 1) & select {.id} & order [asc .id] & limit 2
+a = users &? (.age > 1) &+ {age = .age + 1} &= {.id, .age} &. [asc .age] &- 2
+b = users & where (.age > 1) & update {age = .age + 1} & select {.id, .age} & order [asc .age] & limit 2
 ```
 
 Both produce:
 
 ```sql
-SELECT id FROM public.users WHERE (age > 1) ORDER BY id NULLS LAST LIMIT 2;
+SELECT id, age + 1 AS age FROM public.users
+WHERE (age > 1) ORDER BY age + 1 NULLS LAST LIMIT 2;
 ```
+
+Note that `&=` and `&+` are not interchangeable. `&=` **replaces** the row with
+the fields you list; `&+` **merges** over it, keeping every column you did not
+mention:
+
+```haskell
+keeps = users &+ {age = .age + 1}   # id, name, age (new), active
+drops = users &= {age = .age + 1}   # only age
+```
+
+Stage order follows from that: `&+` cannot update a column a previous `&=` has
+already dropped. See
+[section 5](#5-choosing-columns-select-and-update).
 
 The long names are the easiest to learn first, and they are what the compiler
 prints in error messages. Use the shorthands once a pipeline is long enough that
@@ -294,6 +309,21 @@ decide which columns to publish.
 # Drop password_hash by naming what is published; give name its public label.
 public_users = schema.users & select { .id, display_name = .name }
 ```
+
+The pipeline shorthand for `update` is `&+`, so the two definitions below are
+the same query:
+
+```haskell
+long_form  = users & update { name = upper .name } & select {.id, .name}
+short_form = users &+ { name = upper .name } &= {.id, .name}
+```
+
+```sql
+SELECT id, UPPER(name) AS name FROM public.users;
+```
+
+`&+` is easy to confuse with `&=`, so remember that the symbol points at the
+operation: `&+` adds to the row, `&=` writes the row.
 
 ### The `{.name}` shorthand
 
@@ -591,6 +621,28 @@ spec = { partition = [.user_id], order = [desc .created_at] }
 
 All three are optional; `{}` is a valid spec.
 
+> **`[..]` is a fixed-length key list, not a Haskell list.** Despite the
+> spelling, `[a, b]` is not a cons cell or a linked list with a `[]`/`(:)`
+> algebra. There is no `map`, no concatenation, and no list-typed variable you
+> can build up. It is a *syntax for writing a fixed list of sort keys or
+> partition keys*, and it is only meaningful where keys are expected: as the
+> argument of `order`, or in a spec's `partition` and `order` fields. A list of
+> column expressions is inferred as a `sortkey` row, which is why putting one
+> anywhere else is a type error:
+
+```haskell
+bad  = users & select {.id, ks = [asc .age]}   # field `ks` of `select` must be a
+                                               # column expression or constant, found list
+bad2 = users & where ([1, 2] == [1, 2])        # type mismatch: expected expr a b, found list int
+bad3 = users & select {.id, rn = rowNumber [asc .age]}
+                                               # expected winspec a, found list (sortkey ...)
+```
+
+> Note the last one: a spec is a **record**, not a list. `rowNumber [asc .age]`
+> is rejected; write `rowNumber {order = [asc .age]}`. Elements are homogeneous,
+> so `[1, 2.0]` is a type error rather than a promoted list. An empty `[]` is
+> accepted wherever keys are expected.
+
 | Function | Returns |
 |---|---|
 | `rowNumber spec` | `int` |
@@ -640,10 +692,22 @@ Because a window is computed per row, it cannot appear in a place that must be
 evaluated before rows exist. These are rejected, each with a targeted message:
 
 ```haskell
-bad1 = ranked & where (.rn <= 3)          # `where` cannot filter on a window function
-bad2 = orders & order [desc (rowNumber {})]  # sort and partition keys must be plain column expressions
-bad3 = orders & inner x (.<id == .>rowNumber {})  # join predicates cannot contain aggregates or window functions
+bad1 = orders & where ((rowNumber {order = [desc .amount]}) <= 3)
+# `where` cannot filter on a window function; `select` it first, then filter the new column
+
+bad2 = orders & order [rowNumber {}]
+# sort and partition keys must be plain column expressions;
+# compute aggregates or windows in an earlier stage
+
+bad3 = orders & inner x (.<id == (.>id + rowNumber {}))
+# join predicates cannot contain aggregates or window functions
 ```
+
+Note that the error is about *building* a window in that position, not about
+reading a column that a window produced. Once `rowNumber` has been selected into
+a plain column, filtering on that column is perfectly normal — which is what the
+next snippet does. The distinction is the whole point: a window is not a value
+until a stage has computed it.
 
 The pattern is always the same: compute the window in its own stage, then use
 the new column in the next one.
@@ -651,6 +715,17 @@ the new column in the next one.
 ```haskell
 ranked = orders & select {.id, rn = rowNumber {order = [desc .amount]}}
 top3   = ranked & where (.rn <= 3)
+```
+
+Compare `bad1` above with `top3` here. They look almost identical, but `.rn` in
+`top3` is an ordinary `int` column of `ranked`, computed by an earlier stage,
+whereas `bad1` asks `where` to build a window itself. Only the second is legal:
+
+```sql
+SELECT id, rn
+FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY amount DESC NULLS LAST) AS rn
+      FROM public.orders) AS t1
+WHERE (rn <= 3);
 ```
 
 Windows nest just as little as aggregates — `rowNumber` inside `rowNumber` is
@@ -693,6 +768,10 @@ t = users & where (inList [1, 2, 3] .id)
 ```sql
 SELECT id, name, active FROM public.users WHERE (id IN (1, 2, 3));
 ```
+
+This is the one place a bracket is a genuine value list: `inList` takes a list of
+literals that become the members of a SQL `IN (...)`, rather than sort keys. The
+elements are still homogeneous, so `inList [1, 2.0] .id` is a type error.
 
 ---
 
@@ -1001,8 +1080,9 @@ the computation one stage earlier.
 - Name intermediate stages. A window that is filtered later deserves its own
   definition (`ranked`, then `top3`), for the same reason the compiler requires
   it.
-- Reach for the `&?` shorthands only once a pipeline is long enough that the
-  punctuation is clearer than the words.
+- Reach for the `&?` / `&=` / `&+` shorthands only once a pipeline is long enough
+  that the punctuation is clearer than the words. Spelling out `update` is worth
+  it when the row merge is the point of the stage.
 - Annotate helper functions' types when they are not obvious; signatures are
   what make overloading work predictably.
 

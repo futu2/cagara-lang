@@ -34,6 +34,7 @@ pub enum SyntaxKind {
     AmpStar,
     AmpDot,
     AmpMinus,
+    AmpPlus,
     QuestionQuestion,
     Question,
     LtQuestion,
@@ -142,6 +143,7 @@ impl From<Token> for SyntaxKind {
             Token::AmpStar => K::AmpStar,
             Token::AmpDot => K::AmpDot,
             Token::AmpMinus => K::AmpMinus,
+            Token::AmpPlus => K::AmpPlus,
             Token::QuestionQuestion => K::QuestionQuestion,
             Token::Question => K::Question,
             Token::LtQuestion => K::LtQuestion,
@@ -185,6 +187,7 @@ impl SyntaxKind {
             K::AmpStar => (1, 2, "_&*_"),
             K::AmpDot => (1, 2, "_&._"),
             K::AmpMinus => (1, 2, "_&-_"),
+            K::AmpPlus => (1, 2, "_&+_"),
             // Joins: looser than every expression operator, tighter than the
             // pipe, so `users & teachers ? .<a == .>b` needs no parentheses.
             K::Question => (3, 4, "_?_"),

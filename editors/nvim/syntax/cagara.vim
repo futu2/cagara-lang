@@ -19,7 +19,7 @@ syn match   cagaraFloat    "\<\d\+\.\d\+\([eE][+-]\=\d\+\)\=\>"
 syn match   cagaraNumber   "\<\d\+\>"
 syn match   cagaraOpName   "\<_[-+*/%<>=!&|$?.]\+_"
 syn match   cagaraArrow    "=>\|->"
-syn match   cagaraOperator "<?>\|<?\|?>\|??\|&[=?*.-]\|>>>\|&&\|||\|==\|!=\|<>\|<=\|>=\|[&$?<>+*/%|-]"
+syn match   cagaraOperator "<?>\|<?\|?>\|??\|&[=?*.+-]\|>>>\|&&\|||\|==\|!=\|<>\|<=\|>=\|[&$?<>+*/%|-]"
 " A top-level name at column 0, before its signature or body.
 syn match   cagaraDef      "^\(\h\w*\|_[-+*/%<>=!&|$?.]\+_\)\ze\s*\(:\|=[^=]\)"
 

@@ -67,6 +67,9 @@ pub enum Token {
     /// `q &- n` — `q & limit n`
     #[token("&-")]
     AmpMinus,
+    /// `q &+ fields` — `q & update fields`
+    #[token("&+")]
+    AmpPlus,
     /// `x ?? default` — `coalesce default x`
     #[token("??")]
     QuestionQuestion,
@@ -238,13 +241,14 @@ mod tests {
     fn stage_join_and_coalesce_operators() {
         use Token::*;
         assert_eq!(
-            kinds("&= &? &* &. &- ?? ? <? ?> <?> && <= <>"),
+            kinds("&= &? &* &. &- &+ ?? ? <? ?> <?> && <= <>"),
             vec![
                 AmpEq,
                 AmpQuestion,
                 AmpStar,
                 AmpDot,
                 AmpMinus,
+                AmpPlus,
                 QuestionQuestion,
                 Question,
                 LtQuestion,
@@ -261,8 +265,22 @@ mod tests {
             vec![LtQuestion, LeftField, QuestionGt, RightField]
         );
         assert_eq!(
-            kinds("_&?_ _<?>_ _??_ _&._"),
-            vec![Ident, Ident, Ident, Ident]
+            kinds("_&?_ _<?>_ _??_ _&._ _&+_"),
+            vec![Ident, Ident, Ident, Ident, Ident]
+        );
+    }
+
+    /// A stage shorthand must not swallow the `&` of the next stage, and `&+`
+    /// must not lex as `&` followed by `+`.
+    #[test]
+    fn amp_plus_is_one_token() {
+        use Token::*;
+        assert_eq!(kinds("&+"), vec![AmpPlus]);
+        assert_eq!(kinds("& +"), vec![Amp, Plus]);
+        // `&+` in a pipeline, next to another shorthand.
+        assert_eq!(
+            kinds("q &+ {a = 1} &= {.a}"),
+            vec![Ident, AmpPlus, LBrace, Ident, Eq, Int, RBrace, AmpEq, LBrace, Field, RBrace]
         );
     }
 }

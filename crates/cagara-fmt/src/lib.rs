@@ -205,7 +205,7 @@ fn bin_parts(n: &SyntaxNode) -> Result<(SyntaxNode, SyntaxToken, SyntaxNode, (u8
 fn is_pipe(k: K) -> bool {
     matches!(
         k,
-        K::Amp | K::AmpEq | K::AmpQuestion | K::AmpStar | K::AmpDot | K::AmpMinus
+        K::Amp | K::AmpEq | K::AmpQuestion | K::AmpStar | K::AmpDot | K::AmpMinus | K::AmpPlus
     )
 }
 

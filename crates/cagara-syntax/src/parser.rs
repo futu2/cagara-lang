@@ -89,12 +89,12 @@ const MAX_DEPTH: usize = 192;
 const MAX_PIPE_CHAIN: usize = 10;
 
 /// Does this token build a pipeline stage? These are the `&`-family operators
-/// (`&`, `&?`, `&=`, `&*`, `&.`, `&-`), which the prelude defines as the query
-/// stage shorthands.
+/// (`&`, `&?`, `&=`, `&*`, `&.`, `&-`, `&+`), which the prelude defines as the
+/// query stage shorthands.
 fn is_pipe(k: K) -> bool {
     matches!(
         k,
-        K::Amp | K::AmpEq | K::AmpQuestion | K::AmpStar | K::AmpDot | K::AmpMinus
+        K::Amp | K::AmpEq | K::AmpQuestion | K::AmpStar | K::AmpDot | K::AmpMinus | K::AmpPlus
     )
 }
 
@@ -766,6 +766,20 @@ mod tests {
         );
     }
 
+    /// `&+` is one token and chains like the other stage shorthands, so a
+    /// record argument and a following shorthand both parse.
+    #[test]
+    fn update_shorthand_parses_like_its_siblings() {
+        assert_eq!(
+            body("q = a &+ {x = 1} &= {.x}"),
+            "(BinExpr (BinExpr (NameRef a) (RecordExpr (RecordField x (Literal 1)))) (RecordExpr (RecordField .x)))"
+        );
+        assert_eq!(
+            body("q = a & b + c"),
+            "(BinExpr (NameRef a) (BinExpr (NameRef b) (NameRef c)))"
+        );
+    }
+
     #[test]
     fn coalesce_is_right_assoc_and_tightest() {
         assert_eq!(
@@ -842,7 +856,7 @@ mod tests {
     /// cannot slip past through a different spelling.
     #[test]
     fn every_pipeline_shorthand_counts_against_the_budget() {
-        for op in ["&", "&?", "&=", "&*", "&.", "&-"] {
+        for op in ["&", "&?", "&=", "&+", "&*", "&.", "&-"] {
             let mut src = String::from("q = users");
             for i in 0..MAX_PIPE_CHAIN + 2 {
                 src.push_str(&format!(" {op} (.age > {i})"));

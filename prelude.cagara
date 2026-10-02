@@ -58,9 +58,11 @@ desc = __desc
 group = __group
 
 # Stage shorthands, at the level and associativity of `&`:
-# `q &? p` = `q & where p`, `&=` select, `&*` agg, `&.` order, `&-` limit.
+# `q &? p` = `q & where p`, `&=` select, `&+` update, `&*` agg, `&.` order,
+# `&-` limit.
 _&=_ = q => fields => select fields q
 _&?_ = q => pred => where pred q
+_&+_ = q => fields => update fields q
 _&*_ = q => fields => agg fields q
 _&._ = q => keys => order keys q
 _&-_ = q => n => limit n q

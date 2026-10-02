@@ -207,8 +207,12 @@ fn window_types() {
 fn join_errors() {
     assert!(err("q = orders & innerJoin users (.user_id == .id)\n", "q").contains("which input"));
     assert!(err("q = users & where (.<id == 1)\n", "q").contains("join predicate"));
-    assert!(err("q = orders & innerJoin users (.<user_id == .>name)\n", "q").contains("type mismatch"));
-    assert!(err("q = orders & innerJoin users (.<nope == .>id)\n", "q").contains("no column `nope`"));
+    assert!(
+        err("q = orders & innerJoin users (.<user_id == .>name)\n", "q").contains("type mismatch")
+    );
+    assert!(
+        err("q = orders & innerJoin users (.<nope == .>id)\n", "q").contains("no column `nope`")
+    );
 }
 
 #[test]

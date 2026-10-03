@@ -15,6 +15,8 @@ pub enum Prim {
     Update,
     Omit,
     MapKeys,
+    MapKeys2,
+    MapValue,
     Merge,
     Prefix,
     Suffix,
@@ -44,6 +46,8 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__update", Prim::Update),
     ("__omit", Prim::Omit),
     ("__mapKeys", Prim::MapKeys),
+    ("__mapKeys2", Prim::MapKeys2),
+    ("__mapValue", Prim::MapValue),
     ("__merge", Prim::Merge),
     ("__prefix", Prim::Prefix),
     ("__suffix", Prim::Suffix),
@@ -79,11 +83,12 @@ impl Prim {
         match self {
             UnboundedPreceding | UnboundedFollowing | CurrentRow => 0,
             Group | Asc | Desc | Preceding | Following => 1,
-            Where | Select | Update | Omit | AggStage | Order | Limit | Offset | Table | Rows | Prefix | Suffix | Merge => 2,
+            Where | Select | Update | Omit | AggStage | Order | Limit | Offset | Table | Rows | Prefix | Suffix | Merge | MapValue => 2,
             Distinct => 1,
             In => 2,
             Join(_) => 3,
-            MapKeys => 3,
+            MapKeys => 2,
+            MapKeys2 => 2,
             Set(_) => 2,
         }
     }

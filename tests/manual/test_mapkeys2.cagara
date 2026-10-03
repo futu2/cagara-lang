@@ -1,0 +1,12 @@
+# Test mapKeys2 with function-based key mapping
+
+users = table "db" "users"
+
+# Test 1: Simple prefix with lambda
+prefixed = users & mapKeys2 (\x => "u_" <> x)
+
+# Test 2: Conditional transformation
+conditional = users & mapKeys2 (\x => if x == "id" then "user_id" else x)
+
+# Test 3: Suffix
+suffixed = users & mapKeys2 (\x => x <> "_old")

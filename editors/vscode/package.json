@@ -2,7 +2,7 @@
   "name": "cagara",
   "displayName": "Cagara",
   "description": "Cagara language support: diagnostics, hover, go-to-definition, references, symbols, and completion via `cagara lsp`",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "cagara",
   "license": "MIT",
   "repository": {

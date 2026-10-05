@@ -11,9 +11,9 @@ Each [GitHub release](https://github.com/futu2/cagara-lang/releases) has
 `cagara-vscode-<tag>.vsix`:
 
 ```sh
-tar -xzf cagara-v0.1.0-linux-amd64.tar.gz
-install cagara-v0.1.0-linux-amd64/cagara ~/.local/bin/
-code --install-extension cagara-vscode-v0.1.0.vsix
+tar -xzf cagara-v0.2.0-linux-amd64.tar.gz
+install cagara-v0.2.0-linux-amd64/cagara ~/.local/bin/
+code --install-extension cagara-vscode-v0.2.0.vsix
 ```
 
 ## Setup from source
@@ -41,6 +41,6 @@ npm run compile
 
 Open this folder in VS Code and press F5 (Run Extension) to launch it on
 `examples/`. `npm run package` builds a `.vsix`, which
-`code --install-extension cagara-0.1.0.vsix` installs.
+`code --install-extension cagara-0.2.0.vsix` installs.
 
 Run **Cagara: Restart Language Server** after rebuilding the server.

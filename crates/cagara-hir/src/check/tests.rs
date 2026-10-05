@@ -1180,10 +1180,26 @@ fn key_map_is_a_type_level_row_former() {
         ),
         "query { id_v2 = int, name_v2 = string, age_v2 = int, active_v2 = bool }"
     );
+    // The signature's row names the rename's **input** row — `keyMap m r`
+    // denotes `m` applied to `r` — so a one-column signature describes a
+    // one-column *input*, not a one-column result. The pipeline here is handed
+    // all four of `users`' columns, so the composed rename produces four
+    // columns and this signature is rejected.
+    //
+    // The narrowing this test once asserted here is not a feature: it was the
+    // comparison being skipped for a *chained* key stage. The form that really
+    // narrows is a projection, `& select { id = .id }`, which produces the
+    // one-column input the signature describes.
+    let e = err(
+        "q : query (keyMap (compose (prefix \"u_\") (suffix \"_v2\")) { id = int }) = \
+         users & prefix \"u_\" & suffix \"_v2\"\n",
+        "q",
+    );
+    assert!(e.contains("no column `u_name_v2`"), "{e}");
     assert_eq!(
         ty(
             "q : query (keyMap (compose (prefix \"u_\") (suffix \"_v2\")) { id = int }) = \
-             users & prefix \"u_\" & suffix \"_v2\"\n",
+             users & select { id = .id } & prefix \"u_\" & suffix \"_v2\"\n",
             "q"
         ),
         "query { u_id_v2 = int }"
@@ -1303,13 +1319,16 @@ fn a_key_stage_survives_the_stages_around_it() {
 /// reported the same way, over the *signature's* columns. That named a column
 /// that does exist and listed the very set that was short, so a signature that
 /// had simply forgotten a column read as a complaint about the query.
+///
+/// A signature does not *narrow* a row; it has to match it. Narrowing is a
+/// projection, `& select { … }` or `&= { … }`, which is an operation on the row
+/// rather than a claim about it. A key stage's rename is not an exception: it
+/// renames whatever row reaches it, so a one-column signature over a four-column
+/// pipeline is missing columns like any other.
 #[test]
 fn a_signature_that_is_missing_a_column_says_so() {
     let msg = err("q : query { id = int } = users\n", "q");
-    assert!(
-        msg.contains("signature is missing column `name`"),
-        "{msg}"
-    );
+    assert!(msg.contains("signature is missing column `name`"), "{msg}");
     // It still lists what the body produced, which is what to add.
     assert!(
         msg.contains("the query has: id, name, age, active"),
@@ -1322,19 +1341,81 @@ fn a_signature_that_is_missing_a_column_says_so() {
         "q",
     );
     assert!(msg.contains("no column `oops`"), "{msg}");
-    assert!(
-        msg.contains("available: id, name, age, active"),
-        "{msg}"
-    );
+    assert!(msg.contains("available: id, name, age, active"), "{msg}");
 
-    // A signature may narrow a row a key stage produces: the rename is what
-    // makes the row, so the columns it drops are not an error.
+    // The same rule holds across a key stage: `prefix`/`suffix` rename every
+    // column they are handed, so the pipeline below still produces four, and a
+    // one-column signature is missing three of them. This once read as
+    // accepted — not because narrowing was allowed there, but because a
+    // *chained* key stage left the term looking unreduced and the comparison
+    // was skipped, which also let a nonexistent column through.
+    let msg = err(
+        "q : query { u_id_v2 = int } = users & prefix \"u_\" & suffix \"_v2\"\n",
+        "q",
+    );
+    assert!(msg.contains("no column `u_name_v2`"), "{msg}");
+
+    // The projection is what narrows, and then the signature matches.
     assert_eq!(
         ty(
-            "q : query { u_id_v2 = int } = users & prefix \"u_\" & suffix \"_v2\"\n",
+            "q : query { u_id_v2 = int } = users & select { id = .id } & prefix \"u_\" & suffix \"_v2\"\n",
             "q"
         ),
         "query { u_id_v2 = int }"
+    );
+}
+
+/// A chained key stage is checked like any other row.
+///
+/// A key stage's result is a `keyMap` term, and a *chained* one nests:
+/// `keyMap (suffix "_v2") (keyMap (prefix "u_") users)`. Deciding whether that
+/// term was reducible followed only a top-level variable, so the nested inner
+/// row still looked open, the term was judged "not reducible yet", and
+/// `unify_inner` treats that as satisfied-and-pending — the signature was never
+/// compared. One key stage checked correctly, two silently did not, so a
+/// signature naming a column no stage produces was accepted.
+#[test]
+fn a_chained_key_stage_is_still_checked_against_its_signature() {
+    // A column the pipeline never produces. A single stage rejects it (and
+    // still does, below); chaining must not make it acceptable.
+    let e = err(
+        "q : query { bogus = int } = users & prefix \"u_\" & suffix \"_v2\"\n",
+        "q",
+    );
+    assert!(e.contains("no column `u_id_v2`"), "{e}");
+    let e = err(
+        "q : query { bogus = int } = users & suffix \"_v2\" & prefix \"u_\"\n",
+        "q",
+    );
+    assert!(e.contains("no column `u_id_v2`"), "{e}");
+
+    // A wrong column type is caught too, rather than accepted silently.
+    let e = err(
+        "q : query { u_id_v2 = string } = users & prefix \"u_\" & suffix \"_v2\"\n",
+        "q",
+    );
+    assert!(e.contains("expected string, found int"), "{e}");
+
+    // Three stages chain the same way.
+    let e = err(
+        "q : query { bogus = int } = users & prefix \"u_\" & suffix \"_v2\" & suffix \"_v3\"\n",
+        "q",
+    );
+    assert!(e.contains("no column `u_id_v2_v3`"), "{e}");
+
+    // The single-stage behavior is unchanged, and the honest signature over a
+    // chained rename still matches.
+    assert!(
+        err("q : query { bogus = int } = users & prefix \"u_\"\n", "q")
+            .contains("no column `u_id`")
+    );
+    assert_eq!(
+        ty(
+            "q : query { u_id_v2 = int, u_name_v2 = string, u_age_v2 = int, u_active_v2 = bool } = \
+             users & prefix \"u_\" & suffix \"_v2\"\n",
+            "q"
+        ),
+        "query { u_id_v2 = int, u_name_v2 = string, u_age_v2 = int, u_active_v2 = bool }"
     );
 }
 

@@ -1357,13 +1357,17 @@ impl<'w> Checker<'w> {
     /// a later stage binds.
     ///
     /// The remaining case is a row left open by a stage that narrowed it —
-    /// `{first, … | tail}` with the tail bound afterwards. `resolve` follows
-    /// only a top-level variable, so such a row still looked open and the term
-    /// never reduced, silently dropping the rename: `users & order [asc .id] &
-    /// prefix "lit_"` reached the next stage unrenamed and the projection after
-    /// it was left with an unconstrained row. Following the tail here is what
-    /// makes R-MapKey-Closed fire; it is done only for an open tail, so a
-    /// closed row is never re-normalized into a wider one.
+    /// `{first, … | tail}` with the tail bound afterwards — or a *chained* key
+    /// stage, whose term's inner row is another `keyMap` term. `resolve` follows
+    /// only a top-level variable, so such a row still looked open, the term was
+    /// judged unreduced, and the rewrite was silently lost or — worse — left
+    /// uncompared: `users & order [asc .id] & prefix "lit_"` reached the next
+    /// stage unrenamed and the projection after it was left with an
+    /// unconstrained row, and `users & prefix "u_" & suffix "_v2"` skipped its
+    /// signature check entirely. `flatten` follows both shapes, so it is what
+    /// decides reducibility here. It is only consulted when the shallow form did
+    /// not reduce, so a closed row is still never re-normalized into a wider
+    /// one.
     fn reduce_mapkey_row(&mut self, km: &Ty, row: &Ty) -> Option<Ty> {
         // Only a *concrete* mapper can reduce. A variable mapper has no
         // transformation to apply, and trying anyway is how a deferred term
@@ -1374,9 +1378,20 @@ impl<'w> Checker<'w> {
         let reduced = match reduce_mapkey(&km, &shallow) {
             Some(reduced) => reduced,
             None => {
-                if !matches!(&shallow, Ty::Row(_, tail) if matches!(**tail, Ty::Var(_))) {
-                    return None;
-                }
+                // `resolve` follows only a top-level variable, so a row that is
+                // still open *inside* — a chained key stage's `keyMap m r` whose
+                // `r` has been bound since, or a narrowed `{ … | tail }` — reads
+                // as open here even though it has become reducible. `flatten`
+                // does follow those, and hands back the term itself as the tail
+                // when it still cannot reduce, so it decides reducibility for
+                // both shapes.
+                //
+                // This must not be narrowed to the `{ … | tail }` case alone:
+                // for a chained stage the misread left `unify_inner` taking its
+                // "not reducible yet" path, which returns `Ok(())` and skips the
+                // comparison entirely — so a signature naming a column the
+                // pipeline never produces (`query { bogus = int }` over `users &
+                // prefix "u_" & suffix "_v2"`) was accepted unchallenged.
                 let (fs, tail) = self.flatten(row);
                 reduce_mapkey(&km, &row_or_tail(fs, tail))?
             }

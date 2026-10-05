@@ -55,7 +55,7 @@ fn row_of(src: &str, name: &str) -> Vec<String> {
     };
     inner
         .trim_start_matches('{')
-        .trim_end_matches(|c| c == '}' || c == ')' || c == ' ')
+        .trim_end_matches(['}', ')', ' '])
         .split(',')
         .map(|f| f.trim().to_string())
         .filter(|f| !f.is_empty())

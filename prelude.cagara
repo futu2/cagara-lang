@@ -83,18 +83,20 @@ mapValue : value_wrapper -> query r -> query s = primitive "__mapValue"
 #     query (keyMap (prefix "u_") { id = int, name = string })
 #   ⟹ query { u_id = int, u_name = string }
 #
-# When the input row is still open the term is *retained* rather than rejected,
-# so the stage stays usable where the row is not yet known.
-prefix : prefixAffix -> query r -> query (keyMap m r) = primitive "__prefix"
+# `m` is the same KeyMap witness carried by the affix argument and the result;
+# it is not an unrelated row variable. When the input row is still open the
+# term is *retained* rather than rejected, so the stage stays usable where the
+# row is not yet known.
+prefix : prefixAffix m -> query r -> query (keyMap m r) = primitive "__prefix"
 
-# `suffix "s"` appends a literal string to every column name. Same typing as
-# `prefix`, with the witness `keyMap (suffix "s") r`.
-suffix : suffixAffix -> query r -> query (keyMap m r) = primitive "__suffix"
+# `suffix "s"` appends a literal string to every column name. It shares the
+# affix witness with its result in the same way as `prefix`.
+suffix : suffixAffix m -> query r -> query (keyMap m r) = primitive "__suffix"
 
 # `merge left right` combines two queries; fields from right overwrite duplicates from left.
 merge : query r -> query s -> query (merge r s) = primitive "__merge"
 
-agg : expr r (row s) -> query r -> query s = primitive "__agg"
+agg : agg (expr r (row s)) -> query r -> query s = primitive "__agg"
 
 # `order [asc .x, desc .y]`; NULLs sort last in either direction.
 order : list (sortkey r) -> query r -> query r = primitive "__order"
@@ -136,7 +138,7 @@ infixl 1 &-
 _&?_ : query r -> expr r bool -> query r = q => pred => where pred q
 _&=_ : query r -> expr r (row s) -> query s = q => fields => select fields q
 _&+_ : query r -> expr r (row s) -> query (merge r s) = q => fields => update fields q
-_&*_ : query r -> expr r (row s) -> query s = q => fields => agg fields q
+_&*_ : query r -> agg (expr r (row s)) -> query s = q => fields => agg fields q
 _&._ : query r -> list (sortkey r) -> query r = q => keys => order keys q
 _&-_ : query r -> expr r int -> query r = q => n => limit n q
 

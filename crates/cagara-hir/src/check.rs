@@ -39,10 +39,10 @@
 //!   joins make the far side's columns `maybe`; aggregate/window results may
 //!   still return `maybe`.
 //!
-//! Column names never enter the type language. The key stages (`omit`,
-//! `prefix`, and `suffix`) read their key from the application and record it in a
-//! constraint, so `unify` stays an equivalence and every query the checker
-//! accepts has a fully known row (see `docs/KEYMAP-DESIGN.md`).
+//! Row operations keep column names and wrappers in first-order row terms.
+//! `omit` is solved as a row equation; `prefix`, `suffix`, and `mapValue`
+//! reduce `keyMap` / `mapValue` terms when their inputs are known. The same
+//! schema helpers are used by IR validation (see `docs/ROW-TYPES.md`).
 
 use crate::db::ModuleInput;
 use crate::ir::{JoinKind, Phase};
@@ -353,10 +353,11 @@ fn expr(p: Ty, r: Ty, a: Ty) -> Ty {
 }
 /// The type of a projection/update record argument.
 ///
-/// Surface signatures spell this as `expr r (row s)`, but a record literal is
-/// not itself a scalar expression.  The extra `fields` slot retains the
-/// record of column expressions that the stage constraint consumes, while
-/// `output` is the row of resulting column values exposed by the signature.
+/// Surface signatures spell this as `expr r (row s)` (or
+/// `agg (expr r (row s))` for the aggregate stage), but a record literal is
+/// not itself a scalar expression. The extra `fields` slot retains the record
+/// of column expressions that the stage constraint consumes, while `output` is
+/// the row of resulting column values exposed by the signature.
 fn record_expr(p: Ty, r: Ty, fields: Ty, output: Ty) -> Ty {
     Ty::Con("record_expr", vec![p, r, fields, output])
 }
@@ -398,8 +399,8 @@ fn kind_of(t: &Ty, vars: &[VarInfo]) -> Kind {
         Ty::Var(v) => vars[*v as usize].kind,
         Ty::Rigid(v, _) => vars[*v as usize].kind,
         Ty::Gen(_) => Kind::Type, // schemes handle their own kinding
-        // `prefixAffix` / `suffixAffix` are affix parameters; the mapper is
-        // metadata, so their kind is that of the string they stand for.
+        // `prefixAffix` / `suffixAffix` are string-valued affix parameters;
+        // their KeyMap argument is metadata tying the argument to its row map.
         Ty::Con("prefixAffix" | "suffixAffix", _) => Kind::Type,
         Ty::Con("KeyMapId" | "KeyMapCompose", _) => Kind::KeyMap,
         Ty::Con(_, _) => Kind::Type,
@@ -444,12 +445,16 @@ const CONS: &[(&str, usize)] = &[
     // mapper variable of kind KeyMap.
     ("keyMap", 2),
     ("keymapper", 1),
-    ("prefixAffix", 0),
-    ("suffixAffix", 0),
+    // The affix marker carries the concrete KeyMap witness selected by the
+    // application. Keeping that witness in the argument is what ties
+    // `prefix`/`suffix` to the mapper in their result row.
+    ("prefixAffix", 1),
+    ("suffixAffix", 1),
     // The key-parameter markers. A key stage reads its key from the
     // application, where the literal still is, so its parameter carries a
-    // marker instead of a type; `key_stage` recognises it and records the
-    // literal in the stage's constraint or witness.
+    // marker (and prefix/suffix also carry their KeyMap witness) instead of a
+    // value type; `key_stage` recognises it and records the literal in the
+    // stage's constraint or witness.
     ("key_omit", 0),
     ("key_prefix", 0),
     ("key_suffix", 0),
@@ -471,6 +476,7 @@ fn expected_arg_kinds(con: &str) -> Vec<Kind> {
         "winspec" => vec![Kind::Row],
         "sortkey" => vec![Kind::Row],
         "expr" => vec![Kind::Row, Kind::Type],
+        "prefixAffix" | "suffixAffix" => vec![Kind::KeyMap],
         "maybe" | "list" => vec![Kind::Type],
         "agg" | "win" => vec![Kind::Type], // These are handled specially in conv
         _ => vec![],
@@ -1696,10 +1702,11 @@ impl<'w> Checker<'w> {
             // and describes the primitive's behavior.
             return match ann {
                 Some(t) => {
-                    // Projection primitives expose `expr r (row s)` at the
-                    // surface, while their internal type carries the row of
-                    // field expressions separately so the constraint solver
-                    // can validate and lower the stage.
+                    // Projection primitives expose `expr r (row s)` (or, for
+                    // the aggregate stage, `agg (expr r (row s))`) at the
+                    // surface. Their internal type carries the row of field
+                    // expressions separately so the constraint solver can
+                    // validate and lower the stage.
                     let internal = match &def.body.kind {
                         ExprKind::Primitive(name) => {
                             let p = match name.as_str() {
@@ -2153,10 +2160,12 @@ impl<'w> Checker<'w> {
                     "expr" => {
                         let r = self.conv(&args[0], phase, names)?;
                         // `expr r (row s)` is the public spelling for a
-                        // record of column expressions used by select/update/
-                        // agg. Keep the field-expression row separate from
-                        // the output row so the stage constraint can validate
-                        // each expression and compute its value type.
+                        // record of column expressions used by select/update.
+                        // The aggregate stage wraps this expression in
+                        // `agg`, handled below. Keep the field-expression row
+                        // separate from the output row so the stage
+                        // constraint can validate each expression and compute
+                        // its value type.
                         if let TypeExpr::App {
                             head,
                             args: row_args,
@@ -2232,6 +2241,36 @@ impl<'w> Checker<'w> {
                             head, args: inner, ..
                         } if head == "expr" && inner.len() == 2 => {
                             let r = self.conv(&inner[0], phase, names)?;
+                            // The aggregate stage takes a record of aggregate
+                            // expressions, so `agg (expr r (row s))` must keep
+                            // the record representation used by the stage
+                            // constraint while carrying the aggregate phase.
+                            if name == "agg" {
+                                if let TypeExpr::App {
+                                    head: row_head,
+                                    args: row_args,
+                                    ..
+                                } = &inner[1]
+                                {
+                                    if row_head == "row" {
+                                        if row_args.len() != 1 {
+                                            return Err("`row` takes one type argument".into());
+                                        }
+                                        let output = self.conv_with_kind(
+                                            &row_args[0],
+                                            phase,
+                                            names,
+                                            Kind::Row,
+                                        )?;
+                                        return Ok(record_expr(
+                                            con(name),
+                                            r,
+                                            self.fresh_row(),
+                                            output,
+                                        ));
+                                    }
+                                }
+                            }
                             let a = self.conv(&inner[1], phase, names)?;
                             Ok(expr(con(name), r, a))
                         }
@@ -2291,6 +2330,13 @@ impl<'w> Checker<'w> {
         names: &mut HashMap<String, Ty>,
         expected_kind: Kind,
     ) -> Result<Ty, String> {
+        // Mapper arguments use their own surface grammar (`id`, `prefix
+        // "..."`, `suffix "..."`, `compose ...`), rather than ordinary type
+        // constructors. This is needed for concrete affix witnesses such as
+        // `prefixAffix (prefix "u_")`.
+        if expected_kind == Kind::KeyMap {
+            return self.conv_keymap(t, names);
+        }
         match t {
             TypeExpr::App { head, args, .. } => {
                 // `row s` is the record-in-expression-position marker; its
@@ -2665,7 +2711,7 @@ impl<'w> Checker<'w> {
                     // recorded in the stage's constraint — which keeps column
                     // names out of the type language entirely. A computed key
                     // cannot name a column, so it is refused rather than
-                    // deferred. See docs/KEYMAP-DESIGN.md §4.
+                    // deferred. See docs/ROW-TYPES.md.
                     if let Ty::Fun(p, r) = self.resolve(&ft) {
                         // A directional affix parameter is a string that names
                         // the mapper `m`, which the result type uses
@@ -2897,9 +2943,10 @@ impl<'w> Checker<'w> {
         let (a, e) = (self.resolve(actual), self.resolve(expected));
         match (&a, &e) {
             // A record literal is the surface argument of
-            // `expr r (row s)`. Its field expressions are retained in the
-            // third slot of `record_expr`; the stage constraint attached to
-            // the primitive computes the output row in the fourth slot.
+            // `expr r (row s)` / `agg (expr r (row s))`. Its field
+            // expressions are retained in the third slot of `record_expr`;
+            // the stage constraint attached to the primitive computes the
+            // output row in the fourth slot.
             (Ty::Row(..) | Ty::Empty, Ty::Con("record_expr", ea)) if ea.len() == 4 => {
                 self.unify(&ea[2], &a)
             }
@@ -3129,8 +3176,13 @@ impl<'w> Checker<'w> {
                     agg: p == AggStage,
                 };
                 self.pending.push((c, sp));
+                let phase = if p == AggStage {
+                    con("agg")
+                } else {
+                    con("row")
+                };
                 fun(
-                    record_expr(con("row"), a.clone(), f, b.clone()),
+                    record_expr(phase, a.clone(), f, b.clone()),
                     fun(query(a), query(b)),
                 )
             }
@@ -3154,9 +3206,9 @@ impl<'w> Checker<'w> {
                 )
             }
             // A key stage reads its key from the application, where the literal
-            // still is (`key_stage`), so the parameter carries a marker instead
-            // of a type. The witness or constraint is registered once the key
-            // is in hand.
+            // still is (`key_stage`). Omit/value mapping use markers; the
+            // directional stages also carry their KeyMap witness through the
+            // argument and result so those positions cannot drift apart.
             Omit => {
                 let (r, out) = (self.fresh_row(), self.fresh_row());
                 fun(KeyMarker::Omit.ty(), fun(query(r), query(out)))
@@ -3178,12 +3230,26 @@ impl<'w> Checker<'w> {
                 fun(query(left), fun(query(right), query(out)))
             }
             Prefix => {
-                let (r, out) = (self.fresh_row(), self.fresh_row());
-                fun(KeyMarker::Prefix.ty(), fun(query(r), query(out)))
+                let (r, m) = (
+                    self.fresh_row(),
+                    Ty::Var(self.fresh_with(false, false, Kind::KeyMap)),
+                );
+                let out = Ty::MapKey(Box::new(m.clone()), Box::new(r.clone()));
+                fun(
+                    directional_string_kind(KeyMarker::Prefix, m),
+                    fun(query(r), query(out)),
+                )
             }
             Suffix => {
-                let (r, out) = (self.fresh_row(), self.fresh_row());
-                fun(KeyMarker::Suffix.ty(), fun(query(r), query(out)))
+                let (r, m) = (
+                    self.fresh_row(),
+                    Ty::Var(self.fresh_with(false, false, Kind::KeyMap)),
+                );
+                let out = Ty::MapKey(Box::new(m.clone()), Box::new(r.clone()));
+                fun(
+                    directional_string_kind(KeyMarker::Suffix, m),
+                    fun(query(r), query(out)),
+                )
             }
             Order => {
                 let (req, r) = (self.fresh(), self.fresh_row());
@@ -4033,10 +4099,14 @@ impl Printer {
                         .clone()
                 }
             },
-            // A key parameter's marker is a `string` position, and reads as one
-            // in any signature the user sees.
+            // Omit/value-wrapper markers are string positions. Directional
+            // affixes retain their mapper witness in the printed type so the
+            // row transformation is visible and cannot look unrelated.
             Ty::Con("key_omit" | "key_pattern" | "key_replacement" | "value_wrapper", _) => {
                 "string".into()
+            }
+            Ty::Con(n @ ("prefixAffix" | "suffixAffix"), args) if args.len() == 1 => {
+                format!("{n} {}", self.ty(&args[0], 2))
             }
             Ty::Empty => "{}".into(),
             Ty::Row(fs, tail) => {
@@ -4090,8 +4160,8 @@ impl Printer {
                 };
                 paren(format!("{short} {s:?}"), prec >= 2)
             }
-            // Directional affix parameters carry mapper metadata internally,
-            // but are plain `string` values in inferred signatures.
+            // A zero-argument marker is kept for compatibility with older
+            // schemes; new directional signatures always carry one witness.
             Ty::Con("prefixAffix" | "suffixAffix", _) => "string".into(),
             Ty::Con("KeyMapId", args) if args.is_empty() => "id".into(),
             Ty::Con("KeyMapCompose", args) if args.len() == 2 => {

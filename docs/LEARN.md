@@ -416,9 +416,8 @@ Use this to select existing columns; use `name = expr` to compute or rename.
 ### Fields are static
 
 Every row is fully known: a field list names every output column, and the
-compiler knows the resulting row before any SQL is emitted. That is what makes
-two stages possible for when the *names* are the point rather than the values:
-`omit` drops one column, and `mapKeys` rewrites names by pattern.
+compiler knows the resulting row before any SQL is emitted. `omit` drops one
+column, while `prefix` and `suffix` rewrite names through type-level row maps.
 
 ### Dropping a column: `omit`
 
@@ -459,51 +458,43 @@ b = orders & no_id
 so that the column can be identified when the query is compiled, which also
 means a key cannot be passed in as a parameter.
 
-### Rewriting names: `mapKeys`
+### Rewriting names: `prefix` and `suffix`
 
-`mapKeys "pattern" "replacement"` applies a regular-expression rewrite to
-**every** column name. Prefix, suffix, rename, and strip are all the same stage
-with different arguments:
+`prefix "text"` and `suffix "text"` apply a rewrite to **every** column name:
 
 ```haskell
-prefixed = users & mapKeys "^" "u_"          # id -> u_id, name -> u_name, ...
-suffixed = users & mapKeys "$" "_v2"         # id -> id_v2, ...
-renamed  = users & mapKeys "^id$" "user_id"  # id -> user_id, the rest untouched
-stripped = users & mapKeys "^user_" ""       # user_name -> name
+prefixed = users & prefix "u_"               # id -> u_id, name -> u_name, ...
+suffixed = users & suffix "_v2"              # id -> id_v2, ...
 ```
 
 ```sql
 SELECT id AS u_id, name AS u_name, age AS u_age, active AS u_active FROM public.users;
 ```
 
-A name the pattern does not match keeps its name and its position, and types
-follow the *source* column, so a rewrite never changes a column's type.
+A name rewrite keeps field order and types; only labels change.
 
-Two names colliding, or a rewrite that would leave a column with no name at all,
-are both errors — dropping is `omit`'s job:
+Two names colliding is an error. Dropping is `omit`'s job:
 
 ```
 error: the key map would produce column `name` twice
-error: the key map leaves column `id` with an empty name
 ```
 
-There is no `pick`, `keyMap`, `prefix`, `suffix`, or `Labels` type. Those
-belonged to an earlier design that put column names into the type language,
-which broke the type checker's unification; names are read from the source
-instead. See [the design note](KEYMAP-DESIGN.md) if you want the reasoning.
+There is no `pick`, `mapKeys`, or `Labels` type. Row maps keep names in the
+row algebra while preserving ordinary type unification. See the
+[row type reference](ROW-TYPES.md) for the rules.
 
 | You want | Write |
 |---|---|
 | keep these columns | `select {.a, .b}` |
 | drop one column | `omit "b"` |
-| rename one column | `mapKeys "^a$" "b"` |
-| add a prefix or suffix to every key | `mapKeys "^" "u_"` / `mapKeys "$" "_v2"` |
+| add a prefix or suffix to every key | `prefix "u_"` / `suffix "_v2"` |
 | recompute a column in place | `update {a = .a + 1}` |
 | keep both sides of a join | rename one side *before* the join |
 
 One trap is worth stating here, because the two stages look similar:
 `update {new = .old}` **appends** `new` and keeps `old` in place, so it adds a
-column rather than moving one. To rename in place, use `mapKeys`. Section
+column rather than moving one. Use `prefix` or `suffix` when changing every
+column name. Section
 [5](#5-choosing-columns-select-and-update) covers `update` in full.
 
 **Keeping both sides of a join.** Since a shared name resolves to the left

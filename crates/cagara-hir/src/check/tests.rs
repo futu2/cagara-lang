@@ -171,6 +171,10 @@ fn signatures_are_checked() {
     assert!(err("f : int -> string = x => x + 1\n", "f").contains("does not match its signature"));
     assert!(err("g : a -> int = x => x\n", "g").contains("signature"));
     ty("h : a -> a = x => x\n", "h");
+    ty(
+        "a : agg (expr r (row s)) -> query r -> query s = agg\n",
+        "a",
+    );
     assert!(err("bad : agg (int) = count\n", "bad").contains("wraps an expression type"));
 }
 
@@ -1194,6 +1198,21 @@ fn key_map_rejects_a_non_mapper() {
     );
     assert!(
         e.contains("key mapper") || e.contains("KeyMap") || e.contains("kind"),
+        "{e}"
+    );
+}
+
+#[test]
+fn directional_affix_witness_is_shared_with_result_mapper() {
+    // The affix parameter and the result row must mention the same mapper.
+    // Otherwise a signature could claim that `prefix` changes a row with an
+    // unrelated mapping witness.
+    let e = err(
+        "bad : prefixAffix m -> query r -> query (keyMap n r) = prefix\n",
+        "bad",
+    );
+    assert!(
+        e.contains("rigid") || e.contains("mismatch") || e.contains("type"),
         "{e}"
     );
 }

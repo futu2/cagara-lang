@@ -63,9 +63,10 @@ cagara lsp
 
 ## Learn more
 
-- [A language guide](docs/LEARN.md) and [nullability reference](docs/NULLABILITY.md)
+- [A language guide](docs/LEARN.md), [nullability reference](docs/NULLABILITY.md),
+  and [row type reference](docs/ROW-TYPES.md)
 - [`examples/`](examples): filtering, aggregation, windows, joins, modules, error messages
-- [`docs/PLAN.md`](docs/PLAN.md): design and architecture
+- [`docs/PLAN.md`](docs/PLAN.md): architecture and current gaps
 - Editor support: [VS Code](editors/vscode) · [Neovim](editors/nvim)
 
 ## License

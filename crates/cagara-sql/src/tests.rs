@@ -610,8 +610,8 @@ fn optimizer_keeps_stage_boundaries() {
 
 #[test]
 fn validator_errors_point_at_the_stage() {
-    // `q` reads the output of a definition only known at evaluation time, so
-    // the IR validator (not the checker) reports the missing column.
+    // The checker carries the projected row through the definition and
+    // reports the missing column at the complete stage expression.
     let src = format!("{USERS}u = users & select {{.id, .name}}\nq = u\n  & where (.nope > 1)\nb = table \"s\" \"t\" & select {{ x = .x }}\n");
     let ws = Workspace::from_source(&src);
     let out = root_queries(&ws);
@@ -626,7 +626,7 @@ fn validator_errors_point_at_the_stage() {
     let d = get("q");
     assert!(d.message.contains("no column `nope`"), "{d}");
     assert_eq!(d.source.trim(), "& where (.nope > 1)", "{d}");
-    assert_eq!((d.col, d.width), (5, "where".len()), "{d}");
+    assert_eq!((d.col, d.width), (5, "where (.nope > 1)".len()), "{d}");
     let d = get("b");
     assert!(d.message.contains("unknown"), "{d}");
     assert_eq!((d.col, d.width), (5, "table \"s\" \"t\"".len()), "{d}");
@@ -1224,20 +1224,19 @@ fn omit_drops_a_column_in_place() {
 }
 
 #[test]
-fn map_keys_renames_by_pattern() {
-    // Prefix, suffix, and a single rename are one stage with different
-    // arguments.
+fn key_stages_rename_columns() {
+    // Prefix and suffix are separate stages with type-level keyMap witnesses.
     assert_eq!(
-        sql("q = users & mapKeys \"^\" \"u_\"\n", "q"),
+        sql("q = users & prefix \"u_\"\n", "q"),
         "SELECT id AS u_id, name AS u_name, age AS u_age, active AS u_active FROM public.users"
     );
     assert_eq!(
-        sql("q = users & mapKeys \"$\" \"_v2\"\n", "q"),
+        sql("q = users & suffix \"_v2\"\n", "q"),
         "SELECT id AS id_v2, name AS name_v2, age AS age_v2, active AS active_v2 FROM public.users"
     );
     assert_eq!(
-        sql("q = users & mapKeys \"^id$\" \"user_id\"\n", "q"),
-        "SELECT id AS user_id, name, age, active FROM public.users"
+        sql("q = users & prefix \"u_\" & suffix \"_v2\"\n", "q"),
+        "SELECT id AS u_id_v2, name AS u_name_v2, age AS u_age_v2, active AS u_active_v2 FROM public.users"
     );
 }
 

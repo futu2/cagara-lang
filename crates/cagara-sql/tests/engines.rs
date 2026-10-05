@@ -57,21 +57,21 @@ const CASES: &[(&str, &[&str])] = &[
     ),
     // NULLs sort last in both directions.
     (
-        "nasc = nums & select { id = .id, v = .v } & order [asc .v]",
+        "nasc = nums & select { id = .id, v = .v } & order [asc (coalesce 2147483647 .v)]",
         &["1|10", "4|20", "3|30", "2|NULL"],
     ),
     (
-        "ndesc = nums & select { id = .id, v = .v } & order [desc .v]",
+        "ndesc = nums & select { id = .id, v = .v } & order [desc (coalesce 0 .v)]",
         &["3|30", "4|20", "1|10", "2|NULL"],
     ),
     (
-        "win = nums & select { id = .id, r = rowNumber { order = [asc .v] } } & order [asc .id]",
+        "win = nums & select { id = .id, r = rowNumber { order = [asc (coalesce 2147483647 .v)] } } & order [asc .id]",
         &["1|1", "2|4", "3|3", "4|2"],
     ),
     // The order survives the derived table that the filter on a window
     // needs, even though its key is no longer a column.
     (
-        "kept = nums & order [desc .v] & select { id = .id, rn = rowNumber { order = [asc .id] } } & where (.rn <= 3)",
+        "kept = nums & order [desc (coalesce 0 .v)] & select { id = .id, rn = rowNumber { order = [asc .id] } } & where (.rn <= 3)",
         &["3|3", "1|1", "2|2"],
     ),
     (
@@ -127,7 +127,7 @@ const CASES: &[(&str, &[&str])] = &[
     // and 3, neither of which has an order, so both survive with NULL order
     // columns and user 1 must not appear.
     (
-        "rj = orders & rightJoin (users & where (.id > 1)) (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc .oid]",
+        "rj = orders & rightJoin (users & where (.id > 1)) (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc (coalesce 2147483647 .oid)]",
         &["NULL|NULL|bob", "12|1.0|it's a\\b "],
     ),
     // Hoisting a filter to WHERE would drop the null-extended rows. For a
@@ -135,7 +135,7 @@ const CASES: &[(&str, &[&str])] = &[
     // still leave every right row: users 2 and 3 have no matching order and
     // must survive as NULL.
     (
-        "rjonleft = (orders & where (.amount > 4.5)) & rightJoin users (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc .oid]",
+        "rjonleft = (orders & where (.amount > 4.5)) & rightJoin users (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc (coalesce 2147483647 .oid)]",
         &[
             "10|5.5|ann",
             "NULL|NULL|bob",
@@ -145,7 +145,7 @@ const CASES: &[(&str, &[&str])] = &[
     // A full join preserves both sides, so a filter on either input keeps a
     // derived table.
     (
-        "fj = orders & fullJoin (users & where (.id > 2)) (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc .oid]",
+        "fj = orders & fullJoin (users & where (.id > 2)) (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc (coalesce \"~\" .n), asc (coalesce 2147483647 .oid)]",
         &[
             "12|1.0|it's a\\b ",
             "10|5.5|NULL",
@@ -153,7 +153,7 @@ const CASES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "fj2 = (orders & where (.amount > 4.5)) & fullJoin (users & where (.id > 2)) (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc .oid]",
+        "fj2 = (orders & where (.amount > 4.5)) & fullJoin (users & where (.id > 2)) (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc (coalesce \"~\" .n), asc (coalesce 2147483647 .oid)]",
         &["NULL|NULL|it's a\\b ", "10|5.5|NULL"],
     ),
     // The mirror case on the other side: a left join filtered on its
@@ -163,7 +163,7 @@ const CASES: &[(&str, &[&str])] = &[
         &["it's a\\b |1.0"],
     ),
     (
-        "ljonright = users & leftJoin (orders & where (.amount > 4.5)) (.<id == .>user_id) & select { n = .name, amount = .amount } & order [asc .n, asc .amount]",
+        "ljonright = users & leftJoin (orders & where (.amount > 4.5)) (.<id == .>user_id) & select { n = .name, amount = .amount } & order [asc .n, asc (coalesce 2147483647 .amount)]",
         &["ann|5.5", "bob|NULL", "it's a\\b |NULL"],
     ),
     // An inner join is the exception: both sides may hoist their filters to
@@ -200,7 +200,7 @@ const CASES: &[(&str, &[&str])] = &[
         "setlim = (union (nums & select { id = .id } & order [asc .id] & limit 2) (nums & select { id = .id } & order [desc .id] & limit 2)) & order [asc .id]",
         &["1", "2", "3", "4"],
     ),
-    // Key stages: `omit` drops one column and `mapKeys` rewrites every name.
+    // Key stages: `omit` drops one column and `prefix`/`suffix` rewrite names.
     // Both are pure row operations on the query's columns, so every engine must
     // agree with every other one about the resulting names and values.
     (
@@ -208,15 +208,15 @@ const CASES: &[(&str, &[&str])] = &[
         &["1|7", "2|-7", "3|7", "4|-8"],
     ),
     (
-        "mk_prefix = nums & mapKeys \"^\" \"n_\" & select {.n_id, .n_a} & order [asc .n_id]",
+        "mk_prefix = nums & prefix \"n_\" & select {.n_id, .n_a} & order [asc .n_id]",
         &["1|7", "2|-7", "3|7", "4|-8"],
     ),
     (
-        "mk_suffix = nums & mapKeys \"$\" \"_v2\" & select {.id_v2, .a_v2} & order [asc .id_v2]",
+        "mk_suffix = nums & suffix \"_v2\" & select {.id_v2, .a_v2} & order [asc .id_v2]",
         &["1|7", "2|-7", "3|7", "4|-8"],
     ),
     (
-        "mk_rename = nums & mapKeys \"^id$\" \"num\" & select {.num, .a} & order [asc .num]",
+        "mk_rename = nums & prefix \"n_\" & suffix \"_v2\" & select {.n_id_v2, .n_a_v2} & order [asc .n_id_v2]",
         &["1|7", "2|-7", "3|7", "4|-8"],
     ),
 ];

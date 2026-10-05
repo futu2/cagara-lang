@@ -60,7 +60,8 @@ fn child_of(rel: &Rel) -> Option<&Rel> {
         | Rel::Select(r, _)
         | Rel::Update(r, _)
         | Rel::Omit(r, _)
-        | Rel::MapKeys(r, _, _)
+        | Rel::Prefix(r, _)
+        | Rel::Suffix(r, _)
         | Rel::Agg(r, _)
         | Rel::Order(r, _)
         | Rel::Limit(r, _)
@@ -112,7 +113,10 @@ fn finish_schema(
         Rel::Select(r, fs) => projection(fs, &of(r)?, false),
         Rel::Update(r, fs) => merge(fs, &of(r)?),
         Rel::Omit(r, k) => omit_columns(&of(r)?, k),
-        Rel::MapKeys(r, p, rep) => map_columns(&of(r)?, p, rep),
+        // A rename preserves the columns' positions and types; only the labels
+        // change. The checker computed the same thing with `keyMap (prefix s)`.
+        Rel::Prefix(r, affix) => Ok(rename_columns(&of(r)?, affix, true)),
+        Rel::Suffix(r, affix) => Ok(rename_columns(&of(r)?, affix, false)),
         Rel::Agg(r, fs) => projection(fs, &of(r)?, true),
         Rel::Order(r, ks) => {
             let c = of(r)?;
@@ -243,31 +247,24 @@ pub fn omit_columns(cols: &[String], key: &str) -> Result<Vec<String>, String> {
     Ok(cols.iter().filter(|c| *c != key).cloned().collect())
 }
 
-/// Columns of `mapKeys "p" "r"`: every input name rewritten by the pattern.
-/// One rule covers prefix (`^` → `u_`), suffix (`$` → `_v2`), and single
-/// renames (`^id$` → `user_id`). A column the pattern does not match keeps its
-/// name; an empty result and an output collision are both errors.
-pub fn map_columns(
-    cols: &[String],
-    pattern: &str,
-    replacement: &str,
-) -> Result<Vec<String>, String> {
-    let re = regex::Regex::new(pattern)
-        .map_err(|e| format!("invalid pattern {pattern:?} in `mapKeys`: {e}"))?;
-    let mut out: Vec<String> = Vec::with_capacity(cols.len());
-    for c in cols {
-        let new = re.replace_all(c, replacement).into_owned();
-        if new.is_empty() {
-            return Err(format!(
-                "the key map leaves column `{c}` with an empty name"
-            ));
-        }
-        if out.contains(&new) {
-            return Err(format!("the key map would produce column `{new}` twice"));
-        }
-        out.push(new);
-    }
-    Ok(out)
+/// Columns of `prefix "s"` / `suffix "s"`: every input name gains `affix` in
+/// front or at the end.
+///
+/// Unlike `omit`, a rename cannot fail on the columns themselves — the affix is
+/// a literal, and `name ↦ affix <> name` is injective for a fixed affix, so
+/// distinct names stay distinct and no name can become empty. The only way a
+/// rename goes wrong is a clash with something outside the row, which is not
+/// this function's business.
+pub fn rename_columns(cols: &[String], affix: &str, prefix: bool) -> Vec<String> {
+    cols.iter()
+        .map(|c| {
+            if prefix {
+                format!("{affix}{c}")
+            } else {
+                format!("{c}{affix}")
+            }
+        })
+        .collect()
 }
 
 fn refs(e: &Expr, cols: &[String], ctx: &str) -> Result<(), String> {

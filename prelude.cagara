@@ -34,19 +34,20 @@ infixl 1 &
 infixr 23 >>>
 infixr 23 <<<
 
-_&_ = x => f => f x
-_$_ = f => x => f x
-_>>>_ = f => g => x => g (f x)
-_<<<_ = f => g => x => f (g x)
-id = x => x
+_&_ : a -> (a -> b) -> b = x => f => f x
+_$_ : (a -> b) -> a -> b = f => x => f x
+_>>>_ : (a -> b) -> (b -> c) -> a -> c = f => g => x => g (f x)
+_<<<_ : (b -> c) -> (a -> b) -> a -> c = f => g => x => f (g x)
+id : a -> a = x => x
 
 # ── scalar SQL expressions ─────────────────────────────────────────────────
 
 # Typed conditionals lower to a searched SQL CASE expression. Both branches
 # are checked at the same expression phase, so this also works after agg or
 # select when the surrounding stage permits that phase.
-ifThenElse : expr r bool -> expr r a -> expr r a -> expr r a = sql "CASE WHEN $1 THEN $2 ELSE $3 END"
-caseWhen = ifThenElse
+ifThenElse : expr r bool -> expr r a -> expr r a -> expr r a =
+  sql "CASE WHEN $1 THEN $2 ELSE $3 END"
+caseWhen : expr r bool -> expr r a -> expr r a -> expr r a = ifThenElse
 
 # Explicit casts are deliberately named by their result type. There is no
 # implicit conversion between ordinary expressions.
@@ -61,30 +62,34 @@ select : expr r (row s) -> query r -> query s = primitive "__select"
 # `update {..}` is `select` merged over the input row: a name the input
 # already has keeps its position and takes the new expression, and a name it
 # does not have is appended. Columns not listed are passed through.
-update : expr r (row s) -> query r -> query s = primitive "__update"
+update : expr r (row s) -> query r -> query (merge r s) = primitive "__update"
 
 # `omit "k"` drops one column. The checker needs no rule of its own for this:
 # it is the row equation `input ~ { k : t | output }`.
-omit : expr r string -> query r -> query s = primitive "__omit"
+omit : key_omit -> query r -> query s = primitive "__omit"
 
-# `mapKeys f` transforms column names using a KeyMapper.
-# f has kind KeyMapper, and the result type applies that mapper to row r.
-mapKeys = __mapKeys
+# `mapValue "w"` transforms all field types using a wrapper: `"nullable"`
+# wraps each in `maybe`, `"list"` wraps each in `list`. The wrapper is read at
+# the application, so it is recorded as the type-level term `mapValue w r`.
+mapValue : value_wrapper -> query r -> query s = primitive "__mapValue"
 
-# `mapKeys2 f` transforms column names using a function expression.
-# The function is evaluated at compile-time to determine output column names.
-# Example: users & mapKeys2 (\x => "u_" <> x)
-mapKeys2 = __mapKeys2
+# `prefix "s"` prepends a literal string to every column name.
+#
+# A key stage reads its affix from the application, where the text still is
+# (`key_prefix`), so the parameter carries a marker rather than a type. The
+# checker builds the type-level witness `keyMap (prefix "s") r` and reduces it
+# against the input row: `users & prefix "u_"` gives
+#
+#     query (keyMap (prefix "u_") { id = int, name = string })
+#   ⟹ query { u_id = int, u_name = string }
+#
+# When the input row is still open the term is *retained* rather than rejected,
+# so the stage stays usable where the row is not yet known.
+prefix : prefixAffix -> query r -> query (keyMap m r) = primitive "__prefix"
 
-# `mapValue f` transforms all field types using a ValueMapper.
-# f has kind ValueMapper, and the result type applies that mapper to row r.
-mapValue : ValueMapper f -> query r -> query (mapValue f r) = primitive "__mapValue"
-
-# `prefix "str"` prepends `str` to every column name.
-prefix : string -> query r -> query (mapKey f r) = primitive "__prefix"
-
-# `suffix "str"` appends `str` to every column name.
-suffix : string -> query r -> query (mapKey f r) = primitive "__suffix"
+# `suffix "s"` appends a literal string to every column name. Same typing as
+# `prefix`, with the witness `keyMap (suffix "s") r`.
+suffix : suffixAffix -> query r -> query (keyMap m r) = primitive "__suffix"
 
 # `merge left right` combines two queries; fields from right overwrite duplicates from left.
 merge : query r -> query s -> query (merge r s) = primitive "__merge"
@@ -92,7 +97,7 @@ merge : query r -> query s -> query (merge r s) = primitive "__merge"
 agg : expr r (row s) -> query r -> query s = primitive "__agg"
 
 # `order [asc .x, desc .y]`; NULLs sort last in either direction.
-order : expr r (list dir) -> query r -> query r = primitive "__order"
+order : list (sortkey r) -> query r -> query r = primitive "__order"
 
 limit : expr r int -> query r -> query r = primitive "__limit"
 
@@ -100,14 +105,14 @@ offset : expr r int -> query r -> query r = primitive "__offset"
 
 distinct : query r -> query r = primitive "__distinct"
 
-inList : query r -> expr s a -> expr s bool = primitive "__in"
-in = inList
+inList : list a -> expr r a -> expr r bool = primitive "__in"
+in : list a -> expr r a -> expr r bool = inList
 
-asc : expr r a -> dir = primitive "__asc"
+asc : expr r a -> sortkey r = primitive "__asc"
 
-desc : expr r a -> dir = primitive "__desc"
+desc : expr r a -> sortkey r = primitive "__desc"
 
-group : expr r (list a) -> query r -> query r = primitive "__group"
+group : expr r a -> agg (expr r a) = primitive "__group"
 
 # Stage shorthands. The first line of each pair declares a symbol; the second
 # defines what it means. Both halves live here, and that is the whole cost of a
@@ -128,12 +133,12 @@ infixl 1 &*
 infixl 1 &.
 infixl 1 &-
 
-_&?_ = q => pred => where pred q
-_&=_ = q => fields => select fields q
-_&+_ = q => fields => update fields q
-_&*_ = q => fields => agg fields q
-_&._ = q => keys => order keys q
-_&-_ = q => n => limit n q
+_&?_ : query r -> expr r bool -> query r = q => pred => where pred q
+_&=_ : query r -> expr r (row s) -> query s = q => fields => select fields q
+_&+_ : query r -> expr r (row s) -> query (merge r s) = q => fields => update fields q
+_&*_ : query r -> expr r (row s) -> query s = q => fields => agg fields q
+_&._ : query r -> list (sortkey r) -> query r = q => keys => order keys q
+_&-_ : query r -> expr r int -> query r = q => n => limit n q
 
 # `left & innerJoin right (.<k == .>k)`
 # Outer joins make the columns of the side that may be missing `maybe`.
@@ -141,15 +146,21 @@ _&-_ = q => n => limit n q
 # left does not have: on a shared name the left column wins. To keep both,
 # rename one side in a `select` before the join (a field list is written by
 # hand, so the new name is just the name you write).
-innerJoin : query r -> query s -> expr (merge r s) bool -> query (merge r s) = primitive "__innerJoin"
+innerJoin : query s -> expr (join r s) bool -> query r -> query (merge r s) =
+  primitive "__innerJoin"
 
-leftJoin : query r -> query s -> expr (merge r (mapValue maybe s)) bool -> query (merge r (mapValue maybe s)) = primitive "__leftJoin"
+leftJoin : query s -> expr (join r s) bool -> query r -> query (merge r (mapValue (AsNullable) s)) =
+  primitive "__leftJoin"
 
-rightJoin : query r -> query s -> expr (merge (mapValue maybe r) s) bool -> query (merge (mapValue maybe r) s) = primitive "__rightJoin"
+rightJoin : query s -> expr (join r s) bool ->
+  query r -> query (merge (mapValue (AsNullable) r) s) =
+  primitive "__rightJoin"
 
-fullJoin : query r -> query s -> expr (merge (mapValue maybe r) (mapValue maybe s)) bool -> query (merge (mapValue maybe r) (mapValue maybe s)) = primitive "__fullJoin"
-semiJoin : query r -> query s -> expr (merge r s) bool -> query r = primitive "__semiJoin"
-antiJoin : query r -> query s -> expr (merge r s) bool -> query r = primitive "__antiJoin"
+fullJoin : query s -> expr (join r s) bool ->
+  query r -> query (merge (mapValue (AsNullable) r) (mapValue (AsNullable) s)) =
+  primitive "__fullJoin"
+semiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__semiJoin"
+antiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__antiJoin"
 
 # Set operations require both queries to have the same row. They preserve the
 # columns and order of the left input; SQL uses the corresponding set operator.
@@ -167,10 +178,15 @@ infixl 3 <?
 infixl 3 ?>
 infixl 3 <?>
 
-_?_ = innerJoin
-_<?_ = leftJoin
-_?>_ = rightJoin
-_<?>_ = fullJoin
+_?_ : query s -> expr (join r s) bool -> query r -> query (merge r s) = innerJoin
+_<?_ : query s -> expr (join r s) bool -> query r -> query (merge r (mapValue (AsNullable) s)) =
+  leftJoin
+_?>_ : query s -> expr (join r s) bool -> query r -> query (merge (mapValue (AsNullable) r) s) =
+  rightJoin
+_<?>_ : query s
+    -> expr (join r s) bool
+    -> query r
+    -> query (merge (mapValue (AsNullable) r) (mapValue (AsNullable) s)) = fullJoin
 
 # `select {a = .a, b = .b}` is written `select {.a, .b}`. To recompute or
 # rename a column use `update`, which keeps the row and merges over it.
@@ -181,6 +197,30 @@ _<?>_ = fullJoin
 # `sum` / `avg` / `min` / `max` are NULL for an all-NULL or empty input, so
 # they return `maybe`: write `coalesce 0 (sum .x)` for a number.
 
+count : agg (expr r int) = sql "COUNT(*)"
+countOf : expr r a -> agg (expr r int) = sql "COUNT($1)"
+countDistinct : expr r a -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
+sum : expr r int -> agg (expr r (maybe int)) = sql "SUM($1)"
+sum : expr r float -> agg (expr r (maybe float)) = sql "SUM($1)"
+avg : expr r int -> agg (expr r (maybe float)) = sql "AVG($1)"
+avg : expr r float -> agg (expr r (maybe float)) = sql "AVG($1)"
+min : expr r a -> agg (expr r (maybe a)) = sql "MIN($1)"
+max : expr r a -> agg (expr r (maybe a)) = sql "MAX($1)"
+
+# ── window functions (depth 1) ────────────────────────────────────────────
+# spec = { partition = [..], order = [asc .x, desc .y], frame = .. }
+
+rowNumber : winspec r -> win (expr r int) = sql "ROW_NUMBER()"
+rank : winspec r -> win (expr r int) = sql "RANK()"
+denseRank : winspec r -> win (expr r int) = sql "DENSE_RANK()"
+# `lag` / `lead` are NULL at the partition edge; frames may be empty.
+lag : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LAG($1)"
+lead : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LEAD($1)"
+sumOver : winspec r -> expr r int -> win (expr r (maybe int)) = sql "SUM($1)"
+sumOver : winspec r -> expr r float -> win (expr r (maybe float)) = sql "SUM($1)"
+avgOver : winspec r -> expr r int -> win (expr r (maybe float)) = sql "AVG($1)"
+avgOver : winspec r -> expr r float -> win (expr r (maybe float)) = sql "AVG($1)"
+countOver : winspec r -> win (expr r int) = sql "COUNT(*)"
 
 # ── window functions (depth 1) ────────────────────────────────────────────
 # spec = { partition = [..], order = [asc .x, desc .y], frame = .. }
@@ -193,8 +233,8 @@ unboundedFollowing : bound = primitive "__unboundedFollowing"
 currentRow : bound = primitive "__currentRow"
 preceding : expr r int -> bound = primitive "__preceding"
 following : expr r int -> bound = primitive "__following"
-wholePartition = rows unboundedPreceding unboundedFollowing
-runningFrame = rows unboundedPreceding currentRow
+wholePartition : frame = rows unboundedPreceding unboundedFollowing
+runningFrame : frame = rows unboundedPreceding currentRow
 
 # ── scalar operators and functions ────────────────────────────────────────
 
@@ -221,46 +261,123 @@ _/_ : expr r float -> expr r float -> expr r float = sql "$1 / $2"
 _%_ : expr r int -> expr r int -> expr r int = sql "CAGARA_MOD($1, $2)"
 
 # String concatenation, right-assoc and looser than arithmetic:
-# `.first <> " " <> .last`.
 _<>_ : expr r string -> expr r string -> expr r string = sql "$1 || $2"
-concat = _<>_
+concat : expr r string -> expr r string -> expr r string = _<>_
+not : expr r bool -> expr r bool = sql "NOT $1"
+negate : expr r int -> expr r int = sql "-$1"
+negate : expr r float -> expr r float = sql "-$1"
+upper : expr r string -> expr r string = sql "UPPER($1)"
+lower : expr r string -> expr r string = sql "LOWER($1)"
+trim : expr r string -> expr r string = sql "TRIM($1)"
+ltrim : expr r string -> expr r string = sql "LTRIM($1)"
+rtrim : expr r string -> expr r string = sql "RTRIM($1)"
+length : expr r string -> expr r int = sql "CAGARA_LENGTH($1)"
+like : expr r string -> expr r string -> expr r bool = sql "$2 LIKE $1"
+ilike : expr r string -> expr r string -> expr r bool = sql "$2 ILIKE $1"
 
 # Positions are 1-based, as in SQL. `substring start len s`.
+substring : expr r int -> expr r int -> expr r string -> expr r string = sql "SUBSTRING($3, $1, $2)"
+left : expr r int -> expr r string -> expr r string = sql "CAGARA_LEFT($2, $1)"
+right : expr r int -> expr r string -> expr r string = sql "CAGARA_RIGHT($2, $1)"
 # `replaceAll from to s`: every occurrence. (SQL's REPLACE, not column renaming
 # — use `update` for that.)
-# TODO: replaceAll : string -> string -> expr r string -> expr r string = sql "REPLACE($3, $1, $2)"
+replaceAll : expr r string -> expr r string -> expr r string -> expr r string =
+  sql "REPLACE($3, $1, $2)"
 # `strpos sub s`: position of the first `sub` in `s`; 0 if absent.
+strpos : expr r string -> expr r string -> expr r int = sql "CAGARA_STRPOS($2, $1)"
 # Plain substring tests (`contains "@" .email`): `%` and `_` are not wildcards.
-# TODO: startsWith : string -> expr r string -> expr r bool = sql "CAGARA_LEFT($2, CAGARA_LENGTH($1)) = $1"
-# TODO: endsWith : string -> expr r string -> expr r bool = sql "CAGARA_RIGHT($2, CAGARA_LENGTH($1)) = $1"
+contains : expr r string -> expr r string -> expr r bool = sql "CAGARA_STRPOS($2, $1) > 0"
+startsWith : expr r string -> expr r string -> expr r bool =
+  sql "CAGARA_LEFT($2, CAGARA_LENGTH($1)) = $1"
+endsWith : expr r string -> expr r string -> expr r bool =
+  sql "CAGARA_RIGHT($2, CAGARA_LENGTH($1)) = $1"
 
+toString : expr r int -> expr r string = sql "CAGARA_TO_STRING($1)"
+toString : expr r float -> expr r string = sql "CAGARA_TO_STRING($1)"
+toString : expr r date -> expr r string = sql "CAGARA_TO_STRING($1)"
+toString : expr r timestamp -> expr r string = sql "CAGARA_TO_STRING($1)"
+toInt : expr r float -> expr r int = sql "CAST($1 AS INTEGER)"
+toFloat : expr r int -> expr r float = sql "CAST($1 AS FLOAT)"
 
 # ── dates and timestamps ───────────────────────────────────────────────────
 # String literals widen to `date` / `timestamp`: `.created_at >= "2024-01-01"`.
 # Weeks start on Monday (ISO). `dayOfWeek` is 0 for Sunday.
 
-# TODO: now = currentTimestamp
+currentDate : expr r date = sql "CURRENT_DATE"
+currentTimestamp : expr r timestamp = sql "CAGARA_NOW()"
+now : expr r timestamp = currentTimestamp
 
+toDate : expr r timestamp -> expr r date = sql "CAGARA_TO_DATE($1)"
+toDate : expr r string -> expr r date = sql "CAGARA_TO_DATE($1)"
+toTimestamp : expr r date -> expr r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
+toTimestamp : expr r string -> expr r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
 
 # `addDays 7 .created_at`; negative counts go back. Weeks and quarters are
 # defined here as 7 days and 3 months, so the core needs only DAY and MONTH.
-# TODO: addDays : int -> expr r timestamp -> expr r timestamp = sql "CAGARA_ADD('TIMESTAMP', 'DAY', $2, $1)"
-# TODO: addMonths : int -> expr r timestamp -> expr r timestamp = sql "CAGARA_ADD('TIMESTAMP', 'MONTH', $2, $1)"
-# TODO: addYears : int -> expr r timestamp -> expr r timestamp = sql "CAGARA_ADD('TIMESTAMP', 'YEAR', $2, $1)"
-# TODO: addHours : int -> expr r timestamp -> expr r timestamp = sql "CAGARA_ADD('TIMESTAMP', 'HOUR', $2, $1)"
-# TODO: addMinutes : int -> expr r timestamp -> expr r timestamp = sql "CAGARA_ADD('TIMESTAMP', 'MINUTE', $2, $1)"
-# TODO: addSeconds : int -> expr r timestamp -> expr r timestamp = sql "CAGARA_ADD('TIMESTAMP', 'SECOND', $2, $1)"
+addDays : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'DAY', $2, $1)"
+addDays : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'DAY', $2, $1)"
+addWeeks : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'DAY', $2, $1 * 7)"
+addWeeks : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'DAY', $2, $1 * 7)"
+addMonths : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'MONTH', $2, $1)"
+addMonths : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'MONTH', $2, $1)"
+addQuarters : expr r int -> expr r date -> expr r date =
+  sql "CAGARA_ADD('DATE', 'MONTH', $2, $1 * 3)"
+addQuarters : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'MONTH', $2, $1 * 3)"
+addYears : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'YEAR', $2, $1)"
+addYears : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'YEAR', $2, $1)"
+addHours : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'HOUR', $2, $1)"
+addMinutes : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'MINUTE', $2, $1)"
+addSeconds : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'SECOND', $2, $1)"
 
 # date_trunc: the start of the period containing the value, same type.
+truncYear : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'YEAR', $1)"
+truncYear : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'YEAR', $1)"
+truncQuarter : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'QUARTER', $1)"
+truncQuarter : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'QUARTER', $1)"
+truncMonth : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'MONTH', $1)"
+truncMonth : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'MONTH', $1)"
+truncWeek : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'WEEK', $1)"
+truncWeek : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'WEEK', $1)"
+truncDay : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'DAY', $1)"
+truncHour : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'HOUR', $1)"
+truncMinute : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'MINUTE', $1)"
 
 # Fields as integers.
+year : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'YEAR', $1)"
+year : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'YEAR', $1)"
+quarter : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'QUARTER', $1)"
+quarter : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'QUARTER', $1)"
+month : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'MONTH', $1)"
+month : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'MONTH', $1)"
+day : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'DAY', $1)"
+day : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'DAY', $1)"
+dayOfWeek : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'DOW', $1)"
+dayOfWeek : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'DOW', $1)"
+dayOfYear : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'DOY', $1)"
+dayOfYear : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'DOY', $1)"
+hour : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'HOUR', $1)"
+minute : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'MINUTE', $1)"
 
 # `daysBetween start end`: whole days from `start` to `end` (negative if
 # `end` is earlier), so `daysBetween .created_at` is a function of the end.
+daysBetween : expr r date -> expr r date -> expr r int = sql "CAGARA_DAYS_BETWEEN($1, $2)"
 
 # ── nulls: operators need non-null arguments, so nulls are handled here ────
 
 # `coalesce default x`, like Haskell's `fromMaybe`; infix `x ?? default`
 # (right-assoc, tighter than arithmetic: `.a ?? .b ?? 0`, `.n ?? 0 + 1`).
+coalesce : expr r a -> expr r (maybe a) -> expr r a = sql "COALESCE($2, $1)"
 _??_ : expr r (maybe a) -> expr r a -> expr r a = sql "COALESCE($1, $2)"
+just : expr r a -> expr r (maybe a) = sql "$1"
+isNull : expr r (maybe a) -> expr r bool = sql "$1 IS NULL"
+isNotNull : expr r (maybe a) -> expr r bool = sql "$1 IS NOT NULL"
 # NULL counts as false, as in `where`.
+isTrue : expr r (maybe bool) -> expr r bool = sql "COALESCE($1, FALSE)"

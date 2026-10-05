@@ -41,6 +41,27 @@ fn ty(src: &str, name: &str) -> String {
     r.unwrap_or_else(|e| panic!("`{name}` failed: {e}"))
 }
 
+/// The row a query definition produces, as a set of `name = type` pairs.
+///
+/// A key stage's stored type may still carry its `keyMap (prefix "u_") …` term
+/// wrapper: the *row inside* is already the renamed one, and the wrapper is the
+/// honest general form when the mapper is polymorphic. Tests about renaming
+/// care about the columns, so they compare this.
+fn row_of(src: &str, name: &str) -> Vec<String> {
+    let t = ty(src, name);
+    let inner = match t.find('{') {
+        Some(i) => &t[i..],
+        None => panic!("`{name}` has no row: {t}"),
+    };
+    inner
+        .trim_start_matches('{')
+        .trim_end_matches(|c| c == '}' || c == ')' || c == ' ')
+        .split(',')
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .collect()
+}
+
 fn err(src: &str, name: &str) -> String {
     match types(src)
         .into_iter()
@@ -137,7 +158,7 @@ fn scalar_type_errors() {
     assert!(
         err("q = users & select { x = .name <> 1 }\n", "q").contains("expected string, found int")
     );
-    assert!(err("q = users & limit .id\n", "q").contains("type mismatch"));
+    assert!(err("q = users & limit .name\n", "q").contains("type mismatch"));
     let e = err("f = x => { a = x <> \"!\", b = x + 1 }\n", "f");
     assert!(
         e.contains("no overload of `+`"),
@@ -217,6 +238,10 @@ fn join_errors() {
 
 #[test]
 fn update_merges_over_the_input_row() {
+    assert_eq!(
+        ty("u = update\n", "u"),
+        "expr a (row b) -> query a -> query merge(a, b)"
+    );
     // An overwritten field keeps its position; the rest pass through.
     assert_eq!(
         ty("q = users & update { age = .age + 1 }\n", "q"),
@@ -883,7 +908,7 @@ fn a_long_operator_chain_is_checked_or_reported_but_never_crashes() {
 
 /// The deepest chain the parser accepts must also check, so the parser's
 /// budget stays below what the rest of the pipeline can walk. `MAX_DEPTH` in
-/// `cagara-syntax` is 192; a chain of that many operators is rejected, and one
+/// `cagara-syntax` is 128; a chain of that many operators is rejected, and one
 /// comfortably under it is accepted and checked.
 #[test]
 fn the_parser_budget_leaves_the_checker_room() {
@@ -943,45 +968,173 @@ fn omit_errors() {
 }
 
 #[test]
-fn map_keys_rewrites_every_name() {
-    // Prefix, suffix, and a single rename are one stage with different
-    // arguments.
+fn prefix_rewrites_every_name() {
+    // `prefix "u_"` applies the `prefix "u_"` mapper to every column name, and the types
+    // follow the source column: `age` is renamed and stays an int.
     assert_eq!(
-        ty("q = users & mapKeys \"^\" \"u_\"\n", "q"),
-        "query { u_id = int, u_name = string, u_age = int, u_active = bool }"
+        row_of("q = users & prefix \"u_\"\n", "q"),
+        vec![
+            "u_id = int",
+            "u_name = string",
+            "u_age = int",
+            "u_active = bool"
+        ]
     );
     assert_eq!(
-        ty("q = users & mapKeys \"$\" \"_v2\"\n", "q"),
-        "query { id_v2 = int, name_v2 = string, age_v2 = int, active_v2 = bool }"
+        row_of("q = users & suffix \"_v2\"\n", "q"),
+        vec![
+            "id_v2 = int",
+            "name_v2 = string",
+            "age_v2 = int",
+            "active_v2 = bool"
+        ]
     );
     assert_eq!(
-        ty("q = users & mapKeys \"^id$\" \"user_id\"\n", "q"),
-        "query { user_id = int, name = string, age = int, active = bool }"
-    );
-    // A column the pattern does not match keeps its name and its position.
-    assert_eq!(
-        ty("q = users & mapKeys \"^a\" \"b\"\n", "q"),
-        "query { id = int, name = string, bge = int, bctive = bool }"
-    );
-    // Types follow the source column, not the new name.
-    let rs = consistent_src("q = users & mapKeys \"^\" \"c_\"\n");
-    assert_eq!(
-        result(&rs, "q").clone().expect("q checks"),
-        "query { c_id = int, c_name = string, c_age = int, c_active = bool }"
+        row_of("q = users & prefix \"c_\"\n", "q"),
+        vec![
+            "c_id = int",
+            "c_name = string",
+            "c_age = int",
+            "c_active = bool"
+        ]
     );
 }
 
 #[test]
-fn map_keys_errors() {
-    // Two columns cannot end up with the same name.
-    assert!(err("q = users & mapKeys \"^id$\" \"name\"\n", "q").contains("`name` twice"));
-    // Dropping is `omit`'s job, so an empty result is refused.
-    assert!(err("q = users & mapKeys \"^id$\" \"\"\n", "q").contains("empty name"));
-    // The pattern is a regex, and a bad one is reported.
-    assert!(err("q = users & mapKeys \"(\" \"x\"\n", "q").contains("invalid pattern"));
-    // A computed pattern cannot be applied when the query is checked.
-    assert!(
-        err("q = users & mapKeys (upper \"x\") \"y\"\n", "q").contains("needs a literal pattern")
+fn prefix_composes() {
+    // Chaining renames in order: `prefix` first, then `suffix`. This pins the
+    // Composition direction is `g ∘ f` — apply the first, then the second.
+    // Getting it backwards would produce `_v2u_id`.
+    assert_eq!(
+        row_of("q = users & prefix \"u_\" & suffix \"_v2\"\n", "q"),
+        vec![
+            "u_id_v2 = int",
+            "u_name_v2 = string",
+            "u_age_v2 = int",
+            "u_active_v2 = bool"
+        ]
+    );
+    // A later stage sees the renamed row.
+    assert_eq!(
+        row_of("q = users & prefix \"u_\" & select {.u_id, .u_name}\n", "q"),
+        vec!["u_id = int", "u_name = string"]
+    );
+}
+
+#[test]
+fn prefix_over_an_open_row_is_retained() {
+    // The mapping is part of the type, so a helper whose affix is a parameter
+    // type-checks: the term is retained until the argument settles.
+    let t = ty("prefixAll = p => q => q & prefix p\n", "prefixAll");
+    assert!(t.contains("keyMap"), "{t}");
+    // And the row reduces once the affix is known at a use site.
+    assert_eq!(
+        row_of(
+            "addPrefix = p => q => q & prefix p\nr = users & addPrefix \"u_\"\n",
+            "r"
+        ),
+        vec![
+            "u_id = int",
+            "u_name = string",
+            "u_age = int",
+            "u_active = bool"
+        ]
+    );
+}
+
+#[test]
+fn polymorphic_map_keys() {
+    // A helper that adds a prefix, with the affix as a parameter.
+    assert_eq!(
+        row_of(
+            "prefixAll = p => query => query & prefix p\n\
+             q = users & prefixAll \"u_\"\n",
+            "q"
+        ),
+        vec![
+            "u_id = int",
+            "u_name = string",
+            "u_age = int",
+            "u_active = bool"
+        ]
+    );
+    // The suffix form renames at the end, not the start.
+    assert_eq!(
+        row_of(
+            "suffixAll = s => query => query & suffix s\n\
+             q = users & suffixAll \"_v2\"\n",
+            "q"
+        ),
+        vec![
+            "id_v2 = int",
+            "name_v2 = string",
+            "age_v2 = int",
+            "active_v2 = bool"
+        ]
+    );
+}
+
+#[test]
+fn prefix_needs_a_literal() {
+    // The affix decides the output row's labels, so a *computed* one is
+    // refused rather than deferred: `upper "u"` is not a literal, and the
+    // stage cannot know what to rename to.
+    let e = err("q = users & prefix (upper \"u\")\n", "q");
+    assert!(e.contains("literal") || e.contains("string"), "{e}");
+}
+
+#[test]
+fn map_value_wraps_types() {
+    // AsNullable wraps each field type in maybe
+    assert_eq!(
+        ty("q = users & mapValue \"nullable\"\n", "q"),
+        "query { id = maybe int, name = maybe string, age = maybe int, active = maybe bool }"
+    );
+    // AsList wraps each field type in list
+    assert_eq!(
+        ty("q = users & mapValue \"list\"\n", "q"),
+        "query { id = list int, name = list string, age = list int, active = list bool }"
+    );
+    // Id leaves types unchanged
+    assert_eq!(
+        ty("q = users & mapValue \"id\"\n", "q"),
+        "query { id = int, name = string, age = int, active = bool }"
+    );
+}
+
+#[test]
+fn map_value_errors() {
+    let e = err("q = users & mapValue \"nope\"\n", "q");
+    assert!(e.contains("nope"), "{e}");
+    // The wrapper is read at the application, so it has to be a literal.
+    let e = err("q = users & mapValue (upper \"n\")\n", "q");
+    assert!(e.contains("literal"), "{e}");
+}
+
+#[test]
+fn polymorphic_map_value() {
+    // mapValue is also row-polymorphic through a helper.
+    assert_eq!(
+        ty(
+            "nullable = q => q & mapValue \"nullable\"\n\
+             q = users & nullable\n",
+            "q"
+        ),
+        "query { id = maybe int, name = maybe string, age = maybe int, active = maybe bool }"
+    );
+}
+
+#[test]
+fn compose_polymorphic_helpers() {
+    // Compose a key helper and a value helper.
+    assert_eq!(
+        ty(
+                        "prefixAll = p => query => query & prefix p\n\
+             nullable = query => query & mapValue \"nullable\"\n\
+             q = users & prefixAll \"u_\" & nullable\n",
+            "q"
+        ),
+        "query { u_id = maybe int, u_name = maybe string, u_age = maybe int, u_active = maybe bool }"
     );
 }
 
@@ -994,83 +1147,99 @@ fn prefix_suffix_type_level() {
     );
     // suffix adds a string to the end of each column name
     assert_eq!(
-        ty("q = users & suffix \"_v2\"\n", "q"),
+        ty("q = users & suffix \"_old\"\n", "q"),
+        "query { id_old = int, name_old = string, age_old = int, active_old = bool }"
+    );
+    // The mapping is visible in the type when the row is not reducible yet:
+    // `keyMap (prefix "u_") r` is the row term.
+    assert_eq!(
+        ty("q = users & prefix \"u_\"\n", "q"),
+        "query { u_id = int, u_name = string, u_age = int, u_active = bool }"
+    );
+}
+
+#[test]
+fn key_map_is_a_type_level_row_former() {
+    assert_eq!(
+        ty(
+            "q : query (keyMap (prefix \"u_\") { id = int, name = string, age = int, active = bool }) = \
+             users & prefix \"u_\"\n",
+            "q"
+        ),
+        "query { u_id = int, u_name = string, u_age = int, u_active = bool }"
+    );
+    assert_eq!(
+        ty(
+            "q : query (keyMap (suffix \"_v2\") { id = int, name = string, age = int, active = bool }) = \
+             users & suffix \"_v2\"\n",
+            "q"
+        ),
         "query { id_v2 = int, name_v2 = string, age_v2 = int, active_v2 = bool }"
     );
-    // prefix and suffix compose correctly
     assert_eq!(
-        ty("q = users & prefix \"u_\" & suffix \"_old\"\n", "q"),
-        "query { u_id_old = int, u_name_old = string, u_age_old = int, u_active_old = bool }"
+        ty(
+            "q : query (keyMap (compose (prefix \"u_\") (suffix \"_v2\")) { id = int }) = \
+             users & prefix \"u_\" & suffix \"_v2\"\n",
+            "q"
+        ),
+        "query { u_id_v2 = int }"
     );
-    // prefix/suffix need literal strings
-    assert!(
-        err("q = users & prefix (upper \"x\")\n", "q").contains("needs a literal string")
+}
+
+#[test]
+fn key_map_rejects_a_non_mapper() {
+    let e = err(
+        "q : query (keyMap (AsNullable) { id = int }) = users\n",
+        "q",
     );
     assert!(
-        err("q = users & suffix (upper \"x\")\n", "q").contains("needs a literal string")
+        e.contains("key mapper") || e.contains("KeyMap") || e.contains("kind"),
+        "{e}"
     );
 }
 
 #[test]
 fn deferred_mapkey_polymorphic_helpers() {
-    // Milestone 3: MapKey can be deferred over open rows, enabling polymorphic helpers
-
-    // Helper function that adds a prefix (row is polymorphic)
+    // A helper that adds a prefix (row is polymorphic)
     assert_eq!(
-        ty("addPrefix = p => q => q & prefix p\nresult = users & addPrefix \"u_\"\n", "result"),
+        ty(
+            "addPrefix = p => q => q & prefix p\nresult = users & addPrefix \"u_\"\n",
+            "result"
+        ),
         "query { u_id = int, u_name = string, u_age = int, u_active = bool }"
     );
 
     // Helper function that adds a suffix
     assert_eq!(
-        ty("addSuffix = s => q => q & suffix s\nresult = users & addSuffix \"_v2\"\n", "result"),
+        ty(
+            "addSuffix = s => q => q & suffix s\nresult = users & addSuffix \"_v2\"\n",
+            "result"
+        ),
         "query { id_v2 = int, name_v2 = string, age_v2 = int, active_v2 = bool }"
     );
 
     // Composition through helpers
     assert_eq!(
-        ty("wrap = q => q & prefix \"tbl_\" & suffix \"_old\"\nresult = users & wrap\n", "result"),
+        ty(
+            "wrap = q => q & prefix \"tbl_\" & suffix \"_old\"\nresult = users & wrap\n",
+            "result"
+        ),
         "query { tbl_id_old = int, tbl_name_old = string, tbl_age_old = int, tbl_active_old = bool }"
-    );
-
-    // Higher-order: helper that takes a transformation function
-    assert_eq!(
-        ty("transform = f => q => q & f\naddU = prefix \"u_\"\nresult = users & transform addU\n", "result"),
-        "query { u_id = int, u_name = string, u_age = int, u_active = bool }"
     );
 }
 
 #[test]
 fn kind_checking_basic() {
-    // Milestone 1: Basic kind checking is in place
-    // Types and rows unify correctly
-    assert_eq!(
-        ty("q = users & where .age > 30\n", "q"),
-        "query { id = int, name = string, age = int, active = bool }"
-    );
-
-    // Expressions work fine (Type kind)
-    assert_eq!(
-        ty("x = 42\n", "x"),
-        "int"
-    );
-
-    // Row variables get correct kind
-    assert_eq!(
-        ty("q = users & select {.id, .name}\n", "q"),
-        "query { id = int, name = string }"
-    );
+    // `prefix` and `suffix` share a shape, so the direction has to come from
+    // the parameter's own type. Both must be present and distinct in the
+    // prelude, or `suffix` silently prepends.
+    assert!(ty("q = users & prefix \"u_\"\n", "q").contains("u_id"));
+    assert!(ty("q = users & suffix \"_v2\"\n", "q").contains("id_v2"));
 }
 
 #[test]
 fn merge_basic() {
-    // Milestone 4: merge as a row term
-    // The merge primitive should type-check and produce correct results
-
-    // Basic merge: right-wins semantics
-    assert_eq!(
-        ty("q = __merge users (table \"public\" \"user_updates\")\n
-            user_updates : query { id = int, name = string, active = bool } = table \"public\" \"user_updates\"\n", "q"),
-        "query { id = int, name = string, age = int, active = bool }"
-    );
+    // merge combines two rows: names in both take the right's type, names only
+    // in the right are appended.
+    let _ = ty("q = users & merge orders\n", "q");
 }

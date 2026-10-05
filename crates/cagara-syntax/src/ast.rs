@@ -60,6 +60,10 @@ pub enum TypeExpr {
         tail: Option<String>,
         span: Span,
     },
+    /// A string literal in type position: the affix of a key mapper, as in
+    /// `keyMap (prefix "u_") r`. It is read where the text still is, so the
+    /// mapping is known when the query is checked.
+    Str(String, Span),
     Fun(Box<TypeExpr>, Box<TypeExpr>),
     Error(Span),
 }
@@ -106,6 +110,8 @@ pub enum ExprKind {
     List(Vec<Expr>),
     /// `sql "template"` with `$1`, `$2` placeholders
     Sql(String),
+    /// `primitive "name"` — typed reference to a built-in primitive
+    Primitive(String),
     Error,
 }
 
@@ -281,6 +287,12 @@ impl Lower<'_> {
                     args: n.children().map(|c| self.ty(&c)).collect(),
                     span: span(n),
                 },
+                None => TypeExpr::Error(span(n)),
+            },
+            // A string in type position, e.g. the affix of `(prefix "u_")`.
+            // Decoded the same way a value-level string is.
+            K::TyStr => match token(n, K::String) {
+                Some(t) => TypeExpr::Str(unescape(t.text()), span(n)),
                 None => TypeExpr::Error(span(n)),
             },
             K::TyRecord => {
@@ -464,6 +476,10 @@ impl Lower<'_> {
             K::ListExpr => ExprKind::List(n.children().map(|c| self.expr(&c)).collect()),
             K::SqlExpr => match token(n, K::String) {
                 Some(t) => ExprKind::Sql(unescape(t.text())),
+                None => ExprKind::Error,
+            },
+            K::PrimitiveExpr => match token(n, K::String) {
+                Some(t) => ExprKind::Primitive(unescape(t.text())),
                 None => ExprKind::Error,
             },
             _ => ExprKind::Error,

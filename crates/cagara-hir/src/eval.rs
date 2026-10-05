@@ -4,7 +4,7 @@
 use crate::check::{Choice, TypeCheck};
 use crate::ir::{Expr, Lit, Loc, Rel};
 use crate::prims::{self, build_tpl};
-use crate::value::{err, Closure, EResult, Env, Inst, Template, TplKind, Value};
+use crate::value::{err, Closure, EResult, Env, EvalError, Inst, Template, TplKind, Value};
 use crate::workspace::{Binding, Diag, Workspace};
 use cagara_syntax::ast::{self, ExprKind, Span, TypeExpr};
 use std::collections::HashMap;
@@ -105,6 +105,9 @@ impl<'w> Evaluator<'w> {
     fn eval_def(&mut self, m: usize, def: &ast::Def, inst: Rc<Inst>) -> EResult<Value> {
         let v = match &def.body.kind {
             ExprKind::Sql(sql) => at(template_def(sql, def.ty.as_ref()), m, def.body.span)?,
+            ExprKind::Primitive(name) => {
+                at(primitive_def(name, def.ty.as_ref()), m, def.body.span)?
+            }
             _ => self.eval(m, &inst, &Env::default(), &def.body)?,
         };
         Ok(attach_schema(v, def.ty.as_ref()))
@@ -243,6 +246,9 @@ impl<'w> Evaluator<'w> {
             ExprKind::Sql(_) => {
                 err("`sql \"...\"` must be the whole body of a definition with a type signature")
             }
+            ExprKind::Primitive(_) => err(
+                "`primitive \"...\"` must be the whole body of a definition with a type signature",
+            ),
             ExprKind::Error => err("syntax error"),
         }
     }
@@ -283,6 +289,36 @@ impl<'w> Evaluator<'w> {
             }
             o => err(format!("cannot apply {} to an argument", o.kind())),
         }
+    }
+}
+
+/// `name : a -> b -> query r -> query r' = primitive "name"`: looks up the
+/// primitive and returns it partially applied to the given arity.
+fn primitive_def(name: &str, ty: Option<&TypeExpr>) -> EResult<Value> {
+    let Some(_ty) = ty else {
+        return err("a `primitive` needs a type signature, e.g. `where : query r -> (expr r bool) -> query r = primitive \"where\"`");
+    };
+
+    // Look up the primitive by name
+    use crate::value::PRIMS;
+    let prim = PRIMS
+        .iter()
+        .find(|(prim_name, _)| *prim_name == name)
+        .map(|(_, p)| *p)
+        .ok_or_else(|| EvalError {
+            module: 0,
+            span: None,
+            message: format!("unknown primitive `{}`", name),
+        })?;
+
+    // Nullary primitives are values immediately; keeping them as a `Prim`
+    // would make frame constants such as `currentRow` look like functions to
+    // the runtime. Other primitives remain curried until their arguments are
+    // supplied.
+    if prim.arity() == 0 {
+        prims::call(prim, vec![])
+    } else {
+        Ok(Value::Prim(prim, vec![]))
     }
 }
 

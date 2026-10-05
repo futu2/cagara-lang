@@ -54,6 +54,34 @@ impl Lowerer {
         format!("t{}", self.next)
     }
 
+    /// Rename every output column of a stage, prepending or appending `affix`.
+    ///
+    /// This mirrors what the checker did with `keyMap (prefix s)` /
+    /// `keyMap (suffix s)`: the affix is carried in the `Rel`, so the two agree
+    /// by construction rather than by recomputing a rewrite twice.
+    ///
+    /// As in `select` and `omit`, the rename cannot fold into a preceding
+    /// `distinct`, because deduping on the renamed columns is a different
+    /// query from deduping on the input row — so wrap first.
+    fn rename_all(&mut self, mut st: Stage, affix: &str, prefix: bool) -> Stage {
+        if st.distinct {
+            st = self.wrap(st);
+        }
+        st.items = st
+            .items
+            .into_iter()
+            .map(|(name, e)| {
+                let renamed = if prefix {
+                    format!("{affix}{name}")
+                } else {
+                    format!("{name}{affix}")
+                };
+                (renamed, e)
+            })
+            .collect();
+        st
+    }
+
     /// Put a stage behind a derived table. Its order carries over to the
     /// outer query, since SQL does not keep the order of a derived table;
     /// the inner query keeps it only when a LIMIT / OFFSET needs it. A sort
@@ -373,19 +401,13 @@ impl Lowerer {
                 st.items.retain(|(n, _)| n != key);
                 st
             }
-            Rel::MapKeys(r, pattern, replacement) => {
-                let mut st = self.rel(r)?;
-                // A rename is semantically transparent, but a projection after
-                // `distinct` still has to move outside it (see `select`).
-                if st.distinct {
-                    st = self.wrap(st);
-                }
-                let names: Vec<String> = st.items.iter().map(|(n, _)| n.clone()).collect();
-                let cols = cagara_hir::schema::map_columns(&names, pattern, replacement)?;
-                for (item, new) in st.items.iter_mut().zip(cols) {
-                    item.0 = new;
-                }
-                st
+            Rel::Prefix(r, affix) => {
+                let st = self.rel(r)?;
+                self.rename_all(st, affix, true)
+            }
+            Rel::Suffix(r, affix) => {
+                let st = self.rel(r)?;
+                self.rename_all(st, affix, false)
             }
             Rel::Agg(r, fs) => {
                 let mut st = self.rel(r)?;

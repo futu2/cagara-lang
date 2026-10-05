@@ -185,9 +185,12 @@ pub enum Rel {
     /// `omit "k"`: the input row without column `k`. In the checker this is
     /// nothing but the row equation `input ~ { k : t | output }`.
     Omit(Box<Rel>, String),
-    /// `mapKeys "p" "r"`: every column renamed by the pattern → replacement
-    /// rewrite. Covers prefix, suffix, and single renames.
-    MapKeys(Box<Rel>, String, String),
+    /// `prefix "s"`: every column name gains `s` in front. The checker types
+    /// this as the row term `keyMap (prefix s) input`; the affix is carried
+    /// here so the lowerer computes the same names the checker did.
+    Prefix(Box<Rel>, String),
+    /// `suffix "s"`: every column name gains `s` at the end.
+    Suffix(Box<Rel>, String),
     Agg(Box<Rel>, Vec<(String, Expr)>),
     Order(Box<Rel>, Vec<(Expr, bool)>),
     Limit(Box<Rel>, i64),
@@ -218,7 +221,8 @@ impl Rel {
             | Rel::Select(r, _)
             | Rel::Update(r, _)
             | Rel::Omit(r, _)
-            | Rel::MapKeys(r, _, _)
+            | Rel::Prefix(r, _)
+            | Rel::Suffix(r, _)
             | Rel::Agg(r, _)
             | Rel::Order(r, _)
             | Rel::Limit(r, _)

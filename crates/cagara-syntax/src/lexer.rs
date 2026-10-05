@@ -15,6 +15,8 @@ pub enum Token {
     As,
     #[token("sql")]
     Sql,
+    #[token("primitive")]
+    Primitive,
 
     #[token("=>")]
     FatArrow,

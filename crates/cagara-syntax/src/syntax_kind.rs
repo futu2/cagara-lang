@@ -11,6 +11,7 @@ pub enum SyntaxKind {
     ImportKw,
     AsKw,
     SqlKw,
+    PrimitiveKw,
     FatArrow,
     Arrow,
     ComposeRight,
@@ -73,6 +74,9 @@ pub enum SyntaxKind {
     /// `a -> b`
     TyFun,
     TyParen,
+    /// A string literal in type position: `keyMap (prefix "u_") r`. The affix
+    /// of a key mapper, read where the text still is.
+    TyStr,
     /// `x => body`
     Lambda,
     /// `lhs op rhs`
@@ -95,6 +99,8 @@ pub enum SyntaxKind {
     ProjExpr,
     /// `sql "template"`
     SqlExpr,
+    /// `primitive "name"`
+    PrimitiveExpr,
     /// wraps unparseable input
     ErrorNode,
 }
@@ -120,6 +126,7 @@ impl From<Token> for SyntaxKind {
             Token::Import => K::ImportKw,
             Token::As => K::AsKw,
             Token::Sql => K::SqlKw,
+            Token::Primitive => K::PrimitiveKw,
             Token::FatArrow => K::FatArrow,
             Token::Arrow => K::Arrow,
             Token::ComposeRight => K::ComposeRight,

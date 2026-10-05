@@ -77,7 +77,7 @@ struct Parser<'a> {
 /// comfortable headroom and is still far past anything a person writes.
 ///
 /// Pipelines carry a *tighter* budget of their own; see `MAX_PIPE_CHAIN`.
-const MAX_DEPTH: usize = 192;
+const MAX_DEPTH: usize = 128;
 
 /// Deepest pipeline accepted: the number of `&`-linked stages in one query.
 ///
@@ -370,7 +370,7 @@ impl<'a> Parser<'a> {
         !self.at_boundary()
             && matches!(
                 self.peek(),
-                Some(Token::Ident | Token::LBrace | Token::LParen)
+                Some(Token::Ident | Token::LBrace | Token::LParen | Token::String)
             )
     }
 
@@ -392,6 +392,14 @@ impl<'a> Parser<'a> {
         match self.peek().filter(|_| !self.at_boundary()) {
             Some(Token::Ident) => {
                 self.start(K::TyApp);
+                self.bump();
+                self.finish();
+            }
+            // A string in type position: the affix of a key mapper, as in
+            // `keyMap (prefix "u_") r`. Only meaningful there, and the checker
+            // is what rejects it elsewhere.
+            Some(Token::String) => {
+                self.start(K::TyStr);
                 self.bump();
                 self.finish();
             }
@@ -570,6 +578,7 @@ impl<'a> Parser<'a> {
                         | Token::LBrace
                         | Token::LBracket
                         | Token::Sql
+                        | Token::Primitive
                 )
             )
     }
@@ -655,6 +664,12 @@ impl<'a> Parser<'a> {
                 self.start(K::SqlExpr);
                 self.bump();
                 self.expect(Token::String, "SQL template string after `sql`");
+                self.finish();
+            }
+            Some(Token::Primitive) => {
+                self.start(K::PrimitiveExpr);
+                self.bump();
+                self.expect(Token::String, "primitive name after `primitive`");
                 self.finish();
             }
             Some(Token::LParen) => {

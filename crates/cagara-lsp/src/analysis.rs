@@ -185,7 +185,11 @@ impl Walk<'_> {
             }
             ExprKind::Record(fs) => fs.iter().for_each(|(_, v)| self.expr(v)),
             ExprKind::List(xs) => xs.iter().for_each(|x| self.expr(x)),
-            ExprKind::Lit(_) | ExprKind::Field(..) | ExprKind::Sql(_) | ExprKind::Error => {}
+            ExprKind::Lit(_)
+            | ExprKind::Field(..)
+            | ExprKind::Sql(_)
+            | ExprKind::Primitive(_)
+            | ExprKind::Error => {}
         }
     }
 }
@@ -320,7 +324,7 @@ fn atom_at(text: &str, e: &Expr, offset: usize, found: &mut Option<(Span, (usize
         ExprKind::Lambda(_, body) => atom_at(text, body, offset, found),
         ExprKind::Record(fs) => fs.iter().for_each(|(_, v)| atom_at(text, v, offset, found)),
         ExprKind::List(xs) => xs.iter().for_each(|x| atom_at(text, x, offset, found)),
-        ExprKind::Name(_) | ExprKind::Sql(_) | ExprKind::Error => {}
+        ExprKind::Name(_) | ExprKind::Sql(_) | ExprKind::Primitive(_) | ExprKind::Error => {}
     }
 }
 
@@ -868,11 +872,15 @@ mod tests {
         let h = one_line(hover(&ws, pos(1, 14)).unwrap());
         let (here, general) = h.split_once("defined as").unwrap();
         assert!(
-            here.contains("select : { n = expr { name = string, id = int } string } -> "),
+            here.contains(
+                "select : expr { id = int, name = string } (row { n = string }) -> query { id = int, name = string } -> query { n = string }"
+            ),
             "{h}"
         );
-        assert!(here.contains("-> query { n = string }"), "{h}");
-        assert!(general.contains("select : a -> query b -> query c"), "{h}");
+        assert!(
+            general.contains("select : expr r (row s) -> query r -> query s"),
+            "{h}"
+        );
         // A monomorphic use shows its type once.
         let h = hover(&ws, pos(1, 5)).unwrap();
         assert!(

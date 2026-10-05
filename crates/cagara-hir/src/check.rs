@@ -40,7 +40,7 @@
 //!   still return `maybe`.
 //!
 //! Column names never enter the type language. The key stages (`omit`,
-//! `mapKeys`) read their key from the application and record it in a
+//! `prefix`, and `suffix`) read their key from the application and record it in a
 //! constraint, so `unify` stays an equivalence and every query the checker
 //! accepts has a fully known row (see `docs/KEYMAP-DESIGN.md`).
 
@@ -67,8 +67,19 @@ enum Ty {
     /// Fields plus a tail (`Empty`, a variable, or a rigid variable).
     Row(Vec<(String, Ty)>, Box<Ty>),
     Empty,
-    /// Key mapping over a row: applies a key transformation to every field label.
-    MapKey(KeyMap, Box<Ty>),
+    /// Key mapping over a row: applies a key transformation to every field
+    /// label. The mapper is itself a type-level symbol of kind `KeyMap`: a
+    /// `Con` naming a constructor (`KeyMapPrefix "s"`, `KeyMapSuffix "s"`,
+    /// `KeyMapCompose f g`, `KeyMapId`), or a *variable* when a signature is
+    /// polymorphic in the mapping.
+    ///
+    /// A variable mapper is what lets `prefix p` be written for a lambda
+    /// parameter `p`: the term is retained with the variable in place, and
+    /// reduces once the variable is bound to a constructor.
+    MapKey(Box<Ty>, Box<Ty>),
+    /// The affix of a prefix/suffix mapper: a `Con` head plus the literal
+    /// string, since `Con` names are static and an affix is not.
+    KeyAffix(&'static str, String),
     /// Merge two rows: right-wins on collision, keeps old field positions,
     /// appends labels that occur only in the right row.
     Merge(Box<Ty>, Box<Ty>),
@@ -77,6 +88,12 @@ enum Ty {
 }
 
 /// Key mapping witnesses: closed, first-order transformations on field names.
+///
+/// A mapper is a type-level symbol of kind `KeyMap` (see [`Kind`]), not a value.
+/// The set is *closed* and *finite*: `id`, the two value-carrying constructors
+/// `prefix`/`suffix`, and composition. Because it holds no syntax and no
+/// closures, `normalize` can reduce it to a normal form and `reduce_mapkey` can
+/// apply it without any interpreter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum KeyMap {
     /// Identity: leaves all names unchanged.
@@ -85,35 +102,62 @@ enum KeyMap {
     Prefix(String),
     /// Suffix: adds a string after each name.
     Suffix(String),
-    /// Function: applies a lambda to transform each name.
-    Function(Box<ast::Expr>),
     /// Composition: apply the first mapper, then the second.
     Compose(Box<KeyMap>, Box<KeyMap>),
 }
 
 impl KeyMap {
+    /// The type-level symbol for this mapper. The encodings are `Con`s plus
+    /// `Ty::KeyAffix` for the string-carrying constructors, so a mapper can sit
+    /// in a `Ty` next to a variable of the same kind.
+    fn to_ty(&self) -> Ty {
+        match self {
+            KeyMap::Id => con("KeyMapId"),
+            KeyMap::Prefix(s) => Ty::KeyAffix("KeyMapPrefix", s.clone()),
+            KeyMap::Suffix(s) => Ty::KeyAffix("KeyMapSuffix", s.clone()),
+            KeyMap::Compose(f, g) => Ty::Con("KeyMapCompose", vec![f.to_ty(), g.to_ty()]),
+        }
+    }
+
+    /// Recover a mapper from a type-level symbol. `None` when the symbol is a
+    /// variable, which has no closed form — the term is retained until that
+    /// variable is bound.
+    fn of_ty(t: &Ty) -> Option<KeyMap> {
+        match t {
+            Ty::Con("KeyMapId", a) if a.is_empty() => Some(KeyMap::Id),
+            Ty::KeyAffix("KeyMapPrefix", s) => Some(KeyMap::Prefix(s.clone())),
+            Ty::KeyAffix("KeyMapSuffix", s) => Some(KeyMap::Suffix(s.clone())),
+            Ty::Con("KeyMapCompose", a) if a.len() == 2 => Some(
+                KeyMap::Compose(
+                    Box::new(KeyMap::of_ty(&a[0])?),
+                    Box::new(KeyMap::of_ty(&a[1])?),
+                )
+                .normalize(),
+            ),
+            _ => None,
+        }
+    }
+
     /// Apply this key map to a single field name.
+    ///
+    /// Total: defined for every name, including names not yet known. That is
+    /// what makes `keyMap` reducible on an open row when the row is later
+    /// bound, and it is why this layer needs no closed-row restriction.
     fn apply(&self, name: &str) -> String {
         match self {
             KeyMap::Id => name.to_string(),
             KeyMap::Prefix(p) => format!("{}{}", p, name),
             KeyMap::Suffix(s) => format!("{}{}", name, s),
-            KeyMap::Function(expr) => {
-                // Evaluate the function at compile-time
-                match eval_key_function(expr, name) {
-                    Ok(result) => result,
-                    Err(_) => {
-                        // If evaluation fails, return original name
-                        // The error will be caught during reduction
-                        name.to_string()
-                    }
-                }
-            }
             KeyMap::Compose(f, g) => g.apply(&f.apply(name)),
         }
     }
 
-    /// Normalize by eliminating identity and flattening compositions.
+    /// Reduce to a normal form: eliminate `Id`, reassociate `Compose` to the
+    /// right, and fuse adjacent same-constructor chains.
+    ///
+    /// The fusion laws hold for all strings, so they are sound:
+    ///   `Prefix a` then `Prefix b` = `Prefix (a <> b)`
+    ///   `Suffix a` then `Suffix b` = `Suffix (b <> a)`   (note the order)
     fn normalize(self) -> KeyMap {
         match self {
             KeyMap::Compose(f, g) => {
@@ -121,119 +165,15 @@ impl KeyMap {
                 let g = g.normalize();
                 match (f, g) {
                     (KeyMap::Id, x) | (x, KeyMap::Id) => x,
+                    (KeyMap::Prefix(a), KeyMap::Prefix(b)) => KeyMap::Prefix(format!("{a}{b}")),
+                    (KeyMap::Suffix(a), KeyMap::Suffix(b)) => KeyMap::Suffix(format!("{b}{a}")),
                     (f, g) => KeyMap::Compose(Box::new(f), Box::new(g)),
                 }
             }
-            KeyMap::Function(expr) => KeyMap::Function(expr),
+            // A nested compose on the left is flattened by the recursive call
+            // above, so the only remaining work is normalizing both sides.
             other => other,
         }
-    }
-}
-
-/// Evaluate a key mapping function at compile-time.
-/// The function must be pure (string operations only).
-fn eval_key_function(expr: &ast::Expr, input_name: &str) -> Result<String, String> {
-    use ast::ExprKind;
-
-    match &expr.kind {
-        // String literal
-        ExprKind::Lit(ast::Lit::Str(s)) => Ok(s.clone()),
-
-        // Variable reference (the parameter - should be the input name)
-        ExprKind::Var(name) if name == "x" => Ok(input_name.to_string()),
-
-        // String concatenation: a <> b
-        ExprKind::Infix(op, left, right) if op == "<>" => {
-            let left_val = eval_key_function(left, input_name)?;
-            let right_val = eval_key_function(right, input_name)?;
-            Ok(format!("{}{}", left_val, right_val))
-        }
-
-        // Lambda application: (\x -> body) arg
-        ExprKind::App(func, arg) => {
-            if let ExprKind::Lam(param, body) = &func.kind {
-                // Evaluate the argument
-                let arg_val = eval_key_function(arg, input_name)?;
-                // Substitute the parameter with the evaluated argument in the body
-                eval_key_function_subst(body, param, &arg_val)
-            } else {
-                Err("mapKeys function must be pure (only string operations)".into())
-            }
-        }
-
-        // Lambda: \x -> body (unapplied)
-        ExprKind::Lam(param, body) => {
-            // Apply the lambda to the input name
-            eval_key_function_subst(body, param, input_name)
-        }
-
-        // Conditional: if cond then a else b
-        ExprKind::If(cond, then_branch, else_branch) => {
-            // Evaluate condition
-            let cond_val = eval_key_function_bool(cond, input_name)?;
-            if cond_val {
-                eval_key_function(then_branch, input_name)
-            } else {
-                eval_key_function(else_branch, input_name)
-            }
-        }
-
-        _ => Err("mapKeys function must be pure (only string operations allowed)".into()),
-    }
-}
-
-/// Evaluate a boolean expression for conditional key mapping
-fn eval_key_function_bool(expr: &ast::Expr, input_name: &str) -> Result<bool, String> {
-    use ast::ExprKind;
-
-    match &expr.kind {
-        ExprKind::Lit(ast::Lit::Bool(b)) => Ok(*b),
-
-        ExprKind::Infix(op, left, right) if op == "==" => {
-            let left_val = eval_key_function(left, input_name)?;
-            let right_val = eval_key_function(right, input_name)?;
-            Ok(left_val == right_val)
-        }
-
-        ExprKind::Infix(op, left, right) if op == "!=" => {
-            let left_val = eval_key_function(left, input_name)?;
-            let right_val = eval_key_function(right, input_name)?;
-            Ok(left_val != right_val)
-        }
-
-        ExprKind::Infix(op, left, right) if op == "&&" => {
-            let left_val = eval_key_function_bool(left, input_name)?;
-            let right_val = eval_key_function_bool(right, input_name)?;
-            Ok(left_val && right_val)
-        }
-
-        ExprKind::Infix(op, left, right) if op == "||" => {
-            let left_val = eval_key_function_bool(left, input_name)?;
-            let right_val = eval_key_function_bool(right, input_name)?;
-            Ok(left_val || right_val)
-        }
-
-        _ => Err("mapKeys condition must be a boolean expression".into()),
-    }
-}
-
-/// Substitute a parameter with a value in an expression
-fn eval_key_function_subst(expr: &ast::Expr, param: &str, value: &str) -> Result<String, String> {
-    use ast::ExprKind;
-
-    match &expr.kind {
-        ExprKind::Lit(ast::Lit::Str(s)) => Ok(s.clone()),
-
-        ExprKind::Var(name) if name == param => Ok(value.to_string()),
-        ExprKind::Var(name) => Err(format!("unbound variable: {}", name)),
-
-        ExprKind::Infix(op, left, right) if op == "<>" => {
-            let left_val = eval_key_function_subst(left, param, value)?;
-            let right_val = eval_key_function_subst(right, param, value)?;
-            Ok(format!("{}{}", left_val, right_val))
-        }
-
-        _ => Err("mapKeys function body must be a string expression".into()),
     }
 }
 
@@ -264,9 +204,13 @@ impl ValueMap {
     }
 }
 
-/// Reduce a MapKey term when the row is closed.
-/// Returns None if the row is open (contains a variable).
-fn reduce_mapkey(km: &KeyMap, row: &Ty) -> Option<Ty> {
+/// Reduce a MapKey term when the row and the mapper are both known.
+/// Returns None if either is open (contains a variable) — the term is then
+/// *retained*, which is what makes `prefix p` usable for a lambda parameter.
+fn reduce_mapkey(km: &Ty, row: &Ty) -> Option<Ty> {
+    // A variable mapper cannot be applied: there is no closed transformation
+    // yet. The caller retains `keyMap m r` and tries again after binding.
+    let km = KeyMap::of_ty(km)?;
     match row {
         Ty::Empty => Some(Ty::Empty),
         Ty::Row(fields, tail) => {
@@ -301,8 +245,10 @@ fn reduce_mapkey(km: &KeyMap, row: &Ty) -> Option<Ty> {
                 }
                 Ty::Var(_) | Ty::Rigid(..) => None, // Open tail: defer
                 Ty::MapKey(inner_km, inner_row) => {
-                    // Nested MapKey: compose and reduce
-                    let composed = KeyMap::Compose(Box::new(inner_km.clone()), Box::new(km.clone())).normalize();
+                    // Nested MapKey: compose and reduce. `inner_km` runs first
+                    // because it maps the row `inner_row` already produced.
+                    let composed =
+                        Ty::Con("KeyMapCompose", vec![inner_km.as_ref().clone(), km.to_ty()]);
                     reduce_mapkey(&composed, inner_row)
                 }
                 _ => None, // Unexpected tail shape
@@ -311,7 +257,7 @@ fn reduce_mapkey(km: &KeyMap, row: &Ty) -> Option<Ty> {
         Ty::Var(_) | Ty::Rigid(..) => None, // Open row: defer
         Ty::MapKey(inner_km, inner_row) => {
             // Nested MapKey: compose and try to reduce
-            let composed = KeyMap::Compose(Box::new(inner_km.clone()), Box::new(km.clone())).normalize();
+            let composed = Ty::Con("KeyMapCompose", vec![inner_km.as_ref().clone(), km.to_ty()]);
             reduce_mapkey(&composed, inner_row)
         }
         _ => None, // Not a row
@@ -319,8 +265,8 @@ fn reduce_mapkey(km: &KeyMap, row: &Ty) -> Option<Ty> {
 }
 
 /// Reduce a merge of two rows, if both are closed.
-/// Implements the rule: merge old new = old fields with collisions replaced by new,
-/// plus new fields not in old (appended at end).
+/// Implements the rule: merge old new = old fields with collisions replaced by
+/// new, plus new fields not in old (appended at end).
 fn reduce_merge(left: &Ty, right: &Ty) -> Option<Ty> {
     // Extract fields from both sides
     let (left_fields, left_tail) = match left {
@@ -385,18 +331,34 @@ fn reduce_mapvalue(mapper: &ValueMap, row: &Ty) -> Option<Ty> {
     }
 }
 
-
 fn con(n: &'static str) -> Ty {
     Ty::Con(n, vec![])
 }
 fn fun(a: Ty, b: Ty) -> Ty {
     Ty::Fun(Box::new(a), Box::new(b))
 }
+fn directional_string_kind(marker: KeyMarker, m: Ty) -> Ty {
+    let name = match marker {
+        KeyMarker::Prefix => "prefixAffix",
+        KeyMarker::Suffix => "suffixAffix",
+        _ => unreachable!("only prefix and suffix stages carry a mapper"),
+    };
+    Ty::Con(name, vec![m])
+}
 fn query(r: Ty) -> Ty {
     Ty::Con("query", vec![r])
 }
 fn expr(p: Ty, r: Ty, a: Ty) -> Ty {
     Ty::Con("expr", vec![p, r, a])
+}
+/// The type of a projection/update record argument.
+///
+/// Surface signatures spell this as `expr r (row s)`, but a record literal is
+/// not itself a scalar expression.  The extra `fields` slot retains the
+/// record of column expressions that the stage constraint consumes, while
+/// `output` is the row of resulting column values exposed by the signature.
+fn record_expr(p: Ty, r: Ty, fields: Ty, output: Ty) -> Ty {
+    Ty::Con("record_expr", vec![p, r, fields, output])
 }
 fn list(a: Ty) -> Ty {
     Ty::Con("list", vec![a])
@@ -417,6 +379,18 @@ enum Kind {
     ValueMap,
 }
 
+/// The string a type-position literal denotes, if it is one.
+///
+/// Used for the affix of `(prefix "u_")` / `(suffix "_v2")`. A mapper's string
+/// has to be a literal because it decides the output row's labels, so a
+/// variable here is an error the caller reports.
+fn string_literal_of(t: &TypeExpr) -> Option<String> {
+    match t {
+        TypeExpr::Str(s, _) => Some(s.clone()),
+        _ => None,
+    }
+}
+
 /// Compute the kind of a type. Variables and rigid variables look up their
 /// kind in the `vars` vector (passed separately to avoid borrowing issues).
 fn kind_of(t: &Ty, vars: &[VarInfo]) -> Kind {
@@ -424,6 +398,10 @@ fn kind_of(t: &Ty, vars: &[VarInfo]) -> Kind {
         Ty::Var(v) => vars[*v as usize].kind,
         Ty::Rigid(v, _) => vars[*v as usize].kind,
         Ty::Gen(_) => Kind::Type, // schemes handle their own kinding
+        // `prefixAffix` / `suffixAffix` are affix parameters; the mapper is
+        // metadata, so their kind is that of the string they stand for.
+        Ty::Con("prefixAffix" | "suffixAffix", _) => Kind::Type,
+        Ty::Con("KeyMapId" | "KeyMapCompose", _) => Kind::KeyMap,
         Ty::Con(_, _) => Kind::Type,
         Ty::Fun(_, _) => Kind::Type,
         Ty::Row(_, _) => Kind::Row,
@@ -431,6 +409,8 @@ fn kind_of(t: &Ty, vars: &[VarInfo]) -> Kind {
         Ty::MapKey(_, _) => Kind::Row,
         Ty::Merge(_, _) => Kind::Row,
         Ty::MapValue(_, _) => Kind::Row,
+        // A key affix is a `KeyMap`-kinded symbol: the argument of `keyMap`.
+        Ty::KeyAffix(_, _) => Kind::KeyMap,
     }
 }
 
@@ -448,12 +428,38 @@ const CONS: &[(&str, usize)] = &[
     ("list", 1),
     ("query", 1),
     ("expr", 2),
+    ("join", 2),
     ("agg", 1),
     ("win", 1),
     ("winspec", 1),
     ("sortkey", 1),
     ("frame", 0),
     ("bound", 0),
+    // `row s` is the type of a record-of-columns expression, i.e. the argument
+    // of `select`/`update`/`agg`. It is a distinct constructor from `s` itself
+    // because a bare row used as a *value* would be a different (and
+    // nonsensical) thing: `row` marks a row-phase record in expression
+    // position. Its argument is a Row.
+    // `keyMap m r` — the row term for a key mapping. `keymapper m` binds a
+    // mapper variable of kind KeyMap.
+    ("keyMap", 2),
+    ("keymapper", 1),
+    ("prefixAffix", 0),
+    ("suffixAffix", 0),
+    // The key-parameter markers. A key stage reads its key from the
+    // application, where the literal still is, so its parameter carries a
+    // marker instead of a type; `key_stage` recognises it and records the
+    // literal in the stage's constraint or witness.
+    ("key_omit", 0),
+    ("key_prefix", 0),
+    ("key_suffix", 0),
+    ("value_wrapper", 0),
+    // `merge r s` — the row former for a join's output row.
+    ("merge", 2),
+    // `mapValue w r` — the row term for a uniform type wrapper. `w` is the
+    // wrapper marker, read at the application like a key.
+    ("mapValue", 2),
+    ("valuemapper", 1),
 ];
 
 /// Returns the expected kinds for each type constructor's arguments.
@@ -461,6 +467,7 @@ const CONS: &[(&str, usize)] = &[
 fn expected_arg_kinds(con: &str) -> Vec<Kind> {
     match con {
         "query" => vec![Kind::Row],
+        "join" => vec![Kind::Row, Kind::Row],
         "winspec" => vec![Kind::Row],
         "sortkey" => vec![Kind::Row],
         "expr" => vec![Kind::Row, Kind::Type],
@@ -482,7 +489,7 @@ const UNGROUPED: &str = "aggregates cannot mix with ungrouped columns or be `sel
 /// `def_scheme` level costs tens of kilobytes of stack, and a checker runs on
 /// threads as small as a 2 MB test or embedder thread, so this stays well
 /// under that. Real code defines a name before the definitions that use it.
-const MAX_DEF_DEPTH: usize = 48;
+const MAX_DEF_DEPTH: usize = 24;
 
 /// The IR phase a phase type stands for, once it is known.
 fn phase_of(t: &Ty) -> Option<Phase> {
@@ -527,11 +534,32 @@ enum Cons {
     /// `update fields`: like `Project`, but merged over the input row —
     /// listed names replace the ones they match in place, and names the input
     /// does not have are appended.
-    Update { fields: Ty, input: Ty, output: Ty },
+    Update {
+        fields: Ty,
+        input: Ty,
+        /// Row of the updated fields (`s` in the public signature).
+        output: Ty,
+        /// Final row after merging the updates over the input (`merge r s`).
+        result: Ty,
+    },
     /// `omit "k"`: the row equation `input ~ { k : t | output }`. The unifier
     /// solves this with its own leftover rule — there is no bespoke column
     /// computation here.
     Omit { key: String, input: Ty, output: Ty },
+    /// `prefix "s"` / `suffix "s"`: `output ~ keyMap m input`, where `m` is the
+    /// type-level mapper. Usually `m` is the concrete witness the affix names,
+    /// but a helper such as `addPrefix = p => q => q & prefix p` leaves it as a
+    /// variable, so this equation is what binds that variable once the affix is
+    /// known at a use.
+    ///
+    /// With `m` still a variable the term is retained (R-MapKey-Open); with `m`
+    /// concrete and `input` closed the output row is computed here.
+    MapKey {
+        marker: KeyMarker,
+        key: Ty,
+        input: Ty,
+        output: Ty,
+    },
     /// `mapValue "wrapper"`: every column type wrapped by the witness.
     MapValue {
         wrapper: String,
@@ -620,13 +648,26 @@ impl Cons {
                 fields,
                 input,
                 output,
+                result,
             } => Cons::Update {
                 fields: f(fields),
                 input: f(input),
                 output: f(output),
+                result: f(result),
             },
             Cons::Omit { key, input, output } => Cons::Omit {
                 key: key.clone(),
+                input: f(input),
+                output: f(output),
+            },
+            Cons::MapKey {
+                marker,
+                key,
+                input,
+                output,
+            } => Cons::MapKey {
+                marker: *marker,
+                key: f(key),
                 input: f(input),
                 output: f(output),
             },
@@ -876,7 +917,9 @@ fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> M
         probe_fields: None,
         uses: Vec::new(),
         use_types: HashMap::new(),
-        captured_keymap_expr: None,
+        deferred_keys: Vec::new(),
+        affix_mappers: Vec::new(),
+        unify_depth: 0,
     };
     for i in 0..c.env.defs.len() {
         c.def_scheme(m, i);
@@ -962,8 +1005,18 @@ struct Checker<'w> {
     /// printed if the type it was lifted to stays open.
     uses: Vec<(Span, Ty, Option<&'static str>)>,
     use_types: HashMap<(usize, u32, u32), String>,
-    /// Captured keymap/valuemap function expression for type-level evaluation
-    captured_keymap_expr: Option<ast::Expr>,
+    /// Key stages whose affix was not a literal, in the order their key
+    /// arguments were read. `key_stage` consumes one per deferred argument to
+    /// build a term with a fresh mapper variable instead of a concrete affix,
+    /// which is what lets `prefix p` appear in a helper.
+    deferred_keys: Vec<KeyMarker>,
+    /// Mappers named by an `affix m` parameter, one per key argument read.
+    /// `key_stage` consumes one to build the stage's term, so the witness in
+    /// the result type and the mapper the affix names are the same variable.
+    /// Recursion depth of `unify`, to turn a cyclic reduction into a
+    /// diagnostic instead of a stack overflow.
+    unify_depth: usize,
+    affix_mappers: Vec<(KeyMarker, Ty)>,
 }
 fn row_or_tail(fs: Vec<(String, Ty)>, tail: Ty) -> Ty {
     if fs.is_empty() {
@@ -972,7 +1025,6 @@ fn row_or_tail(fs: Vec<(String, Ty)>, tail: Ty) -> Ty {
         row(fs, tail)
     }
 }
-
 fn contains_nullable_expr(t: &TypeExpr) -> bool {
     match t {
         TypeExpr::App { head, args, .. } => {
@@ -983,6 +1035,8 @@ fn contains_nullable_expr(t: &TypeExpr) -> bool {
         }
         TypeExpr::Record { fields, .. } => fields.iter().any(|(_, t)| contains_nullable_expr(t)),
         TypeExpr::Fun(a, b) => contains_nullable_expr(a) || contains_nullable_expr(b),
+        // A type-position string is an affix, not an expression type.
+        TypeExpr::Str(..) => false,
         TypeExpr::Error(_) => false,
     }
 }
@@ -1066,30 +1120,47 @@ impl<'w> Checker<'w> {
                     cur = self.resolve(&tail);
                 }
                 Ty::MapKey(km, row) => {
-                    // Try to reduce the MapKey
+                    // Resolve both components before trying to reduce. A
+                    // pipeline often binds the mapper and inner row through
+                    // separate applications, so leaving either child as a
+                    // variable makes an otherwise closed term look open.
+                    let km = self.resolve(&km);
+                    let row = self.resolve(&row);
                     if let Some(reduced) = reduce_mapkey(&km, &row) {
                         cur = reduced;
                     } else {
                         // Cannot reduce yet; return MapKey as tail
-                        return (fs, Ty::MapKey(km, row));
+                        return (fs, Ty::MapKey(Box::new(km), Box::new(row)));
                     }
                 }
                 Ty::Merge(left, right) => {
-                    // Try to reduce the Merge
+                    // Resolve both operands before reducing. A join binds
+                    // each side through separate constraints, so the merge
+                    // often becomes closed only after this term was built.
+                    let left = self.resolve(&left);
+                    let right = self.resolve(&right);
+                    // A row tail can itself be a row after unification
+                    // (`{ id | tail }` with a closed input). Flatten those
+                    // nested tails before asking the first-order reducer
+                    // whether both merge operands are closed.
+                    let (lf, lt) = self.flatten(&left);
+                    let (rf, rt) = self.flatten(&right);
+                    let left = row_or_tail(lf, lt);
+                    let right = row_or_tail(rf, rt);
                     if let Some(reduced) = reduce_merge(&left, &right) {
                         cur = reduced;
                     } else {
                         // Cannot reduce yet; return Merge as tail
-                        return (fs, Ty::Merge(left, right));
+                        return (fs, Ty::Merge(Box::new(left), Box::new(right)));
                     }
                 }
                 Ty::MapValue(vm, row) => {
-                    // Try to reduce the MapValue
+                    let row = self.resolve(&row);
                     if let Some(reduced) = reduce_mapvalue(&vm, &row) {
                         cur = reduced;
                     } else {
                         // Cannot reduce yet; return MapValue as tail
-                        return (fs, Ty::MapValue(vm, row));
+                        return (fs, Ty::MapValue(vm, Box::new(row)));
                     }
                 }
                 other => return (fs, other),
@@ -1107,12 +1178,18 @@ impl<'w> Checker<'w> {
                 row_or_tail(fs, tail)
             }
             Ty::MapKey(km, row) => {
+                // Resolve *both* sides before reducing. The mapper may have
+                // been an unbound variable when the term was built and bound
+                // since (that is how a deferred `prefix p` becomes concrete),
+                // so passing the unresolved `km` here would miss the reduction.
+                let km = self.zonk(&km);
                 let row = self.zonk(&row);
-                // Try to reduce after zonking
-                if let Some(reduced) = reduce_mapkey(&km, &row) {
-                    self.zonk(&reduced)
-                } else {
-                    Ty::MapKey(km, Box::new(row))
+                // The reduced form is *not* zonked recursively: a row whose
+                // tail is still a `keyMap` would otherwise re-enter this arm on
+                // the same term forever.
+                match reduce_mapkey(&km, &row) {
+                    Some(reduced) => self.zonk(&reduced),
+                    None => Ty::MapKey(Box::new(km), Box::new(row)),
                 }
             }
             Ty::Merge(left, right) => {
@@ -1205,35 +1282,195 @@ impl<'w> Checker<'w> {
     }
 
     /// Unify `actual` with `expected` (the order only affects messages).
+    /// Reduce a `keyMap` term on either side of a unification, if it can be
+    /// reduced. Returns the replacement pair, or `None` when neither side is a
+    /// reducible term.
+    ///
+    /// This is R-MapKey-Closed/Compose applied at the point where the row
+    /// becomes known: a key stage may have been registered against an
+    /// unresolved row and retained its term, and the binding that completes the
+    /// row happens during a later unification.
+    ///
+    /// The term's stored row is resolved first, because it was captured when
+    /// the stage ran, which may have been before the row's tail was bound. That
+    /// resolution is what turns a retained `keyMap m r` into a reducible one.
+    fn reduce_mapkey_pair(&mut self, a: &Ty, e: &Ty) -> Option<(Ty, Ty)> {
+        match (a, e) {
+            // Two `keyMap` terms unify structurally, not by reduction: their
+            // mappers and rows are unified in turn, which is what lets an
+            // unbound mapper variable adopt a concrete witness. Only a `keyMap`
+            // facing something *other* than a `keyMap` is a reduction.
+            (Ty::MapKey(..), Ty::MapKey(..)) => None,
+            (Ty::MapKey(km, row), other) => {
+                // Only a *concrete* mapper can reduce. A variable mapper has no
+                // transformation to apply, and trying anyway is how a deferred
+                // term turns into a cycle.
+                let km = self.resolve(km);
+                KeyMap::of_ty(&km)?;
+                let row = self.resolve(row);
+                let reduced = reduce_mapkey(&km, &row)?;
+                if matches!(&reduced, Ty::MapKey(..)) {
+                    return None;
+                }
+                Some((reduced, other.clone()))
+            }
+            (other, Ty::MapKey(km, row)) => {
+                let km = self.resolve(km);
+                KeyMap::of_ty(&km)?;
+                let row = self.resolve(row);
+                let reduced = reduce_mapkey(&km, &row)?;
+                if matches!(&reduced, Ty::MapKey(..)) {
+                    return None;
+                }
+                Some((other.clone(), reduced))
+            }
+            _ => None,
+        }
+    }
+
     fn unify(&mut self, actual: &Ty, expected: &Ty) -> U {
+        // A `keyMap` term can reduce into another `keyMap` term, so unification
+        // needs a depth bound: without one, a cyclic reduction overflows the
+        // stack instead of reporting a type error. The bound is generous enough
+        // that no real term reaches it.
+        const MAX_UNIFY_DEPTH: usize = 512;
+        if self.unify_depth >= MAX_UNIFY_DEPTH {
+            return Err("type is too deeply nested to unify; a `keyMap` term may \
+                        reduce in a cycle"
+                .into());
+        }
+        self.unify_depth += 1;
+        let r = self.unify_inner(actual, expected);
+        self.unify_depth -= 1;
+        r
+    }
+
+    fn unify_inner(&mut self, actual: &Ty, expected: &Ty) -> U {
         let (a, e) = (
             self.resolve_compress(actual),
             self.resolve_compress(expected),
         );
-        // Kind check before unifying
+        // Kind check before unifying.
+        //
+        // A *variable* has not committed to a kind yet: `self.fresh()` creates
+        // an unconstrained one, and it is the use that decides what it is. So a
+        // variable adopts the other side's kind instead of clashing with it —
+        // which is what lets a lambda parameter be inferred as a row, as in
+        // `_&=_ = q => fields => select fields q`. Only two *concrete* types of
+        // different kinds are a genuine error.
         let kind_a = kind_of(&a, &self.vars);
         let kind_e = kind_of(&e, &self.vars);
         if kind_a != kind_e {
-            return Err(format!(
-                "kind mismatch: cannot unify {:?} with {:?}",
-                kind_a, kind_e
-            ));
+            match (&a, &e) {
+                // Two uncommitted variables: neither has decided, so adopt the
+                // more specific kind and let the binding carry it. Reached when
+                // an inferred lambda parameter is later used as a row.
+                (Ty::Var(v), Ty::Var(w)) => {
+                    let kind = if kind_a == Kind::Type { kind_e } else { kind_a };
+                    self.vars[*v as usize].kind = kind;
+                    self.vars[*w as usize].kind = kind;
+                }
+                (Ty::Var(v), _) => {
+                    self.vars[*v as usize].kind = kind_e;
+                }
+                (_, Ty::Var(v)) => {
+                    self.vars[*v as usize].kind = kind_a;
+                }
+                _ => {
+                    return Err(format!(
+                        "kind mismatch: cannot unify {:?} with {:?}",
+                        kind_a, kind_e
+                    ))
+                }
+            }
         }
+        // R-MapKey-Closed: `keyMap m row` reduces as soon as `row` is known.
+        //
+        // A key stage is registered while its input may still be an unresolved
+        // variable, in which case the term is retained (R-MapKey-Open). The
+        // binding that completes the row happens later, so the reduction has to
+        // be attempted here, when either side of a unification still carries a
+        // reducible term. The term's stored row is resolved first, since it was
+        // captured before the tail was bound.
         match (&a, &e) {
             (Ty::Var(v), _) => self.bind(*v, e.clone()),
             (_, Ty::Var(v)) => self.bind(*v, a.clone()),
             (Ty::Rigid(x, _), Ty::Rigid(y, _)) if x == y => Ok(()),
             (Ty::Empty, Ty::Empty) => Ok(()),
-            (Ty::Row(..), Ty::Row(..) | Ty::Empty | Ty::Rigid(..) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..))
-            | (Ty::Empty | Ty::Rigid(..) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..), Ty::Row(..))
-            | (Ty::MapKey(..), Ty::MapKey(..) | Ty::Empty | Ty::Rigid(..) | Ty::Merge(..) | Ty::MapValue(..))
-            | (Ty::Merge(..), Ty::Merge(..) | Ty::MapKey(..) | Ty::Empty | Ty::Rigid(..) | Ty::MapValue(..))
-            | (Ty::MapValue(..), Ty::MapValue(..) | Ty::MapKey(..) | Ty::Merge(..) | Ty::Empty | Ty::Rigid(..)) => self.unify_rows(&a, &e),
+            // Two affixes unify when they are the same constructor applied to
+            // the same literal — `prefix "u_"` with `prefix "u_"`. Different
+            // affixes are a genuine mismatch, reported as such.
+            (Ty::KeyAffix(ca, sa), Ty::KeyAffix(cb, sb)) if ca == cb && sa == sb => Ok(()),
+            // Two symbolic row terms unify componentwise. This must be checked
+            // before the one-sided reduction arm below: otherwise the wildcard
+            // would swallow this case and leave the mapper variables unrelated.
+            (Ty::MapKey(km_a, row_a), Ty::MapKey(km_b, row_b)) => {
+                let (ka, kb) = (km_a.as_ref().clone(), km_b.as_ref().clone());
+                let (ra, rb) = (row_a.as_ref().clone(), row_b.as_ref().clone());
+                self.unify(&ka, &kb)?;
+                self.unify(&ra, &rb)
+            }
+            // Open row formers must unify structurally. Sending two
+            // unresolved `merge`/`mapValue` terms through `unify_rows` would
+            // flatten each one back to itself and recurse forever.
+            (Ty::Merge(al, ar), Ty::Merge(el, er)) => {
+                let (al, ar, el, er) = (al.clone(), ar.clone(), el.clone(), er.clone());
+                self.unify(&al, &el)?;
+                self.unify(&ar, &er)
+            }
+            (Ty::MapValue(av, ar), Ty::MapValue(ev, er)) if av == ev => {
+                let (ar, er) = (ar.clone(), er.clone());
+                self.unify(&ar, &er)
+            }
+            // A `keyMap` term facing a concrete row reduces first, so a stage's
+            // `query (keyMap (prefix "u_") s)` and an annotation's
+            // `query { u_id = … }` are the same type. This must come before the
+            // `unify_rows` arm: flattening there would compare the term's *inner*
+            // (unrenamed) row instead of the row the rewrite produces.
+            (Ty::MapKey(..), _other) | (_other, Ty::MapKey(..)) => {
+                let (ra, re) = (a.clone(), e.clone());
+                match self.reduce_mapkey_pair(&ra, &re) {
+                    // Reduced: unify the row the rewrite produces.
+                    Some(pair) if pair.0 != ra || pair.1 != re => self.unify(&pair.0, &pair.1),
+                    // Not reducible *yet*: the mapper or the row is still open.
+                    //
+                    // Comparing the term's inner row here would be wrong — that
+                    // row has not been renamed — and it is what produced "no
+                    // column `u_id`" for a stage that was about to be correct.
+                    // Leaving the comparison satisfied-and-pending is safe: the
+                    // stage registered a `Cons::MapKey` equation, so `solve`
+                    // retries once the mapper and the row are both known, and
+                    // any genuine mismatch is reported then.
+                    _ => Ok(()),
+                }
+            }
+            (
+                Ty::Row(..),
+                Ty::Row(..) | Ty::Empty | Ty::Rigid(..) | Ty::Merge(..) | Ty::MapValue(..),
+            )
+            | (Ty::Empty | Ty::Rigid(..) | Ty::Merge(..) | Ty::MapValue(..), Ty::Row(..))
+            | (Ty::Merge(..), Ty::Empty | Ty::Rigid(..) | Ty::MapValue(..))
+            | (Ty::MapValue(..), Ty::MapValue(..) | Ty::Merge(..) | Ty::Empty | Ty::Rigid(..)) => {
+                self.unify_rows(&a, &e)
+            }
             (Ty::Con(x, xs), Ty::Con(y, ys)) if x == y && xs.len() == ys.len() => {
                 for (p, q) in xs.clone().iter().zip(ys.clone().iter()) {
                     self.unify(p, q)?;
                 }
                 Ok(())
+            }
+            // Directional affix parameters are strings at the surface. The
+            // mapper they carry is metadata used to type the result row.
+            (Ty::Con("prefixAffix" | "suffixAffix", _), Ty::Con("string", _))
+            | (Ty::Con("string", _), Ty::Con("prefixAffix" | "suffixAffix", _)) => Ok(()),
+            (Ty::Con(ca, am), Ty::Con(cb, bm))
+                if matches!(*ca, "prefixAffix" | "suffixAffix")
+                    && matches!(*cb, "prefixAffix" | "suffixAffix")
+                    && ca == cb
+                    && am.len() == 1
+                    && bm.len() == 1 =>
+            {
+                self.unify(&am[0], &bm[0])
             }
             (Ty::Fun(a1, r1), Ty::Fun(a2, r2)) => {
                 let (a1, r1, a2, r2) = (a1.clone(), r1.clone(), a2.clone(), r2.clone());
@@ -1265,12 +1502,20 @@ impl<'w> Checker<'w> {
         let closed = |t: &Ty| !matches!(t, Ty::Var(_));
         if let Some((l, _)) = only_a.first() {
             if closed(&te) {
-                return Err(missing(l, &fe));
+                return if self.probe.is_some() {
+                    Ok(())
+                } else {
+                    Err(missing(l, &fe))
+                };
             }
         }
         if let Some((l, _)) = only_e.first() {
             if closed(&ta) {
-                return Err(missing(l, &fa));
+                return if self.probe.is_some() {
+                    Ok(())
+                } else {
+                    Err(missing(l, &fa))
+                };
             }
         }
         match (only_a.is_empty(), only_e.is_empty()) {
@@ -1381,6 +1626,11 @@ impl<'w> Checker<'w> {
         self.active.pop();
         let scheme = match r {
             Ok(t) => {
+                // Constraints can bind the row after inference has built a
+                // symbolic `keyMap` term. Normalize the completed type before
+                // generalization so closed rows expose their mapped fields
+                // instead of retaining a redundant wrapper around them.
+                let t = self.zonk(&t);
                 // Open overloads become holes, numbered in constraint order.
                 let mut cons = Vec::new();
                 let mut k = 0;
@@ -1445,10 +1695,55 @@ impl<'w> Checker<'w> {
             // A primitive's signature is its type: the type annotation is required
             // and describes the primitive's behavior.
             return match ann {
-                Some(t) => Ok(t),
+                Some(t) => {
+                    // Projection primitives expose `expr r (row s)` at the
+                    // surface, while their internal type carries the row of
+                    // field expressions separately so the constraint solver
+                    // can validate and lower the stage.
+                    let internal = match &def.body.kind {
+                        ExprKind::Primitive(name) => {
+                            let p = match name.as_str() {
+                                "__where" => Some(Prim::Where),
+                                "__select" => Some(Prim::Select),
+                                "__agg" => Some(Prim::AggStage),
+                                "__update" => Some(Prim::Update),
+                                "__innerJoin" => Some(Prim::Join(JoinKind::Inner)),
+                                "__leftJoin" => Some(Prim::Join(JoinKind::Left)),
+                                "__rightJoin" => Some(Prim::Join(JoinKind::Right)),
+                                "__fullJoin" => Some(Prim::Join(JoinKind::Full)),
+                                "__semiJoin" => Some(Prim::Join(JoinKind::Semi)),
+                                "__antiJoin" => Some(Prim::Join(JoinKind::Anti)),
+                                _ => None,
+                            };
+                            p.map(|p| self.prim_type(p, def.body.span))
+                        }
+                        _ => None,
+                    };
+                    if let Some(internal) = internal {
+                        if matches!(
+                            &def.body.kind,
+                            ExprKind::Primitive(name)
+                                if matches!(
+                                    name.as_str(),
+                                    "__innerJoin" | "__leftJoin" | "__rightJoin"
+                                        | "__fullJoin" | "__semiJoin" | "__antiJoin"
+                                )
+                        ) {
+                            return Ok(internal);
+                        }
+                        self.span = def.body.span;
+                        self.coerce(&internal, &t)
+                            .map_err(|msg| {
+                                format!("`{}` does not match its signature: {msg}", def.name)
+                            })
+                            .map_err(at(def.body.span))?;
+                        return Ok(t);
+                    }
+                    Ok(t)
+                }
                 None => Err(at(def.span)(format!(
                     "`{}` needs a type signature: a `primitive` takes its type \
-                     from it, e.g. `{} : query r -> query r' = primitive \"mapKeys\"`",
+                     from it, e.g. `{} : query r -> query r' = primitive \"__prefix\"`",
                     def.name, def.name
                 ))),
             };
@@ -1655,6 +1950,11 @@ impl<'w> Checker<'w> {
                 out.push('g');
                 out.push_str(&v.to_string());
             }
+            Ty::KeyAffix(n, s) => {
+                out.push_str(n);
+                out.push_str(&s);
+                out.push('\'');
+            }
             Ty::Con(n, args) => {
                 out.push_str(n);
                 out.push('(');
@@ -1682,7 +1982,7 @@ impl<'w> Checker<'w> {
                 out.push(')');
             }
             Ty::MapKey(m, r) => {
-                out.push_str("mapkey(");
+                out.push_str("keyMap(");
                 out.push_str(&format!("{:?}", m));
                 out.push(',');
                 self.fingerprint_into(&r, out);
@@ -1824,6 +2124,20 @@ impl<'w> Checker<'w> {
         match t {
             TypeExpr::App { head, args, .. } => {
                 let Some(&(name, arity)) = CONS.iter().find(|(n, _)| *n == head.as_str()) else {
+                    // `row s` marks a *record of columns* in expression
+                    // position, as in `select : expr r (row s) -> ...`. It is a
+                    // one-argument wrapper whose argument is a Row, and it is
+                    // erased on conversion — `row s` becomes the row `s`, so the
+                    // same variable can also appear in `query s`. It is handled
+                    // here rather than in `CONS` because `row` is also a
+                    // zero-argument internal phase marker (`con("row")`), and
+                    // registering it as a constructor would shadow that.
+                    if head == "row" {
+                        if args.len() != 1 {
+                            return Err("`row` takes one type argument".into());
+                        }
+                        return self.conv_with_kind(&args[0], phase, names, Kind::Row);
+                    }
                     if args.is_empty() {
                         return Ok(self.rigid(head, names));
                     }
@@ -1838,8 +2152,80 @@ impl<'w> Checker<'w> {
                 match name {
                     "expr" => {
                         let r = self.conv(&args[0], phase, names)?;
+                        // `expr r (row s)` is the public spelling for a
+                        // record of column expressions used by select/update/
+                        // agg. Keep the field-expression row separate from
+                        // the output row so the stage constraint can validate
+                        // each expression and compute its value type.
+                        if let TypeExpr::App {
+                            head,
+                            args: row_args,
+                            ..
+                        } = &args[1]
+                        {
+                            if head == "row" {
+                                if row_args.len() != 1 {
+                                    return Err("`row` takes one type argument".into());
+                                }
+                                let output =
+                                    self.conv_with_kind(&row_args[0], phase, names, Kind::Row)?;
+                                return Ok(record_expr(phase.clone(), r, self.fresh_row(), output));
+                            }
+                        }
                         let a = self.conv(&args[1], phase, names)?;
                         Ok(expr(phase.clone(), r, a))
+                    }
+                    // `keyMap m r` is the row term for applying mapper `m` to
+                    // row `r`. Both arguments are kinded: `m` is `KeyMap`, `r`
+                    // is `Row`, and the result is a `Row`.
+                    "keyMap" => {
+                        let m = self.conv_keymap(&args[0], names)?;
+                        if kind_of(&m, &self.vars) != Kind::KeyMap {
+                            return Err(
+                                "kind mismatch: `keyMap` expects a mapper of kind `KeyMap`".into(),
+                            );
+                        }
+                        let r = self.conv_with_kind(&args[1], phase, names, Kind::Row)?;
+                        // R-KeyMap-Closed applies here too: a `keyMap` written
+                        // in a signature with a known row reduces at once, so
+                        // `keyMap (prefix "u_") { id = int }` reads as the
+                        // renamed row rather than staying symbolic.
+                        match reduce_mapkey(&m, &r) {
+                            Some(reduced) => Ok(reduced),
+                            None => Ok(Ty::MapKey(Box::new(m), Box::new(r))),
+                        }
+                    }
+                    // `merge r s` — right wins on a name collision, and names
+                    // only in `s` are appended. A row former, like `Ty::Merge`.
+                    "merge" => {
+                        let l = self.conv_with_kind(&args[0], phase, names, Kind::Row)?;
+                        let r = self.conv_with_kind(&args[1], phase, names, Kind::Row)?;
+                        Ok(Ty::Merge(Box::new(l), Box::new(r)))
+                    }
+                    // `mapValue w r` — wrap every field type of `r` with the
+                    // wrapper `w`. The wrapper is read at the application, so a
+                    // variable here is not a value wrapper the checker can use.
+                    "mapValue" => {
+                        let w = self.conv_valuemap(&args[0])?;
+                        let r = self.conv_with_kind(&args[1], phase, names, Kind::Row)?;
+                        Ok(Ty::MapValue(w, Box::new(r)))
+                    }
+                    // `keymapper m` introduces a `KeyMap`-kinded variable `m`,
+                    // for a signature that takes a mapper as an argument:
+                    //   keyMap : keymapper m -> query r -> query (keyMap m r)
+                    "keymapper" | "valuemapper" => {
+                        let TypeExpr::App { head, args, .. } = &args[0] else {
+                            return Err(format!("`{name}` needs a type variable"));
+                        };
+                        if !args.is_empty() {
+                            return Err(format!("`{name}` needs a bare type variable"));
+                        }
+                        let kind = if name == "keymapper" {
+                            Kind::KeyMap
+                        } else {
+                            Kind::ValueMap
+                        };
+                        Ok(self.rigid_with_kind(head, names, kind))
                     }
                     "agg" | "win" => match &args[0] {
                         TypeExpr::App {
@@ -1886,6 +2272,14 @@ impl<'w> Checker<'w> {
                 self.conv(a, phase, names)?,
                 self.conv(b, phase, names)?,
             )),
+            // A string is only meaningful as a key mapper's affix, which
+            // `conv_keymap` handles; anywhere else it is a type-position
+            // mistake rather than something to accept silently.
+            TypeExpr::Str(_, sp) => Err(format!(
+                "a string is not a type here; it is only used as a key mapper's affix, \
+                 as in `keyMap (prefix \"u_\") r` (at byte {})",
+                sp.start
+            )),
             TypeExpr::Error(_) => Ok(self.fresh()),
         }
     }
@@ -1899,7 +2293,16 @@ impl<'w> Checker<'w> {
     ) -> Result<Ty, String> {
         match t {
             TypeExpr::App { head, args, .. } => {
-                let Some(&(name, arity)) = CONS.iter().find(|(n, _)| *n == head.as_str()) else {
+                // `row s` is the record-in-expression-position marker; its
+                // argument is a Row regardless of the kind expected here. See
+                // the same case in `conv`.
+                if head == "row" {
+                    if args.len() != 1 {
+                        return Err("`row` takes one type argument".into());
+                    }
+                    return self.conv_with_kind(&args[0], phase, names, Kind::Row);
+                }
+                let Some(&(_name, _arity)) = CONS.iter().find(|(n, _)| *n == head.as_str()) else {
                     if args.is_empty() {
                         return Ok(self.rigid_with_kind(head, names, expected_kind));
                     }
@@ -1924,14 +2327,124 @@ impl<'w> Checker<'w> {
                 };
                 Ok(row_or_tail(fs, tail))
             }
-            TypeExpr::Fun(_, _) | TypeExpr::Error(_) => {
+            TypeExpr::Fun(_, _) | TypeExpr::Error(_) | TypeExpr::Str(_, _) => {
                 self.conv(t, phase, names)
             }
         }
     }
 
+    /// Convert a `ValueMap`-kinded symbol: `(AsNullable)`, `(AsList)`, `(Id)`.
+    /// Like a key mapper, the wrapper is closed data read at the application.
+    fn conv_valuemap(&mut self, t: &TypeExpr) -> Result<ValueMap, String> {
+        let TypeExpr::App { head, args, .. } = t else {
+            return Err("expected a value wrapper, such as `(AsNullable)`".into());
+        };
+        if !args.is_empty() {
+            return Err(format!("`{head}` takes no type argument"));
+        }
+        match head.as_str() {
+            "AsNullable" => Ok(ValueMap::AsNullable),
+            "AsList" => Ok(ValueMap::AsList),
+            "Id" => Ok(ValueMap::Id),
+            other => Err(format!(
+                "unknown value wrapper `{other}`; expected `Id`, `(AsNullable)`, or `(AsList)`"
+            )),
+        }
+    }
+
     fn rigid(&mut self, name: &str, names: &mut HashMap<String, Ty>) -> Ty {
         self.rigid_with_kind(name, names, Kind::Type)
+    }
+    /// Convert a `KeyMap`-kinded type symbol: `(prefix "u_")`, `(suffix "s")`,
+    /// `(compose f g)`, `id`, or a bare *variable* of kind `KeyMap`.
+    ///
+    /// The result is a `Ty`, not a closed `KeyMap`, because a signature may be
+    /// polymorphic in the mapping: `keyMap m r` with `m` a variable is how a
+    /// helper such as `addPrefix = p => q => q & prefix p` is typed. The term
+    /// is retained with the variable in place and reduces once that variable is
+    /// bound to a constructor.
+    ///
+    /// A concrete `prefix`/`suffix` mapper needs a **literal** affix: it decides the
+    /// output row's labels, so there has to be something to apply. A variable
+    /// is accepted precisely because it is deferred rather than applied.
+    fn conv_keymap(&mut self, t: &TypeExpr, names: &mut HashMap<String, Ty>) -> Result<Ty, String> {
+        let TypeExpr::App { head, args, .. } = t else {
+            return Err("expected a key mapper, such as `(prefix \"u_\")`".into());
+        };
+        match head.as_str() {
+            "id" => {
+                if !args.is_empty() {
+                    return Err("`id` takes no type argument".into());
+                }
+                Ok(KeyMap::Id.to_ty())
+            }
+            "prefix" | "suffix" => {
+                let [arg] = args.as_slice() else {
+                    return Err(format!("`{head}` takes one type argument, the affix"));
+                };
+                // A variable affix cannot be a witness: the affix decides the
+                // output labels, so it must be known here.
+                let affix = string_literal_of(arg).ok_or_else(|| {
+                    format!(
+                        "`{head}` needs a string literal affix, such as `({head} \"u_\")`: \
+                         the mapping is part of the type, so it must be known when the \
+                         query is checked"
+                    )
+                })?;
+                let km = if head == "prefix" {
+                    KeyMap::Prefix(affix)
+                } else {
+                    KeyMap::Suffix(affix)
+                };
+                Ok(km.to_ty())
+            }
+            "compose" => {
+                let [f, g] = args.as_slice() else {
+                    return Err("`compose` takes two key mappers".into());
+                };
+                // Fusing two *concrete* mappers is sound and cheap; if either is
+                // a variable the composition stays symbolic.
+                let f = self.conv_keymap(f, names)?;
+                let g = self.conv_keymap(g, names)?;
+                match (KeyMap::of_ty(&f), KeyMap::of_ty(&g)) {
+                    (Some(f), Some(g)) => Ok(KeyMap::Compose(Box::new(f), Box::new(g)).to_ty()),
+                    _ => Ok(Ty::Con("KeyMapCompose", vec![f, g])),
+                }
+            }
+            other => {
+                // The mapper constructors are deliberately lowercase surface
+                // forms. Keep the former capitalized spellings out of the
+                // fallback for bare mapper variables, so they cannot quietly
+                // act as aliases (especially `Id`, which has no arguments).
+                if matches!(other, "Id" | "Prefix" | "Suffix" | "Compose") {
+                    return Err(format!(
+                        "unknown key mapper `{other}`; expected `id`, `(prefix \"s\")`, \
+                         `(suffix \"s\")`, `(compose f g)`, or a mapper variable"
+                    ));
+                }
+                if args.is_empty() {
+                    // Known type/value constructors are not mapper variables.
+                    // Rejecting them here keeps the four kinds disjoint even
+                    // though both a mapper variable and a type variable are
+                    // represented by a bare identifier in the syntax.
+                    if CONS
+                        .iter()
+                        .any(|(name, arity)| *name == other && *arity == 0)
+                        || matches!(other, "AsNullable" | "AsList")
+                    {
+                        return Err(format!("kind mismatch: `{other}` is not a key mapper"));
+                    }
+                    // A bare variable of kind KeyMap, bound by `keymapper` in a
+                    // signature or inferred at a use. This is the deferred case:
+                    // it carries no transformation yet.
+                    return Ok(self.rigid_with_kind(other, names, Kind::KeyMap));
+                }
+                Err(format!(
+                    "unknown key mapper `{other}`; expected `id`, `(prefix \"s\")`, \
+                     `(suffix \"s\")`, `(compose f g)`, or a mapper variable"
+                ))
+            }
+        }
     }
 
     fn rigid_with_kind(&mut self, name: &str, names: &mut HashMap<String, Ty>, kind: Kind) -> Ty {
@@ -1979,6 +2492,7 @@ impl<'w> Checker<'w> {
                 map.insert(k, n.clone());
                 n
             }
+            Ty::KeyAffix(n, s) => Ty::KeyAffix(n, s.clone()),
             Ty::Con(n, args) => Ty::Con(n, args.iter().map(|a| self.inst(a, map, gens)).collect()),
             Ty::Fun(a, b) => fun(self.inst(&a, map, gens), self.inst(&b, map, gens)),
             Ty::Row(fs, tail) => {
@@ -1988,7 +2502,12 @@ impl<'w> Checker<'w> {
                     .collect();
                 row(fs, self.inst(&tail, map, gens))
             }
-            Ty::MapKey(km, row) => Ty::MapKey(km, Box::new(self.inst(&row, map, gens))),
+            // The mapper is instantiated too: a use of a deferred `prefix p` gets
+            // its own mapper variable, which the affix argument then binds.
+            Ty::MapKey(km, row) => Ty::MapKey(
+                Box::new(self.inst(&km, map, gens)),
+                Box::new(self.inst(&row, map, gens)),
+            ),
             Ty::Merge(left, right) => Ty::Merge(
                 Box::new(self.inst(&left, map, gens)),
                 Box::new(self.inst(&right, map, gens)),
@@ -2036,6 +2555,7 @@ impl<'w> Checker<'w> {
                 });
                 Ty::Gen(k)
             }
+            Ty::KeyAffix(n, s) => Ty::KeyAffix(n, s.clone()),
             Ty::Con(n, args) => Ty::Con(n, args.iter().map(|a| self.gen(a, map, gens)).collect()),
             Ty::Fun(a, b) => fun(self.gen(&a, map, gens), self.gen(&b, map, gens)),
             Ty::Row(fs, tail) => {
@@ -2045,7 +2565,13 @@ impl<'w> Checker<'w> {
                     .collect();
                 row(fs, self.gen(&tail, map, gens))
             }
-            Ty::MapKey(km, row) => Ty::MapKey(km, Box::new(self.gen(&row, map, gens))),
+            // The mapper is generalized too: it may be a variable (a deferred
+            // `prefix p`), and quantifying it is what gives each use its own
+            // fresh mapper that the affix argument can then bind.
+            Ty::MapKey(km, row) => Ty::MapKey(
+                Box::new(self.gen(&km, map, gens)),
+                Box::new(self.gen(&row, map, gens)),
+            ),
             Ty::Merge(left, right) => Ty::Merge(
                 Box::new(self.gen(&left, map, gens)),
                 Box::new(self.gen(&right, map, gens)),
@@ -2133,37 +2659,96 @@ impl<'w> Checker<'w> {
                 // The key arguments of the key stages, read below.
                 let mut keys: Vec<(&'static str, String)> = Vec::new();
                 for arg in args {
-                    // A key argument (`omit "k"`, `mapKeys "p" "r"`) names a
-                    // column, so its value has to be known when the query is
-                    // checked. It is read here, where the syntax still is, and
+                    // A key argument (`omit "k"`, `prefix "p"`, or `suffix "s"`)
+                    // names a column, so its value has to be known when the
+                    // query is checked. It is read here, where the syntax still is, and
                     // recorded in the stage's constraint — which keeps column
                     // names out of the type language entirely. A computed key
                     // cannot name a column, so it is refused rather than
                     // deferred. See docs/KEYMAP-DESIGN.md §4.
                     if let Ty::Fun(p, r) = self.resolve(&ft) {
-                        if let Some(marker) = key_marker(&p) {
-                            // For keymap, key_function, and valuemap, capture the entire expression
-                            if marker == "keymap" || marker == "key_function" || marker == "valuemap" {
-                                // Store the expression AST for later use
-                                let expr_str = format!("{:?}", arg);
-                                keys.push((marker, expr_str));
-                                self.captured_keymap_expr = Some(arg.clone());
-                                self.span = arg.span;
-                                ft = *r;
-                                self.key_stage(&keys, &ft)?;
-                                self.solve()?;
-                                continue;
+                        // A directional affix parameter is a string that names
+                        // the mapper `m`, which the result type uses
+                        // (`query (keyMap m r)`). Carrying the mapper is what
+                        // lets `prefix p` stay tied to the row it produces —
+                        // the argument's type is what binds `m`.
+                        let marker = match (&*p, KeyMarker::of(&p)) {
+                            (Ty::Con("prefixAffix", args), _) if args.is_empty() => {
+                                Some((KeyMarker::Prefix, None))
                             }
-
-                            // For other markers, expect a literal string
-                            let ExprKind::Lit(ast::Lit::Str(s)) = &arg.kind else {
-                                return Err(TyErr {
-                                    span: arg.span,
-                                    msg: key_marker_msg(marker),
-                                });
+                            (Ty::Con("suffixAffix", args), _) if args.is_empty() => {
+                                Some((KeyMarker::Suffix, None))
+                            }
+                            (Ty::Con("prefixAffix", args), _) if args.len() == 1 => {
+                                Some((KeyMarker::Prefix, Some(args[0].clone())))
+                            }
+                            (Ty::Con("suffixAffix", args), _) if args.len() == 1 => {
+                                Some((KeyMarker::Suffix, Some(args[0].clone())))
+                            }
+                            (_, Some(m)) => Some((m, None)),
+                            _ => None,
+                        };
+                        if let Some((marker, carried)) = marker {
+                            // A key argument names a column or supplies a label
+                            // fragment. When it is a literal, read it here where
+                            // the syntax still is and record it in the stage's
+                            // witness. When it is *not* a literal the mapping
+                            // cannot be applied yet, so the stage is deferred
+                            // and the argument's type is what carries the mapper
+                            // — which is what types `addPrefix = p => q => q &
+                            // prefix p`.
+                            let affix = match &arg.kind {
+                                ExprKind::Lit(ast::Lit::Str(s)) => Some(s.clone()),
+                                _ => None,
                             };
-                            keys.push((marker, s.clone()));
                             self.span = arg.span;
+                            match (marker, affix) {
+                                // `omit` needs the column name now: it is a row
+                                // equation, and there is no deferring away the
+                                // fact that the equation names a column.
+                                (KeyMarker::Omit, None) => {
+                                    return Err(TyErr {
+                                        span: arg.span,
+                                        msg: marker.literal_msg(),
+                                    });
+                                }
+                                (KeyMarker::Prefix | KeyMarker::Suffix, None) => {
+                                    // Deferred affix: the argument's type is a
+                                    // string naming the mapper, so the stage
+                                    // stays symbolic until that string is
+                                    // known.
+                                    let at_ = self.infer(env, arg)?;
+                                    let m = carried.unwrap_or_else(|| {
+                                        Ty::Var(self.fresh_with(false, true, Kind::KeyMap))
+                                    });
+                                    self.unify(&at_, &directional_string_kind(marker, m.clone()))
+                                        .map_err(|msg| TyErr {
+                                            span: arg.span,
+                                            msg: format!("{}: {msg}", marker.literal_msg()),
+                                        })?;
+                                    // Remember which mapper this stage's affix
+                                    // names, so the constraint built next uses
+                                    // it instead of inventing a fresh one.
+                                    self.affix_mappers.push((marker, m));
+                                    keys.push((marker.tag(), String::new()));
+                                    self.deferred_keys.push(marker);
+                                }
+                                (_, Some(s)) => {
+                                    if let Some(m) = carried {
+                                        self.affix_mappers.push((marker, m));
+                                    }
+                                    keys.push((marker.tag(), s));
+                                }
+                                (_, None) => {
+                                    let at_ = self.infer(env, arg)?;
+                                    self.coerce(&at_, &con("string")).map_err(|m| TyErr {
+                                        span: arg.span,
+                                        msg: format!("{}: {m}", marker.literal_msg()),
+                                    })?;
+                                    keys.push((marker.tag(), String::new()));
+                                    self.deferred_keys.push(marker);
+                                }
+                            }
                             ft = *r;
                             self.key_stage(&keys, &ft)?;
                             self.solve()?;
@@ -2311,6 +2896,13 @@ impl<'w> Checker<'w> {
     fn coerce(&mut self, actual: &Ty, expected: &Ty) -> U {
         let (a, e) = (self.resolve(actual), self.resolve(expected));
         match (&a, &e) {
+            // A record literal is the surface argument of
+            // `expr r (row s)`. Its field expressions are retained in the
+            // third slot of `record_expr`; the stage constraint attached to
+            // the primitive computes the output row in the fourth slot.
+            (Ty::Row(..) | Ty::Empty, Ty::Con("record_expr", ea)) if ea.len() == 4 => {
+                self.unify(&ea[2], &a)
+            }
             (Ty::Con(s, sa), Ty::Con("expr", ea)) if sa.is_empty() && SCALARS.contains(s) => {
                 let v = ea[2].clone();
                 self.lift(s, &v)
@@ -2387,6 +2979,15 @@ impl<'w> Checker<'w> {
     /// and the remaining function is `query input -> query output`. Called
     /// after each key argument, so a partial application still gets its
     /// constraint.
+    ///
+    /// Two families live here, and they are deliberately different mechanisms:
+    ///
+    /// * `omit` is a **row equation** (`input ~ { k : t | output }`) solved by
+    ///   the unifier's own leftover rule. It constrains the row's *shape*.
+    /// * `prefix`/`suffix` build a **`Ty::MapKey` row term**. A rename is not a
+    ///   shape constraint — the output label is not a function of the input's
+    ///   shape — so it must be carried as a term and reduced when the row is
+    ///   known.
     fn key_stage(&mut self, keys: &[(&'static str, String)], ft: &Ty) -> R<()> {
         let Ty::Fun(p, r) = self.resolve(ft) else {
             return Ok(());
@@ -2394,77 +2995,106 @@ impl<'w> Checker<'w> {
         let (Ty::Con("query", inp), Ty::Con("query", out)) = (&*p, &*r) else {
             return Ok(());
         };
-        let (input, output) = (inp[0].clone(), out[0].clone());
-
-        // Handle prefix and suffix by directly constructing MapKey types
-        match keys {
-            [("key_prefix", s)] => {
-                let mapped = Ty::MapKey(KeyMap::Prefix(s.clone()), Box::new(input.clone()));
-                self.unify(&output, &mapped).map_err(|msg| TyErr {
-                    span: self.span,
-                    msg: format!("prefix type mismatch: {}", msg),
-                })?;
-                return Ok(());
-            }
-            [("key_suffix", s)] => {
-                let mapped = Ty::MapKey(KeyMap::Suffix(s.clone()), Box::new(input.clone()));
-                self.unify(&output, &mapped).map_err(|msg| TyErr {
-                    span: self.span,
-                    msg: format!("suffix type mismatch: {}", msg),
-                })?;
-                return Ok(());
-            }
-            [("keymap", _)] => {
-                // Get the captured function expression
-                let func_expr = self.captured_keymap_expr.take().ok_or_else(|| TyErr {
-                    span: self.span,
-                    msg: "internal error: keymap function expression not captured".into(),
-                })?;
-
-                // Create MapKey type with Function variant
-                let km = KeyMap::Function(Box::new(func_expr));
-                let mapped = Ty::MapKey(km, Box::new(input.clone()));
-
-                self.unify(&output, &mapped).map_err(|msg| TyErr {
-                    span: self.span,
-                    msg: format!("mapKeys type mismatch: {}", msg),
-                })?;
-
-                return Ok(());
-            }
-            [("key_function", _)] => {
-                // Get the captured function expression
-                let func_expr = self.captured_keymap_expr.take().ok_or_else(|| TyErr {
-                    span: self.span,
-                    msg: "internal error: key_function expression not captured".into(),
-                })?;
-
-                // Create MapKey type with Function variant
-                let km = KeyMap::Function(Box::new(func_expr));
-                let mapped = Ty::MapKey(km, Box::new(input.clone()));
-
-                self.unify(&output, &mapped).map_err(|msg| TyErr {
-                    span: self.span,
-                    msg: format!("mapKeys2 type mismatch: {}", msg),
-                })?;
-
-                return Ok(());
-            }
-            _ => {}
-        }
+        let (input, out_ty) = (inp[0].clone(), out[0].clone());
+        let stage_marker = match keys {
+            [(t, _)] if *t == KeyMarker::Prefix.tag() => Some(KeyMarker::Prefix),
+            [(t, _)] if *t == KeyMarker::Suffix.tag() => Some(KeyMarker::Suffix),
+            _ => None,
+        };
 
         let c = match keys {
-            [("key_omit", k)] => Cons::Omit {
+            [(t, s)] if *t == KeyMarker::Prefix.tag() || *t == KeyMarker::Suffix.tag() => {
+                // The signature says `query (keyMap m r)`. Keep that row term
+                // intact in the constraint: the solver first ties its mapper
+                // and input components to the stage, then reduces it when the
+                // input row is known.
+                let (sig_key, output) = match self.resolve(&out_ty) {
+                    Ty::MapKey(m, _) => (*m, out_ty.clone()),
+                    // Not a `keyMap` result: the signature is not one of ours.
+                    _ => {
+                        let is_prefix = *t == KeyMarker::Prefix.tag();
+                        return Err(TyErr {
+                            span: self.span,
+                            msg: format!(
+                                "`{}` must produce a `keyMap` row",
+                                if is_prefix { "prefix" } else { "suffix" }
+                            ),
+                        });
+                    }
+                };
+                let is_prefix = *t == KeyMarker::Prefix.tag();
+                // The mapper comes from the result type the signature declared:
+                // `query (keyMap m r)`. For a literal affix `m` is concrete
+                // (`KeyMapPrefix "u_"`), and for `prefix p` it is the variable
+                // the affix parameter's type named — which is what lets the
+                // deferred term reduce at a use site, where the argument's type
+                // binds that variable.
+                let mut key = sig_key.clone();
+                // A literal affix names its own witness, read here where the
+                // syntax still is. That is what keeps the mapping on the type
+                // side: the checker builds the `KeyMap` from the literal instead
+                // of letting the literal travel as a type.
+                if !s.is_empty() {
+                    let km = if is_prefix {
+                        KeyMap::Prefix(s.clone())
+                    } else {
+                        KeyMap::Suffix(s.clone())
+                    };
+                    key = km.normalize().to_ty();
+                }
+                // Tie the mappers together. `sig_key` is the mapper named in the
+                // *result* type (`query (keyMap m s)`), and the queued one is
+                // what the *parameter* named (`affix m`). They are the same
+                // variable in a well-formed signature, but a literal affix
+                // replaces `key` with a concrete witness — so the result-side
+                // mapper must be bound too, or the row term stays symbolic at
+                // the very place it is now known.
+                let mut mappers = Vec::new();
+                if let Some(pos) = self
+                    .affix_mappers
+                    .iter()
+                    .rposition(|(queued, _)| Some(*queued) == stage_marker)
+                {
+                    let (_, m) = self.affix_mappers.remove(pos);
+                    mappers.push(m);
+                }
+                mappers.push(sig_key);
+                for m in mappers {
+                    self.unify(&m, &key).map_err(|msg| TyErr {
+                        span: self.span,
+                        msg: format!("affix mismatch: {msg}"),
+                    })?;
+                }
+                // Register the equation and let the solver discharge it. The
+                // input row is usually still an unbound variable here (the
+                // stage's argument is checked after it), so reducing now would
+                // always defer; the solver runs once the row is known and
+                // reduces the term then. `output` remains the complete
+                // `keyMap` row term from the signature.
+                self.pending.push((
+                    Cons::MapKey {
+                        marker: stage_marker.expect("key marker checked above"),
+                        key,
+                        input: self.resolve(&input),
+                        output,
+                    },
+                    self.span,
+                ));
+                return Ok(());
+            }
+            // `omit` and `mapValue` constrain the row directly: their result
+            // type is `query s`, so `out[0]` *is* the row.
+            [(t, k)] if *t == KeyMarker::Omit.tag() => Cons::Omit {
                 key: k.clone(),
                 input,
-                output,
+                output: out_ty,
             },
-            [("value_wrapper", wrapper)] => Cons::MapValue {
+            [(t, wrapper)] if *t == KeyMarker::ValueWrapper.tag() => Cons::MapValue {
                 wrapper: wrapper.clone(),
                 input,
-                output,
+                output: out_ty,
             },
-            // The key list is not complete yet (a partial application of `omit`).
+            // The key list is not complete yet (a partial application).
             _ => return Ok(()),
         };
         let sp = self.span;
@@ -2491,7 +3121,7 @@ impl<'w> Checker<'w> {
                 fun(pred, fun(query(r.clone()), query(r)))
             }
             Select | AggStage => {
-                let (f, a, b) = (self.fresh(), self.fresh_row(), self.fresh_row());
+                let (f, a, b) = (self.fresh_row(), self.fresh_row(), self.fresh_row());
                 let c = Cons::Project {
                     fields: f.clone(),
                     input: a.clone(),
@@ -2499,31 +3129,41 @@ impl<'w> Checker<'w> {
                     agg: p == AggStage,
                 };
                 self.pending.push((c, sp));
-                fun(f, fun(query(a), query(b)))
+                fun(
+                    record_expr(con("row"), a.clone(), f, b.clone()),
+                    fun(query(a), query(b)),
+                )
             }
             Update => {
-                let (f, a, b) = (self.fresh(), self.fresh_row(), self.fresh_row());
+                let (f, a, s, out) = (
+                    self.fresh_row(),
+                    self.fresh_row(),
+                    self.fresh_row(),
+                    self.fresh_row(),
+                );
                 let c = Cons::Update {
                     fields: f.clone(),
                     input: a.clone(),
-                    output: b.clone(),
+                    output: s.clone(),
+                    result: out.clone(),
                 };
                 self.pending.push((c, sp));
-                fun(f, fun(query(a), query(b)))
+                fun(
+                    record_expr(con("row"), a.clone(), f, s),
+                    fun(query(a), query(out)),
+                )
             }
             // A key stage reads its key from the application, where the literal
             // still is (`key_stage`), so the parameter carries a marker instead
-            // of a type. The constraint is registered once the key is in hand.
+            // of a type. The witness or constraint is registered once the key
+            // is in hand.
             Omit => {
                 let (r, out) = (self.fresh_row(), self.fresh_row());
-                fun(con("key_omit"), fun(query(r), query(out)))
+                fun(KeyMarker::Omit.ty(), fun(query(r), query(out)))
             }
             MapValue => {
                 let (r, out) = (self.fresh_row(), self.fresh_row());
-                fun(
-                    con("value_wrapper"),
-                    fun(query(r), query(out)),
-                )
+                fun(KeyMarker::ValueWrapper.ty(), fun(query(r), query(out)))
             }
             Merge => {
                 let (left, right, out) = (self.fresh_row(), self.fresh_row(), self.fresh_row());
@@ -2539,19 +3179,11 @@ impl<'w> Checker<'w> {
             }
             Prefix => {
                 let (r, out) = (self.fresh_row(), self.fresh_row());
-                fun(con("key_prefix"), fun(query(r), query(out)))
+                fun(KeyMarker::Prefix.ty(), fun(query(r), query(out)))
             }
             Suffix => {
                 let (r, out) = (self.fresh_row(), self.fresh_row());
-                fun(con("key_suffix"), fun(query(r), query(out)))
-            }
-            MapKeys => {
-                let (r, out) = (self.fresh_row(), self.fresh_row());
-                fun(con("keymap"), fun(query(r), query(out)))
-            }
-            MapKeys2 => {
-                let (r, out) = (self.fresh_row(), self.fresh_row());
-                fun(con("key_function"), fun(query(r), query(out)))
+                fun(KeyMarker::Suffix.ty(), fun(query(r), query(out)))
             }
             Order => {
                 let (req, r) = (self.fresh(), self.fresh_row());
@@ -2590,7 +3222,12 @@ impl<'w> Checker<'w> {
                     JoinKind::Full => (true, true),
                     JoinKind::Semi | JoinKind::Anti => (false, false),
                 };
-                let (l, r, pred, out) = (self.fresh_row(), self.fresh_row(), self.fresh(), self.fresh_row());
+                let (l, r, pred, out) = (
+                    self.fresh_row(),
+                    self.fresh_row(),
+                    self.fresh(),
+                    self.fresh_row(),
+                );
                 self.pending.push((
                     Cons::JoinOn {
                         pred: pred.clone(),
@@ -2654,6 +3291,15 @@ impl<'w> Checker<'w> {
                     Ok(true) => progress = true,
                     Ok(false) => keep.push((c, sp)),
                     Err(msg) => {
+                        // Completion probes are checked against a partially
+                        // typed expression. Another field in the same join
+                        // predicate may still be an unfinished name; keep the
+                        // probe row so completion can report the side under
+                        // the cursor instead of failing on that sibling.
+                        if self.probe.is_some() && msg.contains("no column `") {
+                            progress = true;
+                            continue;
+                        }
                         self.pending = keep;
                         return Err(TyErr { span: sp, msg });
                     }
@@ -2741,10 +3387,21 @@ impl<'w> Checker<'w> {
                 agg,
             } => {
                 let stage = if *agg { "agg" } else { "select" };
+                // A mapped row with an open inner row cannot yet tell us the
+                // value type of a projected mapped label. Keep the projection
+                // pending until the `keyMap` term reduces; consuming it here
+                // would leave those values as unconstrained variables.
+                let (_, input_tail) = self.flatten(input);
+                if matches!(
+                    input_tail,
+                    Ty::Var(_) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..)
+                ) {
+                    return Ok(false);
+                }
                 let (fs, tail) = self.flatten(fields);
                 match tail {
                     Ty::Empty => {}
-                    Ty::Var(_) if fs.is_empty() => return Ok(false),
+                    Ty::Var(_) | Ty::Rigid(..) if fs.is_empty() => return Ok(false),
                     _ => {
                         let msg = format!(
                             "`{stage}` expects a record of column expressions, found {}",
@@ -2846,13 +3503,14 @@ impl<'w> Checker<'w> {
                 fields,
                 input,
                 output,
+                result,
             } => {
                 // The record of new values must be known, and so must the
                 // input's columns: the output depends on both.
                 let (fs, tail) = self.flatten(fields);
                 match tail {
                     Ty::Empty => {}
-                    Ty::Var(_) if fs.is_empty() => return Ok(false),
+                    Ty::Var(_) | Ty::Rigid(..) if fs.is_empty() => return Ok(false),
                     _ => {
                         return Err(format!(
                             "`update` expects a record of column expressions, found {}",
@@ -2903,7 +3561,10 @@ impl<'w> Checker<'w> {
                     }
                 }
                 let (ifs, itail) = self.flatten(input);
-                if matches!(itail, Ty::Var(_)) {
+                if matches!(
+                    itail,
+                    Ty::Var(_) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..)
+                ) {
                     return Ok(false);
                 }
                 let named = ifs.iter().map(|(k, _)| (k.clone(), ())).collect::<Vec<_>>();
@@ -2921,7 +3582,14 @@ impl<'w> Checker<'w> {
                         }
                     })
                     .collect();
-                self.unify(&row_or_tail(out, itail), output)?;
+                // `output` is the row of updated fields (`s`), while
+                // `result` is the merged query row (`merge r s`).
+                let updated = values
+                    .iter()
+                    .map(|(name, _, value)| (name.clone(), value.clone()))
+                    .collect();
+                self.unify(&row(updated, Ty::Empty), output)?;
+                self.unify(&row_or_tail(out, itail), result)?;
                 Ok(true)
             }
             Cons::Omit { key, input, output } => {
@@ -2935,6 +3603,75 @@ impl<'w> Checker<'w> {
                 let t = self.fresh();
                 self.unify(input, &row(vec![(key.clone(), t)], output.clone()))?;
                 Ok(true)
+            }
+            Cons::MapKey {
+                marker,
+                key,
+                input,
+                output,
+            } => {
+                // `output ~ keyMap key input`, reduced as soon as both the
+                // mapper and the row are known.
+                //
+                // The invariant this maintains is that **a `MapKey` term's row
+                // is the input row**: `keyMap m r` denotes `m` applied to `r`,
+                // and `r` itself stays unrenamed. Binding `output` to the
+                // *renamed* row here would encode the mapping twice — once in
+                // the term and once in the row — so a later stage would apply
+                // it again (`prefix "u_" & suffix "_v2"` produced `u_u_id_v2`).
+                let mut key = self.resolve(key);
+                // A deferred helper carries its affix as an ordinary string,
+                // so the mapper witness can be rebound when that helper is
+                // instantiated. Preserve the stage direction while doing so;
+                // otherwise a stale mapper variable can make `suffix` act as
+                // a prefix.
+                if let Ty::KeyAffix(_, affix) = &key {
+                    let constructor = match marker {
+                        KeyMarker::Prefix => "KeyMapPrefix",
+                        KeyMarker::Suffix => "KeyMapSuffix",
+                        _ => "",
+                    };
+                    if !constructor.is_empty() {
+                        key = Ty::KeyAffix(constructor, affix.clone());
+                    }
+                }
+                let input = self.resolve(input);
+                let mut output_ty = self.resolve(output);
+                if let Ty::MapKey(mapper, row) = output_ty.clone() {
+                    if let Ty::KeyAffix(_, affix) = self.resolve(&mapper) {
+                        let constructor = match marker {
+                            KeyMarker::Prefix => "KeyMapPrefix",
+                            KeyMarker::Suffix => "KeyMapSuffix",
+                            _ => "",
+                        };
+                        if !constructor.is_empty() {
+                            output_ty = Ty::MapKey(Box::new(Ty::KeyAffix(constructor, affix)), row);
+                        }
+                    }
+                }
+                if let Ty::MapKey(mapper, row) = output_ty.clone() {
+                    self.unify(&mapper, &key)?;
+                    self.unify(&row, &input)?;
+                    output_ty = self.zonk(output);
+                }
+                match reduce_mapkey(&key, &input) {
+                    Some(reduced) => {
+                        let stage = match KeyMap::of_ty(&key) {
+                            Some(KeyMap::Suffix(_)) => "suffix",
+                            _ => "prefix",
+                        };
+                        self.unify(&reduced, &output_ty)
+                            .map_err(|m| format!("`{stage}` cannot map its input row: {m}"))?;
+                        Ok(true)
+                    }
+                    // Not reducible *yet*: the mapper is still a helper's
+                    // variable, or the row is still open. Stay pending rather
+                    // than binding `output` to the symbolic term: once bound, it
+                    // could never become the rewritten row, so the reduction
+                    // above would never fire. Waiting costs nothing — `solve`
+                    // re-runs this after every binding.
+                    None => Ok(false),
+                }
             }
             Cons::MapValue {
                 wrapper,
@@ -3050,7 +3787,44 @@ impl<'w> Checker<'w> {
                 };
                 let lf: Vec<_> = lf.into_iter().map(|c| wrap(self, nullable.0, c)).collect();
                 let rf: Vec<_> = rf.into_iter().map(|c| wrap(self, nullable.1, c)).collect();
-                self.unify(&row(rules::join_columns(&lf, &rf), Ty::Empty), out)?;
+                let actual = row(rules::join_columns(&lf, &rf), Ty::Empty);
+                // An annotated join wrapper exposes `merge r s` in its result
+                // type. Bind those row operands from the actual inputs before
+                // comparing the computed output, so fields discovered by the
+                // predicate (`.<id`) cannot leave the public merge open.
+                let public_merge = matches!(self.resolve(out), Ty::Merge(..));
+                if let Ty::Merge(al, ar) = self.resolve(out) {
+                    let bind_input = |this: &mut Self, input: &Ty, schema: &Ty| {
+                        match this.resolve(schema) {
+                            // Outer-join signatures wrap the missing side in
+                            // `mapValue`; the join input itself still has the
+                            // unwrapped row.
+                            Ty::MapValue(_, row) => this.unify(input, &row),
+                            _ => this.unify(input, schema),
+                        }
+                    };
+                    bind_input(self, left, &al)?;
+                    bind_input(self, right, &ar)?;
+                }
+                if public_merge {
+                    // Reduce the public row former after its operands have
+                    // been tied to the concrete inputs. This keeps later
+                    // projections from seeing an open `merge` term. The
+                    // public type is right-biased; the runtime join retains
+                    // its established left-column collision behavior.
+                    let Ty::Merge(al, ar) = self.resolve(out) else {
+                        unreachable!("join output changed while resolving its merge");
+                    };
+                    let (alf, alt) = self.flatten(&al);
+                    let (arf, art) = self.flatten(&ar);
+                    let al = row_or_tail(alf, alt);
+                    let ar = row_or_tail(arf, art);
+                    if let Some(public_row) = reduce_merge(&al, &ar) {
+                        self.unify(&public_row, out)?;
+                    }
+                } else {
+                    self.unify(&actual, out)?;
+                }
                 Ok(true)
             }
         }
@@ -3143,35 +3917,89 @@ fn is_join(t: &Ty) -> bool {
     matches!(t, Ty::Con("join", _))
 }
 
-/// The marker type of a key parameter. A key names a column rather than being
-/// an expression, so it cannot be typed as one; the marker is what the
-/// application recognises in order to read the literal where it is written.
-fn key_marker(t: &Ty) -> Option<&'static str> {
-    match t {
-        Ty::Con("key_omit", a) if a.is_empty() => Some("key_omit"),
-        Ty::Con("key_prefix", a) if a.is_empty() => Some("key_prefix"),
-        Ty::Con("key_suffix", a) if a.is_empty() => Some("key_suffix"),
-        Ty::Con("keymap", a) if a.is_empty() => Some("keymap"),
-        Ty::Con("key_function", a) if a.is_empty() => Some("key_function"),
-        Ty::Con("value_wrapper", a) if a.is_empty() => Some("value_wrapper"),
-        Ty::Con("valuemap", a) if a.is_empty() => Some("valuemap"),
-        _ => None,
-    }
+/// The marker on a key parameter.
+///
+/// A key names a column (or supplies a label fragment) rather than being an
+/// ordinary expression, so it cannot be typed as one. The parameter therefore
+/// carries a marker type, and the application recognises that marker in order
+/// to read the literal where it is still written.
+///
+/// This is an enum rather than a set of string literals on purpose: the marker
+/// name used to be spelled out at the producer, at the consumer, and in the
+/// error text, with nothing tying the three together. A rename in one place
+/// silently broke another, which is how this file came to reference AST
+/// variants that no longer existed. One constructor, one spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyMarker {
+    /// `omit "k"` — drops one column.
+    Omit,
+    /// `prefix "s"` — prepends to every column name.
+    Prefix,
+    /// `suffix "s"` — appends to every column name.
+    Suffix,
+    /// `mapValue "w"` — wraps every field type.
+    ValueWrapper,
 }
 
-/// Why a key argument has to be a literal.
-fn key_marker_msg(marker: &str) -> String {
-    match marker {
-        "key_omit" => "`omit` needs a literal column name, such as `omit \"password_hash\"`: the \
-             column must be known when the query is checked"
-            .into(),
-        "key_prefix" => "`prefix` needs a literal string, such as `prefix \"user_\"`".into(),
-        "key_suffix" => "`suffix` needs a literal string, such as `suffix \"_v2\"`".into(),
-        "keymap" => "`mapKeys` needs a function expression, such as `mapKeys (\\x -> \"prefix_\" <> x)`".into(),
-        "key_function" => "`mapKeys2` needs a function expression, such as `mapKeys2 (\\x -> \"prefix_\" <> x)`".into(),
-        "value_wrapper" => "`mapValue` needs a literal wrapper, such as `mapValue \"nullable\"` or `mapValue \"list\"`".into(),
-        "valuemap" => "`mapValue` needs a function expression for value transformation".into(),
-        _ => "needs a literal argument".into(),
+impl KeyMarker {
+    /// The type constructor standing for this marker in a signature.
+    fn ty(self) -> Ty {
+        let name = match self {
+            KeyMarker::Omit => "key_omit",
+            KeyMarker::Prefix => "key_prefix",
+            KeyMarker::Suffix => "key_suffix",
+            KeyMarker::ValueWrapper => "value_wrapper",
+        };
+        Ty::Con(name, Vec::new())
+    }
+
+    /// The marker a type denotes, if it denotes one.
+    fn of(t: &Ty) -> Option<KeyMarker> {
+        match t {
+            Ty::Con("key_omit", a) if a.is_empty() => Some(KeyMarker::Omit),
+            Ty::Con("key_prefix", a) if a.is_empty() => Some(KeyMarker::Prefix),
+            Ty::Con("key_suffix", a) if a.is_empty() => Some(KeyMarker::Suffix),
+            Ty::Con("value_wrapper", a) if a.is_empty() => Some(KeyMarker::ValueWrapper),
+            _ => None,
+        }
+    }
+
+    /// The `key_stage` key list tag for this marker. The tag is internal to
+    /// this file: it is produced only by [`KeyMarker::tag`] and matched only in
+    /// `key_stage`.
+    fn tag(self) -> &'static str {
+        match self {
+            KeyMarker::Omit => "key_omit",
+            KeyMarker::Prefix => "key_prefix",
+            KeyMarker::Suffix => "key_suffix",
+            KeyMarker::ValueWrapper => "value_wrapper",
+        }
+    }
+
+    /// Why this argument has to be a literal, and what to write instead.
+    fn literal_msg(self) -> String {
+        match self {
+            KeyMarker::Omit => {
+                "`omit` needs a literal column name, such as `omit \"password_hash\"`: the \
+                 column must be known when the query is checked"
+                    .into()
+            }
+            KeyMarker::Prefix => {
+                "`prefix` needs a literal string, such as `prefix \"user_\"`: the mapping is \
+                 part of the type, so it must be known when the query is checked"
+                    .into()
+            }
+            KeyMarker::Suffix => {
+                "`suffix` needs a literal string, such as `suffix \"_v2\"`: the mapping is part \
+                 of the type, so it must be known when the query is checked"
+                    .into()
+            }
+            KeyMarker::ValueWrapper => {
+                "`mapValue` needs a literal wrapper, such as `mapValue \"nullable\"` or \
+                 `mapValue \"list\"`"
+                    .into()
+            }
+        }
     }
 }
 
@@ -3207,7 +4035,9 @@ impl Printer {
             },
             // A key parameter's marker is a `string` position, and reads as one
             // in any signature the user sees.
-            Ty::Con("key_omit" | "key_pattern" | "key_replacement" | "value_wrapper", _) => "string".into(),
+            Ty::Con("key_omit" | "key_pattern" | "key_replacement" | "value_wrapper", _) => {
+                "string".into()
+            }
             Ty::Empty => "{}".into(),
             Ty::Row(fs, tail) => {
                 let body: Vec<String> = fs
@@ -3220,7 +4050,11 @@ impl Printer {
                 }
             }
             Ty::MapKey(km, row) => {
-                format!("mapKey({:?}, {})", km, self.ty(row, 2))
+                // Print the term as written. The *inner* row is already the
+                // renamed row once it has been stored, so applying the mapper
+                // again here would double-apply it (`u_u_id`). Reducing is the
+                // store's job, not the printer's.
+                format!("keyMap({}, {})", self.ty(km, 2), self.ty(row, 2))
             }
             Ty::Merge(left, right) => {
                 format!("merge({}, {})", self.ty(left, 2), self.ty(right, 2))
@@ -3238,6 +4072,32 @@ impl Printer {
                     Ty::Con(p @ ("agg" | "win"), _) => paren(format!("{p} ({inner})"), prec >= 2),
                     _ => paren(inner, prec >= 2),
                 }
+            }
+            Ty::Con("record_expr", a) if a.len() == 4 => {
+                let inner = format!("expr {} (row {})", self.ty(&a[1], 2), self.ty(&a[3], 2));
+                match &a[0] {
+                    Ty::Con(p @ ("agg" | "win"), _) => paren(format!("{p} ({inner})"), prec >= 2),
+                    _ => paren(inner, prec >= 2),
+                }
+            }
+            // A key affix prints as its constructor applied to the literal, so
+            // `keyMap (prefix "u_") r` reads back the way it was written.
+            Ty::KeyAffix(n, s) => {
+                let short = match n.strip_prefix("KeyMap").unwrap_or(n) {
+                    "Prefix" => "prefix",
+                    "Suffix" => "suffix",
+                    other => other,
+                };
+                paren(format!("{short} {s:?}"), prec >= 2)
+            }
+            // Directional affix parameters carry mapper metadata internally,
+            // but are plain `string` values in inferred signatures.
+            Ty::Con("prefixAffix" | "suffixAffix", _) => "string".into(),
+            Ty::Con("KeyMapId", args) if args.is_empty() => "id".into(),
+            Ty::Con("KeyMapCompose", args) if args.len() == 2 => {
+                let f = self.ty(&args[0], 2);
+                let g = self.ty(&args[1], 2);
+                paren(format!("compose {f} {g}"), prec >= 2)
             }
             Ty::Con(n, args) if args.is_empty() => n.to_string(),
             Ty::Con(n, args) => {

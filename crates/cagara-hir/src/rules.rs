@@ -180,7 +180,7 @@ mod tests {
             );
             let name = cagara_syntax::op_name(spelling);
             assert!(
-                prelude.contains(&format!("{name} =")),
+                prelude.contains(&format!("{name} :")),
                 "`{spelling}` is a stage operator but `{name}` is not defined in the prelude"
             );
         }

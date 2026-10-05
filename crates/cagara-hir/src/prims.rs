@@ -186,19 +186,13 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
             let key = string(next())?;
             Value::Query(Rel::Omit(Box::new(query(next())?), key))
         }
-        Prim::MapKeys => {
-            let (pattern, replacement) = (string(next())?, string(next())?);
-            Value::Query(Rel::MapKeys(Box::new(query(next())?), pattern, replacement))
-        }
         Prim::Prefix => {
-            let s = string(next())?;
-            // Encode prefix as mapKeys with pattern "^" and replacement s
-            Value::Query(Rel::MapKeys(Box::new(query(next())?), "^".to_string(), s))
+            let affix = string(next())?;
+            Value::Query(Rel::Prefix(Box::new(query(next())?), affix))
         }
         Prim::Suffix => {
-            let s = string(next())?;
-            // Encode suffix as mapKeys with pattern "$" and replacement s
-            Value::Query(Rel::MapKeys(Box::new(query(next())?), "$".to_string(), s))
+            let affix = string(next())?;
+            Value::Query(Rel::Suffix(Box::new(query(next())?), affix))
         }
         Prim::AggStage => {
             let fs = fields(next())?;
@@ -263,5 +257,17 @@ pub fn call(p: Prim, args: Vec<Value>) -> EResult<Value> {
         Prim::CurrentRow => Value::Bound(Bound::CurrentRow),
         Prim::Preceding => Value::Bound(Bound::Preceding(count(next(), "preceding")?)),
         Prim::Following => Value::Bound(Bound::Following(count(next(), "following")?)),
+        Prim::MapValue => {
+            return err(
+                "mapValue is a type-level operation and should be resolved during type checking"
+                    .to_string(),
+            )
+        }
+        Prim::Merge => {
+            return err(
+                "merge is a type-level operation and should be resolved during type checking"
+                    .to_string(),
+            )
+        }
     })
 }

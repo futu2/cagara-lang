@@ -17,7 +17,7 @@ revenue = orders
   & where (.status == "paid")
   & agg { user_id = group .user_id, revenue = sum .amount, n = count }
   & where (.n >= 5)
-  & order [desc .revenue]
+  & order [desc (coalesce 0.0 .revenue)]
 
 # Window functions: latest three orders per user.
 spec = { partition = [.user_id], order = [desc .created_at] }
@@ -55,7 +55,7 @@ user_totals = users
 # `??` coalesce. The same report as `user_totals`, for active users:
 active_totals = users
   &? .active
-  & orders <? .<id == .>user_id
+  & (orders & select { .user_id, .amount, .status, .created_at }) <? .<id == .>user_id
   &* { id = group .id, name = group .name, total = sum (coalesce 0.0 .amount) ?? 0.0 }
   &. [desc .total]
   &- 20

@@ -1131,7 +1131,8 @@ impl<'w> Checker<'w> {
                     // separate applications, so leaving either child as a
                     // variable makes an otherwise closed term look open.
                     let km = self.resolve(&km);
-                    let row = self.resolve(&row);
+                    let (rf, rt) = self.flatten(&row);
+                    let row = row_or_tail(rf, rt);
                     if let Some(reduced) = reduce_mapkey(&km, &row) {
                         cur = reduced;
                     } else {
@@ -1308,30 +1309,53 @@ impl<'w> Checker<'w> {
             // facing something *other* than a `keyMap` is a reduction.
             (Ty::MapKey(..), Ty::MapKey(..)) => None,
             (Ty::MapKey(km, row), other) => {
-                // Only a *concrete* mapper can reduce. A variable mapper has no
-                // transformation to apply, and trying anyway is how a deferred
-                // term turns into a cycle.
-                let km = self.resolve(km);
-                KeyMap::of_ty(&km)?;
-                let row = self.resolve(row);
-                let reduced = reduce_mapkey(&km, &row)?;
-                if matches!(&reduced, Ty::MapKey(..)) {
-                    return None;
-                }
+                let reduced = self.reduce_mapkey_row(km, row)?;
                 Some((reduced, other.clone()))
             }
             (other, Ty::MapKey(km, row)) => {
-                let km = self.resolve(km);
-                KeyMap::of_ty(&km)?;
-                let row = self.resolve(row);
-                let reduced = reduce_mapkey(&km, &row)?;
-                if matches!(&reduced, Ty::MapKey(..)) {
-                    return None;
-                }
+                let reduced = self.reduce_mapkey_row(km, row)?;
                 Some((other.clone(), reduced))
             }
             _ => None,
         }
+    }
+
+    /// Reduce one `keyMap` term to the row it denotes, or `None` while the
+    /// mapper or the row is still open.
+    ///
+    /// A row that is already closed reduces exactly as it stands, and must: its
+    /// shape may be an annotation's, deliberately narrower than the column set
+    /// a later stage binds.
+    ///
+    /// The remaining case is a row left open by a stage that narrowed it —
+    /// `{first, … | tail}` with the tail bound afterwards. `resolve` follows
+    /// only a top-level variable, so such a row still looked open and the term
+    /// never reduced, silently dropping the rename: `users & order [asc .id] &
+    /// prefix "lit_"` reached the next stage unrenamed and the projection after
+    /// it was left with an unconstrained row. Following the tail here is what
+    /// makes R-MapKey-Closed fire; it is done only for an open tail, so a
+    /// closed row is never re-normalized into a wider one.
+    fn reduce_mapkey_row(&mut self, km: &Ty, row: &Ty) -> Option<Ty> {
+        // Only a *concrete* mapper can reduce. A variable mapper has no
+        // transformation to apply, and trying anyway is how a deferred term
+        // turns into a cycle.
+        let km = self.resolve(km);
+        KeyMap::of_ty(&km)?;
+        let shallow = self.resolve(row);
+        let reduced = match reduce_mapkey(&km, &shallow) {
+            Some(reduced) => reduced,
+            None => {
+                if !matches!(&shallow, Ty::Row(_, tail) if matches!(**tail, Ty::Var(_))) {
+                    return None;
+                }
+                let (fs, tail) = self.flatten(row);
+                reduce_mapkey(&km, &row_or_tail(fs, tail))?
+            }
+        };
+        if matches!(&reduced, Ty::MapKey(..)) {
+            return None;
+        }
+        Some(reduced)
     }
 
     fn unify(&mut self, actual: &Ty, expected: &Ty) -> U {
@@ -3701,7 +3725,8 @@ impl<'w> Checker<'w> {
                         key = Ty::KeyAffix(constructor, affix.clone());
                     }
                 }
-                let input = self.resolve(input);
+                let (input_fields, input_tail) = self.flatten(input);
+                let input = row_or_tail(input_fields, input_tail);
                 let mut output_ty = self.resolve(output);
                 if let Ty::MapKey(mapper, row) = output_ty.clone() {
                     if let Ty::KeyAffix(_, affix) = self.resolve(&mapper) {

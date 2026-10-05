@@ -1247,6 +1247,54 @@ fn deferred_mapkey_polymorphic_helpers() {
     );
 }
 
+/// A key stage's rename must survive the stages around it.
+///
+/// `prefix`/`suffix` rename the row they are handed, and the rename is carried
+/// as a `keyMap` term rather than a shape constraint. A `keyMap` term only
+/// reduces once its inner row is closed, so a stage between the source and the
+/// rename that narrows the row — `order`'s sort key, `where`'s predicate — must
+/// still leave the term reducible by the time the row is used. It did not: the
+/// rename was lost, so the columns the `&=` operator could see were the
+/// *pre-rename* ones and every renamed column was reported missing.
+#[test]
+fn a_key_stage_survives_the_stages_around_it() {
+    // Bare rename, and via a stage that does not constrain the row.
+    assert!(ty("q = users & prefix \"lit_\"\n", "q").contains("lit_id"));
+    assert!(ty("q = users & limit 1 & prefix \"lit_\"\n", "q").contains("lit_id"));
+
+    // `order` constrains the row through its sort key; `where` through its
+    // predicate. The rename must still land on the rows they produce.
+    for stages in [
+        "& order [asc .id] ",
+        "& where (.age >= 1) ",
+        "& order [asc .id] & limit 1 ",
+    ] {
+        let src = format!("q = users {stages}& prefix \"lit_\"\n");
+        assert!(
+            ty(&src, "q").contains("lit_id"),
+            "the rename was dropped after {stages:?}: {}",
+            ty(&src, "q")
+        );
+    }
+
+    // The renamed columns must be *usable*, not merely present in a printed
+    // type: reading one back through `&=` is what completion does.
+    assert_eq!(
+        ty(
+            "q = users & order [asc .id] & prefix \"lit_\" &= {x = .lit_id}\n",
+            "q"
+        ),
+        "query { x = int }"
+    );
+    assert_eq!(
+        ty(
+            "q = users & where (.age >= 1) & prefix \"lit_\" &= {x = .lit_name}\n",
+            "q"
+        ),
+        "query { x = string }"
+    );
+}
+
 #[test]
 fn kind_checking_basic() {
     // `prefix` and `suffix` share a shape, so the direction has to come from

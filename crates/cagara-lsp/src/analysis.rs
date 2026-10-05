@@ -1072,6 +1072,43 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Columns reach completion through a key stage whatever the pipeline
+    /// does in between.
+    ///
+    /// A `prefix` renames the row it is handed, and the rename travels as a
+    /// `keyMap` term. A stage between the source and the rename that also
+    /// constrains the row — `order`'s sort key, `where`'s predicate — used to
+    /// leave the row unrenamed by the time the record was checked, so the
+    /// columns offered were the *pre-rename* ones and the renamed columns the
+    /// user had just written were missing.
+    #[test]
+    fn column_completion_through_a_key_stage() {
+        let tail = "  & prefix \"lit_\"\n\
+                    &= {id = .lit_id, id44 = .lit_label <> .lit_label <> .}\n";
+        let head = "users : query { id = int, name = string, age = int, active = bool } = \
+                    table \"public\" \"users\"\n\
+                    adults = users\n\
+                    & where (.age >= 18 && .active)\n\
+                    & select { id = .id, label = upper .name, next_age = .age + 1, id2 = .id }\n";
+        // The pipeline with, and without, the ordering and paging stages: the
+        // renamed columns must be offered either way.
+        for stages in ["", "  & order [asc .label]\n  & limit 10\n"] {
+            let src = format!("{head}{stages}{tail}");
+            let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.clone());
+            let line = src.lines().count() as u32 - 1;
+            let col = src.lines().nth(line as usize).unwrap().chars().count() as u32 - 1;
+            let labels: Vec<String> = completion(&ws, pos(line, col))
+                .into_iter()
+                .map(|i| i.label)
+                .collect();
+            assert_eq!(
+                labels,
+                ["lit_label", "lit_id", "lit_next_age", "lit_id2"],
+                "stages {stages:?}"
+            );
+        }
+    }
+
     #[test]
     fn positions_round_trip() {
         let t = "ab\né x\n";

@@ -1056,6 +1056,15 @@ fn missing(l: &str, have: &[(String, Ty)]) -> String {
     }
 }
 
+/// A row's column names, for an error that lists what a query produced.
+fn names(fields: &[(String, Ty)]) -> String {
+    fields
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl<'w> Checker<'w> {
     // ── variables and substitution ─────────────────────────────────────────
 
@@ -1113,6 +1122,26 @@ impl<'w> Checker<'w> {
             self.vars[*v as usize].bound = Some(resolved.clone());
         }
         resolved
+    }
+
+    /// Whether a `keyMap` term survives on the *spine* of `t` once bound
+    /// variables are followed. A term on the spine renames the row it is part
+    /// of, so that row is still constrainable by a later signature.
+    ///
+    /// Only the spine is walked. A `keyMap` inside a field's *value* type
+    /// describes that value, not the shape of this row, and counting it would
+    /// make every row that projects a renamed row look constrainable.
+    fn keymap_on_spine(&self, t: &Ty) -> bool {
+        let mut cur = self.resolve(t);
+        loop {
+            match cur {
+                Ty::MapKey(..) => return true,
+                Ty::Row(_, tail) => cur = self.resolve(&tail),
+                Ty::Merge(left, _) => cur = self.resolve(&left),
+                Ty::MapValue(_, row) => cur = self.resolve(&row),
+                _ => return false,
+            }
+        }
     }
 
     /// Row fields and the tail after following bound variables.
@@ -1701,6 +1730,68 @@ impl<'w> Checker<'w> {
         Some(scheme)
     }
 
+    /// A clearer message for the one signature mistake the unifier can only
+    /// describe from its own point of view.
+    ///
+    /// When a body's row has a column its signature does not, the two rows
+    /// unify one side at a time and the failure surfaces as `no column `x`;
+    /// available: …` over the *signature's* columns — naming a column that does
+    /// exist and listing the very set that is short. A reader takes that as a
+    /// complaint about the query, which is the opposite of what is wrong. Only
+    /// the signature comparison knows which side is the declaration, so the
+    /// case is detected here instead.
+    ///
+    /// A signature that names a column the body has not is left to the
+    /// unifier: there the ordinary wording is already right.
+    ///
+    /// A `keyMap` annotation is left to the unifier too. Its row is the *input*
+    /// to the rename, so comparing it with the body's row here would report
+    /// every renamed column as missing; `coerce` reduces the term first and
+    /// then compares the rows that actually correspond.
+    fn signature_missing_columns(&self, inferred: &Ty, ann: &Ty) -> Option<String> {
+        let (Ty::Con("query", got), Ty::Con("query", want)) =
+            (self.resolve(inferred), self.resolve(ann))
+        else {
+            return None;
+        };
+        let (got, want) = (got.first()?.clone(), want.first()?.clone());
+        // Two shapes are left to the unifier.
+        //
+        // A `keyMap` signature names the *input* row of a rename, so comparing
+        // it with the body's row here would call every renamed column missing;
+        // `coerce` reduces the term and compares the rows that correspond.
+        //
+        // A body whose row still carries a `keyMap` term is itself still
+        // constrainable — the signature may legitimately narrow it, and
+        // `unify_rows` lets it: `q : query { u_id_v2 = int } = users & prefix
+        // "u_" & suffix "_v2"` is well typed even though the pipeline alone
+        // produces four columns. Only a body whose row is already fixed can a
+        // signature be too narrow for.
+        if matches!(self.resolve(&want), Ty::MapKey(..)) || self.keymap_on_spine(&got) {
+            return None;
+        }
+        let (ifields, itail) = self.flatten(&got);
+        let (afields, atail) = self.flatten(&want);
+        // Only when both rows are fully known: an open one may still grow the
+        // missing columns on its own.
+        if itail != Ty::Empty || atail != Ty::Empty {
+            return None;
+        }
+        let missing: Vec<&str> = ifields
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .filter(|n| !afields.iter().any(|(k, _)| k == n))
+            .collect();
+        if missing.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "the signature is missing column `{}`; the query has: {}",
+            missing.join("`, `"),
+            names(&ifields)
+        ))
+    }
+
     fn check_def(&mut self, i: usize) -> R<Ty> {
         let defs = self.env.defs;
         let def = &defs[i];
@@ -1782,6 +1873,9 @@ impl<'w> Checker<'w> {
         let t = self.infer(&mut Vec::new(), &def.body)?;
         if let Some(a) = &ann {
             self.span = def.body.span;
+            if let Some(msg) = self.signature_missing_columns(&t, a) {
+                return Err(at(def.body.span)(msg));
+            }
             self.coerce(&t, a)
                 .map_err(|msg| format!("`{}` does not match its signature: {msg}", def.name))
                 .map_err(at(def.body.span))?;

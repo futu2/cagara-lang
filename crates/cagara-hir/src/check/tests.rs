@@ -1295,6 +1295,49 @@ fn a_key_stage_survives_the_stages_around_it() {
     );
 }
 
+/// A signature that names too few columns says so.
+///
+/// The two ways a signature's row can disagree with the body's used to read the
+/// same. Naming a column the body lacks is `no column `x``, which is right, but
+/// the mirror case — the body having a column the signature does not — was
+/// reported the same way, over the *signature's* columns. That named a column
+/// that does exist and listed the very set that was short, so a signature that
+/// had simply forgotten a column read as a complaint about the query.
+#[test]
+fn a_signature_that_is_missing_a_column_says_so() {
+    let msg = err("q : query { id = int } = users\n", "q");
+    assert!(
+        msg.contains("signature is missing column `name`"),
+        "{msg}"
+    );
+    // It still lists what the body produced, which is what to add.
+    assert!(
+        msg.contains("the query has: id, name, age, active"),
+        "{msg}"
+    );
+
+    // The opposite mistake keeps its own wording: the column really is absent.
+    let msg = err(
+        "q : query { id = int, name = string, age = int, active = bool, oops = int } = users\n",
+        "q",
+    );
+    assert!(msg.contains("no column `oops`"), "{msg}");
+    assert!(
+        msg.contains("available: id, name, age, active"),
+        "{msg}"
+    );
+
+    // A signature may narrow a row a key stage produces: the rename is what
+    // makes the row, so the columns it drops are not an error.
+    assert_eq!(
+        ty(
+            "q : query { u_id_v2 = int } = users & prefix \"u_\" & suffix \"_v2\"\n",
+            "q"
+        ),
+        "query { u_id_v2 = int }"
+    );
+}
+
 #[test]
 fn kind_checking_basic() {
     // `prefix` and `suffix` share a shape, so the direction has to come from

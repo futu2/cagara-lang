@@ -645,9 +645,30 @@ pub fn elaborate_bodies(
                 Err(e) => {
                     // The evaluator's own diagnostic, reported rather than
                     // dropped: this is the half the old version lost.
+                    //
+                    // `e.module` is where the failure was *raised*, which is
+                    // not always the module being evaluated: a definition here
+                    // can fail inside an imported one (a prelude helper, an
+                    // aliased module). Recording the outer loop's `i` against
+                    // `e.module` would then pair a module with a definition
+                    // index that does not exist in it. Attribute the
+                    // definition by the error's span within its own module,
+                    // and fall back to no definition rather than a wrong one.
+                    let def = e.span.and_then(|span| {
+                        ws.modules
+                            .get(e.module)
+                            .and_then(|md| {
+                                md.module
+                                    .defs
+                                    .iter()
+                                    .position(|d| {
+                                        d.span.start <= span.start && span.end <= d.span.end
+                                    })
+                            })
+                    });
                     diags.push(crate::core::Diagnostic::new(
                         e.module,
-                        Some(i),
+                        def,
                         ws.eval_diag(&e),
                     ));
                     out.insert((m, i), Elaborated::Failed);

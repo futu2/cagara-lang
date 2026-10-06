@@ -1407,6 +1407,94 @@ fn of_elaborated_reports_evaluator_diagnostics() {
     );
 }
 
+/// A failure raised inside an *imported* module is attributed to that module.
+///
+/// `EvalError::module` is where the error was raised, which is not always the
+/// module being evaluated: a definition here can fail inside a module it
+/// imports. Attributing the outer loop's definition index to that module pairs
+/// a module with a definition index it may not have — the root has `q` at
+/// index 1, but the imported module has only one definition, so index 1 does
+/// not exist there at all.
+#[test]
+fn a_diagnostic_from_an_imported_module_names_a_definition_there() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let root = PathBuf::from("/tmp/cagara-import-diag/root.cagara");
+    let lib = PathBuf::from("/tmp/cagara-import-diag/lib.cagara");
+    let mut buffers: HashMap<PathBuf, String> = HashMap::new();
+    // The failing use must NOT be at index 0 of the root, or the buggy
+    // `Some(i)` would coincidentally be a valid index in the imported module
+    // (which has one definition) and the test could not tell the difference.
+    buffers.insert(
+        root.clone(),
+        "import \"lib.cagara\" as lib\n\
+         pad0 = 1\n\
+         pad1 = 2\n\
+         pad2 = 3\n\
+         q = lib.boom 1\n"
+            .into(),
+    );
+    // In the *imported* module, `boom` applies itself forever.
+    buffers.insert(lib.clone(), "boom = x => boom x\n".into());
+    let ws = Workspace::open_with_buffers(&root, buffers[&root].clone(), &buffers);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    // `q` is the fourth definition, so an index of 3 names nothing in `lib`.
+    let q_index = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .position(|d| d.name == "q")
+        .expect("no `q`");
+    assert!(
+        q_index > 0,
+        "`q` must not be at index 0, or this test cannot detect the bug"
+    );
+
+    let p = CheckedProgram::of_elaborated(&ws);
+    let boom = p
+        .diagnostics
+        .iter()
+        .find(|d| d.diag.message.contains("recursion is not supported"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the imported failure must be reported: {:?}",
+                p.diagnostics
+                    .iter()
+                    .map(|d| &d.diag.message)
+                    .collect::<Vec<_>>()
+            )
+        });
+
+    // The diagnostic points at the imported module…
+    assert_eq!(
+        p.module(boom.module).map(|m| m.path.as_str()),
+        Some(lib.to_string_lossy().as_ref()),
+        "the diagnostic must point at the imported module"
+    );
+    // …and the definition it names must exist *in that module* and be the one
+    // that failed. The bug recorded the root's index here, and `lib` has only
+    // one definition, so the old code produced an out-of-range index.
+    let def = boom
+        .def
+        .unwrap_or_else(|| panic!("the imported diagnostic must name a definition: {boom:?}"));
+    let md = &ws.modules[boom.module];
+    assert!(
+        def < md.module.defs.len(),
+        "definition index {def} does not exist in `{}`, which has {} definitions",
+        md.path.display(),
+        md.module.defs.len()
+    );
+    assert_eq!(
+        md.module.defs[def].name, "boom",
+        "the definition index must name the failing definition"
+    );
+    assert_ne!(
+        def, q_index,
+        "the index must be the *imported* definition, not the caller's"
+    );
+}
+
 /// `CheckedModule::types` holds well-typed definitions only.
 #[test]
 fn module_types_omits_definitions_that_did_not_check() {

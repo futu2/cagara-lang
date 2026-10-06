@@ -303,7 +303,8 @@ current state.
 The behavioural contract for this step is the frozen CLI output, not the build:
 
 ```bash
-nix develop --command cargo test --workspace            # 376 passed, 0 failed
+nix develop --command cargo test --workspace            # 390 passed, 0 failed
+nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 nix develop --command cargo build --workspace -q
 <regenerate examples/*.cagara: 6 dialects + --pretty + --types + stderr>
 diff -r <frozen-before> <after>                        # must be empty
@@ -351,7 +352,28 @@ is now part of the gate.
   assertion, and `omit` still restates a rule rather than calling
   `schema::omit_columns`.
 
-The next step is a differential harness: build the checked tree for every
-existing example alongside today's evaluator and compare their erased `Rel`
-before routing anything through the checked path. Only then can `schema` be
-demoted and `root_queries_checked` be moved over.
+**The differential harness exists, and it is not yet source-level.** It compares
+the evaluator's erased `Rel` against `Rel -> CheckedQuery -> erase`
+(`checked/tests.rs`, `assert_trees_agree`), over the real examples plus sixteen
+stage combinations. That catches drift between the two *erasers*, and it found
+a real defect in the bridge (`from_rel_unchecked` rebuilt an `omit`'s input row
+by appending the omitted key, reordering the input's columns).
+
+It does **not** establish what the design needs: that source elaborates to
+`CheckedQuery` through the constructors. Because the "checked" side is built
+*from the evaluator's own output*, the test cannot fail if source elaboration
+never uses `CheckedQuery` at all. Nested projections are also skipped, since a
+`Rel` does not record whether a projection was a `select` or an `agg`.
+
+The next step is therefore a **source elaboration layer**, not more bridge
+coverage:
+
+```text
+source -> type check -> checked elaboration -> erase      (new)
+source -> existing evaluator -> CoreTerm -> erase_core    (oracle)
+```
+
+requiring every valid query to compare with no silent skips. Only after that
+parity can `root_queries_checked`, the CLI, and the LSP move over, `schema` be
+demoted to an assertion, and `from_rel_unchecked` become test-only. The existing
+evaluator stays as the behavioural oracle until then.

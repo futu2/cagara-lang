@@ -235,6 +235,70 @@ fn set_operations_and_reused_queries_use_sql_set_ops_and_ctes() {
     assert_eq!(s.matches("WHERE active").count(), 1, "{s}");
 }
 
+/// `except` is not commutative, so it is the set operation that shows whether
+/// the piped and direct forms agree. They must: `users &~ admins` and
+/// `except users admins` are the same query, with the *written* first operand
+/// on the left.
+///
+/// The piped form used to be reversed. `users & except admins` desugars to
+/// `_&_ users (except admins)`, and `except admins` is already a partial
+/// application, so the pipe supplied `users` as its second argument and the
+/// primitive saw `[admins, users]` — producing `admins EXCEPT users`, the
+/// complement of what was asked for. `union`, `unionAll`, and `intersect` are
+/// commutative and hid it.
+///
+/// `admins` has `users`' row because a set operation requires it.
+const ADMINS: &str = "admins : query { id = int, name = string, age = int, active = bool } = table \"public\" \"admins\"\n";
+
+fn sql_admins(src: &str, name: &str) -> String {
+    sql_with(&format!("{ADMINS}{src}"), name, Options::default())
+}
+
+#[test]
+fn a_piped_except_is_not_reversed() {
+    let piped = sql_admins("q = users &~ admins\n", "q");
+    let direct = sql_admins("q = except users admins\n", "q");
+    assert_eq!(piped, direct, "piped and direct forms must agree");
+
+    let inner = piped
+        .find("(SELECT")
+        .unwrap_or_else(|| panic!("no derived table: {piped}"));
+    let left = piped[inner..]
+        .find("public.users")
+        .unwrap_or_else(|| panic!("`users` is not an operand: {piped}"));
+    let right = piped[inner..]
+        .find("public.admins")
+        .unwrap_or_else(|| panic!("`admins` is not an operand: {piped}"));
+    assert!(
+        left < right,
+        "`users` must be the left operand of `EXCEPT`: {piped}"
+    );
+}
+
+/// All four set operations are available through the pipe, and each puts the
+/// piped query on the left. Only `except`/`intersect` can observe the order,
+/// but pinning all four keeps a future re-declaration from dropping one.
+#[test]
+fn every_set_operation_has_a_pipe_stage() {
+    for (op, sql_op) in [
+        ("&|", "UNION"),
+        ("&!", "UNION ALL"),
+        ("&^", "INTERSECT"),
+        ("&~", "EXCEPT"),
+    ] {
+        let piped = sql_admins(&format!("q = users {op} admins\n"), "q");
+        assert!(
+            piped.contains(sql_op),
+            "`{op}` must lower to `{sql_op}`: {piped}"
+        );
+        // The piped input is the left operand for every one of them.
+        let start = piped.find("(SELECT").unwrap_or(0);
+        let users = piped[start..].find("public.users").expect("users operand");
+        let admins = piped[start..].find("public.admins").expect("admins operand");
+        assert!(users < admins, "`{op}` reversed its operands: {piped}");
+    }
+}
+
 #[test]
 fn union_all_preserves_duplicates() {
     let s = sql("q = unionAll users users\n", "q");

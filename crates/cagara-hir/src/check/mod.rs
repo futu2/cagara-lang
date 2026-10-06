@@ -62,7 +62,11 @@ pub(crate) use reduce::*;
 pub(crate) use ty::*;
 
 pub use ty::Choice;
+/// Scalar-type views of a `Ty`, for the checked layer (`crate::checked`).
+/// `Ty` itself stays crate-private: inference is not a public interface.
+pub(crate) use ty::{ty_fields, ty_to_scalar};
 
+pub(crate) use crate::core::ScalarType;
 pub(crate) use crate::db::ModuleInput;
 pub(crate) use crate::ir::{JoinKind, Phase};
 pub(crate) use crate::lower::parse_module;
@@ -101,6 +105,16 @@ pub struct TypeCheck {
     /// Printed type of each name use, by `(module, span start, span end)`:
     /// the instance at that use, not the definition's scheme.
     use_types: HashMap<(usize, u32, u32), String>,
+    /// The schemes themselves, alongside the printed `types`.
+    ///
+    /// `types` is what a user reads; this is what a *phase* reads. The checked
+    /// layer needs a definition's row and scalar types as data, not as a
+    /// formatted string, so the schemes cannot be dropped when the per-module
+    /// results are merged. `Scheme` stays crate-private: `Ty` is inference
+    /// state, and the only things a later phase gets out of it are
+    /// [`TypeCheck::scheme_fields`] and [`TypeCheck::def_scalar`], which are
+    /// closed [`ScalarType`] / row values rather than type variables.
+    schemes: HashMap<(usize, usize), Scheme>,
 }
 
 /// A column name no user writes (`__` names are reserved). A reference to
@@ -137,6 +151,30 @@ impl TypeCheck {
             .map(String::as_str)
     }
 
+    /// The row of a definition's scheme, as closed data: column names and
+    /// [`ScalarType`]s in declaration order.
+    ///
+    /// This is the typed twin of [`TypeCheck::type_of`]. A phase that needs a
+    /// definition's columns — the checked layer recording a `CheckedModule`,
+    /// for instance — reads them here instead of parsing the printed string.
+    ///
+    /// A scheme whose result is not a row (`f : a -> b`, or a query over an
+    /// open row) yields `None` or an empty list rather than a guess: an open
+    /// row has no columns to report, and inventing them is exactly what the
+    /// checked layer must not do.
+    pub fn scheme_fields(&self, module: usize, def: usize) -> Option<Vec<(String, ScalarType)>> {
+        let s = self.schemes.get(&(module, def))?;
+        Some(ty_fields(&s.ty))
+    }
+
+    /// A definition's scalar type, as closed data. `None` when the scheme has
+    /// no scalar reading (a function or a row); `Some(Unknown)` when it is a
+    /// scalar the checker never solved.
+    pub fn def_scalar(&self, module: usize, def: usize) -> Option<ScalarType> {
+        let s = self.schemes.get(&(module, def))?;
+        Some(ty_to_scalar(&s.ty))
+    }
+
     pub fn error_for(&self, module: usize, def: usize) -> Option<&Diag> {
         self.errors
             .iter()
@@ -159,6 +197,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
         choices: HashMap::new(),
         probe_fields: HashMap::new(),
         use_types: HashMap::new(),
+        schemes: HashMap::new(),
     };
     for &input in &ws.inputs {
         let mc = module_check(&ws.db, input);
@@ -177,6 +216,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
         out.choices.extend(mc.choices.clone());
         out.probe_fields.extend(mc.probe_fields.clone());
         out.use_types.extend(mc.use_types.clone());
+        out.schemes.extend(mc.schemes.clone());
     }
     out
 }

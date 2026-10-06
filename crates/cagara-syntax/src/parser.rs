@@ -957,16 +957,19 @@ mod tests {
     /// of whatever precedence and associativity the declaration gives it.
     #[test]
     fn a_declaration_is_what_makes_an_operator_an_operator() {
-        // Undeclared: rejected, and told how to fix it.
-        let p = parse("q = a &^ 5\n");
+        // Undeclared: rejected, and told how to fix it. The spellings must
+        // stay undeclared by `prelude.cagara`: this test is about the
+        // *absence* of a declaration, so it cannot use one the prelude has
+        // since adopted (`&^` used to be free; it is now `intersect`).
+        let p = parse("q = a &%% 5\n");
         assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
         assert!(
-            p.errors[0].message.contains("unknown operator `&^`"),
+            p.errors[0].message.contains("unknown operator `&%%`"),
             "{:?}",
             p.errors
         );
         assert!(
-            p.errors[0].message.contains("infixl 1 &^"),
+            p.errors[0].message.contains("infixl 1 &%%"),
             "{:?}",
             p.errors
         );
@@ -980,9 +983,9 @@ mod tests {
 
         // Declared at the pipe level, it is a stage: left-assoc and chaining
         // with the shorthands the prelude already declares.
-        let ops = ops_with("infixl 1 &^\n");
+        let ops = ops_with("infixl 1 &%%\n");
         assert_eq!(
-            body_with("q = a &^ 5 &- 1", &ops),
+            body_with("q = a &%% 5 &- 1", &ops),
             "(BinExpr (BinExpr (NameRef a) (Literal 5)) (Literal 1))"
         );
 

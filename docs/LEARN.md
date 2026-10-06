@@ -910,15 +910,26 @@ unlike aggregates, a window may be *composed*: `rowNumber spec + 1` is fine.
 Set operations combine two queries that have **the same row type**:
 
 ```haskell
-everyone = users & union vips
-both     = users & intersect vips
-rest     = users & except vips
+everyone = users &| vips        # union
+both     = users &^ vips        # intersect
+rest     = users &~ vips        # except
+allUsers = users &! vips        # unionAll
+```
+
+Each one also has a named function, which is exactly equivalent:
+
+```haskell
+everyone = union users vips
+both     = intersect users vips
+rest     = except users vips
 allUsers = unionAll users vips
 ```
 
-The result keeps the columns and order of the left input. (The emitted SQL lists
-the operands in the order it evaluates them safely; the observable result
-follows the left query.)
+The result keeps the columns and order of the left input, and *both spellings
+agree*: `users &~ vips` is `users EXCEPT vips`, the same query as
+`except users vips`. Only `except` and `intersect` can tell the two operands
+apart — `union` and `unionAll` are commutative, so their order is not
+observable.
 
 `union` removes duplicate rows, while `unionAll` preserves them.
 

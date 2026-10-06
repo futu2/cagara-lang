@@ -298,6 +298,71 @@ pub enum Choice {
     Hole(usize),
 }
 
+/// Scalar-type mirror of a `Ty`, for the checked layer.
+///
+/// `Ty` is the *inference* representation: variables, rigids, schemes, and
+/// open rows. Later phases need the *result* of inference instead — a closed,
+/// printable scalar type — so `CheckedExpr.ty` is this type, not a `Ty`. The
+/// conversion lives here because it is the only module where `Ty` is visible.
+///
+/// Visibility is `pub(crate)`, not `pub`: `Ty` is an implementation detail of
+/// inference and the checked layer lives in this crate. `check/mod.rs`
+/// re-exports these for `crate::checked`.
+pub(crate) fn ty_to_scalar(t: &Ty) -> ScalarType {
+    match t {
+        // A variable that reaches here was never solved. "Unknown" is the
+        // honest answer: the rest of the definition is already reported.
+        Ty::Var(_) | Ty::Rigid(..) | Ty::Gen(_) => ScalarType::Unknown,
+        Ty::Con(name, args) => match (*name, args.len()) {
+            ("int", 0) => ScalarType::Int,
+            ("float", 0) => ScalarType::Float,
+            ("decimal", 0) => ScalarType::Decimal,
+            ("string", 0) => ScalarType::String,
+            ("bool", 0) => ScalarType::Bool,
+            ("date", 0) => ScalarType::Date,
+            ("timestamp", 0) => ScalarType::Timestamp,
+            ("maybe", 1) => ScalarType::maybe(ty_to_scalar(&args[0])),
+            ("list", 1) => ScalarType::List(Box::new(ty_to_scalar(&args[0]))),
+            _ => ScalarType::Unknown,
+        },
+        Ty::Fun(..) | Ty::Row(..) | Ty::Empty | Ty::MapKey(..) | Ty::KeyAffix(..) => {
+            ScalarType::Unknown
+        }
+        Ty::Merge(..) | Ty::MapValue(..) => ScalarType::Unknown,
+    }
+}
+
+/// Fields of a row type, or of the row inside `query r`.
+///
+/// The row terms a definition's scheme may still carry (`merge`, `mapValue`)
+/// are reduced here rather than in the checked layer, so the checked layer
+/// never has to know how the checker represents them.
+pub(crate) fn ty_fields(t: &Ty) -> Vec<(String, ScalarType)> {
+    match t {
+        Ty::Row(fs, _) => fs
+            .iter()
+            .map(|(n, t)| (n.clone(), ty_to_scalar(t)))
+            .collect(),
+        Ty::Con("query", args) if args.len() == 1 => ty_fields(&args[0]),
+        Ty::Merge(a, b) => {
+            let mut out = ty_fields(a);
+            for (n, t) in ty_fields(b) {
+                match out.iter_mut().find(|(o, _)| *o == n) {
+                    Some(slot) => slot.1 = t,
+                    None => out.push((n, t)),
+                }
+            }
+            out
+        }
+        Ty::MapValue(ValueMap::AsNullable, r) => ty_fields(r)
+            .into_iter()
+            .map(|(n, t)| (n, ScalarType::maybe(t)))
+            .collect(),
+        Ty::MapValue(_, r) => ty_fields(r),
+        _ => vec![],
+    }
+}
+
 impl Cons {
     pub(crate) fn map(&self, f: &mut impl FnMut(&Ty) -> Ty) -> Cons {
         match self {

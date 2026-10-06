@@ -1,8 +1,17 @@
 //! Compile-time evaluator. Runs a Cagara program (prelude included) and
-//! reduces each definition to a value; query definitions become `Rel` IR.
+//! reduces each definition to a value; query definitions become `CoreTerm`,
+//! which is erased to `Rel` IR at the one boundary (`root_queries_checked`)
+//! where the SQL backend and the schema validator need it.
+//!
+//! The evaluator is still the production path. What changed is what flows
+//! through it: a `Prim` no longer *is* the meaning of `where` — it is
+//! classified (`Prim::classify`) and handed to an explicit `CoreTerm`
+//! constructor, so the intermediate representation carries the relational
+//! structure and `Rel` is only an encoding of it.
 
 use crate::check::{Choice, TypeCheck};
-use crate::ir::{Expr, Lit, Loc, Rel};
+use crate::core_term::CoreTerm;
+use crate::ir::{Lit, Loc, Rel};
 use crate::prims::{self, build_tpl};
 use crate::value::{err, Closure, EResult, Env, EvalError, Inst, Template, TplKind, Value};
 use crate::workspace::{Binding, Diag, Workspace};
@@ -174,7 +183,7 @@ impl<'w> Evaluator<'w> {
                 ast::Lit::Str(s) => Lit::Str(s.clone()),
                 ast::Lit::Bool(b) => Lit::Bool(*b),
             })),
-            ExprKind::Field(side, n) => Ok(Value::Expr(Expr::Col(*side, n.clone()))),
+            ExprKind::Field(side, n) => Ok(Value::Expr(Box::new(CoreTerm::col(*side, n.clone())))),
             ExprKind::Proj(base, f) => {
                 if let ExprKind::Name(n) = &base.kind {
                     let ws = self.ws;
@@ -207,15 +216,15 @@ impl<'w> Evaluator<'w> {
                 // Tag a query built in user code with where it was written:
                 // for `q & stage` that is the stage, otherwise the whole call.
                 // Prelude (module 0) stages are tagged at their user call site.
+                // The tag is an explicit `CoreTerm::at`; nothing else in the
+                // evaluation adds one, so erasure keeps today's `Rel::At`
+                // wrappers exactly.
                 if m != 0 {
-                    if let Value::Query(r) = v {
+                    if let Value::Query(t) = v {
                         let pipe = args.len() == 2
                             && matches!(&f.kind, ExprKind::Name(n) if crate::rules::is_pipe_name(n));
                         let span = if pipe { args[1].span } else { e.span };
-                        v = Value::Query(match r {
-                            r @ Rel::At(..) => r,
-                            r => Rel::At(Loc { module: m, span }, Box::new(r)),
-                        });
+                        v = Value::Query(Box::new(t.at(Loc { module: m, span })));
                     }
                 }
                 Ok(v)
@@ -450,13 +459,18 @@ fn check_placeholders(sql: &str, expr_args: usize) -> EResult<()> {
 
 /// `t : query { a = int, b = string } = table "s" "t"` gives the table its
 /// column list (in declaration order).
+///
+/// The columns are set only when they are not known yet, and `closed_row`
+/// decides whether the signature supplies them at all — the same rule as
+/// before, now stated on `CoreTerm`. The table may sit under `At` wrappers,
+/// which `table_columns_mut` descends.
+///
+/// `Value::Query` holds a `Box<CoreTerm>`, so the mutation goes through the
+/// box (`&mut **t`); the box is the unique owner here because the value was
+/// just evaluated, which is also why nothing is cloned.
 fn attach_schema(mut v: Value, ty: Option<&TypeExpr>) -> Value {
-    if let Value::Query(r) = &mut v {
-        let mut r = r;
-        while let Rel::At(_, inner) = r {
-            r = inner;
-        }
-        if let Rel::Table { columns, .. } = r {
+    if let Value::Query(t) = &mut v {
+        if let Some(columns) = t.table_columns_mut() {
             if columns.is_none() {
                 *columns = closed_row(ty);
             }
@@ -485,6 +499,19 @@ pub fn root_queries(ws: &Workspace) -> Vec<(String, Result<Rel, Diag>)> {
 
 /// Like [`root_queries`], reusing a type check. A root definition with a type
 /// error is reported (and not evaluated) even if it is not a query.
+///
+/// This is the one boundary where the evaluator's `CoreTerm` becomes `Rel`:
+/// the erased tree is what the SQL backend consumes and what `schema`
+/// validates. Erasure is total and structural (`core_term::erase_core`), so a
+/// query that evaluated successfully erases to exactly the `Rel` the evaluator
+/// used to build by hand — including the `Rel::At` wrappers that
+/// `ExprKind::App` adds for `q & stage`, which is what lets `schema_located`
+/// blame the innermost failing stage.
+///
+/// `schema` stays here on purpose: it is still the guard rail over the erased
+/// IR (and the second opinion a checked tree is compared against in tests). It
+/// re-derives column existence, which the `CoreTerm` constructors do not carry
+/// rows for — `CoreTerm` is deliberately the row-less twin of `CheckedQuery`.
 pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Rel, Diag>)> {
     let mut ev = Evaluator::new(ws, tc);
     let m = ws.root;
@@ -499,9 +526,10 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
             continue;
         }
         match ev.def_value(m, i) {
-            Ok(Value::Query(r)) => {
-                let checked = match crate::schema::schema_located(&r) {
-                    Ok(_) => Ok(r),
+            Ok(Value::Query(t)) => {
+                let rel = crate::core_term::erase_core(*t);
+                let checked = match crate::schema::schema_located(&rel) {
+                    Ok(_) => Ok(rel),
                     Err((Some(l), msg)) => Err(ws.diag_span(l.module, l.span, msg)),
                     Err((None, msg)) => Err(ws.diag_span(m, d.span, msg)),
                 };
@@ -513,6 +541,36 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
     }
     out
 }
+
+/// Evaluate every definition of the root module and return the query ones as
+/// the *core* term, before erasure. The entry point for callers that want to
+/// inspect the elaboration rather than only its `Rel` encoding.
+pub fn root_core_terms(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<CoreTerm, Diag>)> {
+    let mut ev = Evaluator::new(ws, tc);
+    let m = ws.root;
+    let mut out = Vec::new();
+    for (i, d) in ws.modules[m].module.defs.iter().enumerate() {
+        if let Some(e) = tc.error_for(m, i) {
+            out.push((d.name.clone(), Err(e.clone())));
+            continue;
+        }
+        if tc.holes(m, i) > 0 {
+            continue;
+        }
+        match ev.def_value(m, i) {
+            Ok(Value::Query(t)) => out.push((d.name.clone(), Ok(*t))),
+            Ok(_) => {}
+            Err(e) => out.push((d.name.clone(), Err(ws.eval_diag(&e)))),
+        }
+    }
+    out
+}
+
+/// The elaboration tests, a sibling of `tests` rather than a child of it: they
+/// assert the *shape* of the emitted core term and pin each primitive's
+/// argument order (a permuted `Vec<Value>` is invisible to the type system).
+#[cfg(test)]
+mod elaboration_tests;
 
 #[cfg(test)]
 mod tests {

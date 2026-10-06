@@ -11,6 +11,11 @@ source -> syntax/AST -> type checker -> relational IR -> schema validation
         -> SQL lowering -> dialect rewrite -> SQL
 ```
 
+The intended simplification of this pipeline is described in
+[`ARCHITECTURE.md`](ARCHITECTURE.md). It separates the pure compiler kernel
+from the incremental workspace shell and makes typed relational construction
+the single source of validity rules.
+
 | Crate | Role |
 |---|---|
 | `cagara-syntax` | Lexer, lossless parser, AST, formatter |

@@ -1,0 +1,651 @@
+//! Elaboration tests: the evaluator's by-product is a `CoreTerm` tree.
+//!
+//! Two jobs, and they are different jobs:
+//!
+//! 1. **Structure.** Every assertion below inspects the *shape* of the tree —
+//!    which named constructor was called, with which arguments, nested how.
+//!    That is the point of the `CoreTerm` step: a `Prim` is classified and
+//!    handed to an explicit constructor, so the relational structure is
+//!    visible in the value the evaluator returns instead of only appearing as
+//!    a `Rel` node assembled from a name-keyed dispatch table.
+//!
+//! 2. **Argument order.** `prims::call` receives a `Vec<Value>` and saturates
+//!    on `Prim::arity()`, so reading a primitive's arguments in the wrong
+//!    order compiles cleanly and fails only at run time. That is a real bug
+//!    this file exists to catch (see the stage-form tests at the bottom).
+//!
+//! **What these tests deliberately do not cover.** `CoreTerm` is the *row-less*
+//! twin of `CheckedQuery`, so it cannot express a wrong column type, a missing
+//! `maybe` on an outer join's nullable side, or `update` merging in the wrong
+//! precedence. Those are row-level laws, they are invisible in this tree, and
+//! they need `CheckedQuery.row` / `--types` assertions. Nothing here should be
+//! read as standing in for them.
+
+use crate::core_term::CoreTerm;
+use crate::workspace::Workspace;
+use crate::ir::{JoinKind, Lit};
+
+/// The elaborated core term of one query definition of `src`.
+fn core_of(src: &str, name: &str) -> CoreTerm {
+    let ws = Workspace::from_source(src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let tc = crate::check::check(&ws);
+    let type_errors: Vec<String> = tc.errors.iter().map(|e| e.diag.message.clone()).collect();
+    assert!(type_errors.is_empty(), "{type_errors:?}");
+    crate::eval::root_core_terms(&ws, &tc)
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .unwrap_or_else(|| panic!("no query definition `{name}`"))
+        .1
+        .unwrap_or_else(|d| panic!("`{name}` failed to elaborate: {}", d.message))
+}
+
+/// A term without `At` wrappers, so an assertion about structure is not
+/// disturbed by where a stage was written.
+fn bare(t: &CoreTerm) -> &CoreTerm {
+    t.bare()
+}
+
+/// The `Table` name of a term.
+fn table_name(t: &CoreTerm) -> String {
+    match bare(t) {
+        CoreTerm::Table { name, .. } => name.clone(),
+        o => panic!("expected a table, found {}", o.kind()),
+    }
+}
+
+/// The `(schema, name)` of a table term.
+fn qualified(t: &CoreTerm) -> (String, String) {
+    match bare(t) {
+        CoreTerm::Table { schema, name, .. } => (schema.clone(), name.clone()),
+        o => panic!("expected a table, found {}", o.kind()),
+    }
+}
+
+/// `(column, asc)` of each `order` key, unwrapping the `Dir` node.
+fn order_keys(t: &CoreTerm) -> Vec<(String, bool)> {
+    match bare(t) {
+        CoreTerm::Order { keys, .. } => keys
+            .iter()
+            .map(|(k, asc)| {
+                let e = match k {
+                    CoreTerm::Dir { expr, .. } => expr.as_ref(),
+                    o => o,
+                };
+                (column_of(e), *asc)
+            })
+            .collect(),
+        o => panic!("expected an order, found {}", o.kind()),
+    }
+}
+
+/// The column a term reads, as its name.
+fn column_of(t: &CoreTerm) -> String {
+    match bare(t) {
+        CoreTerm::Col(_, n) => n.clone(),
+        o => panic!("expected a column, found {}", o.kind()),
+    }
+}
+
+const TABLES: &str = "users : query { id = int, name = string, age = int, active = bool } = \
+                       table \"public\" \"users\"\n\
+                       orders : query { id = int, user_id = int, amount = float, status = string, \
+                       created_at = date } = table \"public\" \"orders\"\n";
+
+// ── (a) `examples/report.cagara`'s `user_totals` ───────────────────────────
+//
+//   user_totals = users
+//     & leftJoin orders (.<id == .>user_id)
+//     & agg {
+//       id = group .id,
+//       total = coalesce 0.0 (sum (coalesce 0.0 .amount)),
+//       orders = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0))
+//     }
+//
+// The shape is `Agg(Join { Left, .. }, [group, coalesce(sum(..))])`: a left
+// join under an aggregate, with the coalesce written *inside* the field
+// expressions. Asserting the nesting is the point — a rename of `Rel::Agg`
+// would not produce a left join here.
+//
+// The *side-sensitive* assertions (`Left` kind, `users` on the left, `orders`
+// on the right, `.<id` left-qualified, `.>user_id` right-qualified) are there
+// because a plain node-kind check would survive swapping the two join inputs.
+
+#[test]
+fn left_join_agg_coalesce_elaborates_to_a_named_core_tree() {
+    let src = format!(
+        "{TABLES}\
+         user_totals = users\n\
+         \x20 & leftJoin orders (.<id == .>user_id)\n\
+         \x20 & agg {{ id = group .id, total = coalesce 0.0 (sum (coalesce 0.0 .amount)) }}\n"
+    );
+    let t = core_of(&src, "user_totals");
+
+    // The outermost stage is the aggregate, over a left join.
+    let CoreTerm::Agg { input, fields: fs } = bare(&t) else {
+        panic!("expected `Agg` at the root, found {}", bare(&t).kind());
+    };
+    let CoreTerm::Join {
+        kind,
+        left,
+        right,
+        on,
+    } = bare(input)
+    else {
+        panic!(
+            "expected the aggregate's input to be a `Join`, found {}",
+            input.kind()
+        );
+    };
+
+    // The join kind is the *constructor argument*, not something rediscovered.
+    assert_eq!(*kind, JoinKind::Left);
+    assert_eq!(table_name(left), "users");
+    assert_eq!(table_name(right), "orders");
+
+    // The predicate is a template over two side-qualified columns. The sides
+    // are what makes this assertion side-sensitive: exchanging the join inputs
+    // would put `id` on the right and `user_id` on the left.
+    let CoreTerm::Tpl { args, .. } = bare(on) else {
+        panic!("expected a template predicate, found {}", on.kind());
+    };
+    assert_eq!(args.len(), 2, "`.<id == .>user_id` has two operands");
+    assert!(
+        matches!(bare(&args[0]), CoreTerm::Col(cagara_syntax::ast::Side::Left, n) if n == "id")
+    );
+    assert!(
+        matches!(bare(&args[1]), CoreTerm::Col(cagara_syntax::ast::Side::Right, n) if n == "user_id")
+    );
+
+    // `id = group .id` is a `group` term; `total` is a coalesce template whose
+    // argument is the nested `sum`.
+    let names: Vec<&str> = fs.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["id", "total"]);
+    assert!(matches!(bare(&fs[0].1), CoreTerm::Group(_)));
+
+    let CoreTerm::Tpl { args, .. } = bare(&fs[1].1) else {
+        panic!(
+            "expected the coalesce to be a template, found {}",
+            fs[1].1.kind()
+        );
+    };
+    assert_eq!(args.len(), 2);
+    assert!(
+        matches!(bare(&args[0]), CoreTerm::Lit(Lit::Float(f)) if f == "0.0"),
+        "the coalesce default is a float literal"
+    );
+    // `sum` is an aggregate template wrapping another coalesce — the depth-1
+    // rule means it is `AggExpr`, not a nested `Agg`.
+    let CoreTerm::AggExpr { args, .. } = bare(&args[1]) else {
+        panic!(
+            "expected `sum ..` to be an aggregate template, found {}",
+            args[1].kind()
+        );
+    };
+    let CoreTerm::Tpl { args, .. } = bare(&args[0]) else {
+        panic!("expected the inner coalesce to be a template");
+    };
+    assert_eq!(column_of(&args[1]), "amount");
+}
+
+// ── (b) a two-sided join with `where` / `order` / `limit` ──────────────────
+//
+// Each stage must appear as its own named constructor, in pipeline order.
+
+#[test]
+fn where_order_limit_elaborate_to_distinct_constructors() {
+    let src = format!(
+        "{TABLES}\
+         q = users\n\
+         \x20 & innerJoin orders (.<id == .>user_id)\n\
+         \x20 & where (.amount > 10.0)\n\
+         \x20 & order [desc .name]\n\
+         \x20 & limit 5\n"
+    );
+    let t = core_of(&src, "q");
+
+    // Pipeline order, outermost first: limit <- order <- where <- join.
+    let CoreTerm::Limit { input, n } = bare(&t) else {
+        panic!("expected `Limit` at the root, found {}", bare(&t).kind());
+    };
+    assert_eq!(*n, 5);
+
+    let (order_node, input) = match bare(input) {
+        o @ CoreTerm::Order { input, .. } => (o, input),
+        o => panic!("expected `Order` under the limit, found {}", o.kind()),
+    };
+    assert_eq!(
+        order_keys(order_node),
+        [("name".to_string(), false)],
+        "`desc .name`"
+    );
+
+    let CoreTerm::Where { input, pred } = bare(input) else {
+        panic!("expected `Where` under the order, found {}", input.kind());
+    };
+    // The predicate is a template whose first operand reads a column of the
+    // join's right input — the wrap-around the checker proves.
+    let CoreTerm::Tpl { args, .. } = bare(pred) else {
+        panic!("expected a template predicate, found {}", pred.kind());
+    };
+    assert_eq!(column_of(&args[0]), "amount");
+    assert!(matches!(bare(&args[1]), CoreTerm::Lit(Lit::Float(f)) if f == "10.0"));
+
+    let CoreTerm::Join {
+        kind, left, right, ..
+    } = bare(input)
+    else {
+        panic!("expected `Join` under the where, found {}", input.kind());
+    };
+    assert_eq!(*kind, JoinKind::Inner);
+    assert_eq!(table_name(left), "users");
+    assert_eq!(table_name(right), "orders");
+}
+
+// ── the classification itself is exhaustive and total ──────────────────────
+
+#[test]
+fn every_primitive_is_classified_and_no_relational_prim_is_type_level() {
+    use crate::prims::Kind;
+    use crate::value::{Prim, PRIMS};
+
+    // Every primitive in the table has a kind, and the relational half is
+    // exactly the query half — so a relational primitive cannot quietly
+    // become a scalar or a type-level no-op.
+    for (name, p) in PRIMS {
+        let kind = p.classify();
+        let relational = matches!(
+            p,
+            Prim::Table
+                | Prim::Where
+                | Prim::Select
+                | Prim::Update
+                | Prim::Omit
+                | Prim::Prefix
+                | Prim::Suffix
+                | Prim::AggStage
+                | Prim::Order
+                | Prim::Limit
+                | Prim::Offset
+                | Prim::Distinct
+                | Prim::Join(_)
+                | Prim::Set(_)
+        );
+        assert_eq!(
+            relational,
+            kind == Kind::Query,
+            "`{name}` is relational iff it is classified `Query`"
+        );
+        assert!(
+            !relational || kind != Kind::TypeLevel,
+            "`{name}` is relational but classified type-level"
+        );
+        // The scalar and frame half keeps its own kind.
+        if matches!(p, Prim::In | Prim::Group) {
+            assert_eq!(kind, Kind::Expr, "`{name}` is scalar lowering");
+        }
+        if matches!(p, Prim::Asc | Prim::Desc) {
+            assert_eq!(kind, Kind::Key, "`{name}` is a sort key");
+        }
+        if matches!(p, Prim::Rows) {
+            assert_eq!(kind, Kind::Frame, "`{name}` is a window frame");
+        }
+    }
+
+    // The two type-level operations keep returning their explanatory errors,
+    // rather than being silently accepted.
+    assert_eq!(Prim::MapValue.classify(), Kind::TypeLevel);
+    assert_eq!(Prim::Merge.classify(), Kind::TypeLevel);
+    let e = match crate::prims::call(Prim::MapValue, vec![]) {
+        Err(e) => e.message,
+        Ok(_) => panic!("`mapValue` must not evaluate"),
+    };
+    assert!(e.contains("type-level operation"), "{e}");
+    let e = match crate::prims::call(Prim::Merge, vec![]) {
+        Err(e) => e.message,
+        Ok(_) => panic!("`merge` must not evaluate"),
+    };
+    assert!(e.contains("type-level operation"), "{e}");
+}
+
+// ── stage forms: each primitive's argument order, pinned ───────────────────
+//
+// `prims::call` takes a `Vec<Value>` and saturates on `arity()`. Reading the
+// stage argument and the query in the wrong order therefore type-checks,
+// compiles, and fails only at run time with "expected a query, found a
+// record" — which is exactly what happened when this rewrite landed.
+//
+// Each test drives one primitive through the prelude's curried signature and
+// asserts on something that depends on **which side each argument landed on**,
+// not merely that evaluation succeeded. That distinction matters for the
+// primitives whose two arguments have the same `Value` kind:
+//
+//   * `distinct` (arity 1): nothing to permute.
+//   * `join (right, on, left)`: `right`/`left` are both queries, so a bare
+//     `is_ok()` would not notice them exchanged — the test asserts which table
+//     is on which side, and that `on` (an expression) landed in the predicate
+//     position.
+//   * `set (left, right)`: both are queries; the test gives the two inputs
+//     different shapes so exchanging them changes the asserted tree.
+//   * `table (schema, name)`: both are strings; the test asserts the qualified
+//     pair, so a swap is visible.
+
+const ONE_TABLE: &str =
+    "t : query { id = int, name = string, age = int } = table \"public\" \"users\"\n";
+
+/// The single root query of `body`, elaborated.
+fn stage_query(body: &str) -> CoreTerm {
+    core_of(&format!("{ONE_TABLE}q = {body}\n"), "q")
+}
+
+#[test]
+fn where_stage_takes_its_predicate_first() {
+    // `where : expr r bool -> query r -> query r`
+    let t = stage_query("t & where (.age > 1)");
+    let CoreTerm::Where { input, pred } = bare(&t) else {
+        panic!("expected `Where`, found {}", t.kind());
+    };
+    assert_eq!(table_name(input), "users");
+    // The predicate really is the predicate: it reads `.age`. Reversing the
+    // reads hands the expression to `core_query` and fails before here.
+    let CoreTerm::Tpl { args, .. } = bare(pred) else {
+        panic!("expected a template predicate, found {}", pred.kind());
+    };
+    assert_eq!(column_of(&args[0]), "age");
+}
+
+#[test]
+fn select_stage_takes_its_fields_first() {
+    // `select : expr r (row s) -> query r -> query s`
+    let t = stage_query("t & select { id = .id, dn = .name }");
+    let CoreTerm::Select { input, fields } = bare(&t) else {
+        panic!("expected `Select`, found {}", t.kind());
+    };
+    assert_eq!(table_name(input), "users");
+    let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["id", "dn"]);
+    assert_eq!(column_of(&fields[0].1), "id");
+    assert_eq!(column_of(&fields[1].1), "name");
+}
+
+#[test]
+fn update_stage_takes_its_fields_first() {
+    // `update : expr r (row s) -> query r -> query (merge r s)`
+    let t = stage_query("t & update { age = .age + 1 }");
+    let CoreTerm::Update { input, fields } = bare(&t) else {
+        panic!("expected `Update`, found {}", t.kind());
+    };
+    assert_eq!(table_name(input), "users");
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].0, "age");
+}
+
+#[test]
+fn omit_stage_takes_its_key_first() {
+    // `omit : key_omit -> query r -> query s`
+    let t = stage_query("t & omit \"name\"");
+    let CoreTerm::Omit { input, key } = bare(&t) else {
+        panic!("expected `Omit`, found {}", t.kind());
+    };
+    assert_eq!(table_name(input), "users");
+    assert_eq!(key, "name");
+}
+
+#[test]
+fn prefix_and_suffix_take_their_affix_first() {
+    // `prefix : string -> query r -> query r`, and the same for `suffix`.
+    // The affix is asserted literally, so a lost or swapped affix is visible.
+    let t = stage_query("t & prefix \"u_\"");
+    let CoreTerm::Prefix { input, affix } = bare(&t) else {
+        panic!("expected `Prefix`, found {}", t.kind());
+    };
+    assert_eq!(table_name(input), "users");
+    assert_eq!(affix, "u_");
+
+    let t = stage_query("t & suffix \"_v2\"");
+    let CoreTerm::Suffix { input, affix } = bare(&t) else {
+        panic!("expected `Suffix`, found {}", t.kind());
+    };
+    assert_eq!(table_name(input), "users");
+    assert_eq!(affix, "_v2");
+}
+
+#[test]
+fn agg_stage_takes_its_fields_first() {
+    // `agg : expr r (row s) -> query r -> query s`
+    let t = stage_query("t & agg { n = count, a = sum .age }");
+    let CoreTerm::Agg { input, fields } = bare(&t) else {
+        panic!("expected `Agg`, found {}", t.kind());
+    };
+    assert_eq!(table_name(input), "users");
+    let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["n", "a"]);
+}
+
+#[test]
+fn order_stage_takes_its_keys_first() {
+    // `order : list (expr r a) -> query r -> query r`
+    let t = stage_query("t & order [desc .age, .name]");
+    let CoreTerm::Order { input, keys } = bare(&t) else {
+        panic!("expected `Order`, found {}", t.kind());
+    };
+    assert_eq!(table_name(input), "users");
+    // Direction is asserted too: a lost `desc` flag would still be an `Order`.
+    assert_eq!(
+        order_keys(&t),
+        [("age".to_string(), false), ("name".to_string(), true)]
+    );
+    assert_eq!(keys.len(), 2);
+}
+
+#[test]
+fn limit_and_offset_take_their_count_first() {
+    // `limit : int -> query r -> query r`, and the same for `offset`. The
+    // distinct counts keep the two stages from being confused.
+    let t = stage_query("t & limit 3");
+    let CoreTerm::Limit { input, n } = bare(&t) else {
+        panic!("expected `Limit`, found {}", t.kind());
+    };
+    assert_eq!(table_name(input), "users");
+    assert_eq!(*n, 3);
+
+    let t = stage_query("t & offset 7");
+    let CoreTerm::Offset { input, n } = bare(&t) else {
+        panic!("expected `Offset`, found {}", t.kind());
+    };
+    assert_eq!(table_name(input), "users");
+    assert_eq!(*n, 7);
+}
+
+#[test]
+fn distinct_stage_takes_its_query() {
+    // `distinct : query r -> query r`, arity 1: there is nothing to permute,
+    // so this only pins that the single read is the query.
+    let t = stage_query("t & distinct");
+    let CoreTerm::Distinct { input } = bare(&t) else {
+        panic!("expected `Distinct`, found {}", t.kind());
+    };
+    assert_eq!(table_name(input), "users");
+}
+
+/// The join and set forms need a second query, so they get their own source.
+const TWO_TABLES: &str = "t : query { id = int, name = string } = table \"public\" \"users\"\n\
+                          u : query { id = int, tag = string } = table \"public\" \"tags\"\n";
+
+#[test]
+fn join_stage_takes_right_then_on_then_left() {
+    // `innerJoin : query r -> expr (row r <> row s) bool -> query r -> query s`
+    // arrives as `[right, on, left]`; the original `prims::call` read them in
+    // exactly that order, so this pins it.
+    let src = format!("{TWO_TABLES}q = t & innerJoin u (.<id == .>id)\n");
+    let t = core_of(&src, "q");
+    let CoreTerm::Join {
+        kind,
+        left,
+        right,
+        on,
+    } = bare(&t)
+    else {
+        panic!("expected `Join`, found {}", t.kind());
+    };
+    assert_eq!(*kind, JoinKind::Inner);
+    // Left is the piped input (`t` → users), right is the join's own argument
+    // (`u` → tags). Both are queries, so exchanging the reads keeps the tree a
+    // `Join` — only these two assertions notice.
+    assert_eq!(table_name(left), "users");
+    assert_eq!(table_name(right), "tags");
+    // `on` is a predicate: it must have landed in the predicate position, and
+    // it is the side-qualified one, not a query.
+    let CoreTerm::Tpl { args, .. } = bare(on) else {
+        panic!("expected a template predicate, found {}", on.kind());
+    };
+    assert!(
+        matches!(bare(&args[0]), CoreTerm::Col(cagara_syntax::ast::Side::Left, n) if n == "id")
+    );
+    assert!(
+        matches!(bare(&args[1]), CoreTerm::Col(cagara_syntax::ast::Side::Right, n) if n == "id")
+    );
+}
+
+#[test]
+fn left_join_records_its_kind() {
+    // The join kind is a constructor argument; a wrong kind here would
+    // silently emit an inner join.
+    let src = format!("{TWO_TABLES}q = t & leftJoin u (.<id == .>id)\n");
+    let t = core_of(&src, "q");
+    let CoreTerm::Join { kind, .. } = bare(&t) else {
+        panic!("expected `Join`, found {}", t.kind());
+    };
+    assert_eq!(*kind, JoinKind::Left);
+}
+
+/// `(kind, left_table, right_table)` of a set operation, with each side's
+/// source table read out of its own projection.
+fn set_operands(t: &CoreTerm) -> (crate::ir::SetKind, String, String) {
+    let CoreTerm::Set { kind, left, right } = bare(t) else {
+        panic!("expected `Set`, found {}", t.kind());
+    };
+    (*kind, operand_table(left), operand_table(right))
+}
+
+/// Apply a set operation to two named tables *without* the pipe: the direct
+/// curried call `op a b`. Each side is projected to the same row first, since
+/// a set operation requires matching rows; the projection keeps each side's
+/// source table visible, which is what the operand assertions read.
+fn direct(op: &str) -> CoreTerm {
+    let src = format!(
+        "{TWO_TABLES}q = {op} (t & select {{ id = .id, v = .name }}) \
+         (u & select {{ id = .id, v = .tag }})\n"
+    );
+    core_of(&src, "q")
+}
+
+/// Apply a set operation *through the pipe*: `a & op b`.
+fn piped(op: &str) -> CoreTerm {
+    let src = format!(
+        "{TWO_TABLES}q = (t & select {{ id = .id, v = .name }}) \
+         \x20 & {op} (u & select {{ id = .id, v = .tag }})\n"
+    );
+    core_of(&src, "q")
+}
+
+/// The table a set operation's operand ultimately reads, through its
+/// projection.
+fn operand_table(t: &CoreTerm) -> String {
+    match bare(t) {
+        CoreTerm::Select { input, .. } => table_name(input),
+        o => table_name(o).to_string() + &format!(" <{}>", o.kind()),
+    }
+}
+
+/// The direct form is the one the prelude's signature states: `op a b` puts
+/// `a` on the left and `b` on the right. This is the form `fn`s and doctests
+/// use, and it must not change.
+#[test]
+fn set_direct_form_puts_the_first_operand_on_the_left() {
+    for (op, kind) in [
+        ("union", crate::ir::SetKind::Union),
+        ("unionAll", crate::ir::SetKind::UnionAll),
+        ("intersect", crate::ir::SetKind::Intersect),
+        ("except", crate::ir::SetKind::Except),
+    ] {
+        let (k, left, right) = set_operands(&direct(op));
+        assert_eq!(k, kind, "`{op} t u` has kind {kind:?}");
+        assert_eq!((left.as_str(), right.as_str()), ("users", "tags"), "`{op} t u`");
+    }
+}
+
+/// The piped form, and the behaviour it actually has.
+///
+/// `union`/`intersect`/`except`/`unionAll` are plain primitives, not stage
+/// operators, so `t & op u` is `_&_ t (op u)`: `op u` is a partial application
+/// and the pipe supplies `t` as its **second** argument. The primitive
+/// therefore receives `[u, t]`, so the operand written after `&` lands on the
+/// **left** and the piped input lands on the **right**.
+///
+/// This is pre-existing behaviour, not something this refactor introduced, and
+/// `docs/LEARN.md` promises the opposite ("the observable result follows the
+/// left query"). For `union`/`unionAll`/`intersect` the reversal is invisible
+/// because those are commutative; for **`except` it is a wrong answer** —
+/// `users & except vips` computes `vips EXCEPT users`, the complement.
+///
+/// The test asserts the real order deliberately. It is the pin that a future
+/// swap of `Set`'s two `next()` reads would trip, and it is the evidence for
+/// whichever way the semantics are resolved (see `docs/implementation/`).
+#[test]
+fn set_piped_form_puts_the_piped_query_on_the_right() {
+    for (op, kind) in [
+        ("union", crate::ir::SetKind::Union),
+        ("unionAll", crate::ir::SetKind::UnionAll),
+        ("intersect", crate::ir::SetKind::Intersect),
+        ("except", crate::ir::SetKind::Except),
+    ] {
+        let (k, left, right) = set_operands(&piped(op));
+        assert_eq!(k, kind, "`t & {op} u` has kind {kind:?}");
+        assert_eq!(
+            (left.as_str(), right.as_str()),
+            ("tags", "users"),
+            "`t & {op} u`: the operand after `&` is the primitive's first \
+             argument, and the piped input is the second"
+        );
+    }
+}
+
+/// The two forms must disagree — that is the whole point of pinning both. If a
+/// future change made `t & op u` mean `op t u`, this fails and the piped set
+/// operations become commutative-correct, which is what `LEARN.md` promises.
+#[test]
+fn set_piped_and_direct_forms_are_distinguishable() {
+    let (_, piped_left, piped_right) = set_operands(&piped("except"));
+    let (_, direct_left, direct_right) = set_operands(&direct("except"));
+    assert_ne!(
+        (piped_left.as_str(), piped_right.as_str()),
+        (direct_left.as_str(), direct_right.as_str()),
+        "`t & except u` and `except t u` currently pick opposite operands; \
+         a test that could not see the difference would not have caught the \
+         `except` reversal"
+    );
+}
+
+#[test]
+fn table_stage_takes_schema_then_name() {
+    // `table : string -> string -> query r` — both arguments are strings, so
+    // reversing them is invisible to `is_ok()`; the qualified pair is asserted.
+    let t = stage_query("table \"public\" \"users\"");
+    assert_eq!(qualified(&t), ("public".to_string(), "users".to_string()));
+}
+
+#[test]
+fn in_takes_its_list_then_its_value() {
+    // `in : list (expr r a) -> expr r a -> expr r bool` arrives as
+    // `[list, value]`, matching the original `prims::call`.
+    let t = stage_query("t & where (in [1, 2] .age)");
+    let CoreTerm::Where { pred, .. } = bare(&t) else {
+        panic!("expected `Where`, found {}", t.kind());
+    };
+    let CoreTerm::In { value, list, .. } = bare(pred) else {
+        panic!("expected `In`, found {}", pred.kind());
+    };
+    assert_eq!(list.len(), 2, "the list is the list");
+    assert_eq!(column_of(value), "age", "the value is the value");
+}

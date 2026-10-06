@@ -300,7 +300,7 @@ mod tests {
     fn the_prelude_declares_the_pipeline() {
         let ops = ops();
         assert_eq!(ops.pipe_fixity().unwrap().precedence(), (1, 2));
-        for s in ["&", "&?", "&=", "&+", "&*", "&.", "&-"] {
+        for s in ["&", "&?", "&=", "&+", "&*", "&.", "&-", "&|", "&!", "&^", "&~"] {
             let f = ops.find(s).unwrap_or_else(|| panic!("`{s}` is undeclared"));
             assert_eq!(f.precedence(), (1, 2), "`{s}` must sit at the pipe level");
             assert!(ops.is_stage(s), "`{s}` must be a stage");
@@ -312,7 +312,15 @@ mod tests {
             assert_eq!(f.precedence(), (3, 4));
             assert!(!ops.is_stage(s), "`{s}` is a join, not a stage");
         }
-        assert_eq!(ops.stages(), ["&", "&*", "&+", "&-", "&.", "&=", "&?"]);
+        // Every operator declared at the pipe level is a stage, and this list
+        // is the whole of them. Keeping it exact is the point: the stage set
+        // is what the evaluator uses to recognise `q & stage`, so a new
+        // declaration at this level silently changes how a pipeline is
+        // located for diagnostics.
+        assert_eq!(
+            ops.stages(),
+            ["&", "&!", "&*", "&+", "&-", "&.", "&=", "&?", "&^", "&|", "&~"]
+        );
     }
 
     #[test]

@@ -1,0 +1,1731 @@
+//! The checked layer: typed relational construction.
+//!
+//! This is the target design's "one place for relational validity". Today a
+//! stage is constrained three times — row equations in `check/`, runtime
+//! checks in `prims.rs`, and column/phase checks in `schema.rs`. Here the
+//! constructor *is* the rule: a [`CheckedQuery`] that exists has an output row
+//! that matches its node, so no later phase has to re-derive anything.
+//!
+//! The layer is deliberately boring:
+//!
+//!   * every node carries its [`Origin`], so an error names the node that
+//!     created the invalid operation without changing the tree's shape;
+//!   * every constructor is `pub fn … -> Result<…, Error>`, checks its local
+//!     rule against [`rules`], and returns the output row;
+//!   * [`erase`] lowers a tree back to the existing [`Rel`], so the SQL
+//!     backend and `schema::schema` keep working unchanged while the
+//!     constructors take over the checking.
+//!
+//! Phase and join-side rules come from `crate::rules` — the module the
+//! checker's *types* already use — so this is one statement of the rule, not a
+//! third one. Column-level name rules come from `crate::schema`.
+
+use crate::check::{Choice, TypeCheck};
+use crate::core::{Diagnostic, Error, Origin, RowType, ScalarType};
+use crate::ir::{Bound, Expr, Frame, JoinKind, Lit, Loc, Phase, Rel, SetKind, WinSpec};
+use crate::rules::{self, Place};
+use cagara_syntax::ast::{self, Side};
+use std::collections::HashMap;
+
+/// One checked definition: its name, its printed scheme, how many overload
+/// holes it leaves open, and one core body per instantiation of those holes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckedDef {
+    pub name: String,
+    pub def: usize,
+    /// The definition's printed type scheme (`TypeCheck::type_of`), if it was
+    /// well typed. This is the string a *user* reads.
+    pub scheme: Option<String>,
+    /// The definition's scalar type, as closed data (`TypeCheck::def_scalar`).
+    /// `None` when the scheme has no scalar reading (a function or a row).
+    /// This is what a *phase* should read: unlike `scheme` it carries no
+    /// inference variable.
+    pub scalar: Option<ScalarType>,
+    /// The definition's output row, when its scheme is a query over a closed
+    /// row (`TypeCheck::scheme_fields`).
+    ///
+    /// `None` and `Some(vec![])` are different answers and must not be
+    /// collapsed: `None` means the scheme is not a closed row at all (a
+    /// function, a scalar, a still-open row), whereas `Some(vec![])` means it
+    /// is a row with no columns. A caller asking "does this definition have a
+    /// row?" wants the distinction.
+    pub row: Option<RowType>,
+    /// How many open overloads the definition leaves to its users.
+    pub holes: usize,
+    /// One checked body per overload-hole instantiation: the definition's
+    /// [`crate::CoreTerm`] for each assignment of its holes, in
+    /// `TypeCheck::holes` order. Resolved up front, so evaluation never
+    /// discovers a choice dynamically.
+    pub terms: Vec<crate::CoreTerm>,
+}
+
+impl CheckedDef {
+    /// The definition's output row, if its scheme is a closed row.
+    ///
+    /// `Some(row)` includes the empty row (a query over no columns); use this
+    /// rather than comparing against `vec![]` to ask "is this a row?".
+    pub fn row(&self) -> Option<&RowType> {
+        self.row.as_ref()
+    }
+
+    /// The *names* of the definition's output row, empty when it has none.
+    /// Prefer [`CheckedDef::row`] when the distinction matters.
+    pub fn row_names(&self) -> Vec<String> {
+        self.row.as_ref().map(RowType::names).unwrap_or_default()
+    }
+}
+
+/// One checked module: everything `TypeCheck` holds for it, in one value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckedModule {
+    pub index: usize,
+    pub path: String,
+    pub defs: Vec<CheckedDef>,
+    /// Definition index → printed scheme, for every well-typed definition.
+    pub types: HashMap<usize, String>,
+    /// Definition index → number of open overload holes.
+    pub holes: HashMap<usize, usize>,
+    /// `(def, site, hole)` → the resolved choice.
+    pub choices: HashMap<(usize, u32, usize), Choice>,
+    /// The columns known at this module's `PROBE_FIELD` reference, if it has
+    /// one: `(name, printed type)` in row order.
+    pub probe_fields: Option<Vec<(String, String)>>,
+    /// `(span start, span end)` → printed type of the name use there.
+    pub use_types: HashMap<(u32, u32), String>,
+}
+
+impl CheckedModule {
+    pub fn new(index: usize, path: impl Into<String>) -> Self {
+        CheckedModule {
+            index,
+            path: path.into(),
+            defs: vec![],
+            types: HashMap::new(),
+            holes: HashMap::new(),
+            choices: HashMap::new(),
+            probe_fields: None,
+            use_types: HashMap::new(),
+        }
+    }
+
+    /// The definition with this index, if the module has one.
+    pub fn def(&self, def: usize) -> Option<&CheckedDef> {
+        self.defs.iter().find(|d| d.def == def)
+    }
+
+    /// The choice recorded at `site`/hole `k` of `def`.
+    pub fn choice(&self, def: usize, site: u32, k: usize) -> Option<Choice> {
+        self.choices.get(&(def, site, k)).copied()
+    }
+}
+
+/// A whole checked program: every module, and every diagnostic.
+///
+/// This is the coherent single input the later phases take, replacing the
+/// split where `TypeCheck` holds the choices and the `Evaluator` interprets
+/// the original AST to consume them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckedProgram {
+    pub modules: Vec<CheckedModule>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl CheckedProgram {
+    pub fn new() -> Self {
+        CheckedProgram {
+            modules: vec![],
+            diagnostics: vec![],
+        }
+    }
+
+    /// Gather what the checker learned into one checked program.
+    ///
+    /// This runs the existing checker and groups its output per module; it
+    /// does **not** change what is checked or in what order. The
+    /// per-definition core bodies are supplied by the caller (`bodies`),
+    /// because elaborating a definition to a `CoreTerm` is the evaluator's
+    /// job: this function arranges, it does not check.
+    pub fn of(ws: &crate::workspace::Workspace) -> Self {
+        let tc = crate::check::check(ws);
+        Self::from_type_check(ws, &tc, HashMap::new())
+    }
+
+    /// [`CheckedProgram::of`], reusing a type check the caller already ran.
+    pub fn from_type_check(
+        ws: &crate::workspace::Workspace,
+        tc: &TypeCheck,
+        bodies: HashMap<(usize, usize), Vec<crate::CoreTerm>>,
+    ) -> Self {
+        let mut out = CheckedProgram::new();
+        for index in 0..ws.modules.len() {
+            let loaded = &ws.modules[index];
+            let mut module = CheckedModule::new(index, loaded.path.display().to_string());
+            for (def, d) in loaded.module.defs.iter().enumerate() {
+                let holes = tc.holes(index, def);
+                module.types.insert(def, tc.type_of(index, def).unwrap_or("").into());
+                module.holes.insert(def, holes);
+                // Record every resolved choice of the definition, and the
+                // printed type of every name use, so a later phase reads them
+                // here rather than asking the checker again.
+                for (span, _layer) in body_spans(&d.body) {
+                    if let Some(t) = tc.use_type(index, span) {
+                        module.use_types.insert((span.start, span.end), t.to_string());
+                    }
+                    for site in [span.start, span.end] {
+                        for k in 0..MAX_HOLES {
+                            match tc.choice(index, def, site, k) {
+                                Some(c) => {
+                                    module.choices.insert((def, site, k), c);
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+                module.defs.push(CheckedDef {
+                    name: d.name.clone(),
+                    def,
+                    scheme: tc.type_of(index, def).map(str::to_string),
+                    // The typed twin of `scheme`: read from the same
+                    // `TypeCheck`, so `CheckedProgram` and the checker cannot
+                    // disagree about a definition's type.
+                    scalar: tc.def_scalar(index, def),
+                    row: scheme_row(tc, index, def, tc.type_of(index, def)),
+                    holes,
+                    terms: bodies.get(&(index, def)).cloned().unwrap_or_default(),
+                });
+            }
+            if let Some(fs) = tc.probe_fields(index) {
+                module.probe_fields = Some(fs.to_vec());
+            }
+            out.modules.push(module);
+        }
+        for e in &tc.errors {
+            out.diagnostics
+                .push(Diagnostic::new(e.module, Some(e.def), e.diag.clone()));
+        }
+        for d in &ws.diags {
+            out.diagnostics.push(Diagnostic::new(ws.root, None, d.clone()));
+        }
+        out
+    }
+
+    pub fn module(&self, index: usize) -> Option<&CheckedModule> {
+        self.modules.iter().find(|m| m.index == index)
+    }
+
+    /// True when nothing was reported. A program with errors still carries
+    /// whatever modules were checked, so a language server can show both.
+    pub fn is_ok(&self) -> bool {
+        self.diagnostics.is_empty()
+    }
+}
+
+impl Default for CheckedProgram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// How many overload holes a definition may leave open. `encode` builds a use
+/// site and a hole index into one `u32` with the hole in the low byte.
+const MAX_HOLES: usize = 256;
+
+/// A definition's output row, from its scheme's closed row.
+///
+/// `None` means the scheme is not a query over a closed row — a function, a
+/// scalar, or a row the checker never closed. That is deliberately distinct
+/// from `Some(RowType::new(vec![]))`, a query over no columns: collapsing them
+/// would make "this definition has no row" and "this definition's row is
+/// empty" the same answer, and they are not the same program.
+///
+/// The underlying `ty_fields` returns an empty vector for *every* type that is
+/// not a row, so on its own `Some(vec![])` cannot be told from "not a row".
+/// The printed scheme is the discriminator available at this boundary, and
+/// this reads it rather than guessing: a scheme that is a `query` is a row
+/// (possibly empty), anything else is not a row at all. The known limit that
+/// remains is a still-open row inside a `query`, which arrives as
+/// `Some(empty)`; `TypeCheck::type_of` still prints the open form for a
+/// reader.
+fn scheme_row(tc: &TypeCheck, module: usize, def: usize, scheme: Option<&str>) -> Option<RowType> {
+    let cols = tc.scheme_fields(module, def)?;
+    let printed = scheme?;
+    // `query {..}` and `query r` both name a query; a function or a scalar
+    // scheme does not.
+    if !printed.contains("query") {
+        return None;
+    }
+    Some(RowType::new(cols))
+}
+
+/// Every sub-expression span of a definition body, the body's own first.
+///
+/// `TypeCheck::use_type` and `TypeCheck::choice` are keyed by span and use
+/// site, so reading them requires walking the body.
+fn body_spans(e: &ast::Expr) -> Vec<(ast::Span, ())> {
+    let mut out = vec![(e.span, ())];
+    walk(e, &mut out);
+    out
+}
+
+fn walk(e: &ast::Expr, out: &mut Vec<(ast::Span, ())>) {
+    match &e.kind {
+        ast::ExprKind::Name(_)
+        | ast::ExprKind::Lit(_)
+        | ast::ExprKind::Field(..)
+        | ast::ExprKind::Sql(_)
+        | ast::ExprKind::Primitive(_)
+        | ast::ExprKind::Error => {}
+        ast::ExprKind::Proj(b, _) => walk(b, out),
+        ast::ExprKind::App(f, args) => {
+            walk(f, out);
+            for a in args {
+                walk(a, out);
+            }
+        }
+        ast::ExprKind::Lambda(_, b) => walk(b, out),
+        ast::ExprKind::Record(fs) => {
+            for (_, x) in fs {
+                walk(x, out);
+            }
+        }
+        ast::ExprKind::List(xs) => {
+            for x in xs {
+                walk(x, out);
+            }
+        }
+    }
+    out.push((e.span, ()));
+}
+
+// ── the checked query ──────────────────────────────────────────────────────
+
+/// A checked query: an output row, a node that produced it, and where the
+/// stage was written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckedQuery {
+    pub row: RowType,
+    pub node: CheckedQueryNode,
+    pub origin: Origin,
+}
+
+impl CheckedQuery {
+    /// A table, with its columns known.
+    ///
+    /// `columns` is the table's closed row: the checker gives a `table`
+    /// definition its column list from its signature, and a table whose
+    /// columns are not known cannot be a checked query — every later stage
+    /// would have to guess. `None` is rejected here rather than deferred, with
+    /// the same message `schema` gives.
+    pub fn table(
+        schema: impl Into<String>,
+        name: impl Into<String>,
+        columns: Option<RowType>,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        let schema = schema.into();
+        let name = name.into();
+        let Some(row) = columns else {
+            return Err(Error::new(format!(
+                "the columns of table `{schema}.{name}` are unknown; give its definition a closed \
+                 type, e.g. `t : query {{ id = int }} = table \"{schema}\" \"{name}\"`"
+            ))
+            .at(origin));
+        };
+        // Read the names before `row` is moved into the node.
+        let names = row.names();
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Table {
+                schema,
+                name,
+                columns: names,
+            },
+            origin,
+        })
+    }
+
+    /// `where pred`: a row-phase `bool` predicate; the output row is the
+    /// input's.
+    pub fn where_(input: CheckedQuery, pred: CheckedExpr, origin: Origin) -> Result<Self, Error> {
+        place(Place::Where, &pred, origin)?;
+        if !pred.ty.is_bool() {
+            return Err(Error::new(format!(
+                "a `where` predicate must be bool, found {}",
+                pred.ty
+            ))
+            .at(origin));
+        }
+        refs_columns(&pred, &input.row, "where", origin)?;
+        let row = input.row.clone();
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Where {
+                input: Box::new(input),
+                pred,
+            },
+            origin,
+        })
+    }
+
+    /// `select {..}`: at least one field, every field row-phase and over the
+    /// input row; the output row is the fields, in order.
+    pub fn select(
+        input: CheckedQuery,
+        fields: Vec<(String, CheckedExpr)>,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        let row = project_row("select", &input.row, &fields, Place::Select, origin)?;
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Select {
+                input: Box::new(input),
+                fields,
+            },
+            origin,
+        })
+    }
+
+    /// `update {..}`: like `select`, but merged over the input row — a listed
+    /// name keeps its position and takes the **new** type, a new name is
+    /// appended.
+    ///
+    /// The merge here is [`RowType::overwrite`] (right-wins), *not*
+    /// [`RowType::merge`] (left-wins, the join law). Using the join law would
+    /// silently keep the old type of an overwritten column while the checker
+    /// and the erasure both say the new one.
+    pub fn update(
+        input: CheckedQuery,
+        fields: Vec<(String, CheckedExpr)>,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        let updated = project_row("update", &input.row, &fields, update_place(), origin)?;
+        let row = input.row.overwrite(&updated);
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Update {
+                input: Box::new(input),
+                fields,
+            },
+            origin,
+        })
+    }
+
+    /// `agg {..}`: at least one field, every field at `Agg` or `Const` phase.
+    /// A `Win` field is rejected: it belongs in a `select` after the
+    /// aggregation.
+    pub fn agg(
+        input: CheckedQuery,
+        fields: Vec<(String, CheckedExpr)>,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        let row = project_row("agg", &input.row, &fields, Place::Agg, origin)?;
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Agg {
+                input: Box::new(input),
+                fields,
+            },
+            origin,
+        })
+    }
+
+    /// `order [..]`: row-phase sort keys over the input row; the output row
+    /// is unchanged.
+    pub fn order(
+        input: CheckedQuery,
+        keys: Vec<(CheckedExpr, bool)>,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        for (k, _) in &keys {
+            place(Place::Key, k, origin)?;
+            refs_columns(k, &input.row, "order", origin)?;
+        }
+        let row = input.row.clone();
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Order {
+                input: Box::new(input),
+                keys,
+            },
+            origin,
+        })
+    }
+
+    /// `limit n`.
+    pub fn limit(input: CheckedQuery, n: i64, origin: Origin) -> Result<Self, Error> {
+        if n < 0 {
+            return Err(
+                Error::new(format!("`limit` needs a non-negative count, got {n}")).at(origin)
+            );
+        }
+        let row = input.row.clone();
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Limit {
+                input: Box::new(input),
+                n,
+            },
+            origin,
+        })
+    }
+
+    /// `offset n`.
+    pub fn offset(input: CheckedQuery, n: i64, origin: Origin) -> Result<Self, Error> {
+        if n < 0 {
+            return Err(
+                Error::new(format!("`offset` needs a non-negative count, got {n}")).at(origin)
+            );
+        }
+        let row = input.row.clone();
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Offset {
+                input: Box::new(input),
+                n,
+            },
+            origin,
+        })
+    }
+
+    /// `distinct`.
+    pub fn distinct(input: CheckedQuery, origin: Origin) -> Result<Self, Error> {
+        let row = input.row.clone();
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Distinct(Box::new(input)),
+            origin,
+        })
+    }
+
+    /// `omit "k"`: the input row without column `k`.
+    ///
+    /// A key the input does not have is **rejected here**, with the wording
+    /// `schema::omit_columns` uses. [`RowType::omit`] is total because it is
+    /// the row *former*, but this constructor is where the rule lives: a
+    /// `CheckedQuery` that exists must be one `schema::schema` accepts, and
+    /// `omit` on a missing key is exactly the case where a total row former
+    /// would otherwise let an invalid query into the checked layer.
+    pub fn omit(input: CheckedQuery, key: impl Into<String>, origin: Origin) -> Result<Self, Error> {
+        let key = key.into();
+        if !input.row.has(&key) {
+            let avail = input.row.names().join(", ");
+            return Err(Error::new(format!(
+                "no column `{key}`; available: {avail}"
+            ))
+            .at(origin));
+        }
+        let row = input.row.omit(&key);
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Omit {
+                input: Box::new(input),
+                key,
+            },
+            origin,
+        })
+    }
+
+    /// `prefix "s"` — every column name gains `affix` in front.
+    pub fn prefix(input: CheckedQuery, affix: impl Into<String>, origin: Origin) -> Result<Self, Error> {
+        Self::rename(input, affix, true, origin)
+    }
+
+    /// `suffix "s"` — every column name gains `affix` at the end.
+    pub fn suffix(input: CheckedQuery, affix: impl Into<String>, origin: Origin) -> Result<Self, Error> {
+        Self::rename(input, affix, false, origin)
+    }
+
+    /// The shared body of `prefix`/`suffix`. It keeps the direction explicit
+    /// so a stale mapper cannot make `suffix` act as a prefix.
+    pub fn rename(
+        input: CheckedQuery,
+        affix: impl Into<String>,
+        prefix: bool,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        let affix = affix.into();
+        let row = input.row.rename_all(&affix, prefix);
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Rename {
+                input: Box::new(input),
+                affix,
+                prefix,
+            },
+            origin,
+        })
+    }
+
+    /// A join.
+    ///
+    /// The predicate must be row-phase `bool`, and every side-qualified name
+    /// must come from the input its side names: `Side::Single` is rejected (a
+    /// join predicate must say which input a column comes from), and a column
+    /// absent from its side is reported with what that side has.
+    ///
+    /// The output row is the left input's, then the right's that the left does
+    /// not have, with the nullable side's *types* wrapped in `maybe`: left join
+    /// → right side, right join → left side, full → both. A semi/anti join
+    /// keeps the left input's row.
+    pub fn join(
+        kind: JoinKind,
+        left: CheckedQuery,
+        right: CheckedQuery,
+        on: CheckedExpr,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        place(Place::JoinOn, &on, origin)?;
+        if !on.ty.is_bool() {
+            return Err(Error::new(format!(
+                "a join predicate must be bool, found {}",
+                on.ty
+            ))
+            .at(origin));
+        }
+        for (side, n) in on.node.columns() {
+            let (cols, what) = match side {
+                Side::Left => (&left.row, "left"),
+                Side::Right => (&right.row, "right"),
+                Side::Single => return Err(Error::new(rules::needs_side(&n)).at(origin)),
+            };
+            if !cols.has(&n) {
+                let avail = cols.names().join(", ");
+                return Err(Error::new(format!(
+                    "the {what} join input has no column `{n}`; available: {avail}"
+                ))
+                .at(origin));
+            }
+        }
+        let row = join_row(kind, &left.row, &right.row);
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Join {
+                kind,
+                left: Box::new(left),
+                right: Box::new(right),
+                on,
+            },
+            origin,
+        })
+    }
+
+    /// A set operation: both inputs must expose the same row — the same names,
+    /// in the same order, with the same types.
+    pub fn set(
+        kind: SetKind,
+        left: CheckedQuery,
+        right: CheckedQuery,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        if left.row.names() != right.row.names() {
+            return Err(Error::new(format!(
+                "set-operation inputs must have the same columns; left has [{}], right has [{}]",
+                left.row.names().join(", "),
+                right.row.names().join(", ")
+            ))
+            .at(origin));
+        }
+        if left.row.columns != right.row.columns {
+            let differing = left
+                .row
+                .columns()
+                .iter()
+                .zip(right.row.columns())
+                .find(|(l, r)| l != r)
+                .map(|(l, r)| format!("column `{}` is {} on the left but {} on the right", l.0, l.1, r.1))
+                .unwrap_or_else(|| "the two inputs differ".into());
+            return Err(Error::new(format!(
+                "set-operation inputs must have the same column types; {differing}"
+            ))
+            .at(origin));
+        }
+        let row = left.row.clone();
+        Ok(CheckedQuery {
+            row,
+            node: CheckedQueryNode::Set {
+                kind,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+            origin,
+        })
+    }
+
+    /// The query's output row as a plain column list, for a comparison
+    /// against `schema::schema(&erase(q))`.
+    pub fn names(&self) -> Vec<String> {
+        self.row.names()
+    }
+
+    /// Lower this query to the current relational IR (see [`erase`]).
+    pub fn erase(self) -> Rel {
+        erase(self)
+    }
+
+    /// `schema::schema` run over this query's erasure.
+    pub fn erased_schema(&self) -> Result<Vec<String>, String> {
+        crate::schema::schema(&erase(self.clone()))
+    }
+}
+
+/// The output row of a join, per kind. `join_columns` (via `RowType::merge`)
+/// is the same left-wins rule `schema` uses, and the nullable side's types go
+/// through `map_value_nullable`, the `mapValue (AsNullable)` term the checker
+/// builds.
+pub fn join_row(kind: JoinKind, left: &RowType, right: &RowType) -> RowType {
+    match kind {
+        JoinKind::Semi | JoinKind::Anti => left.clone(),
+        JoinKind::Inner => left.merge(right),
+        JoinKind::Left => left.merge(&right.map_value_nullable()),
+        JoinKind::Right => left.map_value_nullable().merge(right),
+        JoinKind::Full => left
+            .map_value_nullable()
+            .merge(&right.map_value_nullable()),
+    }
+}
+
+/// A checked query's node. Each variant mirrors the `Rel` variant of the same
+/// name, plus the row it produces (carried by [`CheckedQuery`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CheckedQueryNode {
+    Table {
+        schema: String,
+        name: String,
+        columns: Vec<String>,
+    },
+    Where {
+        input: Box<CheckedQuery>,
+        pred: CheckedExpr,
+    },
+    Select {
+        input: Box<CheckedQuery>,
+        fields: Vec<(String, CheckedExpr)>,
+    },
+    Update {
+        input: Box<CheckedQuery>,
+        fields: Vec<(String, CheckedExpr)>,
+    },
+    Omit {
+        input: Box<CheckedQuery>,
+        key: String,
+    },
+    /// `prefix`/`suffix`: one node with the direction, because both erase to a
+    /// rename and nothing downstream cares which spelling produced it.
+    Rename {
+        input: Box<CheckedQuery>,
+        affix: String,
+        prefix: bool,
+    },
+    Agg {
+        input: Box<CheckedQuery>,
+        fields: Vec<(String, CheckedExpr)>,
+    },
+    Order {
+        input: Box<CheckedQuery>,
+        keys: Vec<(CheckedExpr, bool)>,
+    },
+    Limit {
+        input: Box<CheckedQuery>,
+        n: i64,
+    },
+    Offset {
+        input: Box<CheckedQuery>,
+        n: i64,
+    },
+    Distinct(Box<CheckedQuery>),
+    Join {
+        kind: JoinKind,
+        left: Box<CheckedQuery>,
+        right: Box<CheckedQuery>,
+        on: CheckedExpr,
+    },
+    Set {
+        kind: SetKind,
+        left: Box<CheckedQuery>,
+        right: Box<CheckedQuery>,
+    },
+}
+
+impl CheckedQueryNode {
+    /// The single input of a unary stage, if it has one.
+    pub fn input(&self) -> Option<&CheckedQuery> {
+        match self {
+            CheckedQueryNode::Table { .. } => None,
+            CheckedQueryNode::Where { input, .. }
+            | CheckedQueryNode::Select { input, .. }
+            | CheckedQueryNode::Update { input, .. }
+            | CheckedQueryNode::Omit { input, .. }
+            | CheckedQueryNode::Rename { input, .. }
+            | CheckedQueryNode::Agg { input, .. }
+            | CheckedQueryNode::Order { input, .. }
+            | CheckedQueryNode::Limit { input, .. }
+            | CheckedQueryNode::Offset { input, .. }
+            | CheckedQueryNode::Distinct(input) => Some(input),
+            CheckedQueryNode::Join { left, .. } | CheckedQueryNode::Set { left, .. } => Some(left),
+        }
+    }
+
+    /// The second input of a join or set operation, if it has one.
+    pub fn second_input(&self) -> Option<&CheckedQuery> {
+        match self {
+            CheckedQueryNode::Join { right, .. } | CheckedQueryNode::Set { right, .. } => Some(right),
+            _ => None,
+        }
+    }
+
+    /// The expressions this node reads directly (not through an input).
+    pub fn exprs(&self) -> Vec<&CheckedExpr> {
+        match self {
+            CheckedQueryNode::Table { .. }
+            | CheckedQueryNode::Limit { .. }
+            | CheckedQueryNode::Offset { .. }
+            | CheckedQueryNode::Omit { .. }
+            | CheckedQueryNode::Rename { .. }
+            | CheckedQueryNode::Distinct(_)
+            | CheckedQueryNode::Set { .. } => vec![],
+            CheckedQueryNode::Where { pred, .. } => vec![pred],
+            CheckedQueryNode::Select { fields, .. }
+            | CheckedQueryNode::Update { fields, .. }
+            | CheckedQueryNode::Agg { fields, .. } => fields.iter().map(|(_, e)| e).collect(),
+            CheckedQueryNode::Order { keys, .. } => keys.iter().map(|(e, _)| e).collect(),
+            CheckedQueryNode::Join { on, .. } => vec![on],
+        }
+    }
+
+    /// Every side-qualified column reference in this node's own expressions.
+    pub fn columns(&self) -> Vec<(Side, String)> {
+        self.exprs().into_iter().flat_map(|e| e.node.columns()).collect()
+    }
+}
+
+// ── the checked expression ─────────────────────────────────────────────────
+
+/// A checked expression: its phase, its scalar type, its node, its origin.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckedExpr {
+    pub phase: Phase,
+    pub ty: ScalarType,
+    pub node: CheckedExprNode,
+    pub origin: Origin,
+}
+
+impl CheckedExpr {
+    /// A column reference (`.x`, `.<x`, `.>x`). Row phase; the type is the one
+    /// the checker gave the column.
+    pub fn column(side: Side, name: impl Into<String>, ty: ScalarType, origin: Origin) -> Self {
+        CheckedExpr {
+            phase: Phase::Row,
+            ty,
+            node: CheckedExprNode::Column {
+                side,
+                name: name.into(),
+            },
+            origin,
+        }
+    }
+
+    /// A literal. `Const` phase, with the literal's own type.
+    pub fn lit(lit: Lit, origin: Origin) -> Self {
+        let ty = match &lit {
+            Lit::Int(_) => ScalarType::Int,
+            Lit::Float(_) => ScalarType::Float,
+            Lit::Str(_) => ScalarType::String,
+            Lit::Bool(_) => ScalarType::Bool,
+        };
+        CheckedExpr {
+            phase: Phase::Const,
+            ty,
+            node: CheckedExprNode::Lit(lit),
+            origin,
+        }
+    }
+
+    /// A scalar SQL template: its phase is the [`rules::mix`] of its
+    /// arguments', so a template over row arguments is row phase and one over
+    /// aggregate arguments is an aggregate.
+    pub fn template(
+        sql: impl Into<String>,
+        args: Vec<CheckedExpr>,
+        ty: ScalarType,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        let phase = mix_of(&args, origin)?;
+        Ok(CheckedExpr {
+            phase,
+            ty,
+            node: CheckedExprNode::Template {
+                sql: sql.into(),
+                args,
+            },
+            origin,
+        })
+    }
+
+    /// An aggregate template: every argument must be row phase (the depth-1
+    /// rule — aggregates do not nest). The result is `Agg` phase whatever the
+    /// arguments' own phases were, as long as they were row/const.
+    pub fn agg_template(
+        sql: impl Into<String>,
+        args: Vec<CheckedExpr>,
+        ty: ScalarType,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        row_args("an aggregate argument", &args, origin)?;
+        Ok(CheckedExpr {
+            phase: Phase::Agg,
+            ty,
+            node: CheckedExprNode::AggTemplate {
+                sql: sql.into(),
+                args,
+            },
+            origin,
+        })
+    }
+
+    /// A window template: every argument and every window-spec expression must
+    /// be row phase.
+    pub fn win_template(
+        sql: impl Into<String>,
+        args: Vec<CheckedExpr>,
+        spec: WinSpecChecked,
+        ty: ScalarType,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        row_args("a window argument", &args, origin)?;
+        spec.check()?;
+        Ok(CheckedExpr {
+            phase: Phase::Win,
+            ty,
+            node: CheckedExprNode::WinTemplate {
+                sql: sql.into(),
+                args,
+                spec,
+            },
+            origin,
+        })
+    }
+
+    /// `group e`: the key must be row phase; the result is an aggregate.
+    pub fn group(key: CheckedExpr, origin: Origin) -> Result<Self, Error> {
+        row_phase("a group key", &key, origin)?;
+        Ok(CheckedExpr {
+            phase: Phase::Agg,
+            ty: key.ty.clone(),
+            node: CheckedExprNode::Group(Box::new(key)),
+            origin,
+        })
+    }
+
+    /// `in`: value and list mix per [`rules::mix`]; the result is bool at the
+    /// mixed phase.
+    pub fn in_(
+        value: CheckedExpr,
+        list: Vec<CheckedExpr>,
+        negated: bool,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        let mut phase = value.phase;
+        for e in &list {
+            phase = rules::mix(phase, e.phase).map_err(|m| Error::new(m).at(e.origin))?;
+        }
+        let elem = value.ty.clone();
+        Ok(CheckedExpr {
+            phase,
+            ty: ScalarType::Bool,
+            node: CheckedExprNode::In {
+                value: Box::new(value),
+                list,
+                negated,
+                elem,
+            },
+            origin,
+        })
+    }
+
+    /// A use of a checked definition, with the instantiation chosen for its
+    /// overload holes. This is what makes an overload choice explicit at the
+    /// call site instead of a dynamic lookup during evaluation.
+    pub fn call(
+        name: impl Into<String>,
+        def: (usize, usize),
+        holes: Vec<Choice>,
+        ty: ScalarType,
+        origin: Origin,
+    ) -> Self {
+        CheckedExpr {
+            phase: Phase::Row,
+            ty,
+            node: CheckedExprNode::Call {
+                name: name.into(),
+                def,
+                holes,
+            },
+            origin,
+        }
+    }
+
+    /// Build an expression from a node whose phase its own structure gives.
+    pub fn of_node(node: CheckedExprNode, ty: ScalarType, origin: Origin) -> Result<Self, Error> {
+        let phase = node.phase()?;
+        Ok(CheckedExpr {
+            phase,
+            ty,
+            node,
+            origin,
+        })
+    }
+}
+
+/// A checked expression's node.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CheckedExprNode {
+    Column {
+        side: Side,
+        name: String,
+    },
+    Lit(Lit),
+    Template {
+        sql: String,
+        args: Vec<CheckedExpr>,
+    },
+    AggTemplate {
+        sql: String,
+        args: Vec<CheckedExpr>,
+    },
+    WinTemplate {
+        sql: String,
+        args: Vec<CheckedExpr>,
+        spec: WinSpecChecked,
+    },
+    In {
+        value: Box<CheckedExpr>,
+        list: Vec<CheckedExpr>,
+        negated: bool,
+        /// The value's type, resolved once here so `erase` does not look at
+        /// the elements again.
+        elem: ScalarType,
+    },
+    Group(Box<CheckedExpr>),
+    /// A checked definition used as an expression: the callee's name and the
+    /// instantiation chosen for its holes.
+    Call {
+        name: String,
+        def: (usize, usize),
+        holes: Vec<Choice>,
+    },
+}
+
+impl CheckedExprNode {
+    /// The phase a node's own structure gives it. Every phase a constructor
+    /// accepted is reproduced here, so the two cannot disagree.
+    pub fn phase(&self) -> Result<Phase, Error> {
+        match self {
+            CheckedExprNode::Column { .. } | CheckedExprNode::Call { .. } => Ok(Phase::Row),
+            CheckedExprNode::Lit(_) => Ok(Phase::Const),
+            CheckedExprNode::Template { args, .. } => {
+                mix_of(args, Origin::new(0, ast::Span::default()))
+            }
+            CheckedExprNode::AggTemplate { .. } => Ok(Phase::Agg),
+            CheckedExprNode::WinTemplate { .. } => Ok(Phase::Win),
+            CheckedExprNode::In { value, list, .. } => {
+                let mut phase = value.phase;
+                for e in list {
+                    phase = rules::mix(phase, e.phase)
+                        .map_err(|m| Error::new(m).at(e.origin))?;
+                }
+                Ok(phase)
+            }
+            CheckedExprNode::Group(_) => Ok(Phase::Agg),
+        }
+    }
+
+    /// Every column this expression reads, in reading order.
+    pub fn columns(&self) -> Vec<(Side, String)> {
+        let mut out = Vec::new();
+        self.collect_columns(&mut out);
+        out
+    }
+
+    fn collect_columns(&self, out: &mut Vec<(Side, String)>) {
+        match self {
+            CheckedExprNode::Column { side, name } => out.push((*side, name.clone())),
+            CheckedExprNode::Lit(_) | CheckedExprNode::Call { .. } => {}
+            CheckedExprNode::Template { args, .. } | CheckedExprNode::AggTemplate { args, .. } => {
+                for a in args {
+                    a.node.collect_columns(out);
+                }
+            }
+            CheckedExprNode::WinTemplate { args, spec, .. } => {
+                for a in args {
+                    a.node.collect_columns(out);
+                }
+                spec.collect_columns(out);
+            }
+            CheckedExprNode::In { value, list, .. } => {
+                for a in list.iter().chain(std::iter::once(value.as_ref())) {
+                    a.node.collect_columns(out);
+                }
+            }
+            CheckedExprNode::Group(k) => k.node.collect_columns(out),
+        }
+    }
+
+    /// Every direct sub-expression, for a traversal.
+    pub fn children(&self) -> Vec<&CheckedExpr> {
+        match self {
+            CheckedExprNode::Column { .. }
+            | CheckedExprNode::Lit(_)
+            | CheckedExprNode::Call { .. } => vec![],
+            CheckedExprNode::Template { args, .. } | CheckedExprNode::AggTemplate { args, .. } => {
+                args.iter().collect()
+            }
+            CheckedExprNode::WinTemplate { args, spec, .. } => args
+                .iter()
+                .chain(&spec.partition)
+                .chain(spec.order.iter().map(|(e, _)| e))
+                .collect(),
+            CheckedExprNode::In { value, list, .. } => {
+                list.iter().chain(std::iter::once(value.as_ref())).collect()
+            }
+            CheckedExprNode::Group(k) => vec![k.as_ref()],
+        }
+    }
+
+    /// Does this expression read a column?
+    pub fn has_column(&self) -> bool {
+        !self.columns().is_empty()
+    }
+}
+
+/// A checked window specification.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WinSpecChecked {
+    pub partition: Vec<CheckedExpr>,
+    pub order: Vec<(CheckedExpr, bool)>,
+    pub frame: Option<Frame>,
+}
+
+impl WinSpecChecked {
+    /// Every partition and order expression must satisfy the key rule.
+    pub fn check(&self) -> Result<(), Error> {
+        for e in self.partition.iter() {
+            place(Place::Key, e, e.origin)?;
+        }
+        for (e, _) in &self.order {
+            place(Place::Key, e, e.origin)?;
+        }
+        Ok(())
+    }
+
+    fn collect_columns(&self, out: &mut Vec<(Side, String)>) {
+        for e in self.partition.iter() {
+            e.node.collect_columns(out);
+        }
+        for (e, _) in &self.order {
+            e.node.collect_columns(out);
+        }
+    }
+}
+
+/// A window spec from its parts, checking the frame.
+pub fn window_spec(
+    partition: Vec<CheckedExpr>,
+    order: Vec<(CheckedExpr, bool)>,
+    frame: Option<Frame>,
+) -> Result<WinSpecChecked, Error> {
+    let spec = WinSpecChecked {
+        partition,
+        order,
+        frame,
+    };
+    spec.check()?;
+    Ok(spec)
+}
+
+/// A `ROWS BETWEEN` frame from two bounds, rejecting impossible ones (the
+/// check `prims::call` does for `__rows`).
+pub fn frame(start: Bound, end: Bound) -> Result<Frame, Error> {
+    if start == Bound::UnboundedFollowing
+        || end == Bound::UnboundedPreceding
+        || start.key() > end.key()
+    {
+        return Err(Error::new(format!(
+            "impossible window frame: {start:?} to {end:?}"
+        )));
+    }
+    Ok(Frame { start, end })
+}
+
+// ── the shared rules ───────────────────────────────────────────────────────
+
+/// A node's phase from its arguments, via the existing mix rule.
+fn mix_of(args: &[CheckedExpr], origin: Origin) -> Result<Phase, Error> {
+    args.iter().try_fold(Phase::Const, |acc, a| {
+        rules::mix(acc, a.phase)
+            .map_err(|m| Error::new(m).at(a.origin))
+            .map_err(|e| e.at(origin))
+    })
+}
+
+/// The existing placement rule, pointed at the offending expression.
+fn place(place: Place, e: &CheckedExpr, origin: Origin) -> Result<(), Error> {
+    rules::place(place, e.phase)
+        .map_err(|m| Error::new(m).at(e.origin))
+        .map_err(|err| err.at(origin))
+}
+
+/// The existing depth-1 rule, pointed at the offending expression.
+fn row_phase(what: &str, e: &CheckedExpr, origin: Origin) -> Result<(), Error> {
+    rules::nested(what, e.phase)
+        .map_err(|m| Error::new(m).at(e.origin))
+        .map_err(|err| err.at(origin))
+}
+
+fn row_args(what: &str, args: &[CheckedExpr], origin: Origin) -> Result<(), Error> {
+    for a in args {
+        row_phase(what, a, origin)?;
+    }
+    Ok(())
+}
+
+/// Every plain column reference must be a column of `input`; a side-qualified
+/// one is a join-predicate form and is rejected outside a join
+/// (`rules::JOIN_ONLY`, the same message `schema::refs` gives).
+fn refs_columns(e: &CheckedExpr, input: &RowType, ctx: &str, origin: Origin) -> Result<(), Error> {
+    for (side, n) in e.node.columns() {
+        match side {
+            Side::Single if !input.has(&n) => {
+                let avail = input.names().join(", ");
+                return Err(Error::new(format!(
+                    "no column `{n}` in the input of `{ctx}`; available: {avail}"
+                ))
+                .at(origin));
+            }
+            Side::Left | Side::Right => return Err(Error::new(rules::JOIN_ONLY).at(origin)),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The output row of `select`/`update`/`agg`: at least one field, each field
+/// placed by `at`, each referring to `input`, labelled with its own type.
+///
+/// `at` is `Place::Select` for `select`/`update` and `Place::Agg` for `agg`;
+/// the message for a rejected field is the one the checker's `stage_phase`
+/// produces, so a user sees one explanation.
+fn project_row(
+    stage: &str,
+    input: &RowType,
+    fields: &[(String, CheckedExpr)],
+    at: Place,
+    origin: Origin,
+) -> Result<RowType, Error> {
+    if fields.is_empty() {
+        return Err(Error::new(format!("`{stage}` needs at least one field")).at(origin));
+    }
+    // A repeated field is reported before anything else, with the wording the
+    // checker uses per stage (`check/infer.rs` `Cons::Update`: "field `n`
+    // appears twice in `update`"; `Cons::Project` runs the same rule for
+    // `select`/`agg`), so a user sees one explanation rather than two.
+    for (i, (n, _)) in fields.iter().enumerate() {
+        if fields[..i].iter().any(|(o, _)| o == n) {
+            return Err(Error::new(format!("field `{n}` appears twice in `{stage}`")).at(origin));
+        }
+    }
+    let mut out = Vec::with_capacity(fields.len());
+    for (n, e) in fields {
+        refs_columns(e, input, stage, origin)
+            .map_err(|err| Error::new(format!("field `{n}`: {}", err.message)).at(e.origin))?;
+        rules::place(at, e.phase)
+            .map_err(|m| Error::new(format!("field `{n}` {m}")).at(e.origin))?;
+        out.push((n.clone(), e.ty.clone()));
+    }
+    Ok(RowType::project(&out))
+}
+
+/// `update`'s fields are placed like `select`'s: row phase, over the input.
+fn update_place() -> Place {
+    Place::Select
+}
+
+// ── erasure to the existing IR ─────────────────────────────────────────────
+
+/// Lower a checked query to the current relational IR.
+///
+/// Total and structural: every constructor that returned `Ok` erases to the
+/// `Rel` today's evaluator builds for the same program, and the erased tree is
+/// what `schema::schema` and the SQL backend already accept.
+///
+/// Each node is stamped with `Rel::At(origin)`, except where the node is
+/// already an `At` — the evaluator's existing convention, so a tree that came
+/// from evaluation is not wrapped twice.
+pub fn erase(query: CheckedQuery) -> Rel {
+    let loc = Loc {
+        module: query.origin.module,
+        span: query.origin.span,
+    };
+    let at = |r: Rel| match r {
+        r @ Rel::At(..) => r,
+        r => Rel::At(loc, Box::new(r)),
+    };
+    match query.node {
+        CheckedQueryNode::Table {
+            schema,
+            name,
+            columns,
+        } => at(Rel::Table {
+            schema,
+            name,
+            columns: Some(columns),
+        }),
+        CheckedQueryNode::Where { input, pred } => {
+            at(Rel::Where(Box::new(erase(*input)), erase_expr(pred)))
+        }
+        CheckedQueryNode::Select { input, fields } => at(Rel::Select(
+            Box::new(erase(*input)),
+            fields.into_iter().map(|(n, e)| (n, erase_expr(e))).collect(),
+        )),
+        CheckedQueryNode::Update { input, fields } => at(Rel::Update(
+            Box::new(erase(*input)),
+            fields.into_iter().map(|(n, e)| (n, erase_expr(e))).collect(),
+        )),
+        CheckedQueryNode::Omit { input, key } => at(Rel::Omit(Box::new(erase(*input)), key)),
+        CheckedQueryNode::Rename {
+            input,
+            affix,
+            prefix,
+        } => {
+            let inner = Box::new(erase(*input));
+            at(if prefix {
+                Rel::Prefix(inner, affix)
+            } else {
+                Rel::Suffix(inner, affix)
+            })
+        }
+        CheckedQueryNode::Agg { input, fields } => at(Rel::Agg(
+            Box::new(erase(*input)),
+            fields.into_iter().map(|(n, e)| (n, erase_expr(e))).collect(),
+        )),
+        CheckedQueryNode::Order { input, keys } => at(Rel::Order(
+            Box::new(erase(*input)),
+            keys.into_iter()
+                .map(|(e, asc)| (erase_expr(e), asc))
+                .collect(),
+        )),
+        CheckedQueryNode::Limit { input, n } => at(Rel::Limit(Box::new(erase(*input)), n)),
+        CheckedQueryNode::Offset { input, n } => at(Rel::Offset(Box::new(erase(*input)), n)),
+        CheckedQueryNode::Distinct(input) => at(Rel::Distinct(Box::new(erase(*input)))),
+        CheckedQueryNode::Join {
+            kind,
+            left,
+            right,
+            on,
+        } => at(Rel::Join {
+            kind,
+            left: Box::new(erase(*left)),
+            right: Box::new(erase(*right)),
+            on: erase_expr(on),
+        }),
+        CheckedQueryNode::Set { kind, left, right } => at(Rel::Set {
+            kind,
+            left: Box::new(erase(*left)),
+            right: Box::new(erase(*right)),
+        }),
+    }
+}
+
+/// Lower a checked expression to the current `Expr`.
+pub fn erase_expr(e: CheckedExpr) -> Expr {
+    match e.node {
+        CheckedExprNode::Column { side, name } => Expr::Col(side, name),
+        CheckedExprNode::Lit(l) => Expr::Lit(l),
+        CheckedExprNode::Template { sql, args } => {
+            Expr::Tpl(sql, args.into_iter().map(erase_expr).collect())
+        }
+        CheckedExprNode::AggTemplate { sql, args } => {
+            Expr::Agg(sql, args.into_iter().map(erase_expr).collect())
+        }
+        CheckedExprNode::WinTemplate { sql, args, spec } => Expr::Win(
+            sql,
+            args.into_iter().map(erase_expr).collect(),
+            Box::new(WinSpec {
+                partition: spec.partition.into_iter().map(erase_expr).collect(),
+                order: spec
+                    .order
+                    .into_iter()
+                    .map(|(e, asc)| (erase_expr(e), asc))
+                    .collect(),
+                frame: spec.frame,
+            }),
+        ),
+        CheckedExprNode::In {
+            value,
+            list,
+            negated,
+            ..
+        } => Expr::In(
+            Box::new(erase_expr(*value)),
+            list.into_iter().map(erase_expr).collect(),
+            negated,
+        ),
+        CheckedExprNode::Group(k) => Expr::Group(Box::new(erase_expr(*k))),
+        // A call to a definition is not a SQL expression: by the time a query
+        // erases, every call has been inlined or reduced. Erasing one is an
+        // internal error, recorded as a template so the shape is still an
+        // expression rather than a panic.
+        CheckedExprNode::Call { name, .. } => {
+            Expr::Tpl(format!("/* unresolved call `{name}` */"), vec![])
+        }
+    }
+}
+
+/// Erase, then run `schema::schema` over the result. The constructors have
+/// already proved what this validator re-derives, so it is a debug check.
+pub fn erase_checked(query: CheckedQuery) -> Result<(Rel, Vec<String>), String> {
+    let rel = erase(query);
+    let cols = crate::schema::schema(&rel)?;
+    Ok((rel, cols))
+}
+
+// ── reading a `Rel` back into the checked layer ────────────────────────────
+
+/// Which projection a `Rel::Select`-shaped node was.
+///
+/// `Rel::Select` and `Rel::Agg` are the same Rust variant, so a `Rel` alone
+/// does not say which stage built it. A caller migrating from the evaluator
+/// knows, and supplies it here rather than receiving a plausible guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageHint {
+    Select,
+    Agg,
+}
+
+/// Rebuild a [`CheckedQuery`] from a `Rel`, its already-computed row, and the
+/// one thing a `Rel` cannot say.
+///
+/// **Which shapes round-trip.** A `Rel` records each node's own shape but not
+/// its input's row and not its expressions' scalar types, so this bridge is
+/// *lossy* and is `Err` wherever the loss matters:
+///
+/// | `Rel` | reconstructible | why not, when it is not |
+/// |---|---|---|
+/// | `Table { columns: Some(..) }` | yes, with the caller's `row` | — |
+/// | `Where`, `Order`, `Limit`, `Offset`, `Distinct`, `Join`, `Set` | yes | the caller supplies each input's row |
+/// | `Select` / `Agg` | only with a [`StageHint`] | the two are one variant |
+/// | `Prefix` / `Suffix` | only if the affix is invertible on every name | a non-invertible affix loses the input names |
+///
+/// Expressions are translated structurally (`untyped`) and their scalar types
+/// are `Unknown`, because a `Rel` does not carry types. The tree is otherwise
+/// *not* re-checked: [`erase`] is the total direction, and `from_rel` cannot be,
+/// because a `CheckedQuery` carries strictly more information than a `Rel`.
+/// That asymmetry is the point — see the doc on [`erase`].
+pub fn from_rel(
+    rel: Rel,
+    row: RowType,
+    hint: Option<StageHint>,
+    fallback: Origin,
+) -> Result<CheckedQuery, Error> {
+    let origin_of = |r: &Rel| match r {
+        Rel::At(l, _) => Origin::new(l.module, l.span),
+        _ => fallback,
+    };
+    Ok(match rel {
+        Rel::At(_, inner) => return from_rel(*inner, row, hint, fallback),
+        Rel::Table {
+            schema,
+            name,
+            columns,
+        } => {
+            // The caller's typed row wins; `columns` only supplies the names.
+            // Turning a known `int` into `Unknown` here would discard the one
+            // thing the checker worked out.
+            let row = if row.columns.is_empty() {
+                match columns {
+                    Some(cs) => RowType::unknown(cs),
+                    None => row,
+                }
+            } else {
+                row
+            };
+            CheckedQuery {
+                row: row.clone(),
+                node: CheckedQueryNode::Table {
+                    schema,
+                    name,
+                    columns: row.names(),
+                },
+                origin: fallback,
+            }
+        }
+        Rel::Where(input, e) => {
+            let origin = origin_of(&input);
+            // `where` does not change the row, so the output row is the
+            // input's; pass it down rather than an empty one.
+            let r = row.clone();
+            CheckedQuery {
+                row,
+                node: CheckedQueryNode::Where {
+                    input: Box::new(from_rel(*input, r, hint, fallback)?),
+                    pred: untyped(e),
+                },
+                origin,
+            }
+        }
+        Rel::Select(input, fs) | Rel::Agg(input, fs) => {
+            let hint = hint.ok_or_else(|| {
+                Error::new(
+                    "a `Rel` projection does not say whether it was a `select` or an `agg`; \
+                     pass a `StageHint`",
+                )
+                .at(fallback)
+            })?;
+            let origin = origin_of(&input);
+            // The stage's *output* row is the caller's `row`; its input's row
+            // is not recorded anywhere, so the input is reconstructed with an
+            // empty row and its own fields carry the names the caller needs.
+            // This is the one place the bridge is knowingly partial.
+            let inner = RowType::unknown(vec![]);
+            let fields = fs.into_iter().map(|(n, e)| (n, untyped(e))).collect();
+            let input = Box::new(from_rel(*input, inner, hint_forward(hint), fallback)?);
+            let node = match hint {
+                StageHint::Select => CheckedQueryNode::Select { input, fields },
+                StageHint::Agg => CheckedQueryNode::Agg { input, fields },
+            };
+            CheckedQuery { row, node, origin }
+        }
+        Rel::Update(input, fs) => {
+            let origin = origin_of(&input);
+            let inner = RowType::unknown(vec![]);
+            CheckedQuery {
+                row,
+                node: CheckedQueryNode::Update {
+                    input: Box::new(from_rel(*input, inner, hint, fallback)?),
+                    fields: fs.into_iter().map(|(n, e)| (n, untyped(e))).collect(),
+                },
+                origin,
+            }
+        }
+        Rel::Omit(input, key) => {
+            let origin = origin_of(&input);
+            // `omit` only removes a column, so the input's row is the output's
+            // plus `key` — recoverable, and worth recovering so the input's
+            // constructor can be checked.
+            let mut inner = row.clone();
+            if !inner.has(&key) {
+                inner.columns.push((key.clone(), crate::core::ScalarType::Unknown));
+            }
+            CheckedQuery {
+                row,
+                node: CheckedQueryNode::Omit {
+                    input: Box::new(from_rel(*input, inner, hint, fallback)?),
+                    key,
+                },
+                origin,
+            }
+        }
+        Rel::Prefix(input, affix) => rename_from(*input, affix, true, row, hint, fallback)?,
+        Rel::Suffix(input, affix) => rename_from(*input, affix, false, row, hint, fallback)?,
+        Rel::Order(input, keys) => {
+            let origin = origin_of(&input);
+            let r = row.clone();
+            CheckedQuery {
+                row,
+                node: CheckedQueryNode::Order {
+                    input: Box::new(from_rel(*input, r, hint, fallback)?),
+                    keys: keys.into_iter().map(|(e, asc)| (untyped(e), asc)).collect(),
+                },
+                origin,
+            }
+        }
+        Rel::Limit(input, n) => {
+            let origin = origin_of(&input);
+            let r = row.clone();
+            CheckedQuery {
+                row,
+                node: CheckedQueryNode::Limit {
+                    input: Box::new(from_rel(*input, r, hint, fallback)?),
+                    n,
+                },
+                origin,
+            }
+        }
+        Rel::Offset(input, n) => {
+            let origin = origin_of(&input);
+            let r = row.clone();
+            CheckedQuery {
+                row,
+                node: CheckedQueryNode::Offset {
+                    input: Box::new(from_rel(*input, r, hint, fallback)?),
+                    n,
+                },
+                origin,
+            }
+        }
+        Rel::Distinct(input) => {
+            let origin = origin_of(&input);
+            let r = row.clone();
+            CheckedQuery {
+                row,
+                node: CheckedQueryNode::Distinct(Box::new(from_rel(*input, r, hint, fallback)?)),
+                origin,
+            }
+        }
+        Rel::Join {
+            kind,
+            left,
+            right,
+            on,
+        } => {
+            let origin = origin_of(&left);
+            // A join's two input rows cannot be recovered from its output row
+            // alone (the output is the merge of both, with the outer side made
+            // nullable). A caller that knows them uses `CheckedQuery::join`.
+            let (l, r) = (RowType::unknown(vec![]), RowType::unknown(vec![]));
+            CheckedQuery {
+                row,
+                node: CheckedQueryNode::Join {
+                    kind,
+                    left: Box::new(from_rel(*left, l, hint, fallback)?),
+                    right: Box::new(from_rel(*right, r, hint, fallback)?),
+                    on: untyped(on),
+                },
+                origin,
+            }
+        }
+        Rel::Set { kind, left, right } => {
+            let origin = origin_of(&left);
+            // A set operation requires both inputs to expose the output row.
+            let (l, r) = (row.clone(), row.clone());
+            CheckedQuery {
+                row,
+                node: CheckedQueryNode::Set {
+                    kind,
+                    left: Box::new(from_rel(*left, l, hint, fallback)?),
+                    right: Box::new(from_rel(*right, r, hint, fallback)?),
+                },
+                origin,
+            }
+        }
+    })
+}
+
+/// The hint for a projection's *input*. It is the same hint: a `select`'s
+/// input is not itself a projection of a different kind, and the caller that
+/// supplies one knows the node it is reconstructing.
+fn hint_forward(hint: StageHint) -> Option<StageHint> {
+    Some(hint)
+}
+
+/// Recover the input row of a `prefix`/`suffix` by reversing the rename.
+///
+/// This is the second place the bridge is knowingly partial: a name that does
+/// not carry the affix makes the rename non-invertible, so the input row
+/// cannot be recovered. That is an `Err`, not a guess — returning the output
+/// row here would claim a rename of names that were never renamed.
+fn rename_from(
+    input: Rel,
+    affix: String,
+    prefix: bool,
+    row: RowType,
+    hint: Option<StageHint>,
+    fallback: Origin,
+) -> Result<CheckedQuery, Error> {
+    let origin = match &input {
+        Rel::At(l, _) => Origin::new(l.module, l.span),
+        _ => fallback,
+    };
+    let mut names = Vec::with_capacity(row.columns.len());
+    for (n, t) in row.columns() {
+        let stripped = if prefix {
+            n.strip_prefix(affix.as_str())
+        } else {
+            n.strip_suffix(affix.as_str())
+        };
+        match stripped {
+            Some(s) => names.push((s.to_string(), t.clone())),
+            None => {
+                let dir = if prefix { "prefix" } else { "suffix" };
+                return Err(Error::new(format!(
+                    "column `{n}` does not carry the `{dir} \"{affix}\"` affix, so the input row \
+                     of this rename cannot be recovered"
+                ))
+                .at(origin));
+            }
+        }
+    }
+    Ok(CheckedQuery {
+        row,
+        node: CheckedQueryNode::Rename {
+            input: Box::new(from_rel(input, RowType::new(names), hint, fallback)?),
+            affix,
+            prefix,
+        },
+        origin,
+    })
+}
+
+// ── structural translation of an untyped expression ───────────────────────
+
+/// An expression from the current IR, as a checked expression.
+///
+/// The pieces are not re-checked — an expression that reached the IR has
+/// already been checked — so this is a structural translation, used by
+/// [`from_rel`]. Its scalar type is `Unknown` because a `Rel` does not carry
+/// one.
+pub fn untyped(e: Expr) -> CheckedExpr {
+    let phase = e.phase().unwrap_or(Phase::Row);
+    CheckedExpr {
+        phase,
+        ty: ScalarType::Unknown,
+        node: untyped_node(e),
+        origin: Origin::new(0, ast::Span::default()),
+    }
+}
+
+fn untyped_node(e: Expr) -> CheckedExprNode {
+    match e {
+        Expr::Col(side, name) => CheckedExprNode::Column { side, name },
+        Expr::Lit(l) => CheckedExprNode::Lit(l),
+        Expr::Tpl(sql, args) => CheckedExprNode::Template {
+            sql,
+            args: args.into_iter().map(untyped).collect(),
+        },
+        Expr::In(value, list, negated) => CheckedExprNode::In {
+            value: Box::new(untyped(*value)),
+            list: list.into_iter().map(untyped).collect(),
+            negated,
+            elem: ScalarType::Unknown,
+        },
+        Expr::Agg(sql, args) => CheckedExprNode::AggTemplate {
+            sql,
+            args: args.into_iter().map(untyped).collect(),
+        },
+        Expr::Group(k) => CheckedExprNode::Group(Box::new(untyped(*k))),
+        Expr::Win(sql, args, spec) => CheckedExprNode::WinTemplate {
+            sql,
+            args: args.into_iter().map(untyped).collect(),
+            spec: WinSpecChecked::from(*spec),
+        },
+    }
+}
+
+impl From<WinSpec> for WinSpecChecked {
+    /// A checked window spec from the untyped one, by translating each
+    /// expression structurally.
+    fn from(spec: WinSpec) -> Self {
+        WinSpecChecked {
+            partition: spec.partition.into_iter().map(untyped).collect(),
+            order: spec
+                .order
+                .into_iter()
+                .map(|(e, asc)| (untyped(e), asc))
+                .collect(),
+            frame: spec.frame,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

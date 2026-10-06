@@ -134,6 +134,10 @@ infixl 1 &+
 infixl 1 &*
 infixl 1 &.
 infixl 1 &-
+infixl 1 &|
+infixl 1 &!
+infixl 1 &^
+infixl 1 &~
 
 _&?_ : query r -> expr r bool -> query r = q => pred => where pred q
 _&=_ : query r -> expr r (row s) -> query s = q => fields => select fields q
@@ -141,6 +145,15 @@ _&+_ : query r -> expr r (row s) -> query (merge r s) = q => fields => update fi
 _&*_ : query r -> agg (expr r (row s)) -> query s = q => fields => agg fields q
 _&._ : query r -> list (sortkey r) -> query r = q => keys => order keys q
 _&-_ : query r -> expr r int -> query r = q => n => limit n q
+
+# Set-operation stages: `union`, `unionAll`, `intersect`, `except`. Each puts
+# the query it is piped into on the *left*, so the stage and the direct call
+# agree — `users &~ vips` and `except users vips` are the same query. See the
+# note on `union` for why the bare `&` cannot do this on its own.
+_&|_ : query r -> query r -> query r = q => r => union q r
+_&!_ : query r -> query r -> query r = q => r => unionAll q r
+_&^_ : query r -> query r -> query r = q => r => intersect q r
+_&~_ : query r -> query r -> query r = q => r => except q r
 
 # `left & innerJoin right (.<k == .>k)`
 # Outer joins make the columns of the side that may be missing `maybe`.
@@ -166,6 +179,16 @@ antiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__
 
 # Set operations require both queries to have the same row. They preserve the
 # columns and order of the left input; SQL uses the corresponding set operator.
+#
+# Callable directly — `except users vips` is `users EXCEPT vips` — or through
+# the `&|` / `&!` / `&^` / `&~` stage operators below, which read the same way:
+# `users &~ vips` is also `users EXCEPT vips`.
+#
+# The bare `&` cannot express that. `users & except vips` desugars to
+# `_&_ users (except vips)`, and `except vips` is already a partial application,
+# so the pipe would supply `users` as its *second* argument, giving the primitive
+# `[vips, users]`. `union`, `unionAll`, and `intersect` do not care (they are
+# commutative); `except` does, and it returned the complement of what was asked.
 union : query r -> query r -> query r = primitive "__union"
 unionAll : query r -> query r -> query r = primitive "__unionAll"
 intersect : query r -> query r -> query r = primitive "__intersect"

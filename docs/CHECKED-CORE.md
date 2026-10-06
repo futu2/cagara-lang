@@ -352,28 +352,40 @@ is now part of the gate.
   assertion, and `omit` still restates a rule rather than calling
   `schema::omit_columns`.
 
-**The differential harness exists, and it is not yet source-level.** It compares
-the evaluator's erased `Rel` against `Rel -> CheckedQuery -> erase`
-(`checked/tests.rs`, `assert_trees_agree`), over the real examples plus sixteen
-stage combinations. That catches drift between the two *erasers*, and it found
-a real defect in the bridge (`from_rel_unchecked` rebuilt an `omit`'s input row
-by appending the omitted key, reordering the input's columns).
+**There are two differential harnesses, and only the second is evidence.**
 
-It does **not** establish what the design needs: that source elaborates to
-`CheckedQuery` through the constructors. Because the "checked" side is built
-*from the evaluator's own output*, the test cannot fail if source elaboration
-never uses `CheckedQuery` at all. Nested projections are also skipped, since a
-`Rel` does not record whether a projection was a `select` or an `agg`.
+The first (`assert_trees_agree`) compares the evaluator's erased `Rel` against
+`Rel -> CheckedQuery -> erase`, over the real examples plus sixteen stage
+combinations. It catches drift between the two *erasers*, and it found a real
+defect in the bridge (`from_rel_unchecked` rebuilt an `omit`'s input row by
+appending the omitted key, reordering the input's columns). But it does **not**
+establish what the design needs: because the "checked" side is built from the
+evaluator's own output, it cannot fail if source elaboration never constructs a
+`CheckedQuery` at all — a vacuity, not coverage.
 
-The next step is therefore a **source elaboration layer**, not more bridge
-coverage:
+The second (`assert_source_elaboration_agrees`) is the source-level one:
 
 ```text
-source -> type check -> checked elaboration -> erase      (new)
+source -> type check -> checked elaboration -> erase      (elaborate.rs)
 source -> existing evaluator -> CoreTerm -> erase_core    (oracle)
 ```
 
-requiring every valid query to compare with no silent skips. Only after that
-parity can `root_queries_checked`, the CLI, and the LSP move over, `schema` be
-demoted to an assertion, and `from_rel_unchecked` become test-only. The existing
-evaluator stays as the behavioural oracle until then.
+`elaborate.rs` walks each definition's AST and builds `CheckedQuery` /
+`CheckedExpr` through the constructors, reading types from the checker rather
+than re-deriving them (`use_ty` for a leaf, `scheme_fields` for a table's
+columns, `choices_of` for a resolved overload, `result_expr` for the phase and
+scalar a callee returns). An unsupported definition is a **failure**, not a
+skip, and the harness separately asserts that every definition the evaluator
+produced a relation for was *considered* — so coverage cannot quietly shrink.
+
+Coverage, measured rather than assumed: **11 of 11** query definitions across
+`report.cagara` (9), `public.cagara` (1) and `schema.cagara` (1), plus eighteen
+stage combinations. Mutation-checked: perturbing the `Omit` eraser fails it
+with `omit: q elaborates from source to a different tree than the evaluator
+produces`.
+
+What remains is to make this the *production* path — `root_queries_checked`,
+the CLI and the LSP still run the evaluator, so `schema` is still the
+production validator and the checked rules are a second opinion. After that,
+`schema` can be demoted to an assertion and `from_rel_unchecked` restricted to
+tests. The existing evaluator stays as the behavioural oracle until then.

@@ -1805,6 +1805,18 @@ fn assert_source_elaboration_agrees(label: &str, ws: &Workspace) {
             .collect();
 
     let elaborated = crate::elaborate::elaborate_module(ws, &tc, m);
+    // Every definition the evaluator produces a relation for must appear in
+    // the elaboration list. Without this, a definition the elaborator silently
+    // stopped *seeing* — rather than one it reports as unsupported — would
+    // reduce coverage with nothing failing.
+    let seen: std::collections::HashSet<&str> =
+        elaborated.iter().map(|(n, _)| n.as_str()).collect();
+    for name in evaluated.keys() {
+        assert!(
+            seen.contains(name.as_str()),
+            "{label}: the evaluator produced `{name}` but elaboration did not consider it"
+        );
+    }
     let mut compared = 0;
     let mut unsupported = Vec::new();
     for (name, result) in &elaborated {

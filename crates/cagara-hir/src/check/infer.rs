@@ -49,12 +49,18 @@ impl<'w> Checker<'w> {
         let r = self.check_def(i);
         self.depth -= 1;
         // Use types as far as checking got, even if it failed later on.
-        for (sp, t, lit) in std::mem::replace(&mut self.uses, saved_uses) {
+        for (id, sp, t, lit) in std::mem::replace(&mut self.uses, saved_uses) {
             let shown = match (lit, self.resolve(&t)) {
                 (Some(l), Ty::Var(_)) => l.to_string(),
                 _ => self.show(&t),
             };
             self.use_types.insert((m, sp.start, sp.end), shown);
+            // The same facts keyed by `ExprId`, which is what a phase building a
+            // typed tree from source needs: it walks the AST and asks "what type
+            // did *this* node get?". The span map above cannot answer that — it
+            // is keyed by location, and the type has already been flattened to a
+            // string by then.
+            self.use_tys.insert((m, id), self.resolve(&t));
         }
         // Whatever the definition learned about the probe's row, even if it
         // failed later on. Only the definition that actually referenced the
@@ -952,12 +958,12 @@ impl<'w> Checker<'w> {
                     Some((_, t)) => t.clone(),
                     None => self.lookup(n, e.id, sp).map_err(at(sp))?,
                 };
-                self.uses.push((sp, t.clone(), None));
+                self.uses.push((e.id, sp, t.clone(), None));
                 Ok(t)
             }
             ExprKind::Lit(l) => {
                 let t = con(lit_name(l));
-                self.uses.push((sp, t.clone(), None));
+                self.uses.push((e.id, sp, t.clone(), None));
                 Ok(t)
             }
             ExprKind::Field(side, n) => {
@@ -979,7 +985,7 @@ impl<'w> Checker<'w> {
                     Side::Right => Ty::Con("join", vec![self.fresh_row(), r]),
                 };
                 // Hover shows the column's value type, not the whole row.
-                self.uses.push((sp, a.clone(), None));
+                self.uses.push((e.id, sp, a.clone(), None));
                 Ok(expr(phase, input, a))
             }
             ExprKind::Proj(base, f) => {
@@ -1002,7 +1008,7 @@ impl<'w> Checker<'w> {
                                     })
                                 }
                             };
-                            self.uses.push((sp, t.clone(), None));
+                            self.uses.push((e.id, sp, t.clone(), None));
                             return Ok(t);
                         }
                     }
@@ -1128,7 +1134,7 @@ impl<'w> Checker<'w> {
                                     Ty::Con("expr", a) => a[2].clone(),
                                     o => o,
                                 };
-                                self.uses.push((arg.span, v, Some(lit_name(l))));
+                                self.uses.push((arg.id, arg.span, v, Some(lit_name(l))));
                             }
                             *r
                         }

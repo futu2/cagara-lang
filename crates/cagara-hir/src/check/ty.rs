@@ -615,8 +615,22 @@ pub(crate) struct Checker<'w> {
     /// Names, column references, and literals of the definition being
     /// checked, with their types there. A literal also keeps its own type,
     /// printed if the type it was lifted to stays open.
-    pub(crate) uses: Vec<(Span, Ty, Option<&'static str>)>,
+    ///
+    /// The `ExprId` is carried because it is the key the rest of the checker's
+    /// per-use bookkeeping uses — `choices` is keyed by `Origin::Site`, which
+    /// is an `ExprId` — and because a phase that wants to build a typed tree
+    /// from source must pair a syntactic node with the type it received. A span
+    /// cannot do that job: two expressions can share a span, and a span is not
+    /// what a choice was recorded against.
+    pub(crate) uses: Vec<(ast::ExprId, Span, Ty, Option<&'static str>)>,
     pub(crate) use_types: HashMap<(usize, u32, u32), String>,
+    /// The same facts keyed by `ExprId`, as the checker resolved them.
+    ///
+    /// This is what a source-level elaboration needs: it walks the AST and asks
+    /// "what type did this node get?", which the span-keyed `use_types` above
+    /// cannot answer. `Ty` never leaves the crate — `TypeCheck::use_ty`
+    /// converts at the boundary.
+    pub(crate) use_tys: HashMap<(usize, u32), Ty>,
     /// Key stages whose affix was not a literal, in the order their key
     /// arguments were read. `key_stage` consumes one per deferred argument to
     /// build a term with a fresh mapper variable instead of a concrete affix,

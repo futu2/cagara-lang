@@ -112,6 +112,14 @@ pub struct TypeCheck {
     /// Printed type of each name use, by `(module, span start, span end)`:
     /// the instance at that use, not the definition's scheme.
     use_types: HashMap<(usize, u32, u32), String>,
+    /// The type each expression got, keyed by `ExprId` and its module.
+    ///
+    /// `use_types` above is keyed by *location* and holds a printed string;
+    /// this is keyed by the *node* and holds the resolved `Ty`. A phase that
+    /// builds a typed tree from source walks the AST and needs the second:
+    /// given the `ExprId` of an expression, what type did it receive?
+    /// [`TypeCheck::use_ty`] converts on the way out, so `Ty` stays private.
+    use_tys: HashMap<(usize, u32), Ty>,
     /// The schemes themselves, alongside the printed `types`.
     ///
     /// `types` is what a user reads; this is what a *phase* reads. The checked
@@ -185,6 +193,42 @@ impl TypeCheck {
         self.use_types
             .get(&(module, span.start, span.end))
             .map(String::as_str)
+    }
+
+    /// The scalar type the checker gave the expression with this `ExprId`, as
+    /// closed data.
+    ///
+    /// This is the fact a **source-level elaboration** needs: walking the AST,
+    /// it asks "what type did this node get?" for each expression it turns into
+    /// a `CheckedExpr`. The span-keyed [`TypeCheck::use_type`] cannot answer
+    /// that — it returns a *printed* string and is keyed by location rather
+    /// than by the node.
+    ///
+    /// `None` when the checker recorded no type for that id, or recorded one
+    /// that is not a scalar (a `Query`, a `Function`, an open row).
+    /// `Some(Unknown)` when it is a scalar the checker never solved. The
+    /// distinction matches [`TypeCheck::def_scalar`], and for the same reason.
+    pub fn use_ty(&self, module: usize, id: u32) -> Option<ScalarType> {
+        let t = self.use_tys.get(&(module, id))?;
+        match scheme_view(t) {
+            SchemeView::Scalar(s) => Some(s),
+            SchemeView::Open => Some(ScalarType::Unknown),
+            _ => None,
+        }
+    }
+
+    /// The `ExprId`s the checker recorded a type for in `module`, ascending.
+    ///
+    /// For a caller that wants to know what is available before walking.
+    pub fn use_ids(&self, module: usize) -> Vec<u32> {
+        let mut out: Vec<u32> = self
+            .use_tys
+            .keys()
+            .filter(|(m, _)| *m == module)
+            .map(|(_, id)| *id)
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     /// The row of a definition's scheme, as closed data: column names and
@@ -261,6 +305,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
         choices: HashMap::new(),
         probe_fields: HashMap::new(),
         use_types: HashMap::new(),
+        use_tys: HashMap::new(),
         schemes: HashMap::new(),
     };
     for &input in &ws.inputs {
@@ -280,6 +325,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
         out.choices.extend(mc.choices.clone());
         out.probe_fields.extend(mc.probe_fields.clone());
         out.use_types.extend(mc.use_types.clone());
+        out.use_tys.extend(mc.use_tys.clone());
         out.schemes.extend(mc.schemes.clone());
     }
     out
@@ -335,6 +381,7 @@ struct ModuleCheck {
     holes: HashMap<(usize, usize), usize>,
     choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
     probe_fields: Option<(usize, Vec<(String, String)>)>,
+    use_tys: HashMap<(usize, u32), Ty>,
     use_types: HashMap<(usize, u32, u32), String>,
 }
 
@@ -372,6 +419,7 @@ fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> M
         probe_fields: None,
         uses: Vec::new(),
         use_types: HashMap::new(),
+        use_tys: HashMap::new(),
         deferred_keys: Vec::new(),
         affix_mappers: Vec::new(),
         unify_depth: 0,
@@ -392,6 +440,7 @@ fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> M
         .collect();
     let probe_fields = c.probe_fields.map(|fs| (m, fs));
     let use_types = c.use_types;
+    let use_tys = c.use_tys;
     ModuleCheck {
         schemes,
         errors: c.errors,
@@ -400,6 +449,7 @@ fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> M
         choices: c.choices,
         probe_fields,
         use_types,
+        use_tys,
     }
 }
 

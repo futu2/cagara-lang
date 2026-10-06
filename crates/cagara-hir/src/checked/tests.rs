@@ -13,6 +13,7 @@
 use super::*;
 use crate::core::{Diagnostic, Error, Origin, RowType, ScalarType};
 use crate::ir::{JoinKind, Lit, Loc, Phase, Rel, SetKind};
+use crate::workspace::Workspace;
 use cagara_syntax::ast::{Side, Span};
 
 fn o() -> Origin {
@@ -840,7 +841,7 @@ fn a_checked_module_carries_its_definitions_and_choices() {
         scalar: None,
         row: Some(RowType::new(vec![("a".into(), ScalarType::Int)])),
         holes: 1,
-        terms: vec![],
+        terms: None,
     });
     assert_eq!(m.index, 3);
     assert_eq!(m.choice(0, 7, 0), Some(Choice::Def(2, 4)));
@@ -867,6 +868,137 @@ fn a_checked_module_carries_its_definitions_and_choices() {
     assert_eq!(p.module(9), None);
 }
 
+// ── extracting what the checker actually recorded ──────────────────────────
+
+/// A real overloaded program, not a hand-built map.
+///
+/// This is the test the layer was missing. Overload choices are recorded by
+/// the checker against the *use expression's* `ExprId`
+/// (`infer.rs`: `self.lookup(n, e.id, sp)`), while `from_type_check` used to
+/// look them up with `span.start`/`span.end`. The two are different namespaces
+/// that are both small integers, so the old code transferred **no** choices
+/// for a real program — and could have transferred another use's choice when a
+/// span offset happened to equal an `ExprId`. Only a program with genuine
+/// overloads exercises this; the sibling test above hand-inserts a choice and
+/// so passes either way.
+#[test]
+fn a_real_overloaded_definition_transfers_its_choices() {
+    let src = "users : query { id = int, age = int, active = bool } = table \"p\" \"users\"\n\
+               describe : expr r int -> expr r string = sql \"CAST($1 AS TEXT)\"\n\
+               describe : expr r bool -> expr r string = sql \"CASE WHEN $1 THEN 'yes' ELSE 'no' END\"\n\
+               q = users & select { a = describe .age, b = describe .active }\n";
+    let ws = Workspace::from_source(src);
+    let tc = crate::check::check(&ws);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    assert!(tc.errors.is_empty(), "{:?}", tc.errors);
+
+    let m = ws.root;
+    let q = ws.modules[m]
+        .module
+        .defs
+        .iter()
+        .position(|d| d.name == "q")
+        .expect("no `q`");
+
+    // The checker has two uses of `describe`, at two distinct sites.
+    let from_checker = tc.choices_of(m, q);
+    assert_eq!(
+        from_checker.len(),
+        2,
+        "expected two resolved overload uses, got {from_checker:?}"
+    );
+    let sites: Vec<u32> = from_checker.iter().map(|&(s, _, _)| s).collect();
+    assert_ne!(sites[0], sites[1], "the two uses must have distinct sites");
+
+    // …and `CheckedProgram` carries exactly the same ones.
+    let cp = CheckedProgram::of(&ws);
+    let cm = cp.module(m).expect("module missing");
+    let def = cm.def(q).expect("definition missing");
+    assert_eq!(
+        def.holes, 0,
+        "`q` instantiates its overloads, so it leaves none open"
+    );
+
+    // Every choice the checker recorded is in the checked module, under the
+    // same site. The old span-keyed lookup transferred none of them.
+    let mut transferred: Vec<(u32, usize, Choice)> = from_checker
+        .iter()
+        .filter_map(|&(site, k, c)| {
+            let got = cm.choices.get(&(q, site, k))?;
+            Some((site, k, if *got == c { c } else { Choice::Hole(usize::MAX) }))
+        })
+        .collect();
+    // Sort by key: `Choice` has no `Ord`, and the key is what identifies a use.
+    transferred.sort_by_key(|&(site, k, _)| (site, k));
+    let mut expected = from_checker.clone();
+    expected.sort_by_key(|&(site, k, _)| (site, k));
+    assert_eq!(
+        transferred, expected,
+        "every checker choice must arrive in CheckedProgram; \
+         checker={from_checker:?} transferred={transferred:?}"
+    );
+
+    // The choices are two *different* overload candidates, so this is a real
+    // discrimination and not the same candidate twice.
+    let cands: std::collections::HashSet<(usize, usize)> = from_checker
+        .iter()
+        .filter_map(|&(_, _, c)| match c {
+            Choice::Def(dm, di) => Some((dm, di)),
+            Choice::Hole(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        cands.len(),
+        2,
+        "the two uses must resolve to two different overload candidates: {from_checker:?}"
+    );
+}
+
+/// A span offset must not be usable as a choice key.
+///
+/// This pins *why* the fix was needed rather than only that it works: the
+/// checker keyed its choices by `ExprId`, and a byte offset is a different
+/// number. If a future change reintroduces a span-keyed lookup, this fails.
+#[test]
+fn choices_are_keyed_by_expr_id_not_by_span() {
+    let src = "users : query { id = int, age = int } = table \"p\" \"users\"\n\
+               n : expr r int -> expr r int = sql \"$1 + 1\"\n\
+               n : expr r float -> expr r float = sql \"$1 + 1.0\"\n\
+               q = users & select { a = n .age, b = n .age }\n";
+    let ws = Workspace::from_source(src);
+    let tc = crate::check::check(&ws);
+    assert!(tc.errors.is_empty(), "{:?}", tc.errors);
+    let m = ws.root;
+    let q = ws.modules[m]
+        .module
+        .defs
+        .iter()
+        .position(|d| d.name == "q")
+        .expect("no `q`");
+    let choices = tc.choices_of(m, q);
+    assert!(!choices.is_empty(), "expected resolved overload uses");
+
+    // Look every recorded site up as a *span* as well. If the two namespaces
+    // were the same, the span lookup would find the same choices.
+    let spans: Vec<(u32, u32)> = body_spans(&ws.modules[m].module.defs[q].body)
+        .into_iter()
+        .map(|(s, _)| (s.start, s.end))
+        .collect();
+    let mut via_span = 0;
+    for &(start, end) in &spans {
+        for site in [start, end] {
+            if tc.choice(m, q, site, 0).is_some() {
+                via_span += 1;
+            }
+        }
+    }
+    assert_eq!(
+        via_span, 0,
+        "a span offset found a choice: the two namespaces have collided, so the \
+         span-keyed lookup this replaced would have been silently wrong"
+    );
+}
+
 // ── `from_rel` narrowing ───────────────────────────────────────────────────
 
 #[test]
@@ -877,7 +1009,7 @@ fn from_rel_keeps_a_known_table_type() {
         columns: Some(vec!["id".into()]),
     };
     let row = RowType::new(vec![("id".into(), ScalarType::Int)]);
-    let q = from_rel(rel, row, None, o()).unwrap();
+    let q = from_rel_unchecked(rel, row, None, o()).unwrap();
     // The caller's typed row must not be downgraded to `Unknown`.
     assert_eq!(q.row.get("id"), Some(&ScalarType::Int));
 }
@@ -887,7 +1019,7 @@ fn from_rel_round_trips_the_shapes_a_rel_records() {
     let origin = Origin::new(1, Span { start: 4, end: 12 });
     let q = CheckedQuery::where_(table(), bool_col("a"), origin).unwrap();
     let rel = q.clone().erase();
-    let back = from_rel(rel.clone(), q.row.clone(), Some(StageHint::Select), origin).unwrap();
+    let back = from_rel_unchecked(rel.clone(), q.row.clone(), Some(StageHint::Select), origin).unwrap();
     assert_eq!(back.clone().erase(), rel);
     assert_eq!(back.row, q.row);
 }
@@ -897,18 +1029,18 @@ fn from_rel_refuses_to_guess_between_select_and_agg() {
     // `Rel::Select` and `Rel::Agg` are one variant, so a `Rel` cannot say
     // which it was; guessing is what a bridge must not do.
     let rel = Rel::Select(Box::new(base_rel()), vec![]);
-    let e = from_rel(rel, RowType::new(vec![]), None, o()).unwrap_err();
+    let e = from_rel_unchecked(rel, RowType::new(vec![]), None, o()).unwrap_err();
     assert!(e.message.contains("does not say whether it was a `select` or an `agg`"), "{e}");
 }
 
 #[test]
 fn from_rel_distinguishes_select_from_agg_with_a_hint() {
     let sel = Rel::Select(Box::new(base_rel()), vec![]);
-    let q = from_rel(sel, RowType::new(vec![]), Some(StageHint::Select), o()).unwrap();
+    let q = from_rel_unchecked(sel, RowType::new(vec![]), Some(StageHint::Select), o()).unwrap();
     assert!(matches!(q.node, CheckedQueryNode::Select { .. }));
 
     let agg = Rel::Agg(Box::new(base_rel()), vec![]);
-    let q = from_rel(agg, RowType::new(vec![]), Some(StageHint::Agg), o()).unwrap();
+    let q = from_rel_unchecked(agg, RowType::new(vec![]), Some(StageHint::Agg), o()).unwrap();
     assert!(matches!(q.node, CheckedQueryNode::Agg { .. }));
 }
 
@@ -925,7 +1057,7 @@ fn from_rel_refuses_a_non_invertible_rename() {
         ("a".into(), ScalarType::Int),
         ("b".into(), ScalarType::String),
     ]);
-    let e = from_rel(rel, row, None, o()).unwrap_err();
+    let e = from_rel_unchecked(rel, row, None, o()).unwrap_err();
     assert!(e.message.contains("does not carry the `prefix \"u_\"` affix"), "{e}");
 }
 
@@ -938,7 +1070,7 @@ fn from_rel_accepts_an_invertible_rename() {
     };
     let rel = Rel::Prefix(Box::new(inner), "u_".into());
     let row = RowType::new(vec![("u_a".into(), ScalarType::Int)]);
-    let q = from_rel(rel, row, None, o()).unwrap();
+    let q = from_rel_unchecked(rel, row, None, o()).unwrap();
     assert!(matches!(q.node, CheckedQueryNode::Rename { prefix: true, .. }));
 }
 
@@ -1045,6 +1177,66 @@ fn a_function_definition_has_no_row() {
     assert!(d.row_names().is_empty());
 }
 
+/// A function that *mentions* a query is still a function.
+///
+/// This is the case the old printed-scheme test got wrong: `scheme_row` tested
+/// `printed.contains("query")`, which is true for
+/// `query r -> query r` — a helper's own type — so `f` was reported as a query
+/// with **zero columns** rather than as a function. It also meant `def_scalar`
+/// answered `Some(Unknown)` for it, contradicting its own documentation.
+#[test]
+fn a_function_that_mentions_a_query_has_no_row() {
+    let src = "users : query { id = int } = table \"p\" \"users\"\n\
+               f = q => q & where (.id > 0)\n\
+               g : query { id = int } = users & where (.id > 0)\n";
+    let ws = Workspace::from_source(src);
+    let tc = crate::check::check(&ws);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    assert!(tc.errors.is_empty(), "{:?}", tc.errors);
+    let p = CheckedProgram::of(&ws);
+
+    let m = ws.root;
+    let idx = |name: &str| {
+        ws.modules[m]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == name)
+            .unwrap_or_else(|| panic!("no `{name}`"))
+    };
+
+    // `f` takes a query and returns one: a function, not an empty-rowed query.
+    let f = p.module(m).unwrap().def(idx("f")).unwrap();
+    assert!(
+        f.row.is_none(),
+        "`f` is a function; its row must be None, not an empty row: {:?}",
+        f.row
+    );
+
+    // `g` is a real query and keeps its columns: the fix must not have been
+    // to drop every row.
+    let g = p.module(m).unwrap().def(idx("g")).unwrap();
+    assert_eq!(
+        g.row.as_ref().map(|r| r.names()),
+        Some(vec!["id".to_string()]),
+        "`g` is a query over one column"
+    );
+
+    // `def_scalar` returns `None` for a function and a query alike, as its
+    // documentation says — not `Some(Unknown)` for everything.
+    assert_eq!(tc.def_scalar(m, idx("f")), None, "a function is not a scalar");
+    assert_eq!(tc.def_scalar(m, idx("g")), None, "a query is not a scalar");
+    // A real scalar is still `Some`.
+    let src2 = "one : int = 1\n";
+    let ws2 = Workspace::from_source(src2);
+    let tc2 = crate::check::check(&ws2);
+    assert_eq!(
+        tc2.def_scalar(ws2.root, 0),
+        Some(ScalarType::Int),
+        "an `int` definition must report `int`, not None"
+    );
+}
+
 #[test]
 fn a_checked_program_reports_the_same_diagnostics_as_the_checker() {
     let src = "t : query { a = int } = table \"s\" \"t\"\nq = t & where .a\n";
@@ -1064,14 +1256,59 @@ fn a_checked_program_reports_the_same_diagnostics_as_the_checker() {
 fn checked_program_from_type_check_reuses_a_check_already_run() {
     let ws = crate::workspace::Workspace::from_source(SRC);
     let tc = crate::check::check(&ws);
-    let p = CheckedProgram::from_type_check(&ws, &tc, std::collections::HashMap::new());
+    let p = CheckedProgram::from_type_check(&ws, &tc, None);
     assert_eq!(p.modules.len(), ws.modules.len());
     assert!(p.is_ok());
-    // No bodies were supplied, so every definition's term list is empty
-    // rather than invented.
+    // No bodies were supplied, so `terms` is `None` — "not elaborated" — and
+    // explicitly *not* an empty list, which would claim the definitions have
+    // no bodies at all. The distinction is the point of the field's type.
     for m in &p.modules {
         for d in &m.defs {
-            assert!(d.terms.is_empty());
+            assert!(
+                d.terms.is_none(),
+                "`{}` must record that it was not elaborated, not that it has no body",
+                d.name
+            );
         }
     }
+}
+
+/// `CheckedProgram::of_elaborated` fills in the bodies `of` leaves out.
+#[test]
+fn of_elaborated_fills_in_the_definition_bodies() {
+    let src = "t : query { a = int } = table \"s\" \"t\"\n\
+               q = t & where (.a > 0)\n";
+    let ws = crate::workspace::Workspace::from_source(src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+
+    let plain = CheckedProgram::of(&ws);
+    let m = ws.root;
+    let q = ws.modules[m]
+        .module
+        .defs
+        .iter()
+        .position(|d| d.name == "q")
+        .expect("no `q`");
+    assert!(
+        plain.module(m).unwrap().def(q).unwrap().terms.is_none(),
+        "`of` must not claim to have elaborated"
+    );
+
+    let elaborated = CheckedProgram::of_elaborated(&ws);
+    let def = elaborated.module(m).unwrap().def(q).unwrap();
+    let terms = def
+        .terms
+        .as_ref()
+        .expect("`of_elaborated` must populate `terms`");
+    assert_eq!(terms.len(), 1, "a definition with no holes has one body");
+    // The evaluator stamps the term with the stage's location, so the root is
+    // `At`; underneath it must be the elaborated `where`, not a placeholder.
+    assert!(
+        matches!(
+            terms[0].bare(),
+            crate::CoreTerm::Where { .. }
+        ),
+        "expected the elaborated `where` under the `At` wrapper, got {:?}",
+        terms[0]
+    );
 }

@@ -571,6 +571,38 @@ pub fn root_core_terms(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Co
     out
 }
 
+/// Elaborate every definition of every module to its core term(s), for
+/// [`crate::CheckedProgram::of_elaborated`].
+///
+/// A definition with no open overloads has exactly one body. A definition that
+/// leaves `n` open overloads is meaningful only at its uses, so it gets no
+/// body of its own here — the *uses* carry the choices, and
+/// `CheckedProgram` records those separately via `TypeCheck::choices_of`.
+/// A definition that fails to evaluate is skipped rather than given a
+/// placeholder: its diagnostic is already in `CheckedProgram::diagnostics`.
+///
+/// Errors are deliberately not returned. A definition that does not evaluate is
+/// a diagnostic the caller already has, and fabricating a term for it is
+/// exactly the failure mode this refactor is removing.
+pub fn elaborate_bodies(
+    ws: &Workspace,
+    tc: &TypeCheck,
+) -> HashMap<(usize, usize), Vec<CoreTerm>> {
+    let mut ev = Evaluator::new(ws, tc);
+    let mut out = HashMap::new();
+    for m in 0..ws.modules.len() {
+        for (i, _d) in ws.modules[m].module.defs.iter().enumerate() {
+            if tc.error_for(m, i).is_some() || tc.holes(m, i) > 0 {
+                continue;
+            }
+            if let Ok(Value::Query(t)) = ev.def_value(m, i) {
+                out.insert((m, i), vec![*t]);
+            }
+        }
+    }
+    out
+}
+
 /// The elaboration tests, a sibling of `tests` rather than a child of it: they
 /// assert the *shape* of the emitted core term and pin each primitive's
 /// argument order (a permuted `Vec<Value>` is invisible to the type system).

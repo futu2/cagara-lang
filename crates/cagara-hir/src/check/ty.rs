@@ -363,6 +363,88 @@ pub(crate) fn ty_fields(t: &Ty) -> Vec<(String, ScalarType)> {
     }
 }
 
+/// What a definition's scheme *is*, structurally.
+///
+/// [`ty_fields`] returns `vec![]` for every non-row type and
+/// [`ty_to_scalar`] returns `Unknown` for every non-scalar one, so neither can
+/// say "this is a function" or "this is a query". The checked layer needs that
+/// distinction — asking a helper (`f = q => q & where …`) for its columns and
+/// getting an empty list claims it is a query with no fields — and reading the
+/// printed scheme for the word `query` gets it wrong whenever a *function*
+/// mentions a query in its argument or result type.
+///
+/// This is the structural answer, computed where `Ty` is visible. It is the
+/// only thing the checked layer should branch on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchemeView {
+    /// `query r`: a query over `r`. `fields` is `None` when `r` is still open,
+    /// which is different from a query with no fields.
+    Query {
+        fields: Option<Vec<(String, ScalarType)>>,
+    },
+    /// A scalar type (`int`, `maybe string`, `list a`, …).
+    Scalar(ScalarType),
+    /// A function, however many arguments: `a -> b`, `query r -> query r`.
+    Function,
+    /// A row that is not behind `query` (a bare `{ a = int }`).
+    Row { fields: Vec<(String, ScalarType)> },
+    /// Anything the checker did not close: an unsolved variable, a rigid name,
+    /// or a type-level term it could not reduce.
+    Open,
+}
+
+/// Classify a scheme's type. See [`SchemeView`].
+pub(crate) fn scheme_view(t: &Ty) -> SchemeView {
+    match t {
+        Ty::Con("query", args) if args.len() == 1 => SchemeView::Query {
+            fields: closed_fields(&args[0]),
+        },
+        // A bare row is a row whether or not its tail is closed: the fields
+        // listed are real, and an open tail only means more may follow.
+        Ty::Row(fs, _) => SchemeView::Row {
+            fields: fs
+                .iter()
+                .map(|(n, t)| (n.clone(), ty_to_scalar(t)))
+                .collect(),
+        },
+        Ty::Fun(..) => SchemeView::Function,
+        Ty::Merge(..) | Ty::MapValue(..) | Ty::MapKey(..) | Ty::KeyAffix(..) => {
+            let fields = ty_fields(t);
+            if fields.is_empty() {
+                SchemeView::Open
+            } else {
+                SchemeView::Row { fields }
+            }
+        }
+        Ty::Var(_) | Ty::Rigid(..) | Ty::Gen(_) | Ty::Empty => SchemeView::Open,
+        Ty::Con(..) => SchemeView::Scalar(ty_to_scalar(t)),
+    }
+}
+
+/// The fields of a row type when it is closed, or `None` when its tail is
+/// still open. `None` means "not known", not "empty".
+fn closed_fields(t: &Ty) -> Option<Vec<(String, ScalarType)>> {
+    match t {
+        Ty::Row(fs, tail) if matches!(**tail, Ty::Empty) => Some(
+            fs.iter()
+                .map(|(n, t)| (n.clone(), ty_to_scalar(t)))
+                .collect(),
+        ),
+        // A closed merge or value-map reduces to concrete fields.
+        Ty::Merge(..) | Ty::MapValue(..) => {
+            let fields = ty_fields(t);
+            if fields.is_empty() {
+                None
+            } else {
+                Some(fields)
+            }
+        }
+        // `query r` in a signature, or a row term still waiting on a variable:
+        // the columns are not statically known.
+        _ => None,
+    }
+}
+
 impl Cons {
     pub(crate) fn map(&self, f: &mut impl FnMut(&Ty) -> Ty) -> Cons {
         match self {

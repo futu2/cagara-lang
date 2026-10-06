@@ -20,7 +20,7 @@
 //! checker's *types* already use — so this is one statement of the rule, not a
 //! third one. Column-level name rules come from `crate::schema`.
 
-use crate::check::{Choice, TypeCheck};
+use crate::check::{Choice, SchemeView, TypeCheck};
 use crate::core::{Diagnostic, Error, Origin, RowType, ScalarType};
 use crate::ir::{Bound, Expr, Frame, JoinKind, Lit, Loc, Phase, Rel, SetKind, WinSpec};
 use crate::rules::{self, Place};
@@ -56,7 +56,14 @@ pub struct CheckedDef {
     /// [`crate::CoreTerm`] for each assignment of its holes, in
     /// `TypeCheck::holes` order. Resolved up front, so evaluation never
     /// discovers a choice dynamically.
-    pub terms: Vec<crate::CoreTerm>,
+    ///
+    /// `None` means **this program was not elaborated**, which is a different
+    /// statement from "the definition has no body": an unelaborated program
+    /// used to carry an empty `Vec` here, so a caller could not tell "no terms
+    /// because nothing elaborated" from "no terms because there are none".
+    /// `CheckedProgram::of` does not elaborate, so it leaves this `None`;
+    /// [`CheckedProgram::of_elaborated`] fills it in.
+    pub terms: Option<Vec<crate::CoreTerm>>,
 }
 
 impl CheckedDef {
@@ -138,23 +145,45 @@ impl CheckedProgram {
         }
     }
 
-    /// Gather what the checker learned into one checked program.
+    /// Gather what the checker learned into one checked program, without
+    /// elaborating definition bodies.
     ///
-    /// This runs the existing checker and groups its output per module; it
-    /// does **not** change what is checked or in what order. The
-    /// per-definition core bodies are supplied by the caller (`bodies`),
-    /// because elaborating a definition to a `CoreTerm` is the evaluator's
-    /// job: this function arranges, it does not check.
+    /// This runs the existing checker and groups its output per module; it does
+    /// **not** change what is checked or in what order. Every
+    /// [`CheckedDef::terms`] is left `None`, because elaborating a definition
+    /// to a `CoreTerm` means evaluating it, and this function arranges rather
+    /// than evaluates. Use [`CheckedProgram::of_elaborated`] when the bodies
+    /// are needed.
+    ///
+    /// Everything else here *is* filled in from the checker: the printed
+    /// scheme, the closed `ScalarType` and row, the open-overload count, and
+    /// the resolved overload choices — so a caller that does not need bodies
+    /// gets a complete picture of what was checked.
     pub fn of(ws: &crate::workspace::Workspace) -> Self {
         let tc = crate::check::check(ws);
-        Self::from_type_check(ws, &tc, HashMap::new())
+        Self::from_type_check(ws, &tc, None)
+    }
+
+    /// [`CheckedProgram::of`], with definition bodies elaborated.
+    ///
+    /// Elaboration goes through the evaluator, which is why it is a separate
+    /// entry point rather than something `of` does implicitly: a caller that
+    /// only wants types should not pay for evaluation.
+    pub fn of_elaborated(ws: &crate::workspace::Workspace) -> Self {
+        let tc = crate::check::check(ws);
+        let bodies = crate::eval::elaborate_bodies(ws, &tc);
+        Self::from_type_check(ws, &tc, Some(bodies))
     }
 
     /// [`CheckedProgram::of`], reusing a type check the caller already ran.
+    ///
+    /// `bodies` is `None` for "not elaborated", which is recorded as
+    /// `CheckedDef::terms == None` rather than as an empty list: those are
+    /// different facts and a caller needs to tell them apart.
     pub fn from_type_check(
         ws: &crate::workspace::Workspace,
         tc: &TypeCheck,
-        bodies: HashMap<(usize, usize), Vec<crate::CoreTerm>>,
+        bodies: Option<HashMap<(usize, usize), Vec<crate::CoreTerm>>>,
     ) -> Self {
         let mut out = CheckedProgram::new();
         for index in 0..ws.modules.len() {
@@ -164,23 +193,23 @@ impl CheckedProgram {
                 let holes = tc.holes(index, def);
                 module.types.insert(def, tc.type_of(index, def).unwrap_or("").into());
                 module.holes.insert(def, holes);
-                // Record every resolved choice of the definition, and the
-                // printed type of every name use, so a later phase reads them
-                // here rather than asking the checker again.
+                // The printed type of every name use, keyed by span: this map
+                // really is span-keyed (`TypeCheck::use_types`), so a span
+                // lookup is correct here.
                 for (span, _layer) in body_spans(&d.body) {
                     if let Some(t) = tc.use_type(index, span) {
                         module.use_types.insert((span.start, span.end), t.to_string());
                     }
-                    for site in [span.start, span.end] {
-                        for k in 0..MAX_HOLES {
-                            match tc.choice(index, def, site, k) {
-                                Some(c) => {
-                                    module.choices.insert((def, site, k), c);
-                                }
-                                None => break,
-                            }
-                        }
-                    }
+                }
+                // Overload choices are keyed by `ExprId`, NOT by span. This
+                // used to look them up with `span.start`/`span.end`; those are
+                // a different namespace, so a definition with overloads
+                // transferred *no* choices, and — both being small integers —
+                // could transfer another use's choice when the ranges
+                // happened to overlap. `choices_of` reads the pairs the
+                // checker recorded, so the key cannot be wrong.
+                for (site, k, c) in tc.choices_of(index, def) {
+                    module.choices.insert((def, site, k), c);
                 }
                 module.defs.push(CheckedDef {
                     name: d.name.clone(),
@@ -190,9 +219,11 @@ impl CheckedProgram {
                     // `TypeCheck`, so `CheckedProgram` and the checker cannot
                     // disagree about a definition's type.
                     scalar: tc.def_scalar(index, def),
-                    row: scheme_row(tc, index, def, tc.type_of(index, def)),
+                    row: scheme_row(tc, index, def),
                     holes,
-                    terms: bodies.get(&(index, def)).cloned().unwrap_or_default(),
+                    terms: bodies
+                        .as_ref()
+                        .and_then(|b| b.get(&(index, def)).cloned()),
                 });
             }
             if let Some(fs) = tc.probe_fields(index) {
@@ -227,9 +258,6 @@ impl Default for CheckedProgram {
     }
 }
 
-/// How many overload holes a definition may leave open. `encode` builds a use
-/// site and a hole index into one `u32` with the hole in the low byte.
-const MAX_HOLES: usize = 256;
 
 /// A definition's output row, from its scheme's closed row.
 ///
@@ -239,23 +267,20 @@ const MAX_HOLES: usize = 256;
 /// would make "this definition has no row" and "this definition's row is
 /// empty" the same answer, and they are not the same program.
 ///
-/// The underlying `ty_fields` returns an empty vector for *every* type that is
-/// not a row, so on its own `Some(vec![])` cannot be told from "not a row".
-/// The printed scheme is the discriminator available at this boundary, and
-/// this reads it rather than guessing: a scheme that is a `query` is a row
-/// (possibly empty), anything else is not a row at all. The known limit that
-/// remains is a still-open row inside a `query`, which arrives as
-/// `Some(empty)`; `TypeCheck::type_of` still prints the open form for a
-/// reader.
-fn scheme_row(tc: &TypeCheck, module: usize, def: usize, scheme: Option<&str>) -> Option<RowType> {
-    let cols = tc.scheme_fields(module, def)?;
-    let printed = scheme?;
-    // `query {..}` and `query r` both name a query; a function or a scalar
-    // scheme does not.
-    if !printed.contains("query") {
-        return None;
+/// The classification is structural (`TypeCheck::scheme_view`), computed from
+/// the type. An earlier version tested the *printed* scheme for the word
+/// `query`, which also matches a function that merely mentions a query:
+/// `f = q => q & where (.id > 0)` was reported as a query with no columns
+/// instead of a function.
+fn scheme_row(tc: &TypeCheck, module: usize, def: usize) -> Option<RowType> {
+    match tc.scheme_view(module, def)? {
+        SchemeView::Query { fields } => fields.map(RowType::new),
+        // A bare row type (`{ a = int }`) is a row, but not a query; callers
+        // that want a query's columns should not get a bare row's.
+        SchemeView::Row { .. } | SchemeView::Scalar(_) | SchemeView::Function | SchemeView::Open => {
+            None
+        }
     }
-    Some(RowType::new(cols))
 }
 
 /// Every sub-expression span of a definition body, the body's own first.
@@ -1527,6 +1552,13 @@ pub enum StageHint {
 /// Rebuild a [`CheckedQuery`] from a `Rel`, its already-computed row, and the
 /// one thing a `Rel` cannot say.
 ///
+/// **This is an unchecked bridge, and the name says so.** It is the one
+/// function here that produces a `CheckedQuery` *without* running the
+/// constructors that establish the layer's guarantees. The previous name
+/// (`from_rel`) read like the supported way in; it exists for tests that drive
+/// erasure from a hand-built `Rel`, and for a future migration step that holds
+/// a `Rel` and knows what it means. Everything else goes through a constructor.
+///
 /// **Which shapes round-trip.** A `Rel` records each node's own shape but not
 /// its input's row and not its expressions' scalar types, so this bridge is
 /// *lossy* and is `Err` wherever the loss matters:
@@ -1540,10 +1572,10 @@ pub enum StageHint {
 ///
 /// Expressions are translated structurally (`untyped`) and their scalar types
 /// are `Unknown`, because a `Rel` does not carry types. The tree is otherwise
-/// *not* re-checked: [`erase`] is the total direction, and `from_rel` cannot be,
+/// *not* re-checked: [`erase`] is the total direction, and this cannot be,
 /// because a `CheckedQuery` carries strictly more information than a `Rel`.
 /// That asymmetry is the point — see the doc on [`erase`].
-pub fn from_rel(
+pub fn from_rel_unchecked(
     rel: Rel,
     row: RowType,
     hint: Option<StageHint>,
@@ -1554,7 +1586,7 @@ pub fn from_rel(
         _ => fallback,
     };
     Ok(match rel {
-        Rel::At(_, inner) => return from_rel(*inner, row, hint, fallback),
+        Rel::At(_, inner) => return from_rel_unchecked(*inner, row, hint, fallback),
         Rel::Table {
             schema,
             name,
@@ -1589,7 +1621,7 @@ pub fn from_rel(
             CheckedQuery {
                 row,
                 node: CheckedQueryNode::Where {
-                    input: Box::new(from_rel(*input, r, hint, fallback)?),
+                    input: Box::new(from_rel_unchecked(*input, r, hint, fallback)?),
                     pred: untyped(e),
                 },
                 origin,
@@ -1610,7 +1642,7 @@ pub fn from_rel(
             // This is the one place the bridge is knowingly partial.
             let inner = RowType::unknown(vec![]);
             let fields = fs.into_iter().map(|(n, e)| (n, untyped(e))).collect();
-            let input = Box::new(from_rel(*input, inner, hint_forward(hint), fallback)?);
+            let input = Box::new(from_rel_unchecked(*input, inner, hint_forward(hint), fallback)?);
             let node = match hint {
                 StageHint::Select => CheckedQueryNode::Select { input, fields },
                 StageHint::Agg => CheckedQueryNode::Agg { input, fields },
@@ -1623,7 +1655,7 @@ pub fn from_rel(
             CheckedQuery {
                 row,
                 node: CheckedQueryNode::Update {
-                    input: Box::new(from_rel(*input, inner, hint, fallback)?),
+                    input: Box::new(from_rel_unchecked(*input, inner, hint, fallback)?),
                     fields: fs.into_iter().map(|(n, e)| (n, untyped(e))).collect(),
                 },
                 origin,
@@ -1641,7 +1673,7 @@ pub fn from_rel(
             CheckedQuery {
                 row,
                 node: CheckedQueryNode::Omit {
-                    input: Box::new(from_rel(*input, inner, hint, fallback)?),
+                    input: Box::new(from_rel_unchecked(*input, inner, hint, fallback)?),
                     key,
                 },
                 origin,
@@ -1655,7 +1687,7 @@ pub fn from_rel(
             CheckedQuery {
                 row,
                 node: CheckedQueryNode::Order {
-                    input: Box::new(from_rel(*input, r, hint, fallback)?),
+                    input: Box::new(from_rel_unchecked(*input, r, hint, fallback)?),
                     keys: keys.into_iter().map(|(e, asc)| (untyped(e), asc)).collect(),
                 },
                 origin,
@@ -1667,7 +1699,7 @@ pub fn from_rel(
             CheckedQuery {
                 row,
                 node: CheckedQueryNode::Limit {
-                    input: Box::new(from_rel(*input, r, hint, fallback)?),
+                    input: Box::new(from_rel_unchecked(*input, r, hint, fallback)?),
                     n,
                 },
                 origin,
@@ -1679,7 +1711,7 @@ pub fn from_rel(
             CheckedQuery {
                 row,
                 node: CheckedQueryNode::Offset {
-                    input: Box::new(from_rel(*input, r, hint, fallback)?),
+                    input: Box::new(from_rel_unchecked(*input, r, hint, fallback)?),
                     n,
                 },
                 origin,
@@ -1690,7 +1722,7 @@ pub fn from_rel(
             let r = row.clone();
             CheckedQuery {
                 row,
-                node: CheckedQueryNode::Distinct(Box::new(from_rel(*input, r, hint, fallback)?)),
+                node: CheckedQueryNode::Distinct(Box::new(from_rel_unchecked(*input, r, hint, fallback)?)),
                 origin,
             }
         }
@@ -1709,8 +1741,8 @@ pub fn from_rel(
                 row,
                 node: CheckedQueryNode::Join {
                     kind,
-                    left: Box::new(from_rel(*left, l, hint, fallback)?),
-                    right: Box::new(from_rel(*right, r, hint, fallback)?),
+                    left: Box::new(from_rel_unchecked(*left, l, hint, fallback)?),
+                    right: Box::new(from_rel_unchecked(*right, r, hint, fallback)?),
                     on: untyped(on),
                 },
                 origin,
@@ -1724,8 +1756,8 @@ pub fn from_rel(
                 row,
                 node: CheckedQueryNode::Set {
                     kind,
-                    left: Box::new(from_rel(*left, l, hint, fallback)?),
-                    right: Box::new(from_rel(*right, r, hint, fallback)?),
+                    left: Box::new(from_rel_unchecked(*left, l, hint, fallback)?),
+                    right: Box::new(from_rel_unchecked(*right, r, hint, fallback)?),
                 },
                 origin,
             }
@@ -1780,7 +1812,7 @@ fn rename_from(
     Ok(CheckedQuery {
         row,
         node: CheckedQueryNode::Rename {
-            input: Box::new(from_rel(input, RowType::new(names), hint, fallback)?),
+            input: Box::new(from_rel_unchecked(input, RowType::new(names), hint, fallback)?),
             affix,
             prefix,
         },

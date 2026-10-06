@@ -64,7 +64,7 @@ pub(crate) use ty::*;
 pub use ty::Choice;
 /// Scalar-type views of a `Ty`, for the checked layer (`crate::checked`).
 /// `Ty` itself stays crate-private: inference is not a public interface.
-pub(crate) use ty::{ty_fields, ty_to_scalar};
+pub(crate) use ty::{scheme_view, SchemeView};
 
 pub(crate) use crate::core::ScalarType;
 pub(crate) use crate::db::ModuleInput;
@@ -140,8 +140,37 @@ impl TypeCheck {
     }
 
     /// Choice for hole `k` at use site `site` inside definition `(module, def)`.
+    ///
+    /// `site` is an [`ExprId`](cagara_syntax::ast::ExprId) — the `id` of the
+    /// *use expression* — not a span offset. Both are small integers, so a
+    /// caller that passes a byte offset gets `None` at best and, when the two
+    /// happen to collide, **another use's choice**. Prefer
+    /// [`TypeCheck::choices_of`], which takes the pairs the checker actually
+    /// recorded and cannot be called with the wrong key.
     pub fn choice(&self, module: usize, def: usize, site: u32, k: usize) -> Option<Choice> {
         self.choices.get(&(module, def))?.get(&(site, k)).copied()
+    }
+
+    /// Every resolved overload choice of a definition, as
+    /// `(use site, hole, choice)` in a deterministic order.
+    ///
+    /// `use site` is the `ExprId` of the use expression. This is the accessor
+    /// for a phase that wants *all* the choices of a definition and has no way
+    /// to know the site ids in advance; it reads the same map
+    /// [`TypeCheck::choice`] does, so the two cannot disagree.
+    pub fn choices_of(&self, module: usize, def: usize) -> Vec<(u32, usize, Choice)> {
+        let Some(by_site) = self.choices.get(&(module, def)) else {
+            return Vec::new();
+        };
+        // HashMap iteration order is not stable, so sort: a phase that records
+        // these in a `Vec` needs the same answer on every run, and `ExprId`s
+        // are assigned in source order, which makes this a reading order.
+        let mut out: Vec<(u32, usize, Choice)> = by_site
+            .iter()
+            .map(|(&(site, k), &c)| (site, k, c))
+            .collect();
+        out.sort_by_key(|&(site, k, _)| (site, k));
+        out
     }
 
     /// Printed type of the name use whose expression spans `span` in `module`.
@@ -158,21 +187,49 @@ impl TypeCheck {
     /// definition's columns — the checked layer recording a `CheckedModule`,
     /// for instance — reads them here instead of parsing the printed string.
     ///
-    /// A scheme whose result is not a row (`f : a -> b`, or a query over an
-    /// open row) yields `None` or an empty list rather than a guess: an open
-    /// row has no columns to report, and inventing them is exactly what the
-    /// checked layer must not do.
+    /// The columns of a definition's *closed* query row, or `None` when the
+    /// scheme is not a closed query.
+    ///
+    /// `None` covers every other shape — a function, a scalar, a bare row, a
+    /// `query r` with an open row — because a caller asking for columns wants
+    /// to know whether there are any, and the shapes differ in more ways than
+    /// the answer. Use [`TypeCheck::scheme_view`] to tell *which* shape it is.
     pub fn scheme_fields(&self, module: usize, def: usize) -> Option<Vec<(String, ScalarType)>> {
         let s = self.schemes.get(&(module, def))?;
-        Some(ty_fields(&s.ty))
+        match scheme_view(&s.ty) {
+            SchemeView::Query { fields } => fields,
+            SchemeView::Row { fields } => Some(fields),
+            _ => None,
+        }
     }
 
-    /// A definition's scalar type, as closed data. `None` when the scheme has
-    /// no scalar reading (a function or a row); `Some(Unknown)` when it is a
-    /// scalar the checker never solved.
+    /// What shape a definition's scheme has, structurally.
+    ///
+    /// This is the accessor to branch on. [`TypeCheck::scheme_fields`] and
+    /// [`TypeCheck::def_scalar`] both collapse several shapes into `None`, so
+    /// neither can distinguish "a function taking a query" from "a query";
+    /// this can, because it is computed from the type rather than from the
+    /// shape of a printed string.
+    pub fn scheme_view(&self, module: usize, def: usize) -> Option<SchemeView> {
+        let s = self.schemes.get(&(module, def))?;
+        Some(scheme_view(&s.ty))
+    }
+
+    /// A definition's scalar type, as closed data.
+    ///
+    /// `None` for a scheme that is not a scalar — a function, a row, or a
+    /// query — and `Some(Unknown)` for a scalar the checker never solved. The
+    /// two used to be one case, because `ty_to_scalar` maps every non-scalar
+    /// to `Unknown`; this reads the same structural view
+    /// [`TypeCheck::scheme_view`] exposes, so a function is now `None` rather
+    /// than a misleading `Some(Unknown)`.
     pub fn def_scalar(&self, module: usize, def: usize) -> Option<ScalarType> {
         let s = self.schemes.get(&(module, def))?;
-        Some(ty_to_scalar(&s.ty))
+        match scheme_view(&s.ty) {
+            SchemeView::Scalar(t) => Some(t),
+            SchemeView::Open => Some(ScalarType::Unknown),
+            SchemeView::Query { .. } | SchemeView::Row { .. } | SchemeView::Function => None,
+        }
     }
 
     pub fn error_for(&self, module: usize, def: usize) -> Option<&Diag> {

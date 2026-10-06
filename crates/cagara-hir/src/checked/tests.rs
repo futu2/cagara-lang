@@ -1447,3 +1447,243 @@ fn module_types_omits_definitions_that_did_not_check() {
         cm.types
     );
 }
+
+// ── differential harness: the checked tree vs. the evaluator ───────────────
+
+/// Strip every `Rel::At` wrapper, so two trees can be compared on structure.
+///
+/// `At` records *where a stage was written*. The evaluator stamps it at its
+/// application sites, and `from_rel_unchecked` re-stamps it from the `Origin`
+/// it is handed, so two trees for the same program legitimately carry
+/// different locations for the same node — the location is metadata about the
+/// source, not part of the relational value. Comparing with `At` in place would
+/// compare the harness's choice of origin rather than the trees.
+fn without_at(r: &Rel) -> Rel {
+    match r {
+        Rel::At(_, inner) => without_at(inner),
+        Rel::Table {
+            schema,
+            name,
+            columns,
+        } => Rel::Table {
+            schema: schema.clone(),
+            name: name.clone(),
+            columns: columns.clone(),
+        },
+        Rel::Where(i, e) => Rel::Where(Box::new(without_at(i)), e.clone()),
+        Rel::Select(i, fs) => Rel::Select(
+            Box::new(without_at(i)),
+            fs.iter().map(|(n, e)| (n.clone(), e.clone())).collect(),
+        ),
+        Rel::Update(i, fs) => Rel::Update(
+            Box::new(without_at(i)),
+            fs.iter().map(|(n, e)| (n.clone(), e.clone())).collect(),
+        ),
+        Rel::Omit(i, k) => Rel::Omit(Box::new(without_at(i)), k.clone()),
+        Rel::Prefix(i, a) => Rel::Prefix(Box::new(without_at(i)), a.clone()),
+        Rel::Suffix(i, a) => Rel::Suffix(Box::new(without_at(i)), a.clone()),
+        Rel::Agg(i, fs) => Rel::Agg(
+            Box::new(without_at(i)),
+            fs.iter().map(|(n, e)| (n.clone(), e.clone())).collect(),
+        ),
+        Rel::Order(i, ks) => Rel::Order(
+            Box::new(without_at(i)),
+            ks.iter().map(|(e, a)| (e.clone(), *a)).collect(),
+        ),
+        Rel::Limit(i, n) => Rel::Limit(Box::new(without_at(i)), *n),
+        Rel::Offset(i, n) => Rel::Offset(Box::new(without_at(i)), *n),
+        Rel::Distinct(i) => Rel::Distinct(Box::new(without_at(i))),
+        Rel::Join {
+            kind,
+            left,
+            right,
+            on,
+        } => Rel::Join {
+            kind: *kind,
+            left: Box::new(without_at(left)),
+            right: Box::new(without_at(right)),
+            on: on.clone(),
+        },
+        Rel::Set { kind, left, right } => Rel::Set {
+            kind: *kind,
+            left: Box::new(without_at(left)),
+            right: Box::new(without_at(right)),
+        },
+    }
+}
+
+/// Build both trees for one program and assert they erase to the *same* `Rel`.
+///
+/// This is the prerequisite for routing production through the checked layer.
+/// Two things are compared for every query definition of the root module:
+///
+///   * the evaluator's tree — `Evaluator` -> `CoreTerm`, erased with
+///     `erase_core` — which is what ships today;
+///   * the checked tree — `from_rel_unchecked` -> `CheckedQuery`, erased with
+///     `erase` — which is what would ship if the checked path were used.
+///
+/// They must be equal, or routing one through the other would change the
+/// generated SQL. `from_rel_unchecked` is the bridge that makes this
+/// comparable at all, and it is exactly why it is still in the tree: it is
+/// only safe when the `Rel` it is given came from the same evaluator that is
+/// being checked against.
+fn assert_trees_agree(label: &str, src: &str) {
+    let ws = Workspace::from_source(src);
+    assert_trees_agree_in(label, ws);
+}
+
+/// [`assert_trees_agree`] for a program that imports other files, which has to
+/// be loaded through its path so the imports resolve.
+fn assert_trees_agree_file(label: &str, path: &str) {
+    let ws = Workspace::open(std::path::Path::new(path));
+    assert_trees_agree_in(label, ws);
+}
+
+fn assert_trees_agree_in(label: &str, ws: Workspace) {
+    assert!(ws.diags.is_empty(), "{label}: load diagnostics: {:?}", ws.diags);
+    let tc = crate::check::check(&ws);
+    let m = ws.root;
+
+    // Walk the evaluator's *core terms*, not only its erased `Rel`s: a `Rel`
+    // cannot say whether a projection was a `select` or an `agg`, but the
+    // `CoreTerm` the evaluator built can. Deriving the stage hint from the term
+    // keeps the harness from guessing — and a guess here would test the
+    // harness, not the trees.
+    let terms: std::collections::HashMap<String, crate::CoreTerm> =
+        crate::eval::root_core_terms(&ws, &tc)
+            .into_iter()
+            .filter_map(|(n, t)| t.ok().map(|t| (n, t)))
+            .collect();
+
+    // A `CoreTerm`'s root, ignoring `At` wrappers.
+    fn root_kind(t: &crate::CoreTerm) -> &crate::CoreTerm {
+        t.bare()
+    }
+    fn hint_of(t: &crate::CoreTerm) -> Option<crate::checked::StageHint> {
+        match root_kind(t) {
+            crate::CoreTerm::Select { .. } => Some(crate::checked::StageHint::Select),
+            crate::CoreTerm::Agg { .. } => Some(crate::checked::StageHint::Agg),
+            _ => None,
+        }
+    }
+
+    let mut compared = 0;
+    let mut skipped = Vec::new();
+    for (name, eval_rel) in crate::eval::root_queries_checked(&ws, &tc) {
+        let eval_rel = match eval_rel {
+            Ok(r) => r,
+            // A definition the *evaluator* rejects is a diagnostic, not a
+            // mismatch; the checked path is not asked to succeed where the
+            // current one fails.
+            Err(_) => continue,
+        };
+
+        let row = crate::schema::schema(&eval_rel).unwrap_or_default();
+        let origin = Origin::new(
+            m,
+            ws.modules[m]
+                .module
+                .defs
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.span)
+                .unwrap_or_default(),
+        );
+        let hint = terms.get(&name).and_then(hint_of);
+        // The bridge cannot recover an `omit`'s input row from the *output*
+        // alone — the omitted column's position is not recorded — so when the
+        // term is an `omit` we hand it the input's row, which the evaluator's
+        // own tree still has. Without this the `omit` node is skipped here and
+        // never actually compared, which is how a mutated `Omit` eraser first
+        // slipped past this harness.
+        let bridge_row = match terms.get(&name).map(root_kind) {
+            Some(crate::CoreTerm::Omit { input, .. }) => {
+                // The input's columns are on the `CoreTerm` itself.
+                match input.table_columns() {
+                    Some(cs) => RowType::unknown(cs.to_vec()),
+                    None => RowType::unknown(row),
+                }
+            }
+            _ => RowType::unknown(row),
+        };
+        let checked =
+            match crate::checked::from_rel_unchecked(eval_rel.clone(), bridge_row, hint, origin)
+            {
+                Ok(q) => q,
+                Err(e) => {
+                    // The bridge is `Err` where a `Rel` under-determines the
+                    // answer. Those are gaps in the *bridge*, not disagreements
+                    // between the trees — but they are recorded, and the test
+                    // still requires that something was compared.
+                    skipped.push(format!("{name}: {}", e.message));
+                    continue;
+                }
+            };
+        let via_checked = crate::checked::erase(checked)
+            .unwrap_or_else(|e| panic!("{label}: `{name}`: checked erase failed: {e}"));
+        assert_eq!(
+            without_at(&via_checked),
+            without_at(&eval_rel),
+            "{label}: `{name}` erases differently through the checked tree"
+        );
+        compared += 1;
+    }
+    assert!(
+        compared > 0,
+        "{label}: no definition was compared, so this proves nothing (skipped: {skipped:?})"
+    );
+}
+
+#[test]
+fn checked_and_evaluated_trees_agree_on_the_report_example() {
+    assert_trees_agree_file(
+        "report.cagara",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/report.cagara"),
+    );
+}
+
+#[test]
+fn checked_and_evaluated_trees_agree_on_the_public_example() {
+    // `public.cagara` imports `schema.cagara`, so it must be loaded through its
+    // path for the import to resolve.
+    assert_trees_agree_file(
+        "public.cagara",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/public.cagara"),
+    );
+}
+
+#[test]
+fn checked_and_evaluated_trees_agree_on_the_schema_example() {
+    assert_trees_agree_file(
+        "schema.cagara",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/schema.cagara"),
+    );
+}
+
+/// The same comparison across a spread of stage combinations, because the
+/// examples do not cover every constructor.
+#[test]
+fn checked_and_evaluated_trees_agree_across_stages() {
+    const TABLES: &str = "u : query { id = int, n = string, a = int } = table \"p\" \"u\"\n\
+                          v : query { id = int, m = maybe int } = table \"p\" \"v\"\n";
+    for (label, body) in [
+        ("where", "q = u & where (.a > 0)\n"),
+        ("select", "q = u & select { x = .id, y = .n }\n"),
+        ("update", "q = u & update { a = .a + 1 }\n"),
+        ("omit", "q = u & omit \"n\"\n"),
+        ("prefix", "q = u & prefix \"u_\"\n"),
+        ("suffix", "q = u & suffix \"_v\"\n"),
+        ("order_limit", "q = u & order [desc .a] & limit 3\n"),
+        ("offset", "q = u & order [asc .a] & offset 2\n"),
+        ("distinct", "q = u & select { a = .a } & distinct\n"),
+        ("inner_join", "q = u & innerJoin v (.<id == .>id)\n"),
+        ("left_join", "q = u & leftJoin v (.<id == .>id)\n"),
+        ("agg", "q = u & agg { a = group .a, n = count }\n"),
+        ("agg_then_where", "q = u & agg { a = group .a, n = count } & where (.n > 1)\n"),
+        ("set_op", "q = (u & select { a = .a }) &| (u & select { a = .a })\n"),
+        ("window", "q = u & select { r = rowNumber { partition = [.a], order = [asc .id] } }\n"),
+        ("pipeline", "q = u & where (.a > 1) & where (.a < 9) & select { a = .a + 1 }\n"),
+    ] {
+        assert_trees_agree(label, &format!("{TABLES}{body}"));
+    }
+}

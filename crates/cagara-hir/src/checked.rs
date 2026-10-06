@@ -1702,12 +1702,33 @@ pub fn from_rel_unchecked(
         }
         Rel::Omit(input, key) => {
             let origin = origin_of(&input);
-            // `omit` only removes a column, so the input's row is the output's
-            // plus `key` — recoverable, and worth recovering so the input's
-            // constructor can be checked.
+            // `omit` removes exactly one column, so the input's row is the
+            // output's plus `key` — but only its *names* are recoverable. The
+            // *position* the omitted key occupied is not recorded in a `Rel`,
+            // and appending it manufactures an input row with its columns
+            // shuffled. That is not a theoretical concern: erasing the
+            // reconstructed tree then yields a table whose column order differs
+            // from the query's, which the differential harness caught with
+            // `u : { id, n, a }` and `q = u & omit "n"` (input came back as
+            // `id, a, n`).
+            //
+            // So this reports that the bridge cannot answer, like the other
+            // under-determined shapes, rather than guessing. A caller that
+            // knows the input row can still reach the node through
+            // `CheckedQuery::omit`.
+            if !row.has(&key) {
+                return Err(Error::new(format!(
+                    "cannot recover the input row of `omit \"{key}\"` from a `Rel`: the \
+                     omitted column's position is not recorded, and appending it would \
+                     reorder the input's columns"
+                ))
+                .at(origin));
+            }
             let mut inner = row.clone();
             if !inner.has(&key) {
-                inner.columns.push((key.clone(), crate::core::ScalarType::Unknown));
+                inner
+                    .columns
+                    .push((key.clone(), crate::core::ScalarType::Unknown));
             }
             CheckedQuery {
                 row,

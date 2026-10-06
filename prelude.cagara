@@ -167,6 +167,7 @@ antiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__
 # Set operations require both queries to have the same row. They preserve the
 # columns and order of the left input; SQL uses the corresponding set operator.
 union : query r -> query r -> query r = primitive "__union"
+unionAll : query r -> query r -> query r = primitive "__unionAll"
 intersect : query r -> query r -> query r = primitive "__intersect"
 except : query r -> query r -> query r = primitive "__except"
 
@@ -300,6 +301,8 @@ toString : expr r date -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r timestamp -> expr r string = sql "CAGARA_TO_STRING($1)"
 toInt : expr r float -> expr r int = sql "CAST($1 AS INTEGER)"
 toFloat : expr r int -> expr r float = sql "CAST($1 AS FLOAT)"
+toBool : expr r int -> expr r bool = sql "CAST($1 AS BOOLEAN)"
+toBool : expr r float -> expr r bool = sql "CAST($1 AS BOOLEAN)"
 
 # ── dates and timestamps ───────────────────────────────────────────────────
 # String literals widen to `date` / `timestamp`: `.created_at >= "2024-01-01"`.
@@ -379,7 +382,17 @@ daysBetween : expr r date -> expr r date -> expr r int = sql "CAGARA_DAYS_BETWEE
 coalesce : expr r a -> expr r (maybe a) -> expr r a = sql "COALESCE($2, $1)"
 _??_ : expr r (maybe a) -> expr r a -> expr r a = sql "COALESCE($1, $2)"
 just : expr r a -> expr r (maybe a) = sql "$1"
+nullIf : expr r a -> expr r a -> expr r (maybe a) = sql "NULLIF($1, $2)"
 isNull : expr r (maybe a) -> expr r bool = sql "$1 IS NULL"
 isNotNull : expr r (maybe a) -> expr r bool = sql "$1 IS NOT NULL"
 # NULL counts as false, as in `where`.
 isTrue : expr r (maybe bool) -> expr r bool = sql "COALESCE($1, FALSE)"
+
+# A nullable predicate has SQL's three-valued result. `whereTrue` makes the
+# usual filtering choice explicit: NULL is treated as false.
+whereTrue : expr r (maybe bool) -> query r -> query r = pred => q => where (isTrue pred) q
+
+# Equality that treats two NULL values as equal. The COALESCE keeps the result
+# non-null, so it can be used directly in `where` and join predicates.
+eqMaybe : expr r (maybe a) -> expr r (maybe a) -> expr r bool =
+  sql "COALESCE(($1 = $2) OR ($1 IS NULL AND $2 IS NULL), FALSE)"

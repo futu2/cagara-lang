@@ -113,10 +113,10 @@ fn a_long_pipeline_checks_in_reasonable_time() {
     // checker and the SQL lowerer descend it recursively, so the depth that
     // fits depends on the thread's stack: the binary's main thread (8 MiB)
     // takes far more stages than a spawned test thread (2 MiB, the same
-    // default the language server runs on). The parser rejects a pipeline past
-    // `MAX_PIPE_CHAIN` for that reason; this benchmark stays well inside it so
-    // it measures the checker rather than the stack.
-    for n in [2usize, 5, 9] {
+    // default the language server runs on). The parser and lowerer share a
+    // defensive expression budget rather than imposing a ten-stage language
+    // limit.
+    for n in [2usize, 5, 9, 20] {
         let src = pipeline(n);
         let (d, _) = time_check(&src);
         assert_under(&format!("pipeline {n} stages"), d);

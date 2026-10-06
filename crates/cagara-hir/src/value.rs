@@ -60,6 +60,7 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__semiJoin", Prim::Join(JoinKind::Semi)),
     ("__antiJoin", Prim::Join(JoinKind::Anti)),
     ("__union", Prim::Set(SetKind::Union)),
+    ("__unionAll", Prim::Set(SetKind::UnionAll)),
     ("__intersect", Prim::Set(SetKind::Intersect)),
     ("__except", Prim::Set(SetKind::Except)),
     ("__group", Prim::Group),

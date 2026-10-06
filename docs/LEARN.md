@@ -1,6 +1,6 @@
 # A Cagara guide
 
-Cagara is a small typed functional language that describes a SQL query as a
+Cagara is a small typed query language that describes a SQL query as a
 **typed value**. You build a query by starting from a table and passing it
 through a pipeline of stages. Because the whole query is a value, the compiler
 can check it — unknown columns, ungrouped fields, `NULL` misuse, and misplaced
@@ -205,8 +205,8 @@ _&^_ = q => n => offset n q    # define: `q &^ n` is `offset n q`
 The parser reads the declarations to find out what an operator's precedence
 is, and the desugared call `_&^_ q n` is an ordinary prelude definition like
 any other. So adding a shorthand to the language is those two lines and
-nothing else: the formatter, the error messages, the ten-stage pipeline
-budget and the editor grammars all follow from the declaration.
+nothing else: the formatter, the error messages and the editor grammars all
+follow from the declaration.
 
 There is no special form for a stage. `&`, `&+` and `+` are the same kind of
 thing — an infix operator with a precedence and an associativity — and one
@@ -666,8 +666,11 @@ Handling nulls explicitly:
 | `coalesce default x` | use `default` if `x` is `NULL` |
 | `x ?? default` | the same, infix (and it binds tighter than arithmetic) |
 | `just x` | mark a non-null value as nullable |
+| `nullIf x y` | return `NULL` when `x` equals `y` |
 | `isNull x` / `isNotNull x` | test for `NULL`, returning non-null `bool` |
 | `isTrue x` | treat a nullable boolean `NULL` as false |
+| `whereTrue p` | filter with a nullable predicate, treating `NULL` as false |
+| `eqMaybe x y` | compare nullable values, treating two `NULL`s as equal |
 
 The payoff is that the compiler refuses to let a `NULL` slip into a computation
 where it would silently poison the result:
@@ -910,11 +913,14 @@ Set operations combine two queries that have **the same row type**:
 everyone = users & union vips
 both     = users & intersect vips
 rest     = users & except vips
+allUsers = unionAll users vips
 ```
 
 The result keeps the columns and order of the left input. (The emitted SQL lists
 the operands in the order it evaluates them safely; the observable result
 follows the left query.)
+
+`union` removes duplicate rows, while `unionAll` preserves them.
 
 `distinct` removes duplicate rows:
 
@@ -1050,7 +1056,8 @@ error messages.
 `truncDay` `truncHour` `truncMinute`; `year` `quarter` `month` `day`
 `dayOfWeek` `dayOfYear` `hour` `minute`; `daysBetween start end`
 
-**Nulls:** `coalesce` `??` `just` `isNull` `isNotNull` `isTrue`
+**Nulls:** `coalesce` `??` `just` `nullIf` `isNull` `isNotNull` `isTrue`
+`whereTrue` `eqMaybe`
 
 **Casts:** `toInt` `toFloat` `toBool` `toString`
 
@@ -1236,7 +1243,7 @@ ok = orders & select { x = addDays 7 (toDate "2024-01-01") }
 SELECT CAST((DATE '2024-01-01' + 7 * INTERVAL '1' DAY) AS DATE) AS x FROM public.orders;
 ```
 
-#### `toDate` / `toTimestamp` / `toString`
+#### `toDate` / `toTimestamp` / `toString` / `toBool`
 
 Conversions are explicit, in both directions:
 
@@ -1245,6 +1252,7 @@ Conversions are explicit, in both directions:
 | `toDate x` | `timestamp` or `string` | `date` |
 | `toTimestamp x` | `date` or `string` | `timestamp` |
 | `toString x` | `int`, `float`, `date`, or `timestamp` | `string` |
+| `toBool x` | `int` or `float` | `bool` |
 
 ```haskell
 t = orders & select {

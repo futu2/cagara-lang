@@ -473,6 +473,17 @@ fn nullable_columns_are_explicit() {
     let src = format!("{NULLABLE}flags : query {{ ok = maybe bool }} = table \"p\" \"f\"\nq = flags & where .ok\nr = flags & where (isTrue .ok)\n");
     assert!(err(&src, "q").contains("bool"));
     ty(&src, "r");
+
+    let helpers = format!(
+        "{NULLABLE}flags : query {{ ok = maybe bool }} = table \"p\" \"f\"\n\
+         q = flags & whereTrue .ok\n\
+         r = people & select {{ same = eqMaybe .email .email, cleared = nullIf (coalesce 0 .score) 0, b = toBool .id }}\n"
+    );
+    ty(&helpers, "q");
+    assert_eq!(
+        ty(&helpers, "r"),
+        "query { same = bool, cleared = maybe int, b = bool }"
+    );
 }
 
 #[test]

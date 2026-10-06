@@ -8,7 +8,7 @@
 [![Platform](https://img.shields.io/badge/platform-linux%20amd64%20%7C%20arm64-lightgrey?logo=linux)](https://github.com/futu2/cagara-lang/releases)
 [![VS Code](https://img.shields.io/badge/VS%20Code-extension-007ACC?logo=visualstudiocode)](editors/vscode)
 
-A small typed functional language that compiles to SQL. Write queries as
+A small typed query language that compiles to SQL. Write queries as
 pipelines, and the type checker catches mistakes like missing columns,
 ungrouped fields in an aggregate, or `null` misuse before any SQL runs.
 
@@ -43,6 +43,9 @@ ORDER BY revenue DESC NULLS LAST;
 - Modules via `import "file.cagara"`, plus a standard library written in Cagara (`prelude.cagara`).
 - ANSI SQL by default, with dialect support and test coverage described in [`docs/SQL-DIALECTS.md`](docs/SQL-DIALECTS.md).
 - A formatter (`cagara fmt`) and a language server (`cagara lsp`) with diagnostics, hover, go-to-definition and completion.
+
+Cagara is intentionally a query language rather than a general-purpose
+language: its types are built in, and users cannot declare new types.
 
 ## Install
 

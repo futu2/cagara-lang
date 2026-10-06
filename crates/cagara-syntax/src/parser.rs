@@ -73,30 +73,12 @@ struct Parser<'a> {
 /// but a left-nested tree of that depth, so the type checker descends it
 /// recursively. At 256 the checker ran out of stack in a binary built with the
 /// default 8 MiB stack: a 200-operator chain aborted the process (`SIGABRT`)
-/// instead of reporting a diagnostic, while 300 was caught here. 192 leaves
-/// comfortable headroom and is still far past anything a person writes.
+/// instead of reporting a diagnostic. 128 leaves comfortable headroom and is
+/// still far past anything a person writes.
 ///
-/// Pipelines carry a *tighter* budget of their own; see `MAX_PIPE_CHAIN`.
+/// Pipelines share this expression budget. Common filter chains are lowered
+/// iteratively, so there is no separate pipeline-specific cap.
 const MAX_DEPTH: usize = 128;
-
-/// Deepest pipeline accepted: the number of `&`-linked stages in one query.
-///
-/// A pipeline becomes a chain of relational nodes, one per stage, and the
-/// checker, the evaluator, and the SQL lowerer each descend that chain
-/// recursively. Past a few dozen stages the SQL lowerer ran out of stack and
-/// aborted the process (`SIGABRT`) instead of reporting anything.
-///
-/// The binding constraint is not the binary's main thread (8 MiB) but a
-/// *spawned* thread, whose default stack is 2 MiB — which is where the
-/// language server does its work, and where the test harness runs. A pipeline
-/// of eleven mixed `where` / `update` stages already overflowed such a thread.
-/// The exact failing depth also moved with code layout and inlining, so the
-/// limit leaves real headroom rather than sitting on the boundary.
-///
-/// Raising it measurably needs the recursive descents (the lowerer's, and the
-/// checker's and evaluator's over the AST and IR) to be peeled iteratively;
-/// the lowerer's `where` chain already is.
-const MAX_PIPE_CHAIN: usize = 10;
 
 /// The keywords that introduce an operator declaration. There is no separate
 /// form for the pipeline: `&` and `&+` are declared exactly like `+`.
@@ -483,9 +465,6 @@ impl<'a> Parser<'a> {
         // parser recursion but still deepens the AST, so count its length
         // against the same budget.
         let mut chain = 0usize;
-        // Pipeline stages are counted separately, against a tighter budget
-        // (see `MAX_PIPE_CHAIN`).
-        let mut pipes = 0usize;
         loop {
             if self.at_boundary() {
                 break;
@@ -509,13 +488,6 @@ impl<'a> Parser<'a> {
             if self.depth + chain >= MAX_DEPTH {
                 self.bail("expression is too long");
                 break;
-            }
-            if self.ops.is_stage(l.text) {
-                pipes += 1;
-                if pipes >= MAX_PIPE_CHAIN {
-                    self.bail("pipeline has too many stages");
-                    break;
-                }
             }
             self.bump();
             if self.at_lambda() {
@@ -912,12 +884,10 @@ mod tests {
     }
 
     /// A pipeline is one stage per `&`, so its AST is as deep as it is long.
-    /// Both the checker and the SQL lowerer descend that chain recursively, and
-    /// at 50 stages the lowerer overflowed the binary's stack and aborted the
-    /// process instead of reporting anything. The parser now bounds the number
-    /// of stages, so the failure is a diagnostic.
+    /// Pipelines use the shared expression nesting budget; there is no separate
+    /// language-level stage count.
     #[test]
-    fn a_pipeline_past_the_budget_is_a_diagnostic_not_a_crash() {
+    fn a_pipeline_past_the_expression_budget_is_a_diagnostic_not_a_crash() {
         let stages = |n: usize| {
             let mut s = String::from("q = users");
             for i in 0..n {
@@ -928,20 +898,15 @@ mod tests {
         };
         // Comfortably inside: accepted.
         assert!(parse(&stages(1)).errors.is_empty());
-        assert!(parse(&stages(MAX_PIPE_CHAIN - 1)).errors.is_empty());
-        // At and past the budget: one diagnostic naming the pipeline, not a
-        // crash.
-        for n in [
-            MAX_PIPE_CHAIN,
-            MAX_PIPE_CHAIN + 1,
-            MAX_PIPE_CHAIN * 10,
-            1000,
-        ] {
+        assert!(parse(&stages(20)).errors.is_empty());
+        // Past the shared expression budget: one diagnostic, not a crash.
+        for n in [128, 256, 1000] {
             let src = stages(n);
             let p = parse(&src);
             assert_eq!(p.errors.len(), 1, "n={n}: {:?}", p.errors);
             assert!(
-                p.errors[0].message.contains("too many stages"),
+                p.errors[0].message.contains("too long")
+                    || p.errors[0].message.contains("too deeply"),
                 "n={n}: {:?}",
                 p.errors
             );
@@ -950,20 +915,20 @@ mod tests {
         }
     }
 
-    /// Every pipeline shorthand counts against the same budget, so a long one
-    /// cannot slip past through a different spelling.
+    /// Pipeline shorthands use the same expression budget as the long form.
     #[test]
-    fn every_pipeline_shorthand_counts_against_the_budget() {
+    fn pipeline_shorthands_share_the_expression_budget() {
         for op in ["&", "&?", "&=", "&+", "&*", "&.", "&-"] {
             let mut src = String::from("q = users");
-            for i in 0..MAX_PIPE_CHAIN + 2 {
+            for i in 0..150 {
                 src.push_str(&format!(" {op} (.age > {i})"));
             }
             src.push('\n');
             let p = parse(&src);
             assert_eq!(p.errors.len(), 1, "{op}: {:?}", p.errors);
             assert!(
-                p.errors[0].message.contains("too many stages"),
+                p.errors[0].message.contains("too long")
+                    || p.errors[0].message.contains("too deeply"),
                 "{op}: {:?}",
                 p.errors
             );

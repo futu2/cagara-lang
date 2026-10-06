@@ -16,8 +16,11 @@ Use these helpers to handle nullable values:
 
 - `coalesce default value` and `value ?? default` produce a non-null value.
 - `just value` marks a non-null value as nullable.
+- `nullIf value other` produces `NULL` when two non-null values are equal.
 - `isNull value` and `isNotNull value` test nullability and return non-null `bool`.
 - `isTrue value` treats a nullable boolean `NULL` as false.
+- `whereTrue predicate` applies that `NULL`-as-false rule while filtering.
+- `eqMaybe left right` compares nullable values and treats two `NULL`s as equal.
 
 Operators and aggregate/window inputs require non-null expressions. Handle a
 nullable input before passing it to one. For example, after a left join,

@@ -165,6 +165,7 @@ pub enum JoinKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetKind {
     Union,
+    UnionAll,
     Intersect,
     Except,
 }

@@ -1,6 +1,6 @@
 # Architecture and status
 
-Cagara is a typed functional language that compiles queries to SQL. The
+Cagara is a typed query language that compiles queries to SQL. The
 prelude is written in Cagara; Rust supplies the relational primitives, type
 checker, evaluator, language server, and SQL backend.
 
@@ -38,13 +38,29 @@ source -> syntax/AST -> type checker -> relational IR -> schema validation
 
 ## Known gaps
 
-- Pipelines are capped at 10 stages and expressions at 192 levels to keep
-  compiler and language-server stacks bounded.
+- Expressions and deeply nested relational trees have defensive compiler
+  budgets to keep compiler and language-server stacks bounded. Common filter
+  pipelines are lowered iteratively and have no separate ten-stage limit.
 - Some join combinations require extra derived tables because parenthesized
   joins are not yet represented directly.
 - `--optimize` is opt-in; it runs sqlglot optimization after Cagara lowering.
 - A few loader, template qualification, reserved-word, and deep-recursion edge
   cases remain documented in the issue tracker and tests.
+
+## Roadmap
+
+These features are deliberately deferred while the core query language stays
+small and typed:
+
+- Generate checked-in table declarations from a database schema or catalog.
+- Add typed runtime parameters and prepared-query metadata to the compiler API.
+- Extend relational phases with `having`, filtered aggregates, `qualify`,
+  grouping sets, lateral/correlated subqueries, and richer window frames.
+
+Cagara is a typed query language, not a general-purpose functional language.
+The type vocabulary is compiler-owned; user programs cannot declare new types.
+Plan work around query construction, static checking, SQL generation, and the
+developer experience for those workflows.
 
 Run `cargo test --workspace` and `cargo check --workspace` before changing
 shared type or lowering rules. The worked report in `examples/report.cagara` is

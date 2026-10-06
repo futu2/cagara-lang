@@ -164,8 +164,8 @@ impl Ops {
     /// every operator declared at the same precedence and associativity —
     /// `&?`, `&=`, `&+`, …, but not the joins at their own looser level.
     ///
-    /// Three things follow from this and nothing else has to declare them: the
-    /// ten-stage pipeline budget, the formatter's one-stage-per-line rule, and
+    /// Two things follow from this and nothing else has to declare them: the
+    /// formatter's one-stage-per-line rule and
     /// locating a diagnostic at the stage that failed rather than at the whole
     /// pipeline.
     pub fn is_stage(&self, spelling: &str) -> bool {

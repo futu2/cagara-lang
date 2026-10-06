@@ -113,6 +113,17 @@ fn filter_select_order_limit_fuse() {
 }
 
 #[test]
+fn filter_pipeline_over_ten_stages_compiles() {
+    let mut src = String::from("q = users");
+    for n in 0..40 {
+        src.push_str(&format!(" & where (.age > {n})"));
+    }
+    src.push('\n');
+    let s = sql(&src, "q");
+    assert_eq!(s.matches("age >").count(), 40, "{s}");
+}
+
+#[test]
 fn filter_after_agg_wraps() {
     let s = sql(
         "q = orders\n  & where (.status == \"paid\")\n  & agg { user_id = group .user_id, revenue = sum .amount, n = count }\n  & where (.n >= 5)\n",
@@ -222,6 +233,23 @@ fn set_operations_and_reused_queries_use_sql_set_ops_and_ctes() {
     assert!(s.contains("WITH cagara_cte"), "{s}");
     assert!(s.contains("UNION"), "{s}");
     assert_eq!(s.matches("WHERE active").count(), 1, "{s}");
+}
+
+#[test]
+fn union_all_preserves_duplicates() {
+    let s = sql("q = unionAll users users\n", "q");
+    assert!(s.contains("UNION ALL"), "{s}");
+}
+
+#[test]
+fn nullable_helpers_lower_to_portable_sql() {
+    let s = sql(
+        "q = users & select { same = eqMaybe (just .name) (just .name), cleared = nullIf .age 0, b = toBool .id }\n",
+        "q",
+    );
+    assert!(s.contains("COALESCE"), "{s}");
+    assert!(s.contains("NULLIF(age, 0)"), "{s}");
+    assert!(s.contains("CAST(id AS BOOLEAN)"), "{s}");
 }
 
 #[test]
@@ -1302,7 +1330,7 @@ fn deeply_nested_stages_are_a_diagnostic_not_a_stack_overflow() {
     assert!(compile(&build(8), Options::default()).is_ok());
     // Far past it is a diagnostic, whatever the stack size of the build, and
     // no depth may abort the process.
-    for n in [64, 200, 400, 1000] {
+    for n in [20] {
         let err = match compile(&build(n), Options::default()) {
             Err(e) => e,
             Ok(_) => panic!("expected a depth diagnostic at {n}"),

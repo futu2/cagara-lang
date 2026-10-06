@@ -10,7 +10,9 @@ use sqlglot_rust::ast::{
 };
 use std::collections::{HashMap, HashSet};
 
-/// Deepest `Rel` nesting the lowerer will recurse through; see `rel_inner`.
+/// Deepest `Rel` nesting the lowerer will recurse through for stage kinds that
+/// cannot be peeled iteratively. Plain filter chains are handled without this
+/// recursion; the bound protects nested relational trees.
 const MAX_LOWER_DEPTH: usize = 16;
 
 pub struct Lowerer {
@@ -242,22 +244,10 @@ impl Lowerer {
     }
 
     fn rel_inner(&mut self, rel: &Rel) -> Result<Stage, String> {
-        // The recursion below costs stack per `Rel` node, and a node chain is
-        // as long as the program's stage count. The parser bounds one
-        // *pipeline* (`MAX_PIPE_CHAIN`), but a parenthesized group restarts
-        // that count, so nesting multiplies the total and the bound does not
-        // hold here. This is the lowerer's own bound, on the recursion it
-        // actually performs.
-        //
-        // The value is set by the *smallest* stack the lowerer runs on: a
-        // spawned thread gets 2 MiB by default (the language server's, and the
-        // test harness's), and an unoptimised build uses far more stack per
-        // frame than a release one, overflowing there at around twenty levels.
-        // 16 leaves headroom on that configuration. It is well past any
-        // hand-written query — the prelude's largest pipeline is single
-        // digits — but it is a real ceiling: raising it means peeling the
-        // remaining single-input stage kinds iteratively, the way `where`
-        // already is.
+        // The recursion below costs stack per `Rel` node. Common filter chains
+        // are peeled before reaching this function, while parenthesized
+        // relational expressions can still multiply the remaining depth, so
+        // retain a defensive diagnostic for those trees.
         let depth = self.depth + 1;
         if depth > MAX_LOWER_DEPTH {
             return Err(format!(
@@ -283,25 +273,28 @@ impl Lowerer {
         // peeled stages are re-applied innermost-first, which is exactly the
         // order the recursion produced, so the result is unchanged.
         //
-        // Only `where` is peeled here: it is what a pipeline is built from.
-        // The remaining kinds still recurse, and are bounded by
-        // `MAX_LOWER_DEPTH` rather than the parser's per-pipeline budget,
-        // which nesting multiplies.
-        if matches!(rel, Rel::Where(..)) {
-            let mut stages: Vec<(&Rel, &IrExpr)> = Vec::new();
+        // Only `where` is peeled here; the remaining kinds still recurse and
+        // are bounded by `MAX_LOWER_DEPTH`.
+        if matches!(rel, Rel::Where(..) | Rel::At(_, _)) {
+            let mut stages: Vec<&IrExpr> = Vec::new();
             let mut base = rel;
-            while let Rel::Where(inner, p) = base {
-                stages.push((base, p));
-                base = inner;
+            loop {
+                match base {
+                    Rel::At(_, inner) => base = inner,
+                    Rel::Where(inner, p) => {
+                        stages.push(p);
+                        base = inner;
+                    }
+                    _ => break,
+                }
             }
             let mut st = self.rel(base)?;
-            for (node, p) in stages.into_iter().rev() {
+            for p in stages.into_iter().rev() {
                 if st.has_agg || st.has_win || st.limit.is_some() || st.offset.is_some() {
                     st = self.wrap(st);
                 }
                 let e = st.resolve(p)?;
                 st.wheres.push(e);
-                let _ = node;
             }
             return Ok(st);
         }
@@ -640,13 +633,15 @@ impl Lowerer {
                 let names = left.names();
                 let op = match kind {
                     SetKind::Union => SetOperationType::Union,
+                    SetKind::UnionAll => SetOperationType::Union,
                     SetKind::Intersect => SetOperationType::Intersect,
                     SetKind::Except => SetOperationType::Except,
                 };
+                let all = matches!(kind, SetKind::UnionAll);
                 let stmt = Statement::SetOperation(SetOperationStatement {
                     comments: vec![],
                     op,
-                    all: false,
+                    all,
                     left: Box::new(self.branch(left)),
                     right: Box::new(self.branch(right)),
                     order_by: vec![],

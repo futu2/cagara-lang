@@ -303,7 +303,7 @@ current state.
 The behavioural contract for this step is the frozen CLI output, not the build:
 
 ```bash
-nix develop --command cargo test --workspace            # 390 passed, 0 failed
+nix develop --command cargo test --workspace            # 396 passed, 0 failed
 nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 nix develop --command cargo build --workspace -q
 <regenerate examples/*.cagara: 6 dialects + --pretty + --types + stderr>
@@ -340,17 +340,42 @@ classification is structural; the unchecked bridge is named as one; and the
 `Box::leak` in `first_plain_column` is gone. `clippy --all-targets -D warnings`
 is now part of the gate.
 
-**Still open, and the reason this step is not finished:**
+**Source elaboration now runs in production, under a parity check.**
 
-* **The checked layer is not the compiler's path.** `root_queries_checked`
-  still runs the evaluator, erases a `CoreTerm`, and calls
-  `schema::schema_located`. Nothing in `cagara-hir`, `cagara-cli`, or
-  `cagara-lsp` consults `CheckedProgram`. Until that changes, the layer's rules
-  are a second opinion, not the authority — which is why the two regressions
-  above were caught by the golden diff and not by any checked-layer test.
-* `schema` is therefore still the production column validator, not a debug
-  assertion, and `omit` still restates a rule rather than calling
-  `schema::omit_columns`.
+`root_queries_checked` — the one boundary the CLI and the LSP both go through —
+runs *both* paths and compares them. If the trees differ it keeps **the
+evaluator's**, because a difference means the elaborator is wrong: the oracle
+has every golden output behind it and the elaborator does not. So the compiler
+still emits what it always emitted, and the disagreement is reported as an
+internal error naming the definition rather than silently preferring either
+side.
+
+That check is live, not decorative. Routing it found two defects no test had:
+
+* `q = q` overflowed the stack — descending into a definition means elaborating
+  it, and the elaborator had no cycle guard where the evaluator refuses
+  recursion (`eval.rs:89`). `Ctx` now carries the active definitions.
+* A set operation reversed its operands. The two *spellings* are genuinely
+  different desugarings: `_&~_ : ... = q => r => except q r` re-binds, so
+  `users &~ admins` is `except users admins` (piped query left), while the bare
+  name sits at `&`'s level, so `users & except admins` is `except admins users`
+  (argument left). One operand order cannot serve both, and `union` being
+  symmetric hid it until a `union` had differently-filtered operands.
+
+**Still open:**
+
+* `schema` is still the production column validator. It runs on the same erased
+  tree, so it is not bypassed — but the checked constructors have already proved
+  what it re-derives, and it can now be demoted to an assertion.
+* `omit` still restates a rule rather than calling `schema::omit_columns`.
+* `from_rel_unchecked` still exists. It is the only way to build a
+  `CheckedQuery` without running the constructors, and it is now used by tests
+  only — but nothing enforces that, and it should either be gated behind
+  `#[cfg(test)]` or removed.
+* The evaluator is still the oracle for every definition, so it cannot be
+  deleted. Removing it means promoting the elaborator from "agrees with the
+  evaluator" to "is the only implementation" — and the two defects above are
+  the argument for doing that one step at a time.
 
 **There are two differential harnesses, and only the second is evidence.**
 
@@ -380,12 +405,13 @@ produced a relation for was *considered* — so coverage cannot quietly shrink.
 
 Coverage, measured rather than assumed: **11 of 11** query definitions across
 `report.cagara` (9), `public.cagara` (1) and `schema.cagara` (1), plus eighteen
-stage combinations. Mutation-checked: perturbing the `Omit` eraser fails it
-with `omit: q elaborates from source to a different tree than the evaluator
+stage combinations and ten cases built from constructs the examples do not
+contain (`inList`, a three-way join, an aggregate followed by a projection).
+Mutation-checked: perturbing the `Omit` eraser fails it with
+`omit: q elaborates from source to a different tree than the evaluator
 produces`.
 
-What remains is to make this the *production* path — `root_queries_checked`,
-the CLI and the LSP still run the evaluator, so `schema` is still the
-production validator and the checked rules are a second opinion. After that,
-`schema` can be demoted to an assertion and `from_rel_unchecked` restricted to
-tests. The existing evaluator stays as the behavioural oracle until then.
+The same comparison also runs **in production** now, on every compile, inside
+`root_queries_checked` — so agreement is asserted where it matters rather than
+only in tests. The evaluator stays as the behavioural oracle, and on
+disagreement its tree is the one that ships.

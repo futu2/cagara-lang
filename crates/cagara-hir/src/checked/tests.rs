@@ -1775,3 +1775,133 @@ fn checked_and_evaluated_trees_agree_across_stages() {
         assert_trees_agree(label, &format!("{TABLES}{body}"));
     }
 }
+
+// ── differential harness, source level ─────────────────────────────────────
+
+/// Compare **source elaboration** against the evaluator, node for node.
+///
+/// This is the harness the review asked for, and it replaces the bridge-based
+/// one above as the evidence that matters. The difference is where the checked
+/// side comes from:
+///
+/// * the bridge harness built `CheckedQuery` from the evaluator's own erased
+///   `Rel`, so it validated `Rel -> CheckedQuery -> Rel`. It could pass even if
+///   nothing in the compiler ever constructed a `CheckedQuery` from source —
+///   which is exactly the vacuity the review identified.
+/// * this one builds `CheckedQuery` **from the source AST**, through the
+///   constructors, and compares against the evaluator. If source elaboration is
+///   broken, unused, or absent, this fails.
+///
+/// A definition that the elaborator cannot yet handle is a *failure*, not a
+/// skip: silently skipping is how a differential test stops being evidence.
+fn assert_source_elaboration_agrees(label: &str, ws: &Workspace) {
+    let tc = crate::check::check(ws);
+    let m = ws.root;
+
+    let evaluated: std::collections::HashMap<String, Rel> =
+        crate::eval::root_queries_checked(ws, &tc)
+            .into_iter()
+            .filter_map(|(n, r)| r.ok().map(|r| (n, r)))
+            .collect();
+
+    let elaborated = crate::elaborate::elaborate_module(ws, &tc, m);
+    let mut compared = 0;
+    let mut unsupported = Vec::new();
+    for (name, result) in &elaborated {
+        // Only query definitions are compared: a scalar or a helper has no
+        // relational term in either path.
+        let Some(eval_rel) = evaluated.get(name) else {
+            continue;
+        };
+        match result {
+            Ok(q) => {
+                let via_source = crate::checked::erase(q.clone())
+                    .unwrap_or_else(|e| panic!("{label}: `{name}`: erase failed: {e}"));
+                assert_eq!(
+                    without_at(&via_source),
+                    without_at(eval_rel),
+                    "{label}: `{name}` elaborates from source to a different tree than the \
+                     evaluator produces"
+                );
+                compared += 1;
+            }
+            Err(e) => unsupported.push(format!("{name}: {}", e.message)),
+        }
+    }
+    assert!(
+        unsupported.is_empty(),
+        "{label}: the elaborator cannot yet handle {} query definition(s): {unsupported:?}",
+        unsupported.len()
+    );
+    assert!(
+        compared > 0,
+        "{label}: no definition was compared, so this proves nothing"
+    );
+}
+
+#[test]
+fn source_elaboration_agrees_on_a_table_and_a_where() {
+    let ws = Workspace::from_source(
+        "t : query { a = int, b = string } = table \"s\" \"t\"\n\
+         q = t & where (.a > 1)\n",
+    );
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    assert_source_elaboration_agrees("table+where", &ws);
+}
+
+#[test]
+fn source_elaboration_agrees_on_the_report_example() {
+    let ws = Workspace::open(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/report.cagara"
+    )));
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    assert_source_elaboration_agrees("report.cagara", &ws);
+}
+
+#[test]
+fn source_elaboration_agrees_on_public_and_schema_examples() {
+    for (label, file) in [
+        ("public.cagara", "public.cagara"),
+        ("schema.cagara", "schema.cagara"),
+    ] {
+        let ws = Workspace::open(std::path::Path::new(&format!(
+            "{}/../../examples/{file}",
+            env!("CARGO_MANIFEST_DIR")
+        )));
+        assert!(ws.diags.is_empty(), "{label}: {:?}", ws.diags);
+        assert_source_elaboration_agrees(label, &ws);
+    }
+}
+
+/// The same source-level comparison across a spread of stage combinations,
+/// because the examples do not exercise every constructor.
+#[test]
+fn source_elaboration_agrees_across_stages() {
+    const TABLES: &str = "u : query { id = int, n = string, a = int } = table \"p\" \"u\"\n\
+                          v : query { id = int, m = maybe int } = table \"p\" \"v\"\n";
+    for (label, body) in [
+        ("where", "q = u & where (.a > 0)\n"),
+        ("select", "q = u & select { x = .id, y = .n }\n"),
+        ("update", "q = u & update { a = .a + 1 }\n"),
+        ("omit", "q = u & omit \"n\"\n"),
+        ("prefix", "q = u & prefix \"u_\"\n"),
+        ("suffix", "q = u & suffix \"_v\"\n"),
+        ("order_limit", "q = u & order [desc .a] & limit 3\n"),
+        ("offset", "q = u & order [asc .a] & offset 2\n"),
+        ("distinct", "q = u & select { a = .a } & distinct\n"),
+        ("inner_join", "q = u & innerJoin v (.<id == .>id)\n"),
+        ("left_join", "q = u & leftJoin v (.<id == .>id)\n"),
+        ("join_operator", "q = u ? v (.<id == .>id)\n"),
+        ("agg", "q = u & agg { a = group .a, n = count }\n"),
+        ("agg_then_where", "q = u & agg { a = group .a, n = count } & where (.n > 1)\n"),
+        ("set_op", "q = (u & select { a = .a }) &| (u & select { a = .a })\n"),
+        ("window", "q = u & select { r = rowNumber { partition = [.a], order = [asc .id] } }\n"),
+        ("pipeline", "q = u & where (.a > 1) & where (.a < 9) & select { a = .a + 1 }\n"),
+        ("shorthand", "q = u &? (.a > 0) &- 2\n"),
+    ] {
+        let ws = Workspace::from_source(&format!("{TABLES}{body}"));
+        assert!(ws.diags.is_empty(), "{label}: {:?}", ws.diags);
+        assert_source_elaboration_agrees(label, &ws);
+    }
+}

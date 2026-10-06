@@ -421,6 +421,75 @@ pub(crate) fn scheme_view(t: &Ty) -> SchemeView {
     }
 }
 
+/// The phase a scheme's result sits in, and the scalar inside it.
+///
+/// `sum : expr r int -> agg (expr r (maybe int))` returns an *aggregate*
+/// expression, so a call to it is `CheckedExpr::agg_template`, not a scalar
+/// template.
+///
+/// The phase is the **first argument of the `expr` constructor**, not an outer
+/// head: the checker writes `expr(con("agg"), r, a)` (`infer.rs:1658`), which
+/// prints as `agg (expr r a)`. Reading it as `Ty::Con("agg", ..)` finds nothing
+/// and silently reports every aggregate as row-phase, which is what an earlier
+/// version of this function did.
+///
+/// Returns `(phase, value)`. `None` when the result is not an expression at all
+/// (a query, a function returning a function).
+pub(crate) fn scheme_result_expr(t: &Ty) -> Option<(Phase, ScalarType)> {
+    match t {
+        Ty::Fun(_, r) => scheme_result_expr(r),
+        Ty::Con("expr", args) if args.len() == 3 => {
+            let phase = match &args[0] {
+                Ty::Con("agg", _) => Phase::Agg,
+                Ty::Con("win", _) => Phase::Win,
+                // A variable phase in a polymorphic signature: the call site's
+                // own phase is what matters and it is not knowable here, so
+                // report row phase, which is the one every context accepts.
+                _ => Phase::Row,
+            };
+            match scheme_view(&args[2]) {
+                SchemeView::Scalar(s) => Some((phase, s)),
+                SchemeView::Open => Some((phase, ScalarType::Unknown)),
+                _ => None,
+            }
+        }
+        // A bare scalar constant, e.g. `one : int = 1`.
+        other => match scheme_view(other) {
+            SchemeView::Scalar(s) => Some((Phase::Const, s)),
+            SchemeView::Open => Some((Phase::Const, ScalarType::Unknown)),
+            _ => None,
+        },
+    }
+}
+
+/// The result type of a scheme, with the arguments stripped and any `expr r a`
+/// wrapper unwrapped to `a`.
+///
+/// A call site needs the type the callee *returns*. The checker records types
+/// for leaves only (`Field`, `Lit`, `Name`) — an application is not in
+/// `use_tys` — so reading the callee's signature is the right source rather
+/// than plucking a type off the use site. `_>_` is
+/// `expr r a -> expr r a -> expr r bool`, and the call's type is the `bool`
+/// inside the final `expr`.
+///
+/// `None` when the scheme's result is not a scalar (a query, a function
+/// returning a function, an open row).
+pub(crate) fn scheme_result_scalar(t: &Ty) -> Option<ScalarType> {
+    match t {
+        Ty::Fun(_, r) => scheme_result_scalar(r),
+        Ty::Con("expr", args) if args.len() == 3 => match scheme_view(&args[2]) {
+            SchemeView::Scalar(s) => Some(s),
+            SchemeView::Open => Some(ScalarType::Unknown),
+            _ => None,
+        },
+        other => match scheme_view(other) {
+            SchemeView::Scalar(s) => Some(s),
+            SchemeView::Open => Some(ScalarType::Unknown),
+            _ => None,
+        },
+    }
+}
+
 /// The fields of a row type when it is closed, or `None` when its tail is
 /// still open. `None` means "not known", not "empty".
 fn closed_fields(t: &Ty) -> Option<Vec<(String, ScalarType)>> {

@@ -71,7 +71,7 @@ pub use ty::Choice;
 /// *classification* of a checked scheme is data a phase can rely on.
 pub use ty::SchemeView;
 /// Scalar-type views of a `Ty`, for the checked layer (`crate::checked`).
-pub(crate) use ty::scheme_view;
+pub(crate) use ty::{scheme_result_expr, scheme_result_scalar, scheme_view};
 
 pub(crate) use crate::core::ScalarType;
 pub(crate) use crate::db::ModuleInput;
@@ -261,6 +261,24 @@ impl TypeCheck {
     /// neither can distinguish "a function taking a query" from "a query";
     /// this can, because it is computed from the type rather than from the
     /// shape of a printed string.
+    /// The phase and scalar type a definition *returns*, for a call site. See
+    /// `check::ty::scheme_result_expr`.
+    pub fn result_expr(&self, module: usize, def: usize) -> Option<(Phase, ScalarType)> {
+        let s = self.schemes.get(&(module, def))?;
+        scheme_result_expr(&s.ty)
+    }
+
+    /// The scalar type a definition *returns*, with arguments stripped and any
+    /// `expr r a` unwrapped to `a`.
+    ///
+    /// This is what a call site needs. `TypeCheck::use_ty` answers for a leaf
+    /// expression; an application has no recorded entry, so its type comes from
+    /// the callee signature.
+    pub fn result_scalar(&self, module: usize, def: usize) -> Option<ScalarType> {
+        let s = self.schemes.get(&(module, def))?;
+        scheme_result_scalar(&s.ty)
+    }
+
     pub fn scheme_view(&self, module: usize, def: usize) -> Option<SchemeView> {
         let s = self.schemes.get(&(module, def))?;
         Some(scheme_view(&s.ty))

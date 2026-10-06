@@ -7,6 +7,7 @@ pub mod checked;
 pub mod core;
 pub mod core_term;
 pub mod db;
+pub mod elaborate;
 pub mod eval;
 pub mod ir;
 pub mod lower;

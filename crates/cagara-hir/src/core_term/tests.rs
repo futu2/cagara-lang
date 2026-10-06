@@ -41,7 +41,7 @@ fn base() -> Rel {
 
 #[test]
 fn table_erases_to_the_ir_table_with_its_columns() {
-    assert_eq!(erase_core(table()), base());
+    assert_eq!(erase_core(table()).unwrap(), base());
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn table_without_columns_erases_to_none() {
     // `attach_schema` fills this in later; before that it is `None`, exactly
     // as `Prim::Table` builds it today.
     assert_eq!(
-        erase_core(CoreTerm::table("s".into(), "t".into())),
+        erase_core(CoreTerm::table("s".into(), "t".into())).unwrap(),
         Rel::Table {
             schema: "s".into(),
             name: "t".into(),
@@ -86,7 +86,7 @@ fn table_columns_mut_is_none_for_a_non_table() {
 #[test]
 fn where_erases_to_rel_where() {
     assert_eq!(
-        erase_core(CoreTerm::where_(table(), col("a")).unwrap()),
+        erase_core(CoreTerm::where_(table(), col("a")).unwrap()).unwrap(),
         Rel::Where(Box::new(base()), Expr::Col(Side::Single, "a".into()))
     );
 }
@@ -99,7 +99,7 @@ fn select_erases_to_rel_select_with_labeled_fields() {
     )
     .unwrap();
     assert_eq!(
-        erase_core(q),
+        erase_core(q).unwrap(),
         Rel::Select(
             Box::new(base()),
             vec![
@@ -114,7 +114,7 @@ fn select_erases_to_rel_select_with_labeled_fields() {
 fn update_erases_to_rel_update() {
     let q = CoreTerm::update(table(), vec![("a".into(), CoreTerm::lit(Lit::Int(1)))]).unwrap();
     assert_eq!(
-        erase_core(q),
+        erase_core(q).unwrap(),
         Rel::Update(Box::new(base()), vec![("a".into(), Expr::Lit(Lit::Int(1)))])
     );
 }
@@ -122,27 +122,27 @@ fn update_erases_to_rel_update() {
 #[test]
 fn omit_prefix_suffix_limit_offset_distinct_erase_directly() {
     assert_eq!(
-        erase_core(CoreTerm::omit(table(), "a".into()).unwrap()),
+        erase_core(CoreTerm::omit(table(), "a".into()).unwrap()).unwrap(),
         Rel::Omit(Box::new(base()), "a".into())
     );
     assert_eq!(
-        erase_core(CoreTerm::prefix(table(), "u_".into()).unwrap()),
+        erase_core(CoreTerm::prefix(table(), "u_".into()).unwrap()).unwrap(),
         Rel::Prefix(Box::new(base()), "u_".into())
     );
     assert_eq!(
-        erase_core(CoreTerm::suffix(table(), "_v2".into()).unwrap()),
+        erase_core(CoreTerm::suffix(table(), "_v2".into()).unwrap()).unwrap(),
         Rel::Suffix(Box::new(base()), "_v2".into())
     );
     assert_eq!(
-        erase_core(CoreTerm::limit(table(), 3).unwrap()),
+        erase_core(CoreTerm::limit(table(), 3).unwrap()).unwrap(),
         Rel::Limit(Box::new(base()), 3)
     );
     assert_eq!(
-        erase_core(CoreTerm::offset(table(), 4).unwrap()),
+        erase_core(CoreTerm::offset(table(), 4).unwrap()).unwrap(),
         Rel::Offset(Box::new(base()), 4)
     );
     assert_eq!(
-        erase_core(CoreTerm::distinct(table()).unwrap()),
+        erase_core(CoreTerm::distinct(table()).unwrap()).unwrap(),
         Rel::Distinct(Box::new(base()))
     );
 }
@@ -158,7 +158,7 @@ fn agg_and_order_erase_with_their_expressions() {
     )
     .unwrap();
     assert_eq!(
-        erase_core(agg),
+        erase_core(agg).unwrap(),
         Rel::Agg(
             Box::new(base()),
             vec![("n".into(), Expr::Agg("COUNT(*)".into(), vec![]))],
@@ -167,7 +167,7 @@ fn agg_and_order_erase_with_their_expressions() {
 
     let ord = CoreTerm::order(table(), vec![(col("a"), false)]).unwrap();
     assert_eq!(
-        erase_core(ord),
+        erase_core(ord).unwrap(),
         Rel::Order(
             Box::new(base()),
             vec![(Expr::Col(Side::Single, "a".into()), false)],
@@ -180,7 +180,7 @@ fn join_erases_to_rel_join_with_a_sided_predicate() {
     let on = CoreTerm::tpl("$1 = $2".into(), vec![lcol("a"), rcol("c")]);
     let q = CoreTerm::join(JoinKind::Inner, table(), table(), on).unwrap();
     assert_eq!(
-        erase_core(q),
+        erase_core(q).unwrap(),
         Rel::Join {
             kind: JoinKind::Inner,
             left: Box::new(base()),
@@ -199,7 +199,7 @@ fn join_erases_to_rel_join_with_a_sided_predicate() {
 #[test]
 fn set_erases_to_rel_set() {
     assert_eq!(
-        erase_core(CoreTerm::set(SetKind::Union, table(), table())),
+        erase_core(CoreTerm::set(SetKind::Union, table(), table())).unwrap(),
         Rel::Set {
             kind: SetKind::Union,
             left: Box::new(base()),
@@ -213,11 +213,11 @@ fn at_erases_to_rel_at_and_only_where_the_caller_put_it() {
     // Constructors never add `At`; only `CoreTerm::at` does, so the erased
     // tree keeps the evaluator's exact wrapper placement.
     let plain = CoreTerm::where_(table(), col("a")).unwrap();
-    assert!(matches!(erase_core(plain.clone()), Rel::Where(..)));
+    assert!(matches!(erase_core(plain.clone()).unwrap(), Rel::Where(..)));
 
     let wrapped = plain.at(loc(2));
     assert_eq!(
-        erase_core(wrapped),
+        erase_core(wrapped).unwrap(),
         Rel::At(
             loc(2),
             Box::new(Rel::Where(
@@ -294,7 +294,7 @@ fn a_dir_key_erases_to_the_key_expression() {
     // `dir` is not a standalone expression: `order` carries the direction in
     // its own flag, so erasing the key drops the `Dir` wrapper.
     let q = CoreTerm::order(table(), vec![(CoreTerm::dir(col("a"), false), false)]).unwrap();
-    match erase_core(q) {
+    match erase_core(q).unwrap() {
         Rel::Order(_, keys) => {
             assert_eq!(keys, vec![(Expr::Col(Side::Single, "a".into()), false)])
         }
@@ -501,7 +501,7 @@ fn of_rel_and_erase_core_round_trip_for_the_shapes_a_rel_records() {
         )),
         Expr::Col(Side::Single, "a".into()),
     );
-    assert_eq!(erase_core(of_rel(rel.clone())), rel);
+    assert_eq!(erase_core(of_rel(rel.clone())).unwrap(), rel);
 }
 
 #[test]
@@ -526,7 +526,7 @@ fn of_checked_matches_checked_erase() {
     let q = CheckedQuery::where_(t, pred, o).unwrap();
 
     let via_checked = q.clone().erase();
-    let via_core = erase_core(of_checked(q));
+    let via_core = erase_core(of_checked(q)).unwrap();
     assert_eq!(via_checked, via_core);
 }
 

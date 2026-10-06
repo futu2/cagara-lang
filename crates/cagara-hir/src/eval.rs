@@ -527,11 +527,16 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
         }
         match ev.def_value(m, i) {
             Ok(Value::Query(t)) => {
-                let rel = crate::core_term::erase_core(*t);
-                let checked = match crate::schema::schema_located(&rel) {
-                    Ok(_) => Ok(rel),
-                    Err((Some(l), msg)) => Err(ws.diag_span(l.module, l.span, msg)),
-                    Err((None, msg)) => Err(ws.diag_span(m, d.span, msg)),
+                // Erasure is fallible: a `CoreTerm` is an open sum, and a
+                // definition that elaborated to something which is not a query
+                // is an internal error rather than a query with no columns.
+                let checked = match crate::core_term::erase_core(*t) {
+                    Err(e) => Err(ws.diag_span(m, d.span, e.message)),
+                    Ok(rel) => match crate::schema::schema_located(&rel) {
+                        Ok(_) => Ok(rel),
+                        Err((Some(l), msg)) => Err(ws.diag_span(l.module, l.span, msg)),
+                        Err((None, msg)) => Err(ws.diag_span(m, d.span, msg)),
+                    },
                 };
                 out.push((d.name.clone(), checked));
             }

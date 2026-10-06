@@ -18,9 +18,13 @@ pub mod value;
 pub mod workspace;
 
 pub use check::{check, TypeCheck};
+// The checked core's public surface. `CheckedQuery`/`CheckedExpr` expose only
+// accessors (`row()`, `phase()`, `ty()`, `kind()`, `origin()`); their node
+// enums are deliberately *not* re-exported, so a caller outside this crate
+// cannot assemble a value that skipped the constructors' checks.
 pub use checked::{
-    erase, CheckedDef, CheckedExpr, CheckedExprNode, CheckedModule, CheckedProgram, CheckedQuery,
-    CheckedQueryNode,
+    erase, CheckedDef, CheckedExpr, CheckedModule, CheckedProgram, CheckedQuery, ExprKind,
+    QueryKind,
 };
 pub use core::{Diagnostic, Error, Origin, RowType, ScalarType};
 // The evaluator's intermediate representation: relational primitives become

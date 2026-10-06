@@ -276,35 +276,38 @@ fn set_erases_to_rel_set() {
 #[test]
 fn expressions_erase_to_the_ir_expression_they_came_from() {
     assert_eq!(
-        erase_expr(int_col("a")),
+        erase_expr(int_col("a")).unwrap(),
         Expr::Col(Side::Single, "a".into())
     );
     assert_eq!(
-        erase_expr(CheckedExpr::lit(Lit::Int(3), o())),
+        erase_expr(CheckedExpr::lit(Lit::Int(3), o())).unwrap(),
         Expr::Lit(Lit::Int(3))
     );
     assert_eq!(
         erase_expr(
             CheckedExpr::template("$1 + 1".to_string(), vec![int_col("a")], ScalarType::Int, o()).unwrap()
-        ),
+        )
+        .unwrap(),
         Expr::Tpl("$1 + 1".into(), vec![Expr::Col(Side::Single, "a".into())])
     );
     assert_eq!(
         erase_expr(
             CheckedExpr::agg_template("SUM($1)".to_string(), vec![int_col("a")], ScalarType::Int, o())
                 .unwrap()
-        ),
+        )
+        .unwrap(),
         Expr::Agg("SUM($1)".into(), vec![Expr::Col(Side::Single, "a".into())])
     );
     assert_eq!(
-        erase_expr(CheckedExpr::group(int_col("a"), o()).unwrap()),
+        erase_expr(CheckedExpr::group(int_col("a"), o()).unwrap()).unwrap(),
         Expr::Group(Box::new(Expr::Col(Side::Single, "a".into())))
     );
     assert_eq!(
         erase_expr(
             CheckedExpr::in_(int_col("a"), vec![CheckedExpr::lit(Lit::Int(1), o())], false, o())
                 .unwrap()
-        ),
+        )
+        .unwrap(),
         Expr::In(
             Box::new(Expr::Col(Side::Single, "a".into())),
             vec![Expr::Lit(Lit::Int(1))],
@@ -324,7 +327,7 @@ fn a_window_template_erases_to_ir_win_with_its_spec() {
         CheckedExpr::win_template("ROW_NUMBER()".to_string(), vec![], spec, ScalarType::Int, o()).unwrap();
     assert_eq!(w.phase, Phase::Win);
     assert_eq!(
-        erase_expr(w),
+        erase_expr(w).unwrap(),
         Expr::Win(
             "ROW_NUMBER()".to_string(),
             vec![],

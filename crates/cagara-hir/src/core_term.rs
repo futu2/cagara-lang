@@ -410,7 +410,7 @@ impl CoreTerm {
         // A plain column in a join predicate is the one mistake the side rule
         // can catch without the inputs' rows.
         if let Some(n) = on.first_plain_column() {
-            return Err(Error::new(rules::needs_side(n)));
+            return Err(Error::new(rules::needs_side(&n)));
         }
         Ok(CoreTerm::Join {
             kind,
@@ -647,14 +647,19 @@ impl CoreTerm {
 
     /// The first plain (unqualified) column reference in this term, used by
     /// [`CoreTerm::join`] to catch a bare `.x` in a predicate.
-    pub fn first_plain_column(&self) -> Option<&str> {
+    ///
+    /// Owned, like [`CoreTerm::columns`] beside it: the reference lives inside
+    /// this term's tree, and the previous `&str` version had to manufacture a
+    /// `'static` borrow with `Box::leak`, leaking an allocation on every call
+    /// (and this is called once per join predicate checked).
+    pub fn first_plain_column(&self) -> Option<String> {
         let mut found = None;
         self.visit_columns(&mut |side, n| {
             if found.is_none() && matches!(side, Side::Single) {
                 found = Some(n.to_string());
             }
         });
-        found.map(|n| Box::leak(n.into_boxed_str()) as &str)
+        found
     }
 
     /// Every column reference in this term, in reading order.
@@ -743,12 +748,19 @@ fn row_only(e: &CoreTerm, what: &str) -> Result<(), String> {
 
 /// Lower a term to the current relational IR.
 ///
-/// Total and structural; the result is exactly the tree today's evaluator
-/// builds for the same program, so `schema::schema` and the SQL backend accept
-/// it without changes. `At` is preserved where the caller put it and added
-/// nowhere else.
-pub fn erase_core(t: CoreTerm) -> Rel {
-    match t {
+/// Fallible, because a `CoreTerm` is an open sum: a scalar expression or a
+/// window frame is a perfectly good term but not a relation. Erasing one used
+/// to manufacture a placeholder table; this reports it instead. Callers that
+/// hold a query use [`erase_query`], which is total.
+///
+/// Total and structural otherwise; the result is exactly the tree today's
+/// evaluator builds for the same program, so `schema::schema` and the SQL
+/// backend accept it without changes. `At` is preserved where the caller put it
+/// and added nowhere else.
+pub fn erase_core(t: CoreTerm) -> Result<Rel, Error> {
+    // The `other` arm is the only fallible one; keeping the error out of the
+    // `Ok(...)` wrapper is why this is a statement rather than one expression.
+    let rel = match t {
         CoreTerm::Table {
             schema,
             name,
@@ -759,41 +771,41 @@ pub fn erase_core(t: CoreTerm) -> Rel {
             columns,
         },
         CoreTerm::Where { input, pred } => {
-            Rel::Where(Box::new(erase_core(*input)), erase_expr_core(*pred))
+            Rel::Where(Box::new(erase_core(*input)?), erase_expr_core(*pred))
         }
         CoreTerm::Select { input, fields } => Rel::Select(
-            Box::new(erase_core(*input)),
+            Box::new(erase_core(*input)?),
             fields
                 .into_iter()
                 .map(|(n, e)| (n, erase_expr_core(e)))
                 .collect(),
         ),
         CoreTerm::Update { input, fields } => Rel::Update(
-            Box::new(erase_core(*input)),
+            Box::new(erase_core(*input)?),
             fields
                 .into_iter()
                 .map(|(n, e)| (n, erase_expr_core(e)))
                 .collect(),
         ),
-        CoreTerm::Omit { input, key } => Rel::Omit(Box::new(erase_core(*input)), key),
-        CoreTerm::Prefix { input, affix } => Rel::Prefix(Box::new(erase_core(*input)), affix),
-        CoreTerm::Suffix { input, affix } => Rel::Suffix(Box::new(erase_core(*input)), affix),
+        CoreTerm::Omit { input, key } => Rel::Omit(Box::new(erase_core(*input)?), key),
+        CoreTerm::Prefix { input, affix } => Rel::Prefix(Box::new(erase_core(*input)?), affix),
+        CoreTerm::Suffix { input, affix } => Rel::Suffix(Box::new(erase_core(*input)?), affix),
         CoreTerm::Agg { input, fields } => Rel::Agg(
-            Box::new(erase_core(*input)),
+            Box::new(erase_core(*input)?),
             fields
                 .into_iter()
                 .map(|(n, e)| (n, erase_expr_core(e)))
                 .collect(),
         ),
         CoreTerm::Order { input, keys } => Rel::Order(
-            Box::new(erase_core(*input)),
+            Box::new(erase_core(*input)?),
             keys.into_iter()
                 .map(|(k, asc)| (erase_expr_core(k), asc))
                 .collect(),
         ),
-        CoreTerm::Limit { input, n } => Rel::Limit(Box::new(erase_core(*input)), n),
-        CoreTerm::Offset { input, n } => Rel::Offset(Box::new(erase_core(*input)), n),
-        CoreTerm::Distinct { input } => Rel::Distinct(Box::new(erase_core(*input))),
+        CoreTerm::Limit { input, n } => Rel::Limit(Box::new(erase_core(*input)?), n),
+        CoreTerm::Offset { input, n } => Rel::Offset(Box::new(erase_core(*input)?), n),
+        CoreTerm::Distinct { input } => Rel::Distinct(Box::new(erase_core(*input)?)),
         CoreTerm::Join {
             kind,
             left,
@@ -801,23 +813,47 @@ pub fn erase_core(t: CoreTerm) -> Rel {
             on,
         } => Rel::Join {
             kind,
-            left: Box::new(erase_core(*left)),
-            right: Box::new(erase_core(*right)),
+            left: Box::new(erase_core(*left)?),
+            right: Box::new(erase_core(*right)?),
             on: erase_expr_core(*on),
         },
         CoreTerm::Set { kind, left, right } => Rel::Set {
             kind,
-            left: Box::new(erase_core(*left)),
-            right: Box::new(erase_core(*right)),
+            left: Box::new(erase_core(*left)?),
+            right: Box::new(erase_core(*right)?),
         },
-        CoreTerm::At { loc, input } => Rel::At(loc, Box::new(erase_core(*input))),
-        // An expression is not a relation. This is a caller error; erasing it
-        // as a query would invent a table.
-        other => Rel::Table {
-            schema: String::new(),
-            name: format!("/* not a query: {} */", other.kind()),
-            columns: None,
-        },
+        CoreTerm::At { loc, input } => Rel::At(loc, Box::new(erase_core(*input)?)),
+        // An expression is not a relation. This used to be erased as a
+        // placeholder `Rel::Table` carrying a `/* not a query */` name, which
+        // put a manufactured table into the IR and let it reach the SQL
+        // backend as if it were real. A `Result` says the same thing to the
+        // compiler instead of to a reader: a term that is not a query cannot
+        // be erased to a relation, and the caller must handle that.
+        other => {
+            return Err(Error::new(format!(
+                "internal error: cannot erase a non-query core term ({}) to a relation",
+                other.kind()
+            )))
+        }
+    };
+    Ok(rel)
+}
+
+/// [`erase_core`] for a term that is known to be a query, which is the only
+/// case the evaluator's boundary has.
+///
+/// The panic is reachable only if elaboration produced a non-query term where
+/// a query was required — a compiler bug, not a user error — so this fails
+/// loudly rather than fabricating IR. Callers that can handle the invalid case
+/// should use [`erase_core`] directly.
+pub fn erase_query(t: CoreTerm) -> Rel {
+    match erase_core(t) {
+        Ok(r) => r,
+        Err(e) => panic!(
+            "internal error: the evaluator produced a non-query term where a query was \
+             required: {}",
+            e.message
+        ),
     }
 }
 
@@ -869,7 +905,7 @@ pub fn erase_expr_core(t: CoreTerm) -> Expr {
 /// The constructors have already checked what this validator re-derives, so
 /// the comparison is the test that ties the two layers together.
 pub fn erase_core_checked(t: CoreTerm) -> Result<(Rel, Vec<String>), String> {
-    let rel = erase_core(t);
+    let rel = erase_core(t).map_err(|e| e.message)?;
     let cols = crate::schema::schema(&rel)?;
     Ok((rel, cols))
 }
@@ -882,8 +918,8 @@ pub fn erase_core_checked(t: CoreTerm) -> Result<(Rel, Vec<String>), String> {
 /// both go through the same shape, so the checked tree and the evaluated tree
 /// cannot drift.
 pub fn of_checked(q: CheckedQuery) -> CoreTerm {
-    let origin = q.origin;
-    match q.node {
+    let (_row, node, origin) = q.into_parts();
+    match node {
         checked::CheckedQueryNode::Table {
             schema,
             name,
@@ -986,7 +1022,8 @@ pub fn of_checked(q: CheckedQuery) -> CoreTerm {
 
 /// The `CoreTerm` a checked expression erases to.
 pub fn of_checked_expr(e: CheckedExpr) -> CoreTerm {
-    match e.node {
+    let (_phase, _ty, node, _origin) = e.into_parts();
+    match node {
         checked::CheckedExprNode::Column { side, name } => CoreTerm::Col(side, name),
         checked::CheckedExprNode::Lit(l) => CoreTerm::Lit(l),
         checked::CheckedExprNode::Template { sql, args } => CoreTerm::Tpl {

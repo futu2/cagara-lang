@@ -40,6 +40,26 @@ use crate::rules;
 use crate::workspace::{Binding, Workspace};
 use cagara_syntax::ast::{self, ExprKind, Span};
 
+/// What every elaboration step needs: the workspace, the type check, the
+/// module and definition being elaborated, and the scope names resolve in.
+///
+/// These five travelled as five separate parameters through every function
+/// here, which is what `clippy`'s `too_many_arguments` was pointing at. They
+/// are one thing — "where in the program are we, and what do we know" — so
+/// they are one value.
+#[derive(Clone, Copy)]
+pub(crate) struct Ctx<'a> {
+    pub ws: &'a Workspace,
+    pub tc: &'a TypeCheck,
+    /// The module the expression being elaborated lives in.
+    pub module: usize,
+    /// The definition whose body it belongs to. Overload choices are recorded
+    /// per definition, keyed by the use's `ExprId`, so resolving one needs the
+    /// owner as well as the site.
+    pub owner: usize,
+    pub scope: &'a std::collections::HashMap<String, Binding>,
+}
+
 /// What elaborating one expression produced.
 type R<T> = Result<T, Error>;
 
@@ -84,7 +104,8 @@ fn elaborate_def(
     }
     let origin = Origin::new(module, d.span);
     let scope = &ws.modules[module].scope;
-    let value = elaborate_query(ws, tc, module, def, scope, &d.body, origin)?;
+    let cx = Ctx { ws, tc, module, owner: def, scope };
+    let value = elaborate_query(cx, &d.body, origin)?;
     Ok(value)
 }
 
@@ -94,13 +115,8 @@ fn elaborate_def(
 /// this handles; the remaining relational primitives are reached through the
 /// stage operators (`&?`, `&=`, …), and the ones that are not are reported
 /// rather than silently given a made-up node.
-#[allow(clippy::too_many_arguments)]
 fn elaborate_primitive(
-    _ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-    owner: usize,
-    _scope: &std::collections::HashMap<String, Binding>,
+    cx: Ctx<'_>,
     _e: &ast::Expr,
     args: &[ast::Expr],
     prim: &str,
@@ -116,7 +132,7 @@ fn elaborate_primitive(
             // table with unknown columns cannot be a `CheckedQuery`: every later
             // stage would have to guess, which is what `CheckedQuery::table`
             // refuses.
-            let row = tc.scheme_fields(module, owner).ok_or_else(|| {
+            let row = cx.tc.scheme_fields(cx.module, cx.owner).ok_or_else(|| {
                 Error::new(format!(
                     "the columns of table `{schema}.{name}` are unknown; give its definition a \
                      closed type, e.g. `t : query {{ id = int }} = table \"{schema}\" \"{name}\"`"
@@ -138,11 +154,7 @@ fn elaborate_primitive(
 /// `group .x` is the one the report example needs; `__in` is its sibling. The
 /// rest are reported rather than given a made-up node.
 fn elaborate_expr_primitive(
-    ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-    owner: usize,
-    scope: &std::collections::HashMap<String, Binding>,
+    cx: Ctx<'_>,
     prim: &str,
     args: &[ast::Expr],
     origin: Origin,
@@ -150,7 +162,7 @@ fn elaborate_expr_primitive(
     match (prim, args) {
         // `group key`: an aggregate-phase node whose type is the key's.
         ("__group", [key]) => {
-            let k = elaborate_expr(ws, tc, module, owner, scope, key)?;
+            let k = elaborate_expr_inner(cx, key)?;
             CheckedExpr::group(k, origin)
         }
         (other, _) => Err(Error::new(format!(
@@ -166,11 +178,7 @@ fn elaborate_expr_primitive(
 /// (`prelude.cagara:207-214`): the alias is a definition whose *body* is the
 /// name it forwards to. Following that one step reads the language's own
 /// declaration instead of keeping a second table here that could drift.
-fn join_kind(
-    ws: &Workspace,
-    scope: &std::collections::HashMap<String, Binding>,
-    name: &str,
-) -> Option<crate::ir::JoinKind> {
+fn join_kind(cx: Ctx<'_>, name: &str) -> Option<crate::ir::JoinKind> {
     use crate::ir::JoinKind;
     let direct = |n: &str| match n {
         "innerJoin" => Some(JoinKind::Inner),
@@ -185,10 +193,10 @@ fn join_kind(
         return Some(k);
     }
     // An alias: `_<?_` forwards to `leftJoin` by a body that is just a name.
-    let Some(Binding::Def(m, i)) = scope.get(name).cloned() else {
+    let Some(Binding::Def(m, i)) = cx.scope.get(name).cloned() else {
         return None;
     };
-    let body = &ws.modules[m].module.defs[i].body;
+    let body = &cx.ws.modules[m].module.defs[i].body;
     match &body.kind {
         ExprKind::Name(target) => direct(target),
         _ => None,
@@ -210,31 +218,39 @@ fn string_literal(e: &ast::Expr, what: &str) -> R<String> {
 /// `owner` is the definition whose body `e` belongs to. Overload choices are
 /// recorded per *definition*, keyed by the use's `ExprId`, so resolving one
 /// needs the owner as well as the site — see [`choose`].
-fn elaborate_query(
-    ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-    owner: usize,
-    scope: &std::collections::HashMap<String, Binding>,
-    e: &ast::Expr,
-    origin: Origin,
-) -> R<CheckedQuery> {
-    let at = |span: Span| Origin::new(module, span);
+fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery> {
+    let at = |span: Span| Origin::new(cx.module, span);
     let _ = origin;
     match &e.kind {
         ExprKind::Name(n) => {
             // A query-valued definition, e.g. `t` or a helper's result.
-            match scope.get(n) {
+            match cx.scope.get(n) {
                 Some(Binding::Def(dm, di)) => {
-                    let body = &ws.modules[*dm].module.defs[*di].body;
-                    let inner_origin = at(ws.modules[*dm].module.defs[*di].span);
-                    elaborate_query(ws, tc, *dm, *di, &ws.modules[*dm].scope, body, inner_origin)
+                    let body = &cx.ws.modules[*dm].module.defs[*di].body;
+                    let inner_origin = at(cx.ws.modules[*dm].module.defs[*di].span);
+                    // Descending into another definition runs in *its* module,
+                    // owner and scope, so the context changes with it.
+                    let inner = Ctx {
+                        ws: cx.ws,
+                        tc: cx.tc,
+                        module: *dm,
+                        owner: *di,
+                        scope: &cx.ws.modules[*dm].scope,
+                    };
+                    elaborate_query(inner, body, inner_origin)
                 }
                 Some(Binding::Overloads(dm, is)) => {
-                    let di = choose(tc, module, owner, e.id, is)?;
-                    let body = &ws.modules[*dm].module.defs[di].body;
-                    let inner_origin = at(ws.modules[*dm].module.defs[di].span);
-                    elaborate_query(ws, tc, *dm, di, &ws.modules[*dm].scope, body, inner_origin)
+                    let di = choose(cx.tc, cx.module, cx.owner, e.id, is)?;
+                    let body = &cx.ws.modules[*dm].module.defs[di].body;
+                    let inner_origin = at(cx.ws.modules[*dm].module.defs[di].span);
+                    let inner = Ctx {
+                        ws: cx.ws,
+                        tc: cx.tc,
+                        module: *dm,
+                        owner: di,
+                        scope: &cx.ws.modules[*dm].scope,
+                    };
+                    elaborate_query(inner, body, inner_origin)
                 }
                 _ => Err(Error::new(format!("unknown query name `{n}`")).at(at(e.span))),
             }
@@ -246,27 +262,30 @@ fn elaborate_query(
             let ExprKind::Name(alias) = &base.kind else {
                 return Err(Error::new("expected a module alias before `.`").at(at(base.span)));
             };
-            let Some(Binding::Module(target)) = scope.get(alias).cloned() else {
+            let Some(Binding::Module(target)) = cx.scope.get(alias).cloned() else {
                 return Err(Error::new(format!("`{alias}` is not a module")).at(at(base.span)));
             };
-            let Some(binding) = ws.modules[target].own.get(f).cloned() else {
+            let Some(binding) = cx.ws.modules[target].own.get(f).cloned() else {
                 return Err(Error::new(format!("module `{alias}` has no definition `{f}`"))
                     .at(at(e.span)));
             };
             let (dm, di) = match binding {
                 Binding::Def(dm, di) => (dm, di),
-                Binding::Overloads(dm, is) => (dm, choose(tc, module, owner, e.id, &is)?),
+                Binding::Overloads(dm, is) => {
+                    (dm, choose(cx.tc, cx.module, cx.owner, e.id, &is)?)
+                }
                 _ => {
                     return Err(
                         Error::new(format!("`{alias}.{f}` is not a query")).at(at(e.span))
                     )
                 }
             };
-            let body = ws.modules[dm].module.defs[di].body.clone();
-            let inner_scope = ws.modules[dm].scope.clone();
-            elaborate_query(ws, tc, dm, di, &inner_scope, &body, at(e.span))
+            let body = cx.ws.modules[dm].module.defs[di].body.clone();
+            let inner_scope = cx.ws.modules[dm].scope.clone();
+            let inner = Ctx { ws: cx.ws, tc: cx.tc, module: dm, owner: di, scope: &inner_scope };
+            elaborate_query(inner, &body, at(e.span))
         }
-        ExprKind::App(f, args) => elaborate_application(ws, tc, module, owner, scope, e, f, args),
+        ExprKind::App(f, args) => elaborate_application(cx, e, f, args),
         other => Err(Error::new(format!(
             "expected a query, found {}",
             describe(other)
@@ -278,26 +297,22 @@ fn elaborate_query(
 /// Elaborate an application: either a stage applied through the pipe, or a
 /// definition applied to its arguments.
 fn elaborate_application(
-    ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-    owner: usize,
-    scope: &std::collections::HashMap<String, Binding>,
+    cx: Ctx<'_>,
     e: &ast::Expr,
     f: &ast::Expr,
     args: &[ast::Expr],
 ) -> R<CheckedQuery> {
-    let at = |span: Span| Origin::new(module, span);
+    let at = |span: Span| Origin::new(cx.module, span);
 
     // `table "s" "t"` and the other `__` primitives are prelude *definitions*
     // whose body is a `primitive` reference, so they arrive here as an
     // application of a name rather than as a stage. The stage table below does
     // not know them; the prelude does, so read it rather than listing names.
     if let ExprKind::Name(n) = &f.kind {
-        if let Some(Binding::Def(pm, pi)) = scope.get(n).cloned() {
-            let body = &ws.modules[pm].module.defs[pi].body;
+        if let Some(Binding::Def(pm, pi)) = cx.scope.get(n).cloned() {
+            let body = &cx.ws.modules[pm].module.defs[pi].body;
             if let ExprKind::Primitive(prim) = &body.kind {
-                return elaborate_primitive(ws, tc, module, owner, scope, e, args, prim, at(e.span));
+                return elaborate_primitive(cx, e, args, prim, at(e.span));
             }
         }
     }
@@ -309,7 +324,7 @@ fn elaborate_application(
     let is_pipe = matches!(&f.kind, ExprKind::Name(n) if rules::is_pipe_name(n));
     if is_pipe && args.len() == 2 {
         let (input_e, stage_e) = (&args[0], &args[1]);
-        let input = elaborate_query(ws, tc, module, owner, scope, input_e, at(input_e.span))?;
+        let input = elaborate_query(cx, input_e, at(input_e.span))?;
         // A stage arrives in one of two shapes, and both are ordinary:
         //
         // * `q & select {...}` desugars to `_&_ q (_&=_ (select {...}))`, so
@@ -349,7 +364,7 @@ fn elaborate_application(
             // The operator in `f` *is* the stage, and `stage_e` is its argument.
             (pipe_op.as_str(), std::slice::from_ref(stage_e))
         };
-        return apply_stage(ws, tc, module, owner, scope, stage_name, stage_args, input, at(input_e.span));
+        return apply_stage(cx, stage_name, stage_args, input, at(input_e.span));
     }
 
     Err(Error::new(
@@ -363,17 +378,13 @@ fn elaborate_application(
 /// The operator names come from `cagara_syntax::op_name`, so `&?` is `_&?_` —
 /// the spelling the prelude defines — rather than a list maintained here.
 fn apply_stage(
-    ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-    owner: usize,
-    scope: &std::collections::HashMap<String, Binding>,
+    cx: Ctx<'_>,
     stage_name: &str,
     stage_args: &[ast::Expr],
     input: CheckedQuery,
     origin: Origin,
 ) -> R<CheckedQuery> {
-    let at = |span: Span| Origin::new(module, span);
+    let at = |span: Span| Origin::new(cx.module, span);
     let one_arg = |what: &str| -> R<&ast::Expr> {
         match stage_args {
             [a] => Ok(a),
@@ -389,31 +400,31 @@ fn apply_stage(
         // elaborates.
         "_&?_" | "where" => {
             let pred_e = one_arg("where")?;
-            let pred = elaborate_expr(ws, tc, module, owner, scope, pred_e)?;
+            let pred = elaborate_expr_inner(cx, pred_e)?;
             CheckedQuery::where_(input, pred, origin)
         }
         // `select {..}`
         "_&=_" | "select" => {
             let fields_e = one_arg("select")?;
-            let fields = elaborate_fields(ws, tc, module, owner, scope, fields_e)?;
+            let fields = elaborate_fields(cx, fields_e)?;
             CheckedQuery::select(input, fields, origin)
         }
         // `update {..}`
         "_&+_" | "update" => {
             let fields_e = one_arg("update")?;
-            let fields = elaborate_fields(ws, tc, module, owner, scope, fields_e)?;
+            let fields = elaborate_fields(cx, fields_e)?;
             CheckedQuery::update(input, fields, origin)
         }
         // `agg {..}`
         "_&*_" | "agg" => {
             let fields_e = one_arg("agg")?;
-            let fields = elaborate_fields(ws, tc, module, owner, scope, fields_e)?;
+            let fields = elaborate_fields(cx, fields_e)?;
             CheckedQuery::agg(input, fields, origin)
         }
         // `order [..]`
         "_&._" | "order" => {
             let keys_e = one_arg("order")?;
-            let keys = elaborate_order(ws, tc, module, owner, scope, keys_e)?;
+            let keys = elaborate_order(cx, keys_e)?;
             CheckedQuery::order(input, keys, origin)
         }
         // `limit n`
@@ -449,7 +460,7 @@ fn apply_stage(
         // from resolving the name through the prelude, not from a list here.
         "innerJoin" | "leftJoin" | "rightJoin" | "fullJoin" | "semiJoin" | "antiJoin" | "_?_"
         | "_<?_" | "_?>_" | "_<?>_" => {
-            let kind = join_kind(ws, scope, stage_name).ok_or_else(|| {
+            let kind = join_kind(cx, stage_name).ok_or_else(|| {
                 Error::new(format!("`{stage_name}` is not a join")).at(origin)
             })?;
             let (right_e, pred_e) = match stage_args {
@@ -461,14 +472,14 @@ fn apply_stage(
                     .at(origin))
                 }
             };
-            let right = elaborate_query(ws, tc, module, owner, scope, right_e, at(right_e.span))?;
-            let on = elaborate_expr(ws, tc, module, owner, scope, pred_e)?;
+            let right = elaborate_query(cx, right_e, at(right_e.span))?;
+            let on = elaborate_expr_inner(cx, pred_e)?;
             CheckedQuery::join(kind, input, right, on, origin)
         }
         // The set-operation stages take the other query as their argument.
         "_&|_" | "union" | "_&!_" | "unionAll" | "_&^_" | "intersect" | "_&~_" | "except" => {
             let other_e = one_arg("a set operation")?;
-            let other = elaborate_query(ws, tc, module, owner, scope, other_e, at(other_e.span))?;
+            let other = elaborate_query(cx, other_e, at(other_e.span))?;
             let kind = match stage_name {
                 "_&|_" | "union" => crate::ir::SetKind::Union,
                 "_&!_" | "unionAll" => crate::ir::SetKind::UnionAll,
@@ -486,38 +497,24 @@ fn apply_stage(
 }
 
 /// Elaborate a record of fields (`{ a = .., b = .. }`).
-fn elaborate_fields(
-    ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-    owner: usize,
-    scope: &std::collections::HashMap<String, Binding>,
-    e: &ast::Expr,
-) -> R<Vec<(String, CheckedExpr)>> {
+fn elaborate_fields(cx: Ctx<'_>, e: &ast::Expr) -> R<Vec<(String, CheckedExpr)>> {
     match &e.kind {
         ExprKind::Record(fs) => fs
             .iter()
-            .map(|(n, x)| Ok((n.clone(), elaborate_expr(ws, tc, module, owner, scope, x)?)))
+            .map(|(n, x)| Ok((n.clone(), elaborate_expr_inner(cx, x)?)))
             .collect(),
         // `select {.a, .b}`: the parser produces a record of projections.
         other => Err(Error::new(format!(
             "expected a record of fields, found {}",
             describe(other)
         ))
-        .at(Origin::new(module, e.span))),
+        .at(Origin::new(cx.module, e.span))),
     }
 }
 
 /// Elaborate an `order [...]` key list.
-fn elaborate_order(
-    ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-    owner: usize,
-    scope: &std::collections::HashMap<String, Binding>,
-    e: &ast::Expr,
-) -> R<Vec<(CheckedExpr, bool)>> {
-    let at = |span: Span| Origin::new(module, span);
+fn elaborate_order(cx: Ctx<'_>, e: &ast::Expr) -> R<Vec<(CheckedExpr, bool)>> {
+    let at = |span: Span| Origin::new(cx.module, span);
     let ExprKind::List(xs) = &e.kind else {
         return Err(Error::new(format!("expected a list of sort keys, found {}", describe(&e.kind)))
             .at(at(e.span)));
@@ -531,23 +528,22 @@ fn elaborate_order(
                         let asc = match n.as_str() {
                             "asc" => true,
                             "desc" => false,
-                            _ => return Ok((elaborate_expr(ws, tc, module, owner, scope, x)?, true)),
+                            _ => return Ok((elaborate_expr_inner(cx, x)?, true)),
                         };
-                        return Ok((elaborate_expr(ws, tc, module, owner, scope, inner)?, asc));
+                        return Ok((elaborate_expr_inner(cx, inner)?, asc));
                     }
                 }
             }
-            Ok((elaborate_expr(ws, tc, module, owner, scope, x)?, true))
+            Ok((elaborate_expr_inner(cx, x)?, true))
         })
         .collect()
 }
 
 /// Elaborate a scalar expression to a `CheckedExpr`.
 ///
-/// The type comes from the checker ([`TypeCheck::use_ty`]); this function never
-/// invents one. When the checker recorded no scalar for the node, that is
-/// reported rather than guessed — a `CheckedExpr` with a made-up `ScalarType`
-/// would be worse than an error, because everything downstream trusts it.
+/// This is the module's public entry point: it keeps the five separate
+/// parameters its callers pass and builds the [`Ctx`] the helpers below share,
+/// so the public signature is the only place those five appear together.
 pub fn elaborate_expr(
     ws: &Workspace,
     tc: &TypeCheck,
@@ -556,10 +552,20 @@ pub fn elaborate_expr(
     scope: &std::collections::HashMap<String, Binding>,
     e: &ast::Expr,
 ) -> R<CheckedExpr> {
-    let _at = |span: Span| Origin::new(module, span);
-    let origin = Origin::new(module, e.span);
+    elaborate_expr_inner(Ctx { ws, tc, module, owner, scope }, e)
+}
+
+/// Elaborate a scalar expression to a `CheckedExpr`.
+///
+/// The type comes from the checker ([`TypeCheck::use_ty`]); this function never
+/// invents one. When the checker recorded no scalar for the node, that is
+/// reported rather than guessed — a `CheckedExpr` with a made-up `ScalarType`
+/// would be worse than an error, because everything downstream trusts it.
+fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
+    let _at = |span: Span| Origin::new(cx.module, span);
+    let origin = Origin::new(cx.module, e.span);
     let ty = |what: &str| -> R<ScalarType> {
-        tc.use_ty(module, e.id).ok_or_else(|| {
+        cx.tc.use_ty(cx.module, e.id).ok_or_else(|| {
             Error::new(format!(
                 "the checker recorded no scalar type for this {what}, so it cannot be \
                  elaborated without inventing one"
@@ -586,11 +592,11 @@ pub fn elaborate_expr(
         // `agg (expr r int) = sql "COUNT(*)"`, with no arguments, so it
         // appears as a name rather than an application. Anything with
         // arguments goes through `elaborate_call` below.
-        ExprKind::Name(n) => match scope.get(n).cloned() {
+        ExprKind::Name(n) => match cx.scope.get(n).cloned() {
             Some(Binding::Def(dm, di)) => {
-                let body = &ws.modules[dm].module.defs[di].body;
+                let body = &cx.ws.modules[dm].module.defs[di].body;
                 if let ExprKind::Sql(sql) = &body.kind {
-                    let (phase, ty) = tc.result_expr(dm, di).ok_or_else(|| {
+                    let (phase, ty) = cx.tc.result_expr(dm, di).ok_or_else(|| {
                         Error::new(format!("`{n}` does not return an expression")).at(origin)
                     })?;
                     match phase {
@@ -616,7 +622,7 @@ pub fn elaborate_expr(
             ))
             .at(origin)),
         },
-        ExprKind::App(f, args) => elaborate_call(ws, tc, module, owner, scope, f, args, origin),
+        ExprKind::App(f, args) => elaborate_call(cx, f, args, origin),
         other => Err(Error::new(format!(
             "cannot elaborate {} as a scalar expression",
             describe(other)
@@ -628,11 +634,7 @@ pub fn elaborate_expr(
 /// Elaborate an application in expression position: `upper .name`,
 /// `coalesce 0.0 .x`, `sum .amount`, and so on.
 fn elaborate_call(
-    ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-    owner: usize,
-    scope: &std::collections::HashMap<String, Binding>,
+    cx: Ctx<'_>,
     f: &ast::Expr,
     args: &[ast::Expr],
     origin: Origin,
@@ -645,10 +647,10 @@ fn elaborate_call(
 
     // A `sql "..."` template definition: its body is the template and its
     // argument count comes from its signature.
-    let binding = scope.get(name).cloned();
+    let binding = cx.scope.get(name).cloned();
     let (dm, di) = match binding {
         Some(Binding::Def(dm, di)) => (dm, di),
-        Some(Binding::Overloads(dm, is)) => (dm, choose(tc, module, owner, f.id, &is)?),
+        Some(Binding::Overloads(dm, is)) => (dm, choose(cx.tc, cx.module, cx.owner, f.id, &is)?),
         _ => {
             return Err(Error::new(format!(
                 "`{name}` is not a scalar function this layer can elaborate"
@@ -657,12 +659,12 @@ fn elaborate_call(
         }
     };
 
-    let body = &ws.modules[dm].module.defs[di].body;
+    let body = &cx.ws.modules[dm].module.defs[di].body;
     // `group .x` and the other expression primitives are prelude definitions
     // whose body is a `primitive` reference, exactly like `table`. The prelude
     // names them, so read it rather than listing them here.
     if let ExprKind::Primitive(prim) = &body.kind {
-        return elaborate_expr_primitive(ws, tc, module, owner, scope, prim, args, origin);
+        return elaborate_expr_primitive(cx, prim, args, origin);
     }
     let ExprKind::Sql(sql) = &body.kind else {
         return Err(Error::new(format!(
@@ -680,7 +682,7 @@ fn elaborate_call(
     // This comes *before* elaborating the arguments, because a window call's
     // first argument is a spec record rather than an expression: elaborating
     // them uniformly first would reject `rowNumber spec`.
-    let (phase, ty) = tc.result_expr(dm, di).ok_or_else(|| {
+    let (phase, ty) = cx.tc.result_expr(dm, di).ok_or_else(|| {
         Error::new(format!(
             "`{name}` does not return an expression, so its call has no phase or scalar type"
         ))
@@ -689,11 +691,11 @@ fn elaborate_call(
 
     match phase {
         Phase::Const | Phase::Row => {
-            let inner = elaborate_exprs(ws, tc, module, owner, scope, args)?;
+            let inner = elaborate_exprs(cx, args)?;
             CheckedExpr::template(sql.clone(), inner, ty, origin)
         }
         Phase::Agg => {
-            let inner = elaborate_exprs(ws, tc, module, owner, scope, args)?;
+            let inner = elaborate_exprs(cx, args)?;
             CheckedExpr::agg_template(sql.clone(), inner, ty, origin)
         }
         // A window template's *first* argument is its spec (`winspec r ->
@@ -703,25 +705,16 @@ fn elaborate_call(
             let (spec_e, value_args) = args.split_first().ok_or_else(|| {
                 Error::new(format!("`{name}` is a window function and needs a spec")).at(origin)
             })?;
-            let spec = elaborate_winspec(ws, tc, module, owner, scope, spec_e)?;
-            let values = elaborate_exprs(ws, tc, module, owner, scope, value_args)?;
+            let spec = elaborate_winspec(cx, spec_e)?;
+            let values = elaborate_exprs(cx, value_args)?;
             CheckedExpr::win_template(sql.clone(), values, spec, ty, origin)
         }
     }
 }
 
 /// Elaborate a list of argument expressions.
-fn elaborate_exprs(
-    ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-    owner: usize,
-    scope: &std::collections::HashMap<String, Binding>,
-    args: &[ast::Expr],
-) -> R<Vec<CheckedExpr>> {
-    args.iter()
-        .map(|a| elaborate_expr(ws, tc, module, owner, scope, a))
-        .collect()
+fn elaborate_exprs(cx: Ctx<'_>, args: &[ast::Expr]) -> R<Vec<CheckedExpr>> {
+    args.iter().map(|a| elaborate_expr_inner(cx, a)).collect()
 }
 
 /// Elaborate a window spec: a record literal, or a name bound to one.
@@ -730,22 +723,16 @@ fn elaborate_exprs(
 /// ordinary definition whose body is a record, and `runningFrame` is one whose
 /// body is a call of the prelude's `rows`. Both are read here rather than
 /// demanded inline.
-fn elaborate_winspec(
-    ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-    owner: usize,
-    scope: &std::collections::HashMap<String, Binding>,
-    e: &ast::Expr,
-) -> R<crate::checked::WinSpecChecked> {
-    let origin = Origin::new(module, e.span);
+fn elaborate_winspec(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::checked::WinSpecChecked> {
+    let origin = Origin::new(cx.module, e.span);
     // A name bound to a spec, resolved to its body.
     if let ExprKind::Name(n) = &e.kind {
-        if let Some(Binding::Def(dm, di)) = scope.get(n).cloned() {
-            let body = ws.modules[dm].module.defs[di].body.clone();
+        if let Some(Binding::Def(dm, di)) = cx.scope.get(n).cloned() {
+            let body = cx.ws.modules[dm].module.defs[di].body.clone();
             // The body is evaluated in its own module's scope.
-            let inner_scope = ws.modules[dm].scope.clone();
-            return elaborate_winspec(ws, tc, dm, di, &inner_scope, &body);
+            let inner_scope = cx.ws.modules[dm].scope.clone();
+            let inner = Ctx { ws: cx.ws, tc: cx.tc, module: dm, owner: di, scope: &inner_scope };
+            return elaborate_winspec(inner, &body);
         }
     }
     let ExprKind::Record(fs) = &e.kind else {
@@ -764,15 +751,15 @@ fn elaborate_winspec(
         match k.as_str() {
             rules::winspec::PARTITION => {
                 partition = list_items(v)
-                    .into_iter()
-                    .map(|x| elaborate_expr(ws, tc, module, owner, scope, x))
+                    .iter()
+                    .map(|x| elaborate_expr_inner(cx, x))
                     .collect::<R<_>>()?;
             }
             rules::winspec::ORDER => {
-                order = elaborate_order(ws, tc, module, owner, scope, v)?;
+                order = elaborate_order(cx, v)?;
             }
             rules::winspec::FRAME => {
-                frame = Some(elaborate_frame(ws, tc, module, owner, scope, v)?);
+                frame = Some(elaborate_frame(cx, v)?);
             }
             other => {
                 return Err(Error::new(format!(
@@ -795,28 +782,22 @@ fn list_items(e: &ast::Expr) -> &[ast::Expr] {
 }
 
 /// Elaborate a frame: `rows a b`, or a name bound to one.
-fn elaborate_frame(
-    ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-    owner: usize,
-    scope: &std::collections::HashMap<String, Binding>,
-    e: &ast::Expr,
-) -> R<crate::ir::Frame> {
-    let origin = Origin::new(module, e.span);
+fn elaborate_frame(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::ir::Frame> {
+    let origin = Origin::new(cx.module, e.span);
     if let ExprKind::Name(n) = &e.kind {
-        if let Some(Binding::Def(dm, di)) = scope.get(n).cloned() {
-            let body = ws.modules[dm].module.defs[di].body.clone();
-            let inner_scope = ws.modules[dm].scope.clone();
-            return elaborate_frame(ws, tc, dm, di, &inner_scope, &body);
+        if let Some(Binding::Def(dm, di)) = cx.scope.get(n).cloned() {
+            let body = cx.ws.modules[dm].module.defs[di].body.clone();
+            let inner_scope = cx.ws.modules[dm].scope.clone();
+            let inner = Ctx { ws: cx.ws, tc: cx.tc, module: dm, owner: di, scope: &inner_scope };
+            return elaborate_frame(inner, &body);
         }
     }
     // `rows start end`.
     if let ExprKind::App(f, args) = &e.kind {
         if matches!(&f.kind, ExprKind::Name(n) if n == "rows") {
             if let [a, b] = &args[..] {
-                let start = elaborate_bound(ws, tc, module, owner, scope, a)?;
-                let end = elaborate_bound(ws, tc, module, owner, scope, b)?;
+                let start = elaborate_bound(cx, a)?;
+                let end = elaborate_bound(cx, b)?;
                 return crate::checked::frame(start, end);
             }
         }
@@ -826,16 +807,9 @@ fn elaborate_frame(
 
 /// Elaborate a frame bound: `unboundedPreceding`, `currentRow`,
 /// `preceding n`, `following n`.
-fn elaborate_bound(
-    ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-    owner: usize,
-    scope: &std::collections::HashMap<String, Binding>,
-    e: &ast::Expr,
-) -> R<crate::ir::Bound> {
+fn elaborate_bound(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::ir::Bound> {
     use crate::ir::Bound;
-    let origin = Origin::new(module, e.span);
+    let origin = Origin::new(cx.module, e.span);
     let name = match &e.kind {
         ExprKind::Name(n) => n.as_str(),
         // `preceding n` / `following n`.
@@ -852,7 +826,7 @@ fn elaborate_bound(
                 "following" => Ok(Bound::Following(count)),
                 _ => {
                     // A definition bound to a bound value.
-                    let _ = (ws, tc, module, owner, scope);
+                    let _ = cx;
                     Err(Error::new(format!("`{n}` is not a frame bound")).at(origin))
                 }
             };

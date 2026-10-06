@@ -170,16 +170,24 @@ the SQL lowerer already expects. Nothing is re-checked during erasure and
 nothing is inferred.
 
 **What "already valid" does and does not mean.** A `CheckedQuery` that exists
-has a `row` that is consistent with its `node` — the constructors are the only
-way to build one, and each enforces its stage's rule. That is the name-level
-invariant: *which columns*, in *what order*. It is **not** a proof of the column
-types. `schema::schema` returns `Vec<String>`, so a comparison against it cannot
-see a wrong `ScalarType`, a missing `maybe` on an outer-join side, or a wrong
-`update` precedence — and neither can any test built on that comparison.
-Type-level correctness rests on the `CheckedQuery.row`-level tests (which do
-carry `ScalarType`) and on the SQL golden tests. An earlier `update` defect that
-kept the old column type is the worked example: the `erase`/`schema` invariant
-did not catch it; the row-level test did.
+has a `row` that is consistent with its `node` — and this is now enforced by
+the compiler rather than by convention. `CheckedQuery`/`CheckedExpr` have
+private fields, their node enums are `pub(crate)`, and the public surface is
+accessors (`row()`, `phase()`, `ty()`, `origin()`) plus the `QueryKind` /
+`ExprKind` discriminants. Forging a value fails to compile
+(`E0451` private fields, `E0603` private type); before, it compiled, so the
+guarantee rested on nobody trying. The one exception is
+[`from_rel_unchecked`], named to say so: it rebuilds a query from a `Rel`
+without running the constructors, and is for tests and migration only.
+
+That is the **name-level** invariant: *which columns*, in *what order*. It is
+**not** a proof of the column types. `schema::schema` returns `Vec<String>`, so
+a comparison against it cannot see a wrong `ScalarType`, a missing `maybe` on an
+outer-join side, or a wrong `update` precedence — and neither can any test built
+on that comparison. Type-level correctness rests on the `CheckedQuery.row`-level
+tests (which do carry `ScalarType`) and on the SQL golden tests. An earlier
+`update` defect that kept the old column type is the worked example: the
+`erase`/`schema` invariant did not catch it; the row-level test did.
 
 Erasure happens on both sides of the current boundary, through two functions
 with deliberately different scopes:
@@ -260,8 +268,14 @@ current state.
 
 * **One input.** A later phase reads `CheckedProgram`, not the AST plus
   `TypeCheck` plus `Workspace`. `CheckedDef` carries each definition's closed
-  `ScalarType` and row (via `TypeCheck::scheme_fields`), so no later phase has
-  to re-parse a printed type or reach for an inference variable.
+  `ScalarType` and row, classified structurally by `TypeCheck::scheme_view`
+  rather than by looking at a printed type, and `TypeCheck::choices_of` hands
+  over the resolved overload choices under the key the checker actually used
+  (the use expression's `ExprId`).
+* **Bodies are opt-in and honest about it.** `CheckedProgram::of` does not
+  evaluate, so `CheckedDef::terms` is `None` — "not elaborated" — which is a
+  different statement from an empty list and is typed as one.
+  `CheckedProgram::of_elaborated` fills the bodies in.
 * **One place for relational validity per rule.** `where`, `select`, `update`,
   `agg`, `order`, join, set, and group rules are stated in the checked
   constructors and in `rules` — the same `rules` the checker's *types* use, so
@@ -305,3 +319,39 @@ Two regressions during this work were invisible to `cargo build` (exit 0),
 
 Only a real test run and the golden diff caught either. Treat those two as the
 gates; treat the build and the linter as conveniences.
+
+## The post-commit review, and what it changed
+
+A review of the first commit found that the layer was **descriptive rather than
+authoritative**. All seven findings were confirmed against the tree
+(`verify/review-findings-verified.md`), and two were reproduced empirically
+rather than argued:
+
+* overload choices were keyed by `ExprId` in the checker and looked up by span
+  offset here, so a real overloaded program transferred **zero** choices;
+* `scheme_row` tested the *printed* scheme for the word `query`, so a function
+  whose signature mentions a query was reported as a query with no columns.
+
+Fixed since: the API boundary is enforced by the compiler; erasure returns
+`Result` instead of manufacturing placeholder IR; the choices are read under
+the right key; `terms` distinguishes "not elaborated" from "empty"; scheme
+classification is structural; the unchecked bridge is named as one; and the
+`Box::leak` in `first_plain_column` is gone. `clippy --all-targets -D warnings`
+is now part of the gate.
+
+**Still open, and the reason this step is not finished:**
+
+* **The checked layer is not the compiler's path.** `root_queries_checked`
+  still runs the evaluator, erases a `CoreTerm`, and calls
+  `schema::schema_located`. Nothing in `cagara-hir`, `cagara-cli`, or
+  `cagara-lsp` consults `CheckedProgram`. Until that changes, the layer's rules
+  are a second opinion, not the authority — which is why the two regressions
+  above were caught by the golden diff and not by any checked-layer test.
+* `schema` is therefore still the production column validator, not a debug
+  assertion, and `omit` still restates a rule rather than calling
+  `schema::omit_columns`.
+
+The next step is a differential harness: build the checked tree for every
+existing example alongside today's evaluator and compare their erased `Rel`
+before routing anything through the checked path. Only then can `schema` be
+demoted and `root_queries_checked` be moved over.

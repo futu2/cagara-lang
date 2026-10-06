@@ -1297,18 +1297,153 @@ fn of_elaborated_fills_in_the_definition_bodies() {
     let elaborated = CheckedProgram::of_elaborated(&ws);
     let def = elaborated.module(m).unwrap().def(q).unwrap();
     let terms = def
-        .terms
-        .as_ref()
-        .expect("`of_elaborated` must populate `terms`");
+        .query_terms()
+        .expect("`of_elaborated` must give `q` a query term");
     assert_eq!(terms.len(), 1, "a definition with no holes has one body");
     // The evaluator stamps the term with the stage's location, so the root is
     // `At`; underneath it must be the elaborated `where`, not a placeholder.
     assert!(
-        matches!(
-            terms[0].bare(),
-            crate::CoreTerm::Where { .. }
-        ),
+        matches!(terms[0].bare(), crate::CoreTerm::Where { .. }),
         "expected the elaborated `where` under the `At` wrapper, got {:?}",
         terms[0]
+    );
+}
+
+/// The four outcomes of elaboration are distinguishable.
+///
+/// Before, only successful query terms were recorded: a scalar, an open-hole
+/// helper, and a definition whose *evaluation blew up* all looked identical
+/// from the outside — a missing entry. This pins that each is now reported as
+/// itself, which is what makes an evaluator error reportable at all.
+#[test]
+fn elaboration_distinguishes_every_outcome() {
+    use crate::eval::Elaborated;
+    let src = "t : query { a = int } = table \"s\" \"t\"\n\
+               q = t & where (.a > 0)\n\
+               one : int = 1\n\
+               helper = x => x + x\n\
+               boom = t & where (bogusName .a)\n";
+    let ws = Workspace::from_source(src);
+    let m = ws.root;
+    let p = CheckedProgram::of_elaborated(&ws);
+    let cm = p.module(m).expect("module missing");
+    let idx = |name: &str| {
+        ws.modules[m]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == name)
+            .unwrap_or_else(|| panic!("no `{name}`"))
+    };
+    let kind = |name: &str| cm.def(idx(name)).unwrap().terms.clone();
+
+    // A query: one term.
+    assert!(
+        matches!(kind("q"), Some(Elaborated::Query(ts)) if ts.len() == 1),
+        "`q` is a query: {:?}",
+        kind("q")
+    );
+    // A scalar: elaborated, but with no relational term. This is a *fact about
+    // the definition*, not a failure.
+    assert_eq!(
+        kind("one"),
+        Some(Elaborated::Value),
+        "a scalar has no relational term"
+    );
+    // A function that leaves an overload open: meaningful only at its uses.
+    assert_eq!(
+        kind("helper"),
+        Some(Elaborated::OpenHoles),
+        "an open-overload helper has no body of its own"
+    );
+    // A definition that cannot evaluate: `Failed`, and *reported*.
+    assert_eq!(
+        kind("boom"),
+        Some(Elaborated::Failed),
+        "an unevaluatable definition is Failed, not simply absent"
+    );
+}
+
+/// An evaluator error is surfaced as a diagnostic, not dropped.
+///
+/// This is the other half of the previous finding: `of_elaborated` used to
+/// return only successful terms, so a definition that failed to *evaluate*
+/// left no trace beyond a missing key.
+///
+/// The program below is chosen so the **checker accepts it and evaluation
+/// fails**: `f` returns a closure, so there is no definition cycle for the
+/// checker to reject, but each application re-enters `f` forever and the
+/// evaluator's depth guard fires. A program with an unknown name would not do:
+/// the checker rejects that too, so the diagnostic would be present whether or
+/// not evaluation's diagnostics are propagated, and the test would pass
+/// vacuously.
+#[test]
+fn of_elaborated_reports_evaluator_diagnostics() {
+    let src = "t : query { a = int } = table \"s\" \"t\"\n\
+               f = x => f x\n\
+               q = f 1\n";
+    let ws = Workspace::from_source(src);
+    let tc = crate::check::check(&ws);
+    assert!(
+        tc.errors.is_empty(),
+        "the checker must accept this program, or the test proves nothing: {:?}",
+        tc.errors
+    );
+
+    let p = CheckedProgram::of_elaborated(&ws);
+    assert!(
+        p.diagnostics
+            .iter()
+            .any(|d| d.diag.message.contains("recursion is not supported")),
+        "the evaluator's diagnostic must be propagated: {:?}",
+        p.diagnostics.iter().map(|d| &d.diag.message).collect::<Vec<_>>()
+    );
+    // …and it must be attributed to the definition that failed, not to the
+    // module as a whole.
+    assert!(
+        p.diagnostics.iter().any(|d| d.def.is_some()),
+        "the diagnostic must name a definition: {:?}",
+        p.diagnostics
+    );
+}
+
+/// `CheckedModule::types` holds well-typed definitions only.
+#[test]
+fn module_types_omits_definitions_that_did_not_check() {
+    let src = "t : query { a = int } = table \"s\" \"t\"\n\
+               good = t & where (.a > 0)\n\
+               bad = .a + true\n";
+    let ws = Workspace::from_source(src);
+    let tc = crate::check::check(&ws);
+    let p = CheckedProgram::of(&ws);
+    let m = ws.root;
+    let cm = p.module(m).expect("module missing");
+    let idx = |name: &str| {
+        ws.modules[m]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == name)
+            .unwrap_or_else(|| panic!("no `{name}`"))
+    };
+    assert!(
+        tc.error_for(m, idx("bad")).is_some(),
+        "`bad` should not type-check, else this test proves nothing"
+    );
+    assert!(
+        cm.types.contains_key(&idx("good")),
+        "a well-typed definition must have its printed type"
+    );
+    // Absent, not `""`. The empty string is a plausible-looking value a
+    // consumer could go on to display as though it were a type.
+    assert_eq!(
+        cm.types.get(&idx("bad")),
+        None,
+        "a definition that failed has no entry, not an empty string"
+    );
+    assert!(
+        !cm.types.values().any(|t| t.is_empty()),
+        "no definition may report an empty printed type: {:?}",
+        cm.types
     );
 }

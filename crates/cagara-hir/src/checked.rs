@@ -52,18 +52,36 @@ pub struct CheckedDef {
     pub row: Option<RowType>,
     /// How many open overloads the definition leaves to its users.
     pub holes: usize,
-    /// One checked body per overload-hole instantiation: the definition's
-    /// [`crate::CoreTerm`] for each assignment of its holes, in
-    /// `TypeCheck::holes` order. Resolved up front, so evaluation never
-    /// discovers a choice dynamically.
+    /// What elaboration produced for this definition, or `None` when the
+    /// program was not elaborated at all.
     ///
-    /// `None` means **this program was not elaborated**, which is a different
-    /// statement from "the definition has no body": an unelaborated program
-    /// used to carry an empty `Vec` here, so a caller could not tell "no terms
-    /// because nothing elaborated" from "no terms because there are none".
+    /// The `Option` and the [`Elaborated`] inside it are both load-bearing.
+    /// `None` means "this program was not elaborated"; an unelaborated program
+    /// used to carry an empty `Vec` here, so a caller could not tell "nothing
+    /// elaborated" from "no bodies". `Some(Elaborated::Value)` then says the
+    /// definition was elaborated and is not a query — a scalar or a function —
+    /// while `Some(Elaborated::Failed)` says it could not be evaluated, with
+    /// the reason in `CheckedProgram::diagnostics`. Collapsing those was the
+    /// previous behaviour, and it made an evaluator error indistinguishable
+    /// from a definition that legitimately has no relational term.
+    ///
     /// `CheckedProgram::of` does not elaborate, so it leaves this `None`;
     /// [`CheckedProgram::of_elaborated`] fills it in.
-    pub terms: Option<Vec<crate::CoreTerm>>,
+    pub terms: Option<crate::eval::Elaborated>,
+}
+
+impl CheckedDef {
+    /// The definition's core terms, when it is a query that was elaborated.
+    ///
+    /// `None` covers every other case — not elaborated, not a query, failed —
+    /// so callers that want terms should also consult
+    /// [`CheckedDef::terms`] when the *reason* matters.
+    pub fn query_terms(&self) -> Option<&[crate::CoreTerm]> {
+        match self.terms.as_ref()? {
+            crate::eval::Elaborated::Query(ts) => Some(ts),
+            _ => None,
+        }
+    }
 }
 
 impl CheckedDef {
@@ -171,8 +189,21 @@ impl CheckedProgram {
     /// only wants types should not pay for evaluation.
     pub fn of_elaborated(ws: &crate::workspace::Workspace) -> Self {
         let tc = crate::check::check(ws);
-        let bodies = crate::eval::elaborate_bodies(ws, &tc);
-        Self::from_type_check(ws, &tc, Some(bodies))
+        let (bodies, eval_diags) = crate::eval::elaborate_bodies(ws, &tc);
+        let mut out = Self::from_type_check(ws, &tc, Some(bodies));
+        // The checker's diagnostics are in `out` already; these are the ones
+        // evaluation raised, which the previous version dropped on the floor.
+        out.diagnostics.extend(eval_diags);
+        out.diagnostics.sort_by(|a, b| {
+            (a.module, a.diag.line, a.diag.col, &a.diag.message).cmp(&(
+                b.module,
+                b.diag.line,
+                b.diag.col,
+                &b.diag.message,
+            ))
+        });
+        out.diagnostics.dedup();
+        out
     }
 
     /// [`CheckedProgram::of`], reusing a type check the caller already ran.
@@ -183,7 +214,7 @@ impl CheckedProgram {
     pub fn from_type_check(
         ws: &crate::workspace::Workspace,
         tc: &TypeCheck,
-        bodies: Option<HashMap<(usize, usize), Vec<crate::CoreTerm>>>,
+        bodies: Option<HashMap<(usize, usize), crate::eval::Elaborated>>,
     ) -> Self {
         let mut out = CheckedProgram::new();
         for index in 0..ws.modules.len() {
@@ -191,7 +222,15 @@ impl CheckedProgram {
             let mut module = CheckedModule::new(index, loaded.path.display().to_string());
             for (def, d) in loaded.module.defs.iter().enumerate() {
                 let holes = tc.holes(index, def);
-                module.types.insert(def, tc.type_of(index, def).unwrap_or("").into());
+                // Only well-typed definitions get an entry, which is what the
+                // field's contract says. This used to insert `""` for a
+                // definition that failed to check, so a caller could not tell
+                // "has no type" from "its type printed as the empty string" —
+                // and `""` is a plausible-looking value a consumer might go on
+                // to display. Absence is the honest encoding.
+                if let Some(t) = tc.type_of(index, def) {
+                    module.types.insert(def, t.to_string());
+                }
                 module.holes.insert(def, holes);
                 // The printed type of every name use, keyed by span: this map
                 // really is span-keyed (`TypeCheck::use_types`), so a span

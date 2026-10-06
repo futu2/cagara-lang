@@ -62,9 +62,16 @@ pub(crate) use reduce::*;
 pub(crate) use ty::*;
 
 pub use ty::Choice;
+/// What shape a definition's scheme has.
+///
+/// Public because [`TypeCheck::scheme_view`] returns it and a caller outside
+/// the crate has to be able to match on the result; a public method returning
+/// a crate-private type is unusable from outside. `Ty` itself stays
+/// crate-private — inference state is not a public interface, but the
+/// *classification* of a checked scheme is data a phase can rely on.
+pub use ty::SchemeView;
 /// Scalar-type views of a `Ty`, for the checked layer (`crate::checked`).
-/// `Ty` itself stays crate-private: inference is not a public interface.
-pub(crate) use ty::{scheme_view, SchemeView};
+pub(crate) use ty::scheme_view;
 
 pub(crate) use crate::core::ScalarType;
 pub(crate) use crate::db::ModuleInput;

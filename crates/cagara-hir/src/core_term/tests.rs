@@ -238,19 +238,19 @@ fn at_does_not_double_wrap() {
 #[test]
 fn expressions_erase_to_ir_expressions() {
     assert_eq!(
-        erase_expr_core(col("a")),
+        erase_expr_core(col("a")).unwrap(),
         Expr::Col(Side::Single, "a".into())
     );
     assert_eq!(
-        erase_expr_core(CoreTerm::lit(Lit::Int(7))),
+        erase_expr_core(CoreTerm::lit(Lit::Int(7))).unwrap(),
         Expr::Lit(Lit::Int(7))
     );
     assert_eq!(
-        erase_expr_core(CoreTerm::tpl("$1".into(), vec![col("a")])),
+        erase_expr_core(CoreTerm::tpl("$1".into(), vec![col("a")])).unwrap(),
         Expr::Tpl("$1".into(), vec![Expr::Col(Side::Single, "a".into())])
     );
     assert_eq!(
-        erase_expr_core(CoreTerm::in_(col("a"), vec![CoreTerm::lit(Lit::Int(1))], false).unwrap()),
+        erase_expr_core(CoreTerm::in_(col("a"), vec![CoreTerm::lit(Lit::Int(1))], false).unwrap()).unwrap(),
         Expr::In(
             Box::new(Expr::Col(Side::Single, "a".into())),
             vec![Expr::Lit(Lit::Int(1))],
@@ -258,11 +258,11 @@ fn expressions_erase_to_ir_expressions() {
         )
     );
     assert_eq!(
-        erase_expr_core(CoreTerm::agg_expr("SUM($1)".into(), vec![col("a")]).unwrap()),
+        erase_expr_core(CoreTerm::agg_expr("SUM($1)".into(), vec![col("a")]).unwrap()).unwrap(),
         Expr::Agg("SUM($1)".into(), vec![Expr::Col(Side::Single, "a".into())])
     );
     assert_eq!(
-        erase_expr_core(CoreTerm::group(col("a")).unwrap()),
+        erase_expr_core(CoreTerm::group(col("a")).unwrap()).unwrap(),
         Expr::Group(Box::new(Expr::Col(Side::Single, "a".into())))
     );
 }
@@ -276,7 +276,7 @@ fn win_erases_to_ir_win_with_its_spec() {
     let spec = CoreSpec::new(vec![col("a")], vec![(CoreTerm::dir(col("b"), false), false)], Some(frame));
     let w = CoreTerm::win("ROW_NUMBER()".into(), vec![], spec).unwrap();
     assert_eq!(
-        erase_expr_core(w),
+        erase_expr_core(w).unwrap(),
         Expr::Win(
             "ROW_NUMBER()".into(),
             vec![],
@@ -526,7 +526,7 @@ fn of_checked_matches_checked_erase() {
     let q = CheckedQuery::where_(t, pred, o).unwrap();
 
     let via_checked = q.clone().erase();
-    let via_core = erase_core(of_checked(q)).unwrap();
+    let via_core = erase_core(of_checked(q).unwrap()).unwrap();
     assert_eq!(via_checked, via_core);
 }
 

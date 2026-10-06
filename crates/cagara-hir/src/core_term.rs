@@ -771,37 +771,28 @@ pub fn erase_core(t: CoreTerm) -> Result<Rel, Error> {
             columns,
         },
         CoreTerm::Where { input, pred } => {
-            Rel::Where(Box::new(erase_core(*input)?), erase_expr_core(*pred))
+            Rel::Where(Box::new(erase_core(*input)?), erase_expr_core(*pred)?)
         }
         CoreTerm::Select { input, fields } => Rel::Select(
             Box::new(erase_core(*input)?),
-            fields
-                .into_iter()
-                .map(|(n, e)| (n, erase_expr_core(e)))
-                .collect(),
+            erase_core_fields(fields)?,
         ),
         CoreTerm::Update { input, fields } => Rel::Update(
             Box::new(erase_core(*input)?),
-            fields
-                .into_iter()
-                .map(|(n, e)| (n, erase_expr_core(e)))
-                .collect(),
+            erase_core_fields(fields)?,
         ),
         CoreTerm::Omit { input, key } => Rel::Omit(Box::new(erase_core(*input)?), key),
         CoreTerm::Prefix { input, affix } => Rel::Prefix(Box::new(erase_core(*input)?), affix),
         CoreTerm::Suffix { input, affix } => Rel::Suffix(Box::new(erase_core(*input)?), affix),
         CoreTerm::Agg { input, fields } => Rel::Agg(
             Box::new(erase_core(*input)?),
-            fields
-                .into_iter()
-                .map(|(n, e)| (n, erase_expr_core(e)))
-                .collect(),
+            erase_core_fields(fields)?,
         ),
         CoreTerm::Order { input, keys } => Rel::Order(
             Box::new(erase_core(*input)?),
             keys.into_iter()
-                .map(|(k, asc)| (erase_expr_core(k), asc))
-                .collect(),
+                .map(|(k, asc)| Ok((erase_expr_core(k)?, asc)))
+                .collect::<Result<Vec<_>, Error>>()?,
         ),
         CoreTerm::Limit { input, n } => Rel::Limit(Box::new(erase_core(*input)?), n),
         CoreTerm::Offset { input, n } => Rel::Offset(Box::new(erase_core(*input)?), n),
@@ -815,7 +806,7 @@ pub fn erase_core(t: CoreTerm) -> Result<Rel, Error> {
             kind,
             left: Box::new(erase_core(*left)?),
             right: Box::new(erase_core(*right)?),
-            on: erase_expr_core(*on),
+            on: erase_expr_core(*on)?,
         },
         CoreTerm::Set { kind, left, right } => Rel::Set {
             kind,
@@ -858,45 +849,80 @@ pub fn erase_query(t: CoreTerm) -> Rel {
 }
 
 /// Lower a term to the current `Expr`.
-pub fn erase_expr_core(t: CoreTerm) -> Expr {
-    match t {
+///
+/// Fallible, for the same reason as [`erase_core`]: a `CoreTerm` is an open
+/// sum, and a query or a window frame is not a scalar expression. Erasing one
+/// used to manufacture a `/* not an expression */` template.
+pub fn erase_expr_core(t: CoreTerm) -> Result<Expr, Error> {
+    let expr = match t {
         CoreTerm::Col(side, n) => Expr::Col(side, n),
         CoreTerm::Lit(l) => Expr::Lit(l),
-        CoreTerm::Tpl { sql, args } => {
-            Expr::Tpl(sql, args.into_iter().map(erase_expr_core).collect())
-        }
+        CoreTerm::Tpl { sql, args } => Expr::Tpl(sql, erase_exprs_core(args)?),
         CoreTerm::In {
             value,
             list,
             negated,
         } => Expr::In(
-            Box::new(erase_expr_core(*value)),
-            list.into_iter().map(erase_expr_core).collect(),
+            Box::new(erase_expr_core(*value)?),
+            erase_exprs_core(list)?,
             negated,
         ),
-        CoreTerm::AggExpr { sql, args } => {
-            Expr::Agg(sql, args.into_iter().map(erase_expr_core).collect())
-        }
-        CoreTerm::Group(k) => Expr::Group(Box::new(erase_expr_core(*k))),
+        CoreTerm::AggExpr { sql, args } => Expr::Agg(sql, erase_exprs_core(args)?),
+        CoreTerm::Group(k) => Expr::Group(Box::new(erase_expr_core(*k)?)),
         CoreTerm::Win { sql, args, spec } => Expr::Win(
             sql,
-            args.into_iter().map(erase_expr_core).collect(),
+            erase_exprs_core(args)?,
             Box::new(WinSpec {
-                partition: spec.partition.into_iter().map(erase_expr_core).collect(),
+                partition: erase_exprs_core(spec.partition)?,
                 order: spec
                     .order
                     .into_iter()
-                    .map(|(e, asc)| (erase_expr_core(e), asc))
-                    .collect(),
+                    .map(|(e, asc)| Ok((erase_expr_core(e)?, asc)))
+                    .collect::<Result<Vec<_>, Error>>()?,
                 frame: spec.frame,
             }),
         ),
         // A sort key is an expression with a direction; as a bare expression
         // the direction is dropped, which is what `order`'s `(Expr, bool)`
         // does with the flag it carries instead.
-        CoreTerm::Dir { expr, .. } => erase_expr_core(*expr),
-        CoreTerm::At { input, .. } => erase_expr_core(*input),
-        other => Expr::Tpl(format!("/* not an expression: {} */", other.kind()), vec![]),
+        CoreTerm::Dir { expr, .. } => erase_expr_core(*expr)?,
+        CoreTerm::At { input, .. } => erase_expr_core(*input)?,
+        // A query, a frame, or a bound is not a scalar expression. This used
+        // to become a `/* not an expression */` template — a *valid* SQL
+        // expression, so it travelled to the backend as though it meant
+        // something. `Result` says the same thing to the compiler.
+        other => {
+            return Err(Error::new(format!(
+                "internal error: cannot erase a non-expression core term ({}) to an expression",
+                other.kind()
+            )))
+        }
+    };
+    Ok(expr)
+}
+
+/// Erase a projection's fields, stopping at the first that cannot be.
+fn erase_core_fields(fs: Vec<(String, CoreTerm)>) -> Result<Vec<(String, Expr)>, Error> {
+    fs.into_iter()
+        .map(|(n, e)| Ok((n, erase_expr_core(e)?)))
+        .collect()
+}
+
+/// Erase a list of core expressions, stopping at the first that cannot be.
+fn erase_exprs_core(ts: Vec<CoreTerm>) -> Result<Vec<Expr>, Error> {
+    ts.into_iter().map(erase_expr_core).collect()
+}
+
+/// [`erase_expr_core`] for a term known to be an expression.
+///
+/// The panic is reachable only if a caller hands over a query where an
+/// expression belongs, which is a compiler bug; failing loudly is better than
+/// the placeholder template this used to emit. Callers that can handle the
+/// invalid case use [`erase_expr_core`] directly.
+pub fn erase_expr_query(t: CoreTerm) -> Expr {
+    match erase_expr_core(t) {
+        Ok(e) => e,
+        Err(e) => panic!("internal error: {}", e.message),
     }
 }
 
@@ -917,9 +943,13 @@ pub fn erase_core_checked(t: CoreTerm) -> Result<(Rel, Vec<String>), String> {
 /// This is what makes `CheckedQuery::erase()` and `CoreTerm::erase()` agree:
 /// both go through the same shape, so the checked tree and the evaluated tree
 /// cannot drift.
-pub fn of_checked(q: CheckedQuery) -> CoreTerm {
+///
+/// Fallible only through [`of_checked_expr`]: a query node always has a term,
+/// but an expression inside one may be a `Call`, which has none. No *query*
+/// node can fail, which the `Result` makes visible rather than assumed.
+pub fn of_checked(q: CheckedQuery) -> Result<CoreTerm, Error> {
     let (_row, node, origin) = q.into_parts();
-    match node {
+    let t = match node {
         checked::CheckedQueryNode::Table {
             schema,
             name,
@@ -930,25 +960,25 @@ pub fn of_checked(q: CheckedQuery) -> CoreTerm {
             columns: Some(columns),
         },
         checked::CheckedQueryNode::Where { input, pred } => CoreTerm::Where {
-            input: Box::new(of_checked(*input)),
-            pred: Box::new(of_checked_expr(pred)),
+            input: Box::new(of_checked(*input)?),
+            pred: Box::new(of_checked_expr(pred)?),
         },
         checked::CheckedQueryNode::Select { input, fields } => CoreTerm::Select {
-            input: Box::new(of_checked(*input)),
+            input: Box::new(of_checked(*input)?),
             fields: fields
                 .into_iter()
-                .map(|(n, e)| (n, of_checked_expr(e)))
-                .collect(),
+                .map(|(n, e)| Ok((n, of_checked_expr(e)?)))
+                .collect::<Result<Vec<_>, Error>>()?,
         },
         checked::CheckedQueryNode::Update { input, fields } => CoreTerm::Update {
-            input: Box::new(of_checked(*input)),
+            input: Box::new(of_checked(*input)?),
             fields: fields
                 .into_iter()
-                .map(|(n, e)| (n, of_checked_expr(e)))
-                .collect(),
+                .map(|(n, e)| Ok((n, of_checked_expr(e)?)))
+                .collect::<Result<Vec<_>, Error>>()?,
         },
         checked::CheckedQueryNode::Omit { input, key } => CoreTerm::Omit {
-            input: Box::new(of_checked(*input)),
+            input: Box::new(of_checked(*input)?),
             key,
         },
         checked::CheckedQueryNode::Rename {
@@ -956,7 +986,7 @@ pub fn of_checked(q: CheckedQuery) -> CoreTerm {
             affix,
             prefix,
         } => {
-            let inner = Box::new(of_checked(*input));
+            let inner = Box::new(of_checked(*input)?);
             if prefix {
                 CoreTerm::Prefix {
                     input: inner,
@@ -970,29 +1000,29 @@ pub fn of_checked(q: CheckedQuery) -> CoreTerm {
             }
         }
         checked::CheckedQueryNode::Agg { input, fields } => CoreTerm::Agg {
-            input: Box::new(of_checked(*input)),
+            input: Box::new(of_checked(*input)?),
             fields: fields
                 .into_iter()
-                .map(|(n, e)| (n, of_checked_expr(e)))
-                .collect(),
+                .map(|(n, e)| Ok((n, of_checked_expr(e)?)))
+                .collect::<Result<Vec<_>, Error>>()?,
         },
         checked::CheckedQueryNode::Order { input, keys } => CoreTerm::Order {
-            input: Box::new(of_checked(*input)),
+            input: Box::new(of_checked(*input)?),
             keys: keys
                 .into_iter()
-                .map(|(e, asc)| (of_checked_expr(e), asc))
-                .collect(),
+                .map(|(e, asc)| Ok((of_checked_expr(e)?, asc)))
+                .collect::<Result<Vec<_>, Error>>()?,
         },
         checked::CheckedQueryNode::Limit { input, n } => CoreTerm::Limit {
-            input: Box::new(of_checked(*input)),
+            input: Box::new(of_checked(*input)?),
             n,
         },
         checked::CheckedQueryNode::Offset { input, n } => CoreTerm::Offset {
-            input: Box::new(of_checked(*input)),
+            input: Box::new(of_checked(*input)?),
             n,
         },
         checked::CheckedQueryNode::Distinct(input) => CoreTerm::Distinct {
-            input: Box::new(of_checked(*input)),
+            input: Box::new(of_checked(*input)?),
         },
         checked::CheckedQueryNode::Join {
             kind,
@@ -1001,43 +1031,49 @@ pub fn of_checked(q: CheckedQuery) -> CoreTerm {
             on,
         } => CoreTerm::Join {
             kind,
-            left: Box::new(of_checked(*left)),
-            right: Box::new(of_checked(*right)),
-            on: Box::new(of_checked_expr(on)),
+            left: Box::new(of_checked(*left)?),
+            right: Box::new(of_checked(*right)?),
+            on: Box::new(of_checked_expr(on)?),
         },
         checked::CheckedQueryNode::Set { kind, left, right } => CoreTerm::Set {
             kind,
-            left: Box::new(of_checked(*left)),
-            right: Box::new(of_checked(*right)),
+            left: Box::new(of_checked(*left)?),
+            right: Box::new(of_checked(*right)?),
         },
-    }
+    };
     // A checked query carries an `Origin`, not an `At`; the location is
     // stamped here so the erased tree matches the evaluator's, which adds
     // `Rel::At` at its application sites.
-    .at(Loc {
+    Ok(t.at(Loc {
         module: origin.module,
         span: origin.span,
-    })
+    }))
 }
 
 /// The `CoreTerm` a checked expression erases to.
-pub fn of_checked_expr(e: CheckedExpr) -> CoreTerm {
+///
+/// Fallible for one reason: a `CheckedExprNode::Call` is not a term this layer
+/// can express, because a call must be inlined or reduced before erasure. It
+/// used to become a `/* unresolved call */` template — valid SQL, so it reached
+/// the backend as though it were a value. `Err` says the same thing to the
+/// compiler instead.
+pub fn of_checked_expr(e: CheckedExpr) -> Result<CoreTerm, Error> {
     let (_phase, _ty, node, _origin) = e.into_parts();
-    match node {
+    let t = match node {
         checked::CheckedExprNode::Column { side, name } => CoreTerm::Col(side, name),
         checked::CheckedExprNode::Lit(l) => CoreTerm::Lit(l),
         checked::CheckedExprNode::Template { sql, args } => CoreTerm::Tpl {
             sql,
-            args: args.into_iter().map(of_checked_expr).collect(),
+            args: of_checked_exprs(args)?,
         },
         checked::CheckedExprNode::AggTemplate { sql, args } => CoreTerm::AggExpr {
             sql,
-            args: args.into_iter().map(of_checked_expr).collect(),
+            args: of_checked_exprs(args)?,
         },
         checked::CheckedExprNode::WinTemplate { sql, args, spec } => CoreTerm::Win {
             sql,
-            args: args.into_iter().map(of_checked_expr).collect(),
-            spec: of_checked_spec(spec),
+            args: of_checked_exprs(args)?,
+            spec: of_checked_spec(spec)?,
         },
         checked::CheckedExprNode::In {
             value,
@@ -1045,31 +1081,38 @@ pub fn of_checked_expr(e: CheckedExpr) -> CoreTerm {
             negated,
             ..
         } => CoreTerm::In {
-            value: Box::new(of_checked_expr(*value)),
-            list: list.into_iter().map(of_checked_expr).collect(),
+            value: Box::new(of_checked_expr(*value)?),
+            list: of_checked_exprs(list)?,
             negated,
         },
-        checked::CheckedExprNode::Group(k) => CoreTerm::Group(Box::new(of_checked_expr(*k))),
-        // A call to a definition is not an SQL expression; by the time a query
-        // erases, every call has been inlined or reduced.
-        checked::CheckedExprNode::Call { name, .. } => CoreTerm::Tpl {
-            sql: format!("/* unresolved call `{name}` */"),
-            args: vec![],
-        },
-    }
+        checked::CheckedExprNode::Group(k) => CoreTerm::Group(Box::new(of_checked_expr(*k)?)),
+        checked::CheckedExprNode::Call { name, .. } => {
+            return Err(Error::new(format!(
+                "internal error: the call `{name}` reached erasure; every call must be \
+                 inlined or reduced before a checked query is erased"
+            )))
+        }
+    };
+    Ok(t)
+}
+
+/// Erase a list of checked expressions to core terms, stopping at the first
+/// that cannot be.
+fn of_checked_exprs(es: Vec<CheckedExpr>) -> Result<Vec<CoreTerm>, Error> {
+    es.into_iter().map(of_checked_expr).collect()
 }
 
 /// The `CoreSpec` a checked window spec erases to.
-pub fn of_checked_spec(spec: WinSpecChecked) -> CoreSpec {
-    CoreSpec {
-        partition: spec.partition.into_iter().map(of_checked_expr).collect(),
+pub fn of_checked_spec(spec: WinSpecChecked) -> Result<CoreSpec, Error> {
+    Ok(CoreSpec {
+        partition: of_checked_exprs(spec.partition)?,
         order: spec
             .order
             .into_iter()
-            .map(|(e, asc)| (of_checked_expr(e), asc))
-            .collect(),
+            .map(|(e, asc)| Ok((of_checked_expr(e)?, asc)))
+            .collect::<Result<Vec<_>, Error>>()?,
         frame: spec.frame,
-    }
+    })
 }
 
 /// The span an `At` node carries, if it is one.

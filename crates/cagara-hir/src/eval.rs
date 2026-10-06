@@ -571,36 +571,91 @@ pub fn root_core_terms(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Co
     out
 }
 
-/// Elaborate every definition of every module to its core term(s), for
+/// What elaboration produced for one definition, and why.
+///
+/// This is the term contract, made explicit rather than inferred from the
+/// absence of an entry in a map:
+///
+/// * [`Elaborated::Query`] — a query definition, with one core term per
+///   assignment of its overload holes (an empty hole list means one term).
+/// * [`Elaborated::Value`] — a definition that evaluated to something that is
+///   not a query: a scalar, a function, a record. It has no *relational* term,
+///   which is a fact about the definition, not a failure.
+/// * [`Elaborated::OpenHoles`] — the definition leaves open overloads, so it is
+///   meaningful only at its uses and has no body of its own. Its uses carry the
+///   choices, recorded by `TypeCheck::choices_of`.
+/// * [`Elaborated::Failed`] — it could not be evaluated (or did not type-check).
+///   The reason is returned alongside, so a caller is never left guessing.
+///
+/// Previously a definition in any of the last three cases simply had no entry,
+/// so "a scalar", "an open-hole helper", and "evaluation blew up" were the same
+/// observation: a missing key. A caller could not report the third at all.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Elaborated {
+    /// A query, with one term per overload-hole assignment.
+    Query(Vec<CoreTerm>),
+    /// Evaluated, but not to a query: no relational term exists.
+    Value,
+    /// Leaves open overloads; its uses carry the choices.
+    OpenHoles,
+    /// Did not type-check or did not evaluate.
+    Failed,
+}
+
+/// Elaborate every definition of every module, for
 /// [`crate::CheckedProgram::of_elaborated`].
 ///
-/// A definition with no open overloads has exactly one body. A definition that
-/// leaves `n` open overloads is meaningful only at its uses, so it gets no
-/// body of its own here — the *uses* carry the choices, and
-/// `CheckedProgram` records those separately via `TypeCheck::choices_of`.
-/// A definition that fails to evaluate is skipped rather than given a
-/// placeholder: its diagnostic is already in `CheckedProgram::diagnostics`.
+/// Returns one entry per definition that was *considered*, including the ones
+/// that produced no term, plus the diagnostics raised while evaluating. Both
+/// halves matter: the previous version returned only successful query terms, so
+/// an evaluator error was silently dropped and "not a query" was
+/// indistinguishable from "failed".
 ///
-/// Errors are deliberately not returned. A definition that does not evaluate is
-/// a diagnostic the caller already has, and fabricating a term for it is
-/// exactly the failure mode this refactor is removing.
+/// Definitions that did not type-check are reported as [`Elaborated::Failed`]
+/// with no diagnostic here, because the checker's diagnostic is already in
+/// `CheckedProgram::diagnostics` and duplicating it would report one error
+/// twice.
 pub fn elaborate_bodies(
     ws: &Workspace,
     tc: &TypeCheck,
-) -> HashMap<(usize, usize), Vec<CoreTerm>> {
+) -> (HashMap<(usize, usize), Elaborated>, Vec<crate::core::Diagnostic>) {
     let mut ev = Evaluator::new(ws, tc);
     let mut out = HashMap::new();
+    let mut diags = Vec::new();
     for m in 0..ws.modules.len() {
         for (i, _d) in ws.modules[m].module.defs.iter().enumerate() {
-            if tc.error_for(m, i).is_some() || tc.holes(m, i) > 0 {
+            // A definition the checker already rejected is `Failed`; its
+            // diagnostic comes from the checker, not from here.
+            if tc.error_for(m, i).is_some() {
+                out.insert((m, i), Elaborated::Failed);
                 continue;
             }
-            if let Ok(Value::Query(t)) = ev.def_value(m, i) {
-                out.insert((m, i), vec![*t]);
+            // A definition with open holes is meaningful only at its uses.
+            if tc.holes(m, i) > 0 {
+                out.insert((m, i), Elaborated::OpenHoles);
+                continue;
+            }
+            match ev.def_value(m, i) {
+                Ok(Value::Query(t)) => {
+                    out.insert((m, i), Elaborated::Query(vec![*t]));
+                }
+                Ok(_) => {
+                    out.insert((m, i), Elaborated::Value);
+                }
+                Err(e) => {
+                    // The evaluator's own diagnostic, reported rather than
+                    // dropped: this is the half the old version lost.
+                    diags.push(crate::core::Diagnostic::new(
+                        e.module,
+                        Some(i),
+                        ws.eval_diag(&e),
+                    ));
+                    out.insert((m, i), Elaborated::Failed);
+                }
             }
         }
     }
-    out
+    (out, diags)
 }
 
 /// The elaboration tests, a sibling of `tests` rather than a child of it: they

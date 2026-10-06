@@ -1330,11 +1330,10 @@ fn deeply_nested_stages_are_a_diagnostic_not_a_stack_overflow() {
     assert!(compile(&build(8), Options::default()).is_ok());
     // Far past it is a diagnostic, whatever the stack size of the build, and
     // no depth may abort the process.
-    for n in [20] {
-        let err = match compile(&build(n), Options::default()) {
-            Err(e) => e,
-            Ok(_) => panic!("expected a depth diagnostic at {n}"),
-        };
-        assert!(err.contains("nests more than"), "n={n}: {err}");
-    }
+    let n = 20;
+    let err = match compile(&build(n), Options::default()) {
+        Err(e) => e,
+        Ok(_) => panic!("expected a depth diagnostic at {n}"),
+    };
+    assert!(err.contains("nests more than"), "n={n}: {err}");
 }

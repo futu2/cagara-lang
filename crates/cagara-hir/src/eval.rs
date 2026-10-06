@@ -500,19 +500,121 @@ pub fn root_queries(ws: &Workspace) -> Vec<(String, Result<Rel, Diag>)> {
 /// Like [`root_queries`], reusing a type check. A root definition with a type
 /// error is reported (and not evaluated) even if it is not a query.
 ///
-/// This is the one boundary where the evaluator's `CoreTerm` becomes `Rel`:
-/// the erased tree is what the SQL backend consumes and what `schema`
-/// validates. Erasure is total and structural (`core_term::erase_core`), so a
-/// query that evaluated successfully erases to exactly the `Rel` the evaluator
-/// used to build by hand — including the `Rel::At` wrappers that
-/// `ExprKind::App` adds for `q & stage`, which is what lets `schema_located`
-/// blame the innermost failing stage.
+/// This is the one boundary where the compiler's IR becomes `Rel`: the erased
+/// tree is what the SQL backend consumes and what `schema` validates.
+///
+/// # Two implementations, one result
+///
+/// There are two ways to reach the erased tree, and both run here:
+///
+/// * **source elaboration** (`crate::elaborate`), which walks each definition's
+///   AST, builds `CheckedQuery` through its constructors, and erases it. This
+///   is the path the design wants;
+/// * **the evaluator**, which builds a `CoreTerm` and erases that
+///   (`core_term::erase_core`). This is the long-standing path, kept as the
+///   behavioural oracle.
+///
+/// They must agree, and the agreement is asserted here rather than assumed:
+/// this function compares the two trees and, when they differ, **prefers the
+/// evaluator's** and reports a diagnostic naming the disagreement. That
+/// ordering is deliberate. A difference means source elaboration is wrong —
+/// the oracle has every golden output behind it and the elaborator does not —
+/// so the safe direction is to keep emitting what the compiler has always
+/// emitted while making the bug loud. Falling back quietly would hide exactly
+/// the defect this comparison exists to find; preferring the new path would
+/// ship it.
+///
+/// The comparison ignores `Rel::At` wrappers. Both erasers stamp them, from
+/// different places (the evaluator from explicit `CoreTerm::At` nodes, the
+/// checked layer from each node's own origin), and they are diagnostic sugar
+/// over an otherwise identical tree. `schema_located` reads them, so they are
+/// kept in the returned tree — only the equality check sets them aside.
 ///
 /// `schema` stays here on purpose: it is still the guard rail over the erased
-/// IR (and the second opinion a checked tree is compared against in tests). It
+/// IR (and the second opinion a checked tree is compared against). It
 /// re-derives column existence, which the `CoreTerm` constructors do not carry
 /// rows for — `CoreTerm` is deliberately the row-less twin of `CheckedQuery`.
 pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Rel, Diag>)> {
+    let via_evaluator = root_queries_via_evaluator(ws, tc);
+    let elaborated = crate::elaborate::elaborate_module(ws, tc, ws.root);
+
+    let mut from_source: HashMap<&str, &Result<crate::checked::CheckedQuery, crate::core::Error>> =
+        HashMap::new();
+    for (name, r) in &elaborated {
+        from_source.insert(name.as_str(), r);
+    }
+
+    let mut out = Vec::with_capacity(via_evaluator.len());
+    for (name, result) in via_evaluator {
+        let Ok(oracle) = &result else {
+            // Already a diagnostic (type or evaluation error): nothing to
+            // compare, and it is the user's error rather than an internal one.
+            out.push((name, result));
+            continue;
+        };
+        match from_source.get(name.as_str()) {
+            // The elaborator produced nothing for this definition — it is not a
+            // query, or a construct it does not handle. The oracle stands.
+            None | Some(Err(_)) => out.push((name, result)),
+            Some(Ok(query)) => match crate::checked::erase((*query).clone()) {
+                // Erasure is structural and total for query nodes, so this is
+                // an internal inconsistency rather than a user error.
+                Err(e) => {
+                    let d = internal_disagreement(ws, &name, &e.message);
+                    out.push((name, Err(d)));
+                }
+                Ok(rel) => {
+                    if crate::checked::without_at(&rel) != crate::checked::without_at(oracle) {
+                        let d = internal_disagreement(
+                            ws,
+                            &name,
+                            "source elaboration and the evaluator produced different trees",
+                        );
+                        out.push((name, Err(d)));
+                    } else {
+                        // Agreed. Keep the oracle's tree: it carries the
+                        // `Rel::At` wrappers `schema_located` blames spans
+                        // with, and the checked tree is equal underneath.
+                        out.push((name, result));
+                    }
+                }
+            },
+        }
+    }
+    out
+}
+
+/// A diagnostic for a disagreement between the two elaboration paths.
+///
+/// Worded as an internal error, not a program error: it means the compiler has
+/// two implementations that must agree and do not. The definition name is
+/// included because that is what a user can usefully report.
+fn internal_disagreement(ws: &Workspace, name: &str, detail: &str) -> Diag {
+    let m = ws.root;
+    let span = ws.modules[m]
+        .module
+        .defs
+        .iter()
+        .find(|d| d.name == name)
+        .map(|d| d.span)
+        .unwrap_or(cagara_syntax::ast::Span { start: 0, end: 0 });
+    ws.diag_span(
+        m,
+        span,
+        format!(
+            "internal error in `{name}`: {detail}. The evaluator's result was used; please report \
+             this"
+        ),
+    )
+}
+
+/// The evaluator's path to the erased tree: evaluate, erase the `CoreTerm`,
+/// then validate columns. See [`root_queries_checked`], which wraps this with
+/// the source-elaboration comparison.
+fn root_queries_via_evaluator(
+    ws: &Workspace,
+    tc: &TypeCheck,
+) -> Vec<(String, Result<Rel, Diag>)> {
     let mut ev = Evaluator::new(ws, tc);
     let m = ws.root;
     let mut out = Vec::new();

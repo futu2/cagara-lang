@@ -58,6 +58,30 @@ pub(crate) struct Ctx<'a> {
     /// owner as well as the site.
     pub owner: usize,
     pub scope: &'a std::collections::HashMap<String, Binding>,
+    /// The definitions currently being expanded, outermost first.
+    ///
+    /// Descending into a definition's body means elaborating it, and a
+    /// definition may name itself. The evaluator refuses that with "`q` refers
+    /// to itself; recursion is not supported" (`eval.rs:89`) and tracks the
+    /// same way; without this the elaborator recursed until the stack
+    /// overflowed on `q = q`. The message here matches the evaluator's so a
+    /// user sees one diagnostic whichever path reports it.
+    pub active: &'a [(usize, usize)],
+}
+
+/// The result of descending into a definition: either it is not already being
+/// expanded, or this is a cycle the evaluator would also reject.
+fn enter<'a>(cx: &Ctx<'a>, module: usize, def: usize) -> R<Vec<(usize, usize)>> {
+    if cx.active.contains(&(module, def)) {
+        let name = &cx.ws.modules[module].module.defs[def].name;
+        return Err(Error::new(format!(
+            "`{name}` refers to itself; recursion is not supported"
+        ))
+        .at(Origin::new(module, cx.ws.modules[module].module.defs[def].span)));
+    }
+    let mut next = cx.active.to_vec();
+    next.push((module, def));
+    Ok(next)
 }
 
 /// What elaborating one expression produced.
@@ -104,7 +128,8 @@ fn elaborate_def(
     }
     let origin = Origin::new(module, d.span);
     let scope = &ws.modules[module].scope;
-    let cx = Ctx { ws, tc, module, owner: def, scope };
+    let active = [(module, def)];
+    let cx = Ctx { ws, tc, module, owner: def, scope, active: &active };
     let value = elaborate_query(cx, &d.body, origin)?;
     Ok(value)
 }
@@ -164,6 +189,16 @@ fn elaborate_expr_primitive(
         ("__group", [key]) => {
             let k = elaborate_expr_inner(cx, key)?;
             CheckedExpr::group(k, origin)
+        }
+        // `inList [..] .x`: the list comes first, then the value, matching
+        // `inList : list a -> expr r a -> expr r bool` (`prelude.cagara:110`)
+        // and the order the evaluator reads them in (`prims.rs:374` reads the
+        // list first). Swapping them can still produce a well-typed tree, so
+        // the order is worth stating rather than leaving implicit.
+        ("__in", [list, value]) => {
+            let v = elaborate_expr_inner(cx, value)?;
+            let items = elaborate_exprs(cx, list_items(list))?;
+            CheckedExpr::in_(v, items, false, origin)
         }
         (other, _) => Err(Error::new(format!(
             "the expression primitive `{other}` is not elaborated yet"
@@ -230,12 +265,14 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                     let inner_origin = at(cx.ws.modules[*dm].module.defs[*di].span);
                     // Descending into another definition runs in *its* module,
                     // owner and scope, so the context changes with it.
+                    let active = enter(&cx, *dm, *di)?;
                     let inner = Ctx {
                         ws: cx.ws,
                         tc: cx.tc,
                         module: *dm,
                         owner: *di,
                         scope: &cx.ws.modules[*dm].scope,
+                        active: &active,
                     };
                     elaborate_query(inner, body, inner_origin)
                 }
@@ -243,12 +280,14 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                     let di = choose(cx.tc, cx.module, cx.owner, e.id, is)?;
                     let body = &cx.ws.modules[*dm].module.defs[di].body;
                     let inner_origin = at(cx.ws.modules[*dm].module.defs[di].span);
+                    let active = enter(&cx, *dm, di)?;
                     let inner = Ctx {
                         ws: cx.ws,
                         tc: cx.tc,
                         module: *dm,
                         owner: di,
                         scope: &cx.ws.modules[*dm].scope,
+                        active: &active,
                     };
                     elaborate_query(inner, body, inner_origin)
                 }
@@ -282,7 +321,16 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
             };
             let body = cx.ws.modules[dm].module.defs[di].body.clone();
             let inner_scope = cx.ws.modules[dm].scope.clone();
-            let inner = Ctx { ws: cx.ws, tc: cx.tc, module: dm, owner: di, scope: &inner_scope };
+
+            let active = enter(&cx, dm, di)?;
+            let inner = Ctx {
+                ws: cx.ws,
+                tc: cx.tc,
+                module: dm,
+                owner: di,
+                scope: &inner_scope,
+                active: &active,
+            };
             elaborate_query(inner, &body, at(e.span))
         }
         ExprKind::App(f, args) => elaborate_application(cx, e, f, args),
@@ -476,17 +524,52 @@ fn apply_stage(
             let on = elaborate_expr_inner(cx, pred_e)?;
             CheckedQuery::join(kind, input, right, on, origin)
         }
-        // The set-operation stages take the other query as their argument.
-        "_&|_" | "union" | "_&!_" | "unionAll" | "_&^_" | "intersect" | "_&~_" | "except" => {
+        // Set operations. The two *spellings* put the piped query on opposite
+        // sides, and the difference is real rather than a quirk to smooth over.
+        //
+        //   * the operators `&|`, `&!`, `&^`, `&~` declare
+        //     `_&|_ : query r -> query r -> query r = q => r => union q r`
+        //     (`prelude.cagara:153`), so the body re-binds and the piped query
+        //     `q` ends up on the **left**. The prelude's own comment says so:
+        //     "Each puts the query it is piped into on the *left*, so the stage
+        //     and the direct call agree — `users &~ vips` and
+        //     `except users vips` are the same query."
+        //   * the bare names `union`, `unionAll`, `intersect`, `except` are
+        //     `query r -> query r -> query r` primitives whose first argument
+        //     is the left operand, and they are declared at `&`'s own level, so
+        //     `q & union other` desugars to `union other q` and the piped query
+        //     lands on the **right**.
+        //
+        // Verified against the evaluator rather than inferred: for
+        // `s & select {..} & union (users & select {..})` the evaluator emits
+        // `users UNION s`, and `union A B` emits `A UNION B`. Treating both
+        // spellings alike reverses whichever one is wrong — which is what the
+        // production parity check caught, and why `except` and `union` cannot
+        // both be served by one operand order.
+        "_&|_" | "_&!_" | "_&^_" | "_&~_" => {
             let other_e = one_arg("a set operation")?;
             let other = elaborate_query(cx, other_e, at(other_e.span))?;
             let kind = match stage_name {
-                "_&|_" | "union" => crate::ir::SetKind::Union,
-                "_&!_" | "unionAll" => crate::ir::SetKind::UnionAll,
-                "_&^_" | "intersect" => crate::ir::SetKind::Intersect,
+                "_&|_" => crate::ir::SetKind::Union,
+                "_&!_" => crate::ir::SetKind::UnionAll,
+                "_&^_" => crate::ir::SetKind::Intersect,
                 _ => crate::ir::SetKind::Except,
             };
+            // Piped query on the left, the operator's argument on the right.
             CheckedQuery::set(kind, input, other, origin)
+        }
+        "union" | "unionAll" | "intersect" | "except" => {
+            let other_e = one_arg("a set operation")?;
+            let other = elaborate_query(cx, other_e, at(other_e.span))?;
+            let kind = match stage_name {
+                "union" => crate::ir::SetKind::Union,
+                "unionAll" => crate::ir::SetKind::UnionAll,
+                "intersect" => crate::ir::SetKind::Intersect,
+                _ => crate::ir::SetKind::Except,
+            };
+            // Bare name: its argument is the left operand, the piped query the
+            // right one, because `q & union other` is `union other q`.
+            CheckedQuery::set(kind, other, input, origin)
         }
         other => Err(Error::new(format!(
             "the stage `{other}` is not elaborated yet; its spelling comes from the prelude's \
@@ -552,7 +635,21 @@ pub fn elaborate_expr(
     scope: &std::collections::HashMap<String, Binding>,
     e: &ast::Expr,
 ) -> R<CheckedExpr> {
-    elaborate_expr_inner(Ctx { ws, tc, module, owner, scope }, e)
+    // No enclosing definition, so the cycle guard starts empty: a definition
+    // that names itself is caught when *it* is descended into, which keeps this
+    // the same caller-facing signature it has always had.
+    let active: [(usize, usize); 0] = [];
+    elaborate_expr_inner(
+        Ctx {
+            ws,
+            tc,
+            module,
+            owner,
+            scope,
+            active: &active,
+        },
+        e,
+    )
 }
 
 /// Elaborate a scalar expression to a `CheckedExpr`.
@@ -731,7 +828,16 @@ fn elaborate_winspec(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::checked::WinSpecChe
             let body = cx.ws.modules[dm].module.defs[di].body.clone();
             // The body is evaluated in its own module's scope.
             let inner_scope = cx.ws.modules[dm].scope.clone();
-            let inner = Ctx { ws: cx.ws, tc: cx.tc, module: dm, owner: di, scope: &inner_scope };
+
+            let active = enter(&cx, dm, di)?;
+            let inner = Ctx {
+                ws: cx.ws,
+                tc: cx.tc,
+                module: dm,
+                owner: di,
+                scope: &inner_scope,
+                active: &active,
+            };
             return elaborate_winspec(inner, &body);
         }
     }
@@ -788,7 +894,16 @@ fn elaborate_frame(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::ir::Frame> {
         if let Some(Binding::Def(dm, di)) = cx.scope.get(n).cloned() {
             let body = cx.ws.modules[dm].module.defs[di].body.clone();
             let inner_scope = cx.ws.modules[dm].scope.clone();
-            let inner = Ctx { ws: cx.ws, tc: cx.tc, module: dm, owner: di, scope: &inner_scope };
+
+            let active = enter(&cx, dm, di)?;
+            let inner = Ctx {
+                ws: cx.ws,
+                tc: cx.tc,
+                module: dm,
+                owner: di,
+                scope: &inner_scope,
+                active: &active,
+            };
             return elaborate_frame(inner, &body);
         }
     }

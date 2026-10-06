@@ -1575,6 +1575,70 @@ pub fn erase_checked(query: CheckedQuery) -> Result<(Rel, Vec<String>), String> 
     Ok((rel, cols))
 }
 
+
+/// Strip every `Rel::At` wrapper, so two trees can be compared on structure.
+///
+/// `At` records *where a stage was written*. The evaluator stamps it at its
+/// application sites, and the checked layer stamps it from each node's own
+/// origin, so two trees for the same program legitimately carry different
+/// locations for the same node — the location is metadata about the source,
+/// not part of the relational value. Comparing with `At` in place would
+/// compare the producer's choice of origin rather than the trees.
+///
+/// This is what `root_queries_checked` compares with, which is why it is public.
+pub fn without_at(r: &Rel) -> Rel {
+    match r {
+        Rel::At(_, inner) => without_at(inner),
+        Rel::Table {
+            schema,
+            name,
+            columns,
+        } => Rel::Table {
+            schema: schema.clone(),
+            name: name.clone(),
+            columns: columns.clone(),
+        },
+        Rel::Where(i, e) => Rel::Where(Box::new(without_at(i)), e.clone()),
+        Rel::Select(i, fs) => Rel::Select(
+            Box::new(without_at(i)),
+            fs.iter().map(|(n, e)| (n.clone(), e.clone())).collect(),
+        ),
+        Rel::Update(i, fs) => Rel::Update(
+            Box::new(without_at(i)),
+            fs.iter().map(|(n, e)| (n.clone(), e.clone())).collect(),
+        ),
+        Rel::Omit(i, k) => Rel::Omit(Box::new(without_at(i)), k.clone()),
+        Rel::Prefix(i, a) => Rel::Prefix(Box::new(without_at(i)), a.clone()),
+        Rel::Suffix(i, a) => Rel::Suffix(Box::new(without_at(i)), a.clone()),
+        Rel::Agg(i, fs) => Rel::Agg(
+            Box::new(without_at(i)),
+            fs.iter().map(|(n, e)| (n.clone(), e.clone())).collect(),
+        ),
+        Rel::Order(i, ks) => Rel::Order(
+            Box::new(without_at(i)),
+            ks.iter().map(|(e, a)| (e.clone(), *a)).collect(),
+        ),
+        Rel::Limit(i, n) => Rel::Limit(Box::new(without_at(i)), *n),
+        Rel::Offset(i, n) => Rel::Offset(Box::new(without_at(i)), *n),
+        Rel::Distinct(i) => Rel::Distinct(Box::new(without_at(i))),
+        Rel::Join {
+            kind,
+            left,
+            right,
+            on,
+        } => Rel::Join {
+            kind: *kind,
+            left: Box::new(without_at(left)),
+            right: Box::new(without_at(right)),
+            on: on.clone(),
+        },
+        Rel::Set { kind, left, right } => Rel::Set {
+            kind: *kind,
+            left: Box::new(without_at(left)),
+            right: Box::new(without_at(right)),
+        },
+    }
+}
 // ── reading a `Rel` back into the checked layer ────────────────────────────
 
 /// Which projection a `Rel::Select`-shaped node was.

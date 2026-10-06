@@ -1538,68 +1538,6 @@ fn module_types_omits_definitions_that_did_not_check() {
 
 // ── differential harness: the checked tree vs. the evaluator ───────────────
 
-/// Strip every `Rel::At` wrapper, so two trees can be compared on structure.
-///
-/// `At` records *where a stage was written*. The evaluator stamps it at its
-/// application sites, and `from_rel_unchecked` re-stamps it from the `Origin`
-/// it is handed, so two trees for the same program legitimately carry
-/// different locations for the same node — the location is metadata about the
-/// source, not part of the relational value. Comparing with `At` in place would
-/// compare the harness's choice of origin rather than the trees.
-fn without_at(r: &Rel) -> Rel {
-    match r {
-        Rel::At(_, inner) => without_at(inner),
-        Rel::Table {
-            schema,
-            name,
-            columns,
-        } => Rel::Table {
-            schema: schema.clone(),
-            name: name.clone(),
-            columns: columns.clone(),
-        },
-        Rel::Where(i, e) => Rel::Where(Box::new(without_at(i)), e.clone()),
-        Rel::Select(i, fs) => Rel::Select(
-            Box::new(without_at(i)),
-            fs.iter().map(|(n, e)| (n.clone(), e.clone())).collect(),
-        ),
-        Rel::Update(i, fs) => Rel::Update(
-            Box::new(without_at(i)),
-            fs.iter().map(|(n, e)| (n.clone(), e.clone())).collect(),
-        ),
-        Rel::Omit(i, k) => Rel::Omit(Box::new(without_at(i)), k.clone()),
-        Rel::Prefix(i, a) => Rel::Prefix(Box::new(without_at(i)), a.clone()),
-        Rel::Suffix(i, a) => Rel::Suffix(Box::new(without_at(i)), a.clone()),
-        Rel::Agg(i, fs) => Rel::Agg(
-            Box::new(without_at(i)),
-            fs.iter().map(|(n, e)| (n.clone(), e.clone())).collect(),
-        ),
-        Rel::Order(i, ks) => Rel::Order(
-            Box::new(without_at(i)),
-            ks.iter().map(|(e, a)| (e.clone(), *a)).collect(),
-        ),
-        Rel::Limit(i, n) => Rel::Limit(Box::new(without_at(i)), *n),
-        Rel::Offset(i, n) => Rel::Offset(Box::new(without_at(i)), *n),
-        Rel::Distinct(i) => Rel::Distinct(Box::new(without_at(i))),
-        Rel::Join {
-            kind,
-            left,
-            right,
-            on,
-        } => Rel::Join {
-            kind: *kind,
-            left: Box::new(without_at(left)),
-            right: Box::new(without_at(right)),
-            on: on.clone(),
-        },
-        Rel::Set { kind, left, right } => Rel::Set {
-            kind: *kind,
-            left: Box::new(without_at(left)),
-            right: Box::new(without_at(right)),
-        },
-    }
-}
-
 /// Build both trees for one program and assert they erase to the *same* `Rel`.
 ///
 /// This is the prerequisite for routing production through the checked layer.
@@ -1913,6 +1851,77 @@ fn source_elaboration_agrees_across_stages() {
         ("shorthand", "q = u &? (.a > 0) &- 2\n"),
     ] {
         let ws = Workspace::from_source(&format!("{TABLES}{body}"));
+        assert!(ws.diags.is_empty(), "{label}: {:?}", ws.diags);
+        assert_source_elaboration_agrees(label, &ws);
+    }
+}
+
+/// Constructs the examples happen not to exercise.
+///
+/// The four examples cover a lot but not everything: they contain no
+/// three-way join, no `inList`, and no aggregate followed by a second
+/// projection. Each case here was a real gap the elaborator had when this
+/// test was written — `inList` failed with "the expression primitive `__in`
+/// is not elaborated yet" until it was added — so this is the regression net
+/// for constructs that only appear in user programs.
+#[test]
+fn source_elaboration_agrees_beyond_the_examples() {
+    for (label, src) in [
+        (
+            "three_way_join",
+            "u : query { a = int } = table \"s\" \"u\"\n\
+             v : query { a = int } = table \"s\" \"v\"\n\
+             w : query { a = int } = table \"s\" \"w\"\n\
+             q = u & innerJoin v (.<a == .>a) & innerJoin w (.<a == .>a)\n",
+        ),
+        (
+            "in_list",
+            "t : query { a = int } = table \"s\" \"t\"\n\
+             q = t & where (inList [1, 2] .a)\n",
+        ),
+        (
+            "not_in_list",
+            "t : query { a = int } = table \"s\" \"t\"\n\
+             q = t & where (not (inList [1] .a))\n",
+        ),
+        (
+            "sql_template_literal",
+            "t : query { a = int } = table \"s\" \"t\"\n\
+             q = t & where (sql \"$1 > 5\" .a)\n",
+        ),
+        (
+            "select_then_select",
+            "t : query { a = int } = table \"s\" \"t\"\n\
+             q = t & select { a = .a } & select { b = .a + 1 }\n",
+        ),
+        (
+            "agg_then_project",
+            "t : query { a = int } = table \"s\" \"t\"\n\
+             q = t & agg { n = count } & select { n = .n + 1 }\n",
+        ),
+        (
+            "limit_then_where",
+            "t : query { a = int } = table \"s\" \"t\"\n\
+             q = t & limit 3 & where (.a > 1)\n",
+        ),
+        (
+            "group_only",
+            "t : query { a = int } = table \"s\" \"t\"\n\
+             q = t & agg { a = group .a }\n",
+        ),
+        (
+            "order_by_two_keys",
+            "t : query { a = int, b = string } = table \"s\" \"t\"\n\
+             q = t & order [desc .a, asc .b] & limit 1\n",
+        ),
+        (
+            "join_then_agg",
+            "u : query { id = int, n = int } = table \"s\" \"u\"\n\
+             v : query { id = int, m = int } = table \"s\" \"v\"\n\
+             q = u & innerJoin v (.<id == .>id) & agg { id = group .id, s = sum .n }\n",
+        ),
+    ] {
+        let ws = Workspace::from_source(src);
         assert!(ws.diags.is_empty(), "{label}: {:?}", ws.diags);
         assert_source_elaboration_agrees(label, &ws);
     }

@@ -1401,3 +1401,56 @@ fn deeply_nested_stages_are_a_diagnostic_not_a_stack_overflow() {
     };
     assert!(err.contains("nests more than"), "n={n}: {err}");
 }
+
+/// The bare-name and operator spellings of a set operation put the piped query
+/// on **opposite** sides, and both are correct.
+///
+/// `_&~_ : ... = q => r => except q r` re-binds, so `users &~ admins` is
+/// `except users admins` — `users` on the left. The bare name is declared at
+/// `&`'s own level, so `users & except admins` desugars to
+/// `except admins users` — `admins` on the left.
+///
+/// This is load-bearing rather than pedantic: `union` is symmetric and hides
+/// the difference, so only an asymmetric operation reveals it. The source
+/// elaborator had one operand order for both spellings when it was first
+/// routed into production, and the parity check reported a disagreement on a
+/// `union` that turned out to be the reversal. Asserting both spellings here
+/// means the next person to touch either order is told immediately.
+#[test]
+fn the_two_set_operation_spellings_differ_in_operand_order() {
+    let sqlish = |src: &str| sql_admins(src, "q");
+
+    // Operator spelling: the piped query is the left operand.
+    for (op, sql_op) in [
+        ("&|", "UNION"),
+        ("&!", "UNION ALL"),
+        ("&^", "INTERSECT"),
+        ("&~", "EXCEPT"),
+    ] {
+        let piped = sqlish(&format!("q = users {op} admins\n"));
+        assert!(piped.contains(sql_op), "`{op}` must lower to `{sql_op}`: {piped}");
+        let start = piped.find("(SELECT").unwrap_or(0);
+        let users = piped[start..].find("public.users").expect("users operand");
+        let admins = piped[start..].find("public.admins").expect("admins operand");
+        assert!(users < admins, "`{op}` must put `users` (piped) on the left: {piped}");
+    }
+
+    // Bare-name spelling: the *argument* is the left operand, because
+    // `users & except admins` is `except admins users`.
+    for (name, sql_op) in [
+        ("union", "UNION"),
+        ("unionAll", "UNION ALL"),
+        ("intersect", "INTERSECT"),
+        ("except", "EXCEPT"),
+    ] {
+        let piped = sqlish(&format!("q = users & {name} admins\n"));
+        assert!(piped.contains(sql_op), "`{name}` must lower to `{sql_op}`: {piped}");
+        let start = piped.find("(SELECT").unwrap_or(0);
+        let users = piped[start..].find("public.users").expect("users operand");
+        let admins = piped[start..].find("public.admins").expect("admins operand");
+        assert!(
+            admins < users,
+            "`users & {name} admins` must put `admins` (the argument) on the left: {piped}"
+        );
+    }
+}

@@ -33,9 +33,13 @@ impl<'a> CompilerInput<'a> {
     }
 
     pub fn root(&self) -> ModuleSnapshot<'a> {
+        self.module(self.workspace.root)
+    }
+
+    pub fn module(&self, module: usize) -> ModuleSnapshot<'a> {
         ModuleSnapshot {
             workspace: self.workspace,
-            module: self.workspace.root,
+            module,
         }
     }
 }
@@ -62,6 +66,10 @@ impl<'a> ModuleSnapshot<'a> {
 
     pub fn source(&self) -> &'a Module {
         &self.loaded().module
+    }
+
+    pub fn def(&self, def: usize) -> &'a cagara_syntax::ast::Def {
+        &self.source().defs[def]
     }
 
     pub fn scope(&self) -> &'a HashMap<String, Binding> {
@@ -129,7 +137,7 @@ pub fn compile_input(input: CompilerInput<'_>) -> Compilation {
         push_unique(&mut out.diagnostics, error.diag.clone());
     }
 
-    for (index, (name, result)) in elaborate_module(ws, tc, root.index())
+    for (index, (name, result)) in elaborate_module(input, root.index())
         .into_iter()
         .enumerate()
     {

@@ -27,23 +27,20 @@
 
 use crate::check::{Choice, TypeCheck};
 use crate::checked::{CheckedExpr, CheckedQuery};
+use crate::compile::CompilerInput;
 use crate::core::{Error, Origin, ScalarType};
 use crate::ir::{Lit, Phase};
 use crate::rules;
-use crate::workspace::{Binding, Workspace};
+use crate::workspace::Binding;
 use cagara_syntax::ast::{self, ExprKind, Span};
 
-/// What every elaboration step needs: the workspace, the type check, the
-/// module and definition being elaborated, and the scope names resolve in.
-///
-/// These five travelled as five separate parameters through every function
-/// here, which is what `clippy`'s `too_many_arguments` was pointing at. They
-/// are one thing — "where in the program are we, and what do we know" — so
-/// they are one value.
+/// What every elaboration step needs: immutable compiler input, the module and
+/// definition being elaborated, the scope names resolve in, and local bindings.
+/// Keeping this context as one value prevents source access from bypassing the
+/// compiler boundary as the elaborator descends into imported definitions.
 #[derive(Clone, Copy)]
 pub(crate) struct Ctx<'a> {
-    pub ws: &'a Workspace,
-    pub tc: &'a TypeCheck,
+    pub input: CompilerInput<'a>,
     /// The module the expression being elaborated lives in.
     pub module: usize,
     /// The definition whose body it belongs to. Overload choices are recorded
@@ -83,14 +80,12 @@ pub(crate) struct Ctx<'a> {
 /// expanded, or this is a recursive definition.
 fn enter<'a>(cx: &Ctx<'a>, module: usize, def: usize) -> R<Vec<(usize, usize)>> {
     if cx.active.contains(&(module, def)) {
-        let name = &cx.ws.modules[module].module.defs[def].name;
+        let definition = cx.input.module(module).def(def);
+        let name = &definition.name;
         return Err(Error::new(format!(
             "`{name}` refers to itself; recursion is not supported"
         ))
-        .at(Origin::new(
-            module,
-            cx.ws.modules[module].module.defs[def].span,
-        )));
+        .at(Origin::new(module, definition.span)));
     }
     let mut next = cx.active.to_vec();
     next.push((module, def));
@@ -127,15 +122,11 @@ pub(crate) fn is_not_a_query(e: &Error) -> bool {
 ///
 /// Returns one entry per definition, in source order, with the same
 /// one result per root definition, in source order.
-pub fn elaborate_module(
-    ws: &Workspace,
-    tc: &TypeCheck,
-    module: usize,
-) -> Vec<(String, R<CheckedQuery>)> {
+pub fn elaborate_module(input: CompilerInput<'_>, module: usize) -> Vec<(String, R<CheckedQuery>)> {
     let mut out = Vec::new();
-    for (i, d) in ws.modules[module].module.defs.iter().enumerate() {
+    for (i, d) in input.module(module).source().defs.iter().enumerate() {
         let result = validate_template_definition(module, d)
-            .and_then(|()| elaborate_def(ws, tc, module, i, d));
+            .and_then(|()| elaborate_def(input, module, i, d));
         out.push((d.name.clone(), result));
     }
     out
@@ -154,12 +145,12 @@ fn validate_template_definition(module: usize, d: &ast::Def) -> R<()> {
 
 /// Elaborate one definition's body to a checked query.
 fn elaborate_def(
-    ws: &Workspace,
-    tc: &TypeCheck,
+    input: CompilerInput<'_>,
     module: usize,
     def: usize,
     d: &ast::Def,
 ) -> R<CheckedQuery> {
+    let tc = input.type_check();
     // A rejected definition has no trustworthy types. Its checker diagnostic
     // is emitted by the compilation boundary, so it must not be elaborated.
     if tc.error_for(module, def).is_some() {
@@ -188,7 +179,7 @@ fn elaborate_def(
         return Err(NOT_A_QUERY);
     }
     let origin = Origin::new(module, d.span);
-    let scope = &ws.modules[module].scope;
+    let scope = input.module(module).scope();
     let active = [(module, def)];
     let env: [(String, CheckedValue); 0] = [];
     // A definition elaborated on its own has no assignment for its open
@@ -196,8 +187,7 @@ fn elaborate_def(
     // skipped by `elaborate_module` anyway. See `Ctx::holes`.
     let holes: [(usize, usize); 0] = [];
     let cx = Ctx {
-        ws,
-        tc,
+        input,
         module,
         owner: def,
         scope,
@@ -231,20 +221,24 @@ fn elaborate_primitive(
             // table with unknown columns cannot be a `CheckedQuery`: every later
             // stage would have to guess, which is what `CheckedQuery::table`
             // refuses.
-            let row = cx.tc.scheme_fields(cx.module, cx.owner).ok_or_else(|| {
-                // A **program** error rather than a gap: a table whose defining
-                // definition declares no columns is genuinely untypeable, and
-                // `schema` reports exactly this. Classifying it correctly is what
-                // lets the production boundary show it to the user instead of
-                // treating it as a compiler failure — with `schema` demoted to an
-                // assertion, the wrong classification made the compiler *panic*
-                // here on a program that deserves a plain diagnostic.
-                Error::new(format!(
+            let row = cx
+                .input
+                .type_check()
+                .scheme_fields(cx.module, cx.owner)
+                .ok_or_else(|| {
+                    // A **program** error rather than a gap: a table whose defining
+                    // definition declares no columns is genuinely untypeable, and
+                    // `schema` reports exactly this. Classifying it correctly is what
+                    // lets the production boundary show it to the user instead of
+                    // treating it as a compiler failure — with `schema` demoted to an
+                    // assertion, the wrong classification made the compiler *panic*
+                    // here on a program that deserves a plain diagnostic.
+                    Error::new(format!(
                     "the columns of table `{schema}.{name}` are unknown; give its definition a \
                      closed type, e.g. `t : query {{ id = int }} = table \"{schema}\" \"{name}\"`"
                 ))
-                .at(origin)
-            })?;
+                    .at(origin)
+                })?;
             CheckedQuery::table(schema, name, Some(crate::core::RowType::new(row)), origin)
         }
         (other, _) => Err(Error::unsupported(format!(
@@ -311,7 +305,7 @@ fn join_kind(cx: Ctx<'_>, name: &str) -> Option<crate::ir::JoinKind> {
     let Some(Binding::Def(m, i)) = cx.scope.get(name).cloned() else {
         return None;
     };
-    let body = &cx.ws.modules[m].module.defs[i].body;
+    let body = &cx.input.module(m).def(i).body;
     match &body.kind {
         ExprKind::Name(target) => direct(target),
         _ => None,
@@ -362,17 +356,16 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
             // A query-valued definition, e.g. `t` or a helper's result.
             match cx.scope.get(n) {
                 Some(Binding::Def(dm, di)) => {
-                    let body = &cx.ws.modules[*dm].module.defs[*di].body;
-                    let inner_origin = at(cx.ws.modules[*dm].module.defs[*di].span);
+                    let body = &cx.input.module(*dm).def(*di).body;
+                    let inner_origin = at(cx.input.module(*dm).def(*di).span);
                     // Descending into another definition runs in *its* module,
                     // owner and scope, so the context changes with it.
                     let active = enter(&cx, *dm, *di)?;
                     let inner = Ctx {
-                        ws: cx.ws,
-                        tc: cx.tc,
+                        input: cx.input,
                         module: *dm,
                         owner: *di,
-                        scope: &cx.ws.modules[*dm].scope,
+                        scope: cx.input.module(*dm).scope(),
                         active: &active,
                         holes: cx.holes,
                         env: cx.env,
@@ -380,16 +373,22 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                     elaborate_query(inner, body, inner_origin)
                 }
                 Some(Binding::Overloads(dm, is)) => {
-                    let di = choose(cx.tc, cx.module, cx.owner, e.id, is, cx.holes)?;
-                    let body = &cx.ws.modules[*dm].module.defs[di].body;
-                    let inner_origin = at(cx.ws.modules[*dm].module.defs[di].span);
+                    let di = choose(
+                        cx.input.type_check(),
+                        cx.module,
+                        cx.owner,
+                        e.id,
+                        is,
+                        cx.holes,
+                    )?;
+                    let body = &cx.input.module(*dm).def(di).body;
+                    let inner_origin = at(cx.input.module(*dm).def(di).span);
                     let active = enter(&cx, *dm, di)?;
                     let inner = Ctx {
-                        ws: cx.ws,
-                        tc: cx.tc,
+                        input: cx.input,
                         module: *dm,
                         owner: di,
-                        scope: &cx.ws.modules[*dm].scope,
+                        scope: cx.input.module(*dm).scope(),
                         active: &active,
                         holes: cx.holes,
                         env: cx.env,
@@ -409,25 +408,32 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
             let Some(Binding::Module(target)) = cx.scope.get(alias).cloned() else {
                 return Err(Error::new(format!("`{alias}` is not a module")).at(at(base.span)));
             };
-            let Some(binding) = cx.ws.modules[target].own.get(f).cloned() else {
+            let Some(binding) = cx.input.module(target).own().get(f).cloned() else {
                 return Err(
                     Error::new(format!("module `{alias}` has no definition `{f}`")).at(at(e.span)),
                 );
             };
             let (dm, di) = match binding {
                 Binding::Def(dm, di) => (dm, di),
-                Binding::Overloads(dm, is) => {
-                    (dm, choose(cx.tc, cx.module, cx.owner, e.id, &is, cx.holes)?)
-                }
+                Binding::Overloads(dm, is) => (
+                    dm,
+                    choose(
+                        cx.input.type_check(),
+                        cx.module,
+                        cx.owner,
+                        e.id,
+                        &is,
+                        cx.holes,
+                    )?,
+                ),
                 _ => return Err(Error::new(format!("`{alias}.{f}` is not a query")).at(at(e.span))),
             };
-            let body = cx.ws.modules[dm].module.defs[di].body.clone();
-            let inner_scope = cx.ws.modules[dm].scope.clone();
+            let body = cx.input.module(dm).def(di).body.clone();
+            let inner_scope = cx.input.module(dm).scope().clone();
 
             let active = enter(&cx, dm, di)?;
             let inner = Ctx {
-                ws: cx.ws,
-                tc: cx.tc,
+                input: cx.input,
                 module: dm,
                 owner: di,
                 scope: &inner_scope,
@@ -470,13 +476,21 @@ fn elaborate_application(
             let binding = cx.scope.get(n).cloned();
             let chosen = match binding {
                 Some(Binding::Def(dm, di)) => Some((dm, di)),
-                Some(Binding::Overloads(dm, is)) => {
-                    Some((dm, choose(cx.tc, cx.module, cx.owner, f.id, &is, cx.holes)?))
-                }
+                Some(Binding::Overloads(dm, is)) => Some((
+                    dm,
+                    choose(
+                        cx.input.type_check(),
+                        cx.module,
+                        cx.owner,
+                        f.id,
+                        &is,
+                        cx.holes,
+                    )?,
+                )),
                 _ => None,
             };
             if let Some((dm, di)) = chosen {
-                let body = cx.ws.modules[dm].module.defs[di].body.clone();
+                let body = cx.input.module(dm).def(di).body.clone();
                 let (mut params, mut inner) = (Vec::new(), &body);
                 while let ExprKind::Lambda(p, b) = &inner.kind {
                     params.push(p.clone());
@@ -506,7 +520,7 @@ fn elaborate_application(
                     for (p, a) in params.iter().zip(args) {
                         bound.push((p.clone(), elaborate_value(cx, a)?));
                     }
-                    let inner_scope = cx.ws.modules[dm].scope.clone();
+                    let inner_scope = cx.input.module(dm).scope().clone();
                     let active = enter(&cx, dm, di)?;
                     let mut env: Vec<(String, CheckedValue)> = cx.env.to_vec();
                     env.extend(bound);
@@ -517,8 +531,7 @@ fn elaborate_application(
                     // addresses the *caller's* holes, not the callee's.
                     let holes = holes_at(cx, dm, di, f.id)?;
                     let callee = Ctx {
-                        ws: cx.ws,
-                        tc: cx.tc,
+                        input: cx.input,
                         module: dm,
                         owner: di,
                         scope: &inner_scope,
@@ -538,7 +551,7 @@ fn elaborate_application(
     // not know them; the prelude does, so read it rather than listing names.
     if let ExprKind::Name(n) = &f.kind {
         if let Some(Binding::Def(pm, pi)) = cx.scope.get(n).cloned() {
-            let body = &cx.ws.modules[pm].module.defs[pi].body;
+            let body = &cx.input.module(pm).def(pi).body;
             if let ExprKind::Primitive(prim) = &body.kind {
                 // A *set operation* defined as a bare primitive is still a set
                 // operation, and `q = unionAll users users` is an ordinary call
@@ -647,7 +660,7 @@ fn stage_wants_more(cx: Ctx<'_>, op: &str, given: usize) -> bool {
         })
         .map(|(m, i)| {
             let mut n = 0;
-            let mut t = cx.ws.modules[m].module.defs[i].ty.as_ref();
+            let mut t = cx.input.module(m).def(i).ty.as_ref();
             while let Some(ast::TypeExpr::Fun(_, r)) = t {
                 n += 1;
                 t = Some(r);
@@ -940,13 +953,12 @@ fn elaborate_user_stage(
     input: CheckedQuery,
     origin: Origin,
 ) -> R<CheckedQuery> {
-    let body = cx.ws.modules[dm].module.defs[di].body.clone();
-    let name = cx.ws.modules[dm].module.defs[di].name.clone();
-    let inner_scope = cx.ws.modules[dm].scope.clone();
+    let body = cx.input.module(dm).def(di).body.clone();
+    let name = cx.input.module(dm).def(di).name.clone();
+    let inner_scope = cx.input.module(dm).scope().clone();
     let active = enter(&cx, dm, di)?;
     let inner = Ctx {
-        ws: cx.ws,
-        tc: cx.tc,
+        input: cx.input,
         module: dm,
         owner: di,
         scope: &inner_scope,
@@ -1037,12 +1049,9 @@ fn elaborate_order(cx: Ctx<'_>, e: &ast::Expr) -> R<Vec<(CheckedExpr, bool)>> {
 
 /// Elaborate a scalar expression to a `CheckedExpr`.
 ///
-/// This is the module's public entry point: it keeps the five separate
-/// parameters its callers pass and builds the [`Ctx`] the helpers below share,
-/// so the public signature is the only place those five appear together.
+/// This is the module's public entry point for scalar elaboration.
 pub fn elaborate_expr(
-    ws: &Workspace,
-    tc: &TypeCheck,
+    input: CompilerInput<'_>,
     module: usize,
     owner: usize,
     scope: &std::collections::HashMap<String, Binding>,
@@ -1058,8 +1067,7 @@ pub fn elaborate_expr(
     let holes: [(usize, usize); 0] = [];
     elaborate_expr_inner(
         Ctx {
-            ws,
-            tc,
+            input,
             module,
             owner,
             scope,
@@ -1081,13 +1089,16 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
     let _at = |span: Span| Origin::new(cx.module, span);
     let origin = Origin::new(cx.module, e.span);
     let ty = |what: &str| -> R<ScalarType> {
-        cx.tc.use_ty(cx.module, e.id).ok_or_else(|| {
-            Error::new(format!(
-                "the checker recorded no scalar type for this {what}, so it cannot be \
+        cx.input
+            .type_check()
+            .use_ty(cx.module, e.id)
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "the checker recorded no scalar type for this {what}, so it cannot be \
                  elaborated without inventing one"
-            ))
-            .at(origin)
-        })
+                ))
+                .at(origin)
+            })
     };
 
     match &e.kind {
@@ -1140,11 +1151,12 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
         // arguments goes through `elaborate_call` below.
         ExprKind::Name(n) => match cx.scope.get(n).cloned() {
             Some(Binding::Def(dm, di)) => {
-                let body = &cx.ws.modules[dm].module.defs[di].body;
+                let body = &cx.input.module(dm).def(di).body;
                 if let ExprKind::Sql(sql) = &body.kind {
-                    let (phase, ty) = cx.tc.result_expr(dm, di).ok_or_else(|| {
-                        Error::new(format!("`{n}` does not return an expression")).at(origin)
-                    })?;
+                    let (phase, ty) =
+                        cx.input.type_check().result_expr(dm, di).ok_or_else(|| {
+                            Error::new(format!("`{n}` does not return an expression")).at(origin)
+                        })?;
                     match phase {
                         Phase::Const | Phase::Row => {
                             CheckedExpr::template(sql.clone(), vec![], ty, origin)
@@ -1161,11 +1173,10 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
                     // Its body is elaborated in the definition's own module and
                     // scope, which is where its names resolve.
                     let body = body.clone();
-                    let inner_scope = cx.ws.modules[dm].scope.clone();
+                    let inner_scope = cx.input.module(dm).scope().clone();
                     let active = enter(&cx, dm, di)?;
                     let inner = Ctx {
-                        ws: cx.ws,
-                        tc: cx.tc,
+                        input: cx.input,
                         module: dm,
                         owner: di,
                         scope: &inner_scope,
@@ -1233,9 +1244,17 @@ fn elaborate_call(
     let binding = cx.scope.get(name).cloned();
     let (dm, di) = match binding {
         Some(Binding::Def(dm, di)) => (dm, di),
-        Some(Binding::Overloads(dm, is)) => {
-            (dm, choose(cx.tc, cx.module, cx.owner, f.id, &is, cx.holes)?)
-        }
+        Some(Binding::Overloads(dm, is)) => (
+            dm,
+            choose(
+                cx.input.type_check(),
+                cx.module,
+                cx.owner,
+                f.id,
+                &is,
+                cx.holes,
+            )?,
+        ),
         _ => {
             return Err(Error::new(format!(
                 "`{name}` is not a scalar function this layer can elaborate"
@@ -1244,7 +1263,7 @@ fn elaborate_call(
         }
     };
 
-    let body = &cx.ws.modules[dm].module.defs[di].body;
+    let body = &cx.input.module(dm).def(di).body;
     // `group .x` and the other expression primitives are prelude definitions
     // whose body is a `primitive` reference, exactly like `table`. The prelude
     // names them, so read it rather than listing them here.
@@ -1272,12 +1291,11 @@ fn elaborate_call(
     // operator goes through it unchanged.
     if matches!(body.kind, ExprKind::App(..)) {
         let body = body.clone();
-        let inner_scope = cx.ws.modules[dm].scope.clone();
+        let inner_scope = cx.input.module(dm).scope().clone();
         let active = enter(&cx, dm, di)?;
         let holes = holes_at(cx, dm, di, f.id)?;
         let callee = Ctx {
-            ws: cx.ws,
-            tc: cx.tc,
+            input: cx.input,
             module: dm,
             owner: di,
             scope: &inner_scope,
@@ -1327,7 +1345,7 @@ fn elaborate_call(
     // deliberately not: the scheme is what the checker inferred, and for a
     // template whose arguments promote it that disagrees with the node built
     // below.
-    let (_phase, ty) = cx.tc.result_expr(dm, di).ok_or_else(|| {
+    let (_phase, ty) = cx.input.type_check().result_expr(dm, di).ok_or_else(|| {
         Error::new(format!(
             "`{name}` does not return an expression, so its call has no phase or scalar type"
         ))
@@ -1349,7 +1367,7 @@ fn elaborate_call(
     // is exactly the promotion rule used by checked templates,
     // so a scalar template over aggregate arguments still comes out aggregate —
     // without the constructors fighting each other.
-    let declared = declared_kind(&cx.ws.modules[dm].module.defs[di]);
+    let declared = declared_kind(cx.input.module(dm).def(di));
     match declared {
         // Declared `expr ..`: a scalar template. Its phase comes from its
         // arguments (`CheckedExpr::template` folds them with `rules::mix`), so
@@ -1473,7 +1491,7 @@ pub(crate) enum DeclaredKind {
 /// minus one for a window template, whose first argument is its spec rather than
 /// an expression.
 fn template_arity(cx: Ctx<'_>, dm: usize, di: usize) -> usize {
-    let d = &cx.ws.modules[dm].module.defs[di];
+    let d = cx.input.module(dm).def(di);
     template_arity_from_type(
         d.ty.as_ref().expect("typed template definition"),
         declared_kind(d),
@@ -1590,7 +1608,7 @@ fn declared_kind(d: &ast::Def) -> DeclaredKind {
 /// An open hole with nothing recorded is a real gap, not an absence of
 /// overloads, so it is reported rather than defaulting to candidate 0.
 fn holes_at(cx: Ctx<'_>, dm: usize, di: usize, site: u32) -> R<Vec<(usize, usize)>> {
-    let n = cx.tc.holes(dm, di);
+    let n = cx.input.type_check().holes(dm, di);
     if n == 0 {
         return Ok(Vec::new());
     }
@@ -1608,7 +1626,7 @@ fn holes_at(cx: Ctx<'_>, dm: usize, di: usize, site: u32) -> R<Vec<(usize, usize
         //
         // Verified rather than assumed: `h`'s own entry holds
         // `[(7, 0, Hole(0))]` while `ok`'s holds `[(16, 0, Def(0, 85))]`.
-        match cx.tc.choice(cx.module, cx.owner, site, k) {
+        match cx.input.type_check().choice(cx.module, cx.owner, site, k) {
             Some(Choice::Def(_, chosen)) => out.push((dm, chosen)),
             // The use sits at a site that is itself an open hole **of the
             // definition being elaborated** — the nested case:
@@ -1625,7 +1643,7 @@ fn holes_at(cx: Ctx<'_>, dm: usize, di: usize, site: u32) -> R<Vec<(usize, usize
             Some(Choice::Hole(h)) => match cx.holes.get(h) {
                 Some((_, chosen)) => out.push((dm, *chosen)),
                 None => {
-                    let name = &cx.ws.modules[dm].module.defs[di].name;
+                    let name = &cx.input.module(dm).def(di).name;
                     return Err(Error::new(format!(
                         "`{name}` is used at an open hole ({h}) of the definition being \
                          elaborated, and no assignment for it was supplied"
@@ -1633,7 +1651,7 @@ fn holes_at(cx: Ctx<'_>, dm: usize, di: usize, site: u32) -> R<Vec<(usize, usize
                 }
             },
             None => {
-                let name = &cx.ws.modules[dm].module.defs[di].name;
+                let name = &cx.input.module(dm).def(di).name;
                 return Err(Error::new(format!(
                     "`{name}` has an open overload (hole {k}) that this use does not \
                      instantiate; give the definition a type signature that fixes it"
@@ -1695,7 +1713,7 @@ fn elaborate_lambda(
         bound.push((p.clone(), elaborate_value(cx, a)?));
     }
 
-    let scope = cx.ws.modules[dm].scope.clone();
+    let scope = cx.input.module(dm).scope().clone();
     let active = enter(&cx, dm, di)?;
     // The callee's environment is the caller's bindings plus the new ones.
     // Keeping the caller's bindings lets a nested lambda see what the outer
@@ -1710,8 +1728,7 @@ fn elaborate_lambda(
     // would be addressing different holes.
     let holes = holes_at(cx, dm, di, site)?;
     let callee = Ctx {
-        ws: cx.ws,
-        tc: cx.tc,
+        input: cx.input,
         module: dm,
         owner: di,
         scope: &scope,
@@ -1815,14 +1832,21 @@ fn elaborate_callable(cx: Ctx<'_>, e: &ast::Expr) -> R<Option<Callable>> {
     let (dm, di) = match binding {
         Binding::Def(dm, di) => (dm, di),
         Binding::Overloads(dm, is) => {
-            match choose(cx.tc, cx.module, cx.owner, f.id, &is, cx.holes) {
+            match choose(
+                cx.input.type_check(),
+                cx.module,
+                cx.owner,
+                f.id,
+                &is,
+                cx.holes,
+            ) {
                 Ok(di) => (dm, di),
                 Err(_) => return Ok(None),
             }
         }
         _ => return Ok(None),
     };
-    let body = cx.ws.modules[dm].module.defs[di].body.clone();
+    let body = cx.input.module(dm).def(di).body.clone();
     match &body.kind {
         // A `sql` template still short of arguments.
         ExprKind::Sql(sql) => {
@@ -1831,7 +1855,7 @@ fn elaborate_callable(cx: Ctx<'_>, e: &ast::Expr) -> R<Option<Callable>> {
             if args.len() >= arity {
                 return Ok(None);
             }
-            let Some((_, ty)) = cx.tc.result_expr(dm, di) else {
+            let Some((_, ty)) = cx.input.type_check().result_expr(dm, di) else {
                 return Ok(None);
             };
             Ok(Some(Callable::Template {
@@ -1839,7 +1863,7 @@ fn elaborate_callable(cx: Ctx<'_>, e: &ast::Expr) -> R<Option<Callable>> {
                 arity,
                 args: elaborate_exprs(cx, args)?,
                 ty,
-                kind: declared_kind(&cx.ws.modules[dm].module.defs[di]),
+                kind: declared_kind(cx.input.module(dm).def(di)),
             }))
         }
         // A lambda with binders left over.
@@ -1942,15 +1966,14 @@ fn apply_value(cx: Ctx<'_>, f: CheckedValue, arg: CheckedValue, origin: Origin) 
             env.push((param, arg));
             if params.is_empty() {
                 let (dm, di) = def;
-                let scope = cx.ws.modules[dm].scope.clone();
+                let scope = cx.input.module(dm).scope().clone();
                 let holes = holes_at(cx, dm, di, site)?;
                 let mut active = cx.active.to_vec();
                 if !active.contains(&(dm, di)) {
                     active.push((dm, di));
                 }
                 let callee = Ctx {
-                    ws: cx.ws,
-                    tc: cx.tc,
+                    input: cx.input,
                     module: dm,
                     owner: di,
                     scope: &scope,
@@ -2032,14 +2055,13 @@ fn elaborate_winspec(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::checked::WinSpecChe
     // A name bound to a spec, resolved to its body.
     if let ExprKind::Name(n) = &e.kind {
         if let Some(Binding::Def(dm, di)) = cx.scope.get(n).cloned() {
-            let body = cx.ws.modules[dm].module.defs[di].body.clone();
+            let body = cx.input.module(dm).def(di).body.clone();
             // The body is evaluated in its own module's scope.
-            let inner_scope = cx.ws.modules[dm].scope.clone();
+            let inner_scope = cx.input.module(dm).scope().clone();
 
             let active = enter(&cx, dm, di)?;
             let inner = Ctx {
-                ws: cx.ws,
-                tc: cx.tc,
+                input: cx.input,
                 module: dm,
                 owner: di,
                 scope: &inner_scope,
@@ -2101,13 +2123,12 @@ fn elaborate_frame(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::ir::Frame> {
     let origin = Origin::new(cx.module, e.span);
     if let ExprKind::Name(n) = &e.kind {
         if let Some(Binding::Def(dm, di)) = cx.scope.get(n).cloned() {
-            let body = cx.ws.modules[dm].module.defs[di].body.clone();
-            let inner_scope = cx.ws.modules[dm].scope.clone();
+            let body = cx.input.module(dm).def(di).body.clone();
+            let inner_scope = cx.input.module(dm).scope().clone();
 
             let active = enter(&cx, dm, di)?;
             let inner = Ctx {
-                ws: cx.ws,
-                tc: cx.tc,
+                input: cx.input,
                 module: dm,
                 owner: di,
                 scope: &inner_scope,

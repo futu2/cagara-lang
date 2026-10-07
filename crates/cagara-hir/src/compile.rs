@@ -128,8 +128,13 @@ impl Compilation {
 
 /// Check and compile every query in the root module.
 pub fn compile(ws: &Workspace) -> Compilation {
+    if let Some(cached) = ws.compilation_cache() {
+        return cached;
+    }
     let tc = crate::check::check(ws);
-    compile_input(CompilerInput::new(ws, &tc))
+    let compilation = compile_input(CompilerInput::new(ws, &tc));
+    ws.set_compilation_cache(compilation.clone());
+    compilation
 }
 
 /// Compile a workspace using a type check the caller already computed.
@@ -285,5 +290,59 @@ mod tests {
 
         assert!(!compilation.diagnostics.is_empty());
         assert_eq!(compilation.diagnostics, ws.diags);
+    }
+
+    #[test]
+    fn compilation_cache_reuses_and_invalidates_elaboration() {
+        let mut ws = Workspace::from_source("q : query { a = int } = table \"public\" \"items\"\n");
+
+        let first = compile(&ws);
+        assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
+        let after_first = crate::elaborate::elaborate_runs();
+
+        let second = compile(&ws);
+        assert!(second.diagnostics.is_empty(), "{:?}", second.diagnostics);
+        assert_eq!(
+            crate::elaborate::elaborate_runs(),
+            after_first,
+            "unchanged compilation should reuse the cached result"
+        );
+
+        assert!(ws.set_source(
+            ws.root,
+            "q : query { a = int } = table \"public\" \"updated\"\n".into()
+        ));
+        let edited = compile(&ws);
+        assert!(edited.diagnostics.is_empty(), "{:?}", edited.diagnostics);
+        assert_eq!(
+            crate::elaborate::elaborate_runs(),
+            after_first + 1,
+            "an accepted edit should invalidate the cached compilation"
+        );
+    }
+
+    #[test]
+    fn changing_the_compilation_root_invalidates_the_cache() {
+        let root_path = std::path::PathBuf::from("/tmp/cagara-root-cache/root.cagara");
+        let lib_path = std::path::PathBuf::from("/tmp/cagara-root-cache/lib.cagara");
+        let root_src = "import \"lib.cagara\" as lib\nq = lib.value\n";
+        let lib_src = "value : query { a = int } = table \"public\" \"items\"\n";
+        let mut buffers = std::collections::HashMap::new();
+        buffers.insert(root_path.clone(), root_src.to_string());
+        buffers.insert(lib_path.clone(), lib_src.to_string());
+        let mut ws = Workspace::open_with_buffers(&root_path, root_src.to_string(), &buffers);
+
+        let first = compile(&ws);
+        assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
+        let after_first = crate::elaborate::elaborate_runs();
+
+        assert!(ws.set_root_path(&lib_path));
+        let second = compile(&ws);
+        assert!(second.diagnostics.is_empty(), "{:?}", second.diagnostics);
+        assert_eq!(
+            crate::elaborate::elaborate_runs(),
+            after_first + 1,
+            "changing roots must not reuse the previous root compilation"
+        );
     }
 }

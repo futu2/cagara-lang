@@ -34,6 +34,16 @@ use crate::rules;
 use crate::workspace::Binding;
 use cagara_syntax::ast::{self, ExprKind, Span};
 
+#[cfg(test)]
+thread_local! {
+    static ELABORATE_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn elaborate_runs() -> usize {
+    ELABORATE_RUNS.with(|runs| runs.get())
+}
+
 /// What every elaboration step needs: immutable compiler input, the module and
 /// definition being elaborated, the scope names resolve in, and local bindings.
 /// Keeping this context as one value prevents source access from bypassing the
@@ -123,6 +133,9 @@ pub(crate) fn is_not_a_query(e: &Error) -> bool {
 /// Returns one entry per definition, in source order, with the same
 /// one result per root definition, in source order.
 pub fn elaborate_module(input: CompilerInput<'_>, module: usize) -> Vec<(String, R<CheckedQuery>)> {
+    #[cfg(test)]
+    ELABORATE_RUNS.with(|runs| runs.set(runs.get() + 1));
+
     let mut out = Vec::new();
     for (i, d) in input.module(module).source().defs.iter().enumerate() {
         let result = validate_template_definition(module, d)

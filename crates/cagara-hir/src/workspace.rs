@@ -1,12 +1,14 @@
 //! Module loading: the embedded prelude, the root file, and its imports.
 //! Parsing goes through the salsa `parse_module` query.
 
+use crate::compile::Compilation;
 use crate::db::{Database, ModuleInput, SourceFile};
 use crate::lower::{parse_module, ParsedModule};
 use crate::primitive::Prim;
 use crate::resolve::{module_own, module_scope};
 use cagara_syntax::ast::{Import, Module, Span};
 use salsa::Setter;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -90,6 +92,9 @@ pub struct Workspace {
     /// Unsaved contents supplied by an editor. These take precedence over
     /// files on disk while imports are loaded.
     overlays: HashMap<PathBuf, String>,
+    /// Immutable compilation result for the current root and source graph.
+    /// Invalidated by the mutation methods below.
+    compile_cache: RefCell<Option<Compilation>>,
 }
 
 impl Workspace {
@@ -106,6 +111,7 @@ impl Workspace {
             by_path: HashMap::new(),
             stack: Vec::new(),
             overlays: HashMap::new(),
+            compile_cache: RefCell::new(None),
         };
         ws.add(PathBuf::from(PRELUDE_PATH), PRELUDE_SRC.to_string());
         ws
@@ -186,6 +192,9 @@ impl Workspace {
         let Some(&root) = self.by_path.get(&path) else {
             return false;
         };
+        if self.root != root {
+            self.invalidate_compile_cache();
+        }
         self.root = root;
         true
     }
@@ -262,6 +271,7 @@ impl Workspace {
         if imports(&parsed.module) != imports(&self.modules[m].module) {
             return false;
         }
+        self.invalidate_compile_cache();
         let file = *self.inputs[m].file(&self.db);
         // Set the file's text without going through a helper: this changes
         // what the queries parse but nothing else, so `Workspace` must update
@@ -282,6 +292,18 @@ impl Workspace {
         md.module = parsed.module;
         self.rebuild_diags();
         true
+    }
+
+    pub(crate) fn compilation_cache(&self) -> Option<Compilation> {
+        self.compile_cache.borrow().clone()
+    }
+
+    pub(crate) fn set_compilation_cache(&self, compilation: Compilation) {
+        *self.compile_cache.borrow_mut() = Some(compilation);
+    }
+
+    fn invalidate_compile_cache(&mut self) {
+        self.compile_cache.get_mut().take();
     }
 
     fn rebuild_diags(&mut self) {

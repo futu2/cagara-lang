@@ -2007,3 +2007,59 @@ fn a_mismatch_on_one_definition_is_not_swallowed_by_the_others() {
         "the unperturbed q_two must agree, so the comparison is live"
     );
 }
+
+/// Point-free composition: a definition whose body applies a lambda to
+/// *function* arguments.
+///
+/// `nextWeek = addDays 7 >>> truncWeek` desugars to
+/// `_>>>_ (addDays 7) truncWeek`, where `_>>>_` is `f => g => x => g (f x)`.
+/// Elaborating it needs `addDays 7` to be held as a partially applied function
+/// and applied later, which is why the elaborator's environment holds *values*
+/// rather than expressions.
+///
+/// This was the last construct the elaborator reported rather than handled, and
+/// the case that motivated replacing three parallel binding environments with
+/// one — none of them could express a function as a value.
+#[test]
+fn source_elaboration_agrees_on_composition() {
+    for (label, src) in [
+        (
+            "right_to_left_composition",
+            "ev : query { id = int, d = date } = table \"public\" \"ev\"\n\
+             nextWeek = addDays 7 >>> truncWeek\n\
+             q = ev & select { w = nextWeek .d }\n",
+        ),
+        (
+            "left_to_right_composition",
+            "ev : query { id = int, d = date } = table \"public\" \"ev\"\n\
+             nextWeek = truncWeek <<< addDays 7\n\
+             q = ev & select { w = nextWeek .d }\n",
+        ),
+        (
+            "three_stage_composition",
+            "ev : query { id = int, d = date } = table \"public\" \"ev\"\n\
+             f = addDays 1 >>> addDays 2 >>> truncWeek\n\
+             q = ev & select { w = f .d }\n",
+        ),
+        (
+            // The operator spelling is not what makes this work: the same
+            // composition written as a direct application of the prelude.s
+            // `_>>>_` must elaborate identically. If the elaborator recognised
+            // `>>>` by name, this case would drift from the one above.
+            "composition_by_direct_application",
+            "ev : query { id = int, d = date } = table \"public\" \"ev\"\n\
+             nextWeek = _>>>_ (addDays 7) truncWeek\n\
+             q = ev & select { w = nextWeek .d }\n",
+        ),
+        (
+            "composed_function_used_twice",
+            "ev : query { id = int, d = date } = table \"public\" \"ev\"\n\
+             nextWeek = addDays 7 >>> truncWeek\n\
+             q = ev & select { a = nextWeek .d, b = nextWeek (.d & left 4) }\n",
+        ),
+    ] {
+        let ws = Workspace::from_source(src);
+        assert!(ws.diags.is_empty(), "{label}: {:?}", ws.diags);
+        assert_source_elaboration_agrees(label, &ws);
+    }
+}

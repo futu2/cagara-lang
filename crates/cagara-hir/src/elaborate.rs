@@ -60,20 +60,21 @@ pub(crate) struct Ctx<'a> {
     pub scope: &'a std::collections::HashMap<String, Binding>,
     /// Parameters bound by an enclosing application, innermost last.
     ///
-    /// This is the elaborator's counterpart of the evaluator's `Env`: when a
-    /// lambda is applied, its parameter is bound to the *already elaborated*
-    /// argument, and a name that resolves here shadows the module scope
-    /// (`eval.rs:173` does the same with `Value`s). It is what lets
-    /// `f : expr r int -> expr r int = x => k x (1 + 2)` be elaborated by
+    /// This is the elaborator's counterpart of the evaluator's `Env`
+    /// (`eval.rs:173`): when a lambda is applied its parameter is bound to the
+    /// already elaborated argument, and a name resolving here shadows the
+    /// module scope. It is what lets `f = x => k x (1 + 2)` be elaborated by
     /// substituting into the body rather than by re-deriving anything.
+    /// This one environment replaced three parallel maps — expressions, queries,
+    /// and stages — which between them still could not express a *partially
+    /// applied function*, and so could not elaborate
+    /// `nextWeek = addDays 7 >>> truncWeek`. The evaluator keeps a single `Env`
+    /// of `Value`s for exactly this reason (`eval.rs:173`); here a value may be
+    /// a query, an expression, a callable, or a stage — see [`CheckedValue`].
     ///
-    /// A `Vec` of pairs rather than a map because a name may be shadowed by a
-    /// nearer binding, and the innermost must win — which a plain map would
-    /// lose.
-    pub env: &'a [(String, CheckedExpr)],
-    /// Query-valued bindings, the counterpart of `env` for parameters applied
-    /// to a query. Kept separate because the two hold different types.
-    pub qenv: &'a [(String, CheckedQuery)],
+    /// A `Vec` of pairs rather than a map, because a name may be shadowed by a
+    /// nearer binding and the innermost must win, which a plain map would lose.
+    pub env: &'a [(String, CheckedValue)],
     /// The overload candidates chosen for the definition currently being
     /// elaborated, indexed by hole.
     ///
@@ -89,18 +90,6 @@ pub(crate) struct Ctx<'a> {
     /// elaborated once per hole assignment, and this is where that assignment
     /// travels.
     pub holes: &'a [(usize, usize)],
-    /// Parameters bound to a *stage* rather than to a query or an expression.
-    ///
-    /// `h = p => users & select { id = .id } & p` takes a stage as its
-    /// parameter — `a = h (select { z = .id })` passes one — so `& p` is a stage
-    /// application whose operator is a variable. The evaluator handles this
-    /// because `select {..}` with one of its two arguments supplied is a
-    /// partially applied primitive awaiting the query (`eval.rs:288`), and it is
-    /// applied the same way any other stage would be.
-    ///
-    /// A stage binding is stored as the *stage form it was written as*, so
-    /// applying it re-runs the ordinary stage dispatch on that form.
-    pub senv: &'a [(String, CheckedStage)],
     /// The definitions currently being expanded, outermost first.
     ///
     /// Descending into a definition's body means elaborating it, and a
@@ -172,14 +161,11 @@ fn elaborate_def(
     let origin = Origin::new(module, d.span);
     let scope = &ws.modules[module].scope;
     let active = [(module, def)];
-    let env: [(String, CheckedExpr); 0] = [];
-    let qenv: [(String, CheckedQuery); 0] = [];
+    let env: [(String, CheckedValue); 0] = [];
     // A definition elaborated on its own has no assignment for its open
     // overloads: those are chosen per use, and a definition with holes is
     // skipped by `elaborate_module` anyway. See `Ctx::holes`.
     let holes: [(usize, usize); 0] = [];
-    // A definition elaborated on its own takes no stage arguments either.
-    let senv: [(String, CheckedStage); 0] = [];
     let cx = Ctx {
         ws,
         tc,
@@ -187,9 +173,7 @@ fn elaborate_def(
         owner: def,
         scope,
         env: &env,
-        qenv: &qenv,
         holes: &holes,
-        senv: &senv,
         active: &active,
     };
     let value = elaborate_query(cx, &d.body, origin)?;
@@ -319,11 +303,21 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
     let at = |span: Span| Origin::new(cx.module, span);
     let _ = origin;
     // A name bound by an enclosing application to a *query* argument: the `q`
-    // of `f = q => users & leftJoin q (..)`. Query bindings live here rather
-    // than in `env`, because a `CheckedExpr` cannot hold a query.
+    // of `f = q => users & leftJoin q (..)`. Now that the environment holds
+    // values rather than expressions this is the same lookup an expression
+    // binding uses — the value simply turns out to be a query.
     if let ExprKind::Name(n) = &e.kind {
-        if let Some((_, v)) = cx.qenv.iter().rev().find(|(k, _)| k == n) {
-            return Ok(v.clone());
+        if let Some((_, CheckedValue::Query(q))) = cx.env.iter().rev().find(|(k, _)| k == n) {
+            return Ok(q.clone());
+        }
+        // A *stage* binding: `& p` where `p` was passed `select { z = .id }`.
+        // Handled by the caller, which knows the piped input; reaching here
+        // means a stage is being used where a query is wanted.
+        if let Some((_, CheckedValue::Stage(_))) = cx.env.iter().rev().find(|(k, _)| k == n) {
+            return Err(Error::new(format!(
+                "`{n}` is a stage; apply it to a query with `&` rather than using it as one"
+            ))
+            .at(at(e.span)));
         }
     }
     match &e.kind {
@@ -344,9 +338,7 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                         scope: &cx.ws.modules[*dm].scope,
                         active: &active,
                         holes: cx.holes,
-                        senv: cx.senv,
                         env: cx.env,
-                        qenv: cx.qenv,
                     };
                     elaborate_query(inner, body, inner_origin)
                 }
@@ -363,9 +355,7 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                         scope: &cx.ws.modules[*dm].scope,
                         active: &active,
                         holes: cx.holes,
-                        senv: cx.senv,
                         env: cx.env,
-                        qenv: cx.qenv,
                     };
                     elaborate_query(inner, body, inner_origin)
                 }
@@ -409,9 +399,7 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                 scope: &inner_scope,
                 active: &active,
                 holes: cx.holes,
-                senv: cx.senv,
                 env: cx.env,
-                qenv: cx.qenv,
             };
             elaborate_query(inner, &body, at(e.span))
         }
@@ -479,50 +467,19 @@ fn elaborate_application(
                     // reference cannot be a query, and a bare name that *is* a
                     // query would elaborate either way, so the query reading is
                     // the more specific one and must win.
-                    let mut qbound: Vec<(String, CheckedQuery)> = Vec::new();
-                    let mut ebound: Vec<(String, CheckedExpr)> = Vec::new();
-                    let mut sbound: Vec<(String, CheckedStage)> = Vec::new();
+                    // Bind each parameter to whatever its argument *is*. One
+                    // loop, one environment, because a value may be a query, an
+                    // expression, a callable, or a stage — which is precisely
+                    // what three parallel environments could not express, and
+                    // why a partially applied function had no home.
+                    let mut bound: Vec<(String, CheckedValue)> = Vec::with_capacity(args.len());
                     for (p, a) in params.iter().zip(args) {
-                        // A stage argument: `h (select { z = .id })` passes a
-                        // stage, which is an application of a stage operator to
-                        // its own operand. Recognised before the query reading
-                        // because `select {..}` is *not* a query — it is a
-                        // function from a query — so the query reading would fail
-                        // on it, and could otherwise succeed for a stage spelled
-                        // like a query name.
-                        //
-                        // It must be **partially** applied to count. `select {..}`
-                        // supplies one of its two arguments, with the query still
-                        // to come; `union users users` supplies both and is a
-                        // complete call whose result is a query. Treating the
-                        // latter as a stage made `q = union users users` reach the
-                        // `__union` primitive and fail.
-                        if let ExprKind::App(sf, sargs) = &a.kind {
-                            if let ExprKind::Name(op) = &sf.kind {
-                                if is_stage_form(op) && stage_wants_more(cx, op, sargs.len()) {
-                                    sbound.push((
-                                        p.clone(),
-                                        CheckedStage::Applied(op.clone(), sargs.to_vec()),
-                                    ));
-                                    continue;
-                                }
-                            }
-                        }
-                        // The query reading runs in the *caller's* context, so a
-                        // failure here is expected for a scalar argument.
-                        match elaborate_query(cx, a, at(a.span)) {
-                            Ok(q) => qbound.push((p.clone(), q)),
-                            Err(_) => ebound.push((p.clone(), elaborate_expr_inner(cx, a)?)),
-                        }
+                        bound.push((p.clone(), elaborate_value(cx, a)?));
                     }
                     let inner_scope = cx.ws.modules[dm].scope.clone();
                     let active = enter(&cx, dm, di)?;
-                    let mut qenv: Vec<(String, CheckedQuery)> = cx.qenv.to_vec();
-                    qenv.extend(qbound);
-                    let mut env: Vec<(String, CheckedExpr)> = cx.env.to_vec();
-                    env.extend(ebound);
-                    let mut senv: Vec<(String, CheckedStage)> = cx.senv.to_vec();
-                    senv.extend(sbound);
+                    let mut env: Vec<(String, CheckedValue)> = cx.env.to_vec();
+                    env.extend(bound);
                     // The callee's open overloads are resolved by this use
                     // site, exactly as in the expression path. Setting
                     // `cx.holes` here instead was the bug that kept these
@@ -536,10 +493,8 @@ fn elaborate_application(
                         owner: di,
                         scope: &inner_scope,
                         env: &env,
-                        qenv: &qenv,
                         active: &active,
                         holes: &holes,
-                        senv: &senv,
                     };
                     return elaborate_query(callee, inner, at(e.span));
                 }
@@ -627,10 +582,9 @@ fn elaborate_application(
         // was written in, so applying it re-runs the ordinary dispatch on that
         // form — which is what the evaluator does when it applies the partially
         // applied primitive that the argument evaluated to.
-        if let Some((_, CheckedStage::Applied(op, st_args))) =
-            cx.senv.iter().rev().find(|(k, _)| k == stage_name)
-        {
-            return apply_stage(cx, op, st_args, input, at(input_e.span));
+        if let Some((_, CheckedValue::Stage(s))) = cx.env.iter().rev().find(|(k, _)| k == stage_name) {
+            let s = s.clone();
+            return apply_stage(cx, &s.op, &s.arg, input, at(input_e.span));
         }
         return apply_stage(cx, stage_name, stage_args, input, at(input_e.span));
     }
@@ -956,9 +910,7 @@ fn elaborate_user_stage(
         scope: &inner_scope,
         active: &active,
         holes: cx.holes,
-        senv: cx.senv,
         env: cx.env,
-        qenv: cx.qenv,
     };
     // A stage name applied to no further argument: the body already *is* the
     // function, so the input is its only argument. `no_id = omit "id"` reaches
@@ -1052,10 +1004,8 @@ pub fn elaborate_expr(
     let active: [(usize, usize); 0] = [];
     // No enclosing lambda either, so the environment starts empty; this is the
     // caller-facing entry point and keeps the signature it has always had.
-    let env: [(String, CheckedExpr); 0] = [];
-    let qenv: [(String, CheckedQuery); 0] = [];
+    let env: [(String, CheckedValue); 0] = [];
     let holes: [(usize, usize); 0] = [];
-    let senv: [(String, CheckedStage); 0] = [];
     elaborate_expr_inner(
         Ctx {
             ws,
@@ -1064,9 +1014,7 @@ pub fn elaborate_expr(
             owner,
             scope,
             env: &env,
-            qenv: &qenv,
             holes: &holes,
-            senv: &senv,
             active: &active,
         },
         e,
@@ -1118,7 +1066,22 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
                 .rev()
                 .find(|(k, _)| k == n)
                 .expect("checked just above");
-            Ok(v.clone())
+            match v {
+                // The binding is an expression: it *is* the value.
+                CheckedValue::Expr(e) => Ok(e.clone()),
+                // The binding is a callable used without arguments. That is
+                // legal only when it is not what this position wants; report
+                // rather than emit a partially applied function as an
+                // expression, which would be a fabricated `CheckedExpr`.
+                CheckedValue::Callable(_) => Err(Error::new(format!(
+                    "`{n}` is a function here; apply it to its argument(s)"
+                ))
+                .at(origin)),
+                CheckedValue::Query(_) | CheckedValue::Stage(_) => Err(Error::new(format!(
+                    "`{n}` is not a scalar expression in this position"
+                ))
+                .at(origin)),
+            }
         }
         // A bare name is a *nullary* definition: `count` is
         // `agg (expr r int) = sql "COUNT(*)"`, with no arguments, so it
@@ -1158,10 +1121,8 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
                         owner: di,
                         scope: &inner_scope,
                         env: cx.env,
-                        qenv: cx.qenv,
                         active: &active,
                         holes: cx.holes,
-                        senv: cx.senv,
                     };
                     elaborate_expr_inner(inner, &body)
                 }
@@ -1194,6 +1155,31 @@ fn elaborate_call(
         );
     };
 
+    // A name bound by an enclosing application is applied through the value it
+    // holds, before any definition of the same name is considered. This is what
+    // makes `g (f x)` inside `_>>>_`'s body work: `g` and `f` are not definitions
+    // there, they are the composition's parameters.
+    if let Some((_, v)) = cx.env.iter().rev().find(|(k, _)| k == name).cloned() {
+        let mut value = v;
+        for a in args {
+            let arg = elaborate_value(cx, a)?;
+            value = match apply_value(cx, value, arg, origin)? {
+                Applied::Done(v) | Applied::Partial(v) => v,
+            };
+        }
+        return match value {
+            CheckedValue::Expr(e) => Ok(e),
+            CheckedValue::Callable(_) => Err(Error::new(format!(
+                "`{name}` is applied to too few arguments"
+            ))
+            .at(origin)),
+            CheckedValue::Query(_) | CheckedValue::Stage(_) => Err(Error::new(format!(
+                "`{name}` does not denote an expression"
+            ))
+            .at(origin)),
+        };
+    }
+
     // A `sql "..."` template definition: its body is the template and its
     // argument count comes from its signature.
     let binding = cx.scope.get(name).cloned();
@@ -1224,6 +1210,53 @@ fn elaborate_call(
     // user's.
     if matches!(body.kind, ExprKind::Lambda(..)) {
         return elaborate_lambda(cx, (dm, di), name, body, args, f.id, origin);
+    }
+    // A body that is an **application**: `nextWeek = addDays 7 >>> truncWeek`,
+    // which desugars to `_>>>_ (addDays 7) truncWeek`.
+    //
+    // The body is elaborated into a value — here a callable, because `_>>>_` is
+    // a lambda and `addDays 7` is a partially applied template — and this call's
+    // arguments are then applied to it through the same `apply_value` every
+    // other application uses. That is what the evaluator does: it evaluates the
+    // body to a closure and applies the argument to that.
+    //
+    // No case for `>>>` or `<<<` appears here and none is needed: nothing in
+    // this path looks at the operator's name, so a user's own composition
+    // operator goes through it unchanged.
+    if matches!(body.kind, ExprKind::App(..)) {
+        let body = body.clone();
+        let inner_scope = cx.ws.modules[dm].scope.clone();
+        let active = enter(&cx, dm, di)?;
+        let holes = holes_at(cx, dm, di, f.id)?;
+        let callee = Ctx {
+            ws: cx.ws,
+            tc: cx.tc,
+            module: dm,
+            owner: di,
+            scope: &inner_scope,
+            env: cx.env,
+            holes: &holes,
+            active: &active,
+        };
+        let mut value = elaborate_value(callee, &body)?;
+        for a in args {
+            let arg = elaborate_value(cx, a)?;
+            value = match apply_value(cx, value, arg, origin)? {
+                Applied::Done(v) | Applied::Partial(v) => v,
+            };
+        }
+        return match value {
+            CheckedValue::Expr(e) => Ok(e),
+            CheckedValue::Callable(_) => Err(Error::new(format!(
+                "`{name}` is applied to too few arguments; a partially applied function is not \
+                 an expression"
+            ))
+            .at(origin)),
+            CheckedValue::Query(_) | CheckedValue::Stage(_) => Err(Error::new(format!(
+                "`{name}` does not denote an expression"
+            ))
+            .at(origin)),
+        };
     }
     let ExprKind::Sql(sql) = &body.kind else {
         return Err(Error::new(format!(
@@ -1304,22 +1337,88 @@ fn elaborate_call(
     }
 }
 
-/// A stage passed as an argument, kept in the form it was written.
+/// What a name bound by an enclosing application stands for.
 ///
-/// `a = h (select { z = .id })` passes `select { z = .id }` — an application of
-/// the `select` operator to its field record, with the query still to come. The
-/// evaluator represents that as a partially applied primitive; here it is kept
-/// as the operator name plus its already-elaborated operand, so applying it
-/// later goes through the same [`apply_stage`] dispatch as any other stage.
+/// This is the elaborator's counterpart of the evaluator's `Value`
+/// (`value.rs:137`), and it exists for the same reason: a function can be
+/// partially applied, so the *result of evaluating an expression* is not always
+/// an expression. `nextWeek = addDays 7 >>> truncWeek` evaluates `addDays 7` to
+/// a function that is then passed as an argument, and the earlier design — one
+/// environment per kind of thing (query, expression, stage) — could not hold
+/// that. That is why it needed special cases and still could not express it.
+///
+/// The difference from `Value` is what each variant carries: the evaluator
+/// keeps core terms, while this keeps source plus what is already known,
+/// because these must be able to sit unapplied until a row exists.
 #[derive(Debug, Clone)]
-pub(crate) enum CheckedStage {
-    /// `select {..}`, `where p`, …: the operator and its own argument.
+pub(crate) enum CheckedValue {
+    /// A query. The stage constructs produce these.
+    Query(CheckedQuery),
+    /// A scalar/aggregate/window expression.
+    Expr(CheckedExpr),
+    /// A callable, awaiting arguments.
     ///
-    /// The argument is kept as source because a stage's own argument is
-    /// elaborated against the *input* row, which is not known until the stage
-    /// is applied; elaborating it early would need a row that does not exist
-    /// yet. That is why this holds `ast::Expr` rather than a `CheckedExpr`.
-    Applied(String, Vec<ast::Expr>),
+    /// One variant for everything callable, because that is how the evaluator
+    /// applies them: `eval::apply` (`eval.rs:265`) pushes the argument and
+    /// either completes the value or stays deferred, whether the callee was a
+    /// closure, a template, or a primitive. Splitting them would reintroduce the
+    /// special-casing this type exists to remove.
+    Callable(Box<Callable>),
+    /// A *stage*: a function from a query to a query, written as an operator
+    /// applied to its own argument.
+    ///
+    /// `a = h (select { z = .id })` passes one and `& p` applies it.
+    Stage(Box<CheckedStage>),
+}
+
+/// A callable value: enough to apply it, and to know when it is complete.
+#[derive(Debug, Clone)]
+pub(crate) enum Callable {
+    /// A `sql` template and the arguments supplied so far.
+    Template {
+        sql: String,
+        /// Expression arguments the whole call takes, so the value is complete
+        /// when `args.len() == arity`.
+        arity: usize,
+        args: Vec<CheckedExpr>,
+        ty: ScalarType,
+        kind: DeclaredKind,
+    },
+    /// A user-written function: a lambda body plus the binders still unbound.
+    ///
+    /// The body is held as source so applying it re-runs `elaborate_lambda`'s
+    /// binding logic, which is what keeps closures, shadowing and the hole
+    /// assignment behaving exactly as they do on a direct call.
+    Closure {
+        /// Where the body lives: the module and definition it belongs to.
+        def: (usize, usize),
+        /// Binders not yet supplied, outermost first.
+        params: Vec<String>,
+        /// The body under those binders.
+        body: ast::Expr,
+        /// The name it was reached by, for diagnostics.
+        name: String,
+        /// The `ExprId` of the application that produced this value: the use
+        /// site the checker keyed this instance's overloads by.
+        site: u32,
+        /// The bindings this closure captured, innermost last.
+        ///
+        /// The counterpart of `Closure::env` (`eval.rs:235`): a partially
+        /// applied function must carry the arguments already bound to it, or the
+        /// next application would not see them — a curried `k = x => y => x`
+        /// applied one argument at a time would lose `x`.
+        env: Vec<(String, CheckedValue)>,
+    },
+}
+
+/// A stage passed as an argument, kept in the form it was written.
+#[derive(Debug, Clone)]
+pub(crate) struct CheckedStage {
+    /// The stage operator: `_&=_`, `select`, `_&?_`, …
+    pub op: String,
+    /// The stage's own argument, as written. Elaborated against the input row
+    /// when the stage is applied.
+    pub arg: Vec<ast::Expr>,
 }
 
 /// How a `sql` template's result is *declared* to behave, read from its type
@@ -1327,13 +1426,33 @@ pub(crate) enum CheckedStage {
 ///
 /// Deliberately not the resolved scheme — see the comment at the use site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeclaredKind {
+pub(crate) enum DeclaredKind {
     Scalar,
     Agg,
     Win,
 }
 
 /// The declared result kind of a `sql` template definition.
+/// How many expression arguments a `sql` template definition takes.
+///
+/// Counted from its signature the way `eval::shape` counts it (`eval.rs:367`),
+/// minus one for a window template, whose first argument is its spec rather than
+/// an expression.
+fn template_arity(cx: Ctx<'_>, dm: usize, di: usize) -> usize {
+    let d = &cx.ws.modules[dm].module.defs[di];
+    let mut n: usize = 0;
+    let mut t = d.ty.as_ref();
+    while let Some(ast::TypeExpr::Fun(_, r)) = t {
+        n += 1;
+        t = Some(r);
+    }
+    if declared_kind(d) == DeclaredKind::Win {
+        n.saturating_sub(1)
+    } else {
+        n
+    }
+}
+
 fn declared_kind(d: &ast::Def) -> DeclaredKind {
     let Some(mut t) = d.ty.as_ref() else {
         return DeclaredKind::Scalar;
@@ -1466,11 +1585,11 @@ fn elaborate_lambda(
 
     // Elaborate the arguments in the *caller's* context — they are expressions
     // the caller wrote, so they resolve against the caller's environment, not
-    // the callee's.
-    let mut bound: Vec<(String, CheckedExpr)> = Vec::with_capacity(args.len());
+    // the callee's. Each becomes whatever it denotes, so a parameter can be
+    // bound to a query, an expression, a callable, or a stage.
+    let mut bound: Vec<(String, CheckedValue)> = Vec::with_capacity(args.len());
     for (p, a) in params.iter().zip(args) {
-        let v = elaborate_expr_inner(cx, a)?;
-        bound.push((p.clone(), v));
+        bound.push((p.clone(), elaborate_value(cx, a)?));
     }
 
     let scope = cx.ws.modules[dm].scope.clone();
@@ -1478,7 +1597,7 @@ fn elaborate_lambda(
     // The callee's environment is the caller's bindings plus the new ones.
     // Keeping the caller's is what makes a nested lambda see what the outer
     // application bound, as `Closure::env` does in the evaluator.
-    let mut env: Vec<(String, CheckedExpr)> = cx.env.to_vec();
+    let mut env: Vec<(String, CheckedValue)> = cx.env.to_vec();
     let base = env.len();
     env.extend(bound);
     // The callee's own open overloads are resolved by *this* use site, which is
@@ -1494,10 +1613,8 @@ fn elaborate_lambda(
         owner: di,
         scope: &scope,
         env: &env,
-        qenv: cx.qenv,
         active: &active,
         holes: &holes,
-        senv: cx.senv,
     };
 
     // No arguments left over: the body itself is the result. This is the
@@ -1516,6 +1633,278 @@ fn elaborate_lambda(
         params.len() - args.len()
     ))
     .at(origin))
+}
+
+// ── elaborating an argument into a value ────────────────────────────────────
+
+/// Elaborate an expression in *argument* position into whatever it denotes.
+///
+/// This is the piece the earlier design was missing. It replaces a sequence of
+/// "try it as a stage, then as a query, then as an expression" guesses with a
+/// single reading driven by the **shape of the expression**, which is what the
+/// evaluator effectively does: `eval` returns a `Value`, and only the caller's
+/// context decides how it is used.
+///
+/// Order matters where two readings could both succeed:
+///
+/// * a **stage operator applied to fewer arguments than it takes** is a stage —
+///   `select {..}` supplies one of two, with the query still to come. A stage
+///   operator applied to *all* its arguments (`unionAll users users`) is a
+///   finished call and must be read as a query instead;
+/// * a **partially applied template or lambda** is a callable, checked before
+///   the query reading, because such a thing is not a query;
+/// * otherwise a query, then an expression.
+///
+/// A function that is already a value in the environment is returned as-is.
+fn elaborate_value(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedValue> {
+    let at = |span: Span| Origin::new(cx.module, span);
+
+    // A name, or a bare call, may already be bound to a value.
+    if let ExprKind::Name(n) = &e.kind {
+        if let Some((_, v)) = cx.env.iter().rev().find(|(k, _)| k == n) {
+            let v = v.clone();
+            // A bound expression or query is the value; a bound *callable* is
+            // applied to nothing here, so it is passed along unchanged — that
+            // is how `f` in `h f` forwards a function.
+            return Ok(v);
+        }
+    }
+
+    // A stage: an operator of the pipeline's level supplied with fewer
+    // arguments than it takes.
+    if let ExprKind::App(sf, sargs) = &e.kind {
+        if let ExprKind::Name(op) = &sf.kind {
+            if is_stage_form(op) && stage_wants_more(cx, op, sargs.len()) {
+                return Ok(CheckedValue::Stage(Box::new(CheckedStage {
+                    op: op.clone(),
+                    arg: sargs.to_vec(),
+                })));
+            }
+        }
+    }
+
+    // A callable: a partially applied template or a lambda with binders left.
+    if let Some(c) = elaborate_callable(cx, e)? {
+        return Ok(CheckedValue::Callable(Box::new(c)));
+    }
+
+    // A query, when the expression denotes one.
+    if let Ok(q) = elaborate_query(cx, e, at(e.span)) {
+        return Ok(CheckedValue::Query(q));
+    }
+
+    // Otherwise an expression.
+    Ok(CheckedValue::Expr(elaborate_expr_inner(cx, e)?))
+}
+
+/// Elaborate an expression that denotes a *function* into a callable, if it is
+/// one. `Ok(None)` when it is not, so the caller can try other readings.
+fn elaborate_callable(cx: Ctx<'_>, e: &ast::Expr) -> R<Option<Callable>> {
+    let (f, args): (&ast::Expr, &[ast::Expr]) = match &e.kind {
+        ExprKind::App(f, args) => (f, args),
+        ExprKind::Name(_) => (e, &[]),
+        _ => return Ok(None),
+    };
+    let ExprKind::Name(name) = &f.kind else {
+        return Ok(None);
+    };
+    let Some(binding) = cx.scope.get(name).cloned() else {
+        return Ok(None);
+    };
+    let (dm, di) = match binding {
+        Binding::Def(dm, di) => (dm, di),
+        Binding::Overloads(dm, is) => {
+            match choose(cx.tc, cx.module, cx.owner, f.id, &is, cx.holes) {
+                Ok(di) => (dm, di),
+                Err(_) => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+    let body = cx.ws.modules[dm].module.defs[di].body.clone();
+    match &body.kind {
+        // A `sql` template still short of arguments.
+        ExprKind::Sql(sql) => {
+            let arity = template_arity(cx, dm, di);
+            if args.len() >= arity {
+                return Ok(None);
+            }
+            let Some((_, ty)) = cx.tc.result_expr(dm, di) else {
+                return Ok(None);
+            };
+            Ok(Some(Callable::Template {
+                sql: sql.clone(),
+                arity,
+                args: elaborate_exprs(cx, args)?,
+                ty,
+                kind: declared_kind(&cx.ws.modules[dm].module.defs[di]),
+            }))
+        }
+        // A lambda with binders left over.
+        ExprKind::Lambda(..) => {
+            let (mut params, mut inner) = (Vec::new(), &body);
+            while let ExprKind::Lambda(p, b) = &inner.kind {
+                params.push(p.clone());
+                inner = b;
+            }
+            if args.len() >= params.len() {
+                return Ok(None);
+            }
+            // The supplied arguments are bound immediately; the rest wait.
+            let mut env: Vec<(String, CheckedValue)> = Vec::new();
+            for (p, a) in params.iter().zip(args) {
+                env.push((p.clone(), elaborate_value(cx, a)?));
+            }
+            let supplied = args.len();
+            params.drain(..supplied);
+            let body = inner.clone();
+            Ok(Some(Callable::Closure {
+                def: (dm, di),
+                params,
+                body,
+                name: name.clone(),
+                site: f.id,
+                env,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+
+
+// ── applying a value to an argument ─────────────────────────────────────────
+
+/// The outcome of applying a value to one argument.
+///
+/// Mirrors the evaluator's `apply` (`eval.rs:265`), which returns a completed or
+/// a partially applied value from the same call. Making that explicit is what
+/// lets a caller stop guessing whether it holds a function or a result — the
+/// earlier design tried to answer that by *which environment* a name lived in,
+/// which is exactly why it could not represent a partially applied function.
+enum Applied {
+    /// The call completed; this is its value.
+    Done(CheckedValue),
+    /// Still a function, with this argument recorded.
+    Partial(CheckedValue),
+}
+
+/// Apply one argument to a value, completing it or staying deferred.
+fn apply_value(cx: Ctx<'_>, f: CheckedValue, arg: CheckedValue, origin: Origin) -> R<Applied> {
+    let CheckedValue::Callable(c) = f else {
+        return Err(Error::new("cannot apply this to an argument").at(origin));
+    };
+    match *c {
+        Callable::Template {
+            sql,
+            arity,
+            mut args,
+            ty,
+            kind,
+        } => {
+            // A template's operands are expressions; a query cannot be one.
+            let CheckedValue::Expr(e) = arg else {
+                return Err(Error::new(format!(
+                    "`{sql}` takes an expression, but a query was supplied"
+                ))
+                .at(origin));
+            };
+            args.push(e);
+            if args.len() < arity {
+                return Ok(Applied::Partial(CheckedValue::Callable(Box::new(
+                    Callable::Template {
+                        sql,
+                        arity,
+                        args,
+                        ty,
+                        kind,
+                    },
+                ))));
+            }
+            // Complete. The constructor follows the declared kind, the same
+            // choice a direct call makes, so a composed call and a written-out
+            // one cannot differ.
+            let built = complete_template(cx, kind, sql, args, ty, origin)?;
+            Ok(Applied::Done(CheckedValue::Expr(built)))
+        }
+        Callable::Closure {
+            def,
+            mut params,
+            body,
+            name,
+            site,
+            env: captured,
+        } => {
+            let Some(param) = params.first().cloned() else {
+                return Err(Error::new(format!("`{name}` takes no more arguments")).at(origin));
+            };
+            params.remove(0);
+            // The captured bindings come first so a nested closure still sees
+            // what an outer application bound, as `Closure::env` does.
+            let mut env = captured;
+            env.push((param, arg));
+            if params.is_empty() {
+                let (dm, di) = def;
+                let scope = cx.ws.modules[dm].scope.clone();
+                let holes = holes_at(cx, dm, di, site)?;
+                let mut active = cx.active.to_vec();
+                if !active.contains(&(dm, di)) {
+                    active.push((dm, di));
+                }
+                let callee = Ctx {
+                    ws: cx.ws,
+                    tc: cx.tc,
+                    module: dm,
+                    owner: di,
+                    scope: &scope,
+                    env: &env,
+                    holes: &holes,
+                    active: &active,
+                };
+                let v = elaborate_expr_inner(callee, &body)?;
+                return Ok(Applied::Done(CheckedValue::Expr(v)));
+            }
+            Ok(Applied::Partial(CheckedValue::Callable(Box::new(
+                Callable::Closure {
+                    def,
+                    params,
+                    body,
+                    name,
+                    site,
+                    env,
+                },
+            ))))
+        }
+    }
+}
+
+/// Build a completed template call from its collected arguments.
+fn complete_template(
+    cx: Ctx<'_>,
+    kind: DeclaredKind,
+    sql: String,
+    args: Vec<CheckedExpr>,
+    ty: ScalarType,
+    origin: Origin,
+) -> R<CheckedExpr> {
+    match kind {
+        // A scalar template folds its arguments' phases (`rules::mix`), which
+        // is what makes `inc count` an aggregate; an aggregate template takes
+        // row-phase arguments only. Both go through `template`/`agg_template`,
+        // and those are the same constructors a direct call uses.
+        DeclaredKind::Scalar | DeclaredKind::Agg => CheckedExpr::template(sql, args, ty, origin),
+        DeclaredKind::Win => {
+            // A window template's first argument is its spec, which was
+            // elaborated as a `WinSpecChecked`, not an expression. A composed
+            // window call would need the spec carried in the value; reported
+            // rather than guessed.
+            let _ = cx;
+            Err(Error::new(
+                "a composed window function is not elaborated; call it directly instead",
+            )
+            .at(origin))
+        }
+    }
 }
 
 /// Elaborate a list of argument expressions.
@@ -1547,9 +1936,7 @@ fn elaborate_winspec(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::checked::WinSpecChe
                 scope: &inner_scope,
                 active: &active,
                 holes: cx.holes,
-                senv: cx.senv,
                 env: cx.env,
-                qenv: cx.qenv,
             };
             return elaborate_winspec(inner, &body);
         }
@@ -1617,9 +2004,7 @@ fn elaborate_frame(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::ir::Frame> {
                 scope: &inner_scope,
                 active: &active,
                 holes: cx.holes,
-                senv: cx.senv,
                 env: cx.env,
-                qenv: cx.qenv,
             };
             return elaborate_frame(inner, &body);
         }

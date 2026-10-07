@@ -4,7 +4,78 @@ use crate::check::TypeCheck;
 use crate::core::{Error, Fault, Origin};
 use crate::elaborate::{elaborate_module, is_not_a_query};
 use crate::ir::Rel;
-use crate::workspace::{Diag, Workspace};
+use crate::workspace::{Binding, Diag, LoadedModule, Workspace};
+use cagara_syntax::ast::Module;
+use std::collections::HashMap;
+use std::path::Path;
+
+/// Immutable compiler input borrowed from an existing workspace.
+///
+/// The workspace remains the owner of Salsa storage, overlays, and cache
+/// identity. This view only bundles the cached source graph and its type-check
+/// result for the source-elaboration and erasure boundary.
+#[derive(Clone, Copy)]
+pub struct CompilerInput<'a> {
+    workspace: &'a Workspace,
+    type_check: &'a TypeCheck,
+}
+
+impl<'a> CompilerInput<'a> {
+    pub fn new(workspace: &'a Workspace, type_check: &'a TypeCheck) -> Self {
+        Self {
+            workspace,
+            type_check,
+        }
+    }
+
+    pub fn type_check(&self) -> &'a TypeCheck {
+        self.type_check
+    }
+
+    pub fn root(&self) -> ModuleSnapshot<'a> {
+        ModuleSnapshot {
+            workspace: self.workspace,
+            module: self.workspace.root,
+        }
+    }
+}
+
+/// Read-only view of one loaded module in a [`CompilerInput`].
+#[derive(Clone, Copy)]
+pub struct ModuleSnapshot<'a> {
+    workspace: &'a Workspace,
+    module: usize,
+}
+
+impl<'a> ModuleSnapshot<'a> {
+    pub fn index(&self) -> usize {
+        self.module
+    }
+
+    pub fn path(&self) -> &'a Path {
+        &self.loaded().path
+    }
+
+    pub fn text(&self) -> &'a str {
+        &self.loaded().text
+    }
+
+    pub fn source(&self) -> &'a Module {
+        &self.loaded().module
+    }
+
+    pub fn scope(&self) -> &'a HashMap<String, Binding> {
+        &self.loaded().scope
+    }
+
+    pub fn own(&self) -> &'a HashMap<String, Binding> {
+        &self.loaded().own
+    }
+
+    fn loaded(&self) -> &'a LoadedModule {
+        &self.workspace.modules[self.module]
+    }
+}
 
 /// Stable identity for a definition inside a loaded workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -37,11 +108,19 @@ impl Compilation {
 /// Check and compile every query in the root module.
 pub fn compile(ws: &Workspace) -> Compilation {
     let tc = crate::check::check(ws);
-    compile_checked(ws, &tc)
+    compile_input(CompilerInput::new(ws, &tc))
 }
 
 /// Compile a workspace using a type check the caller already computed.
 pub fn compile_checked(ws: &Workspace, tc: &TypeCheck) -> Compilation {
+    compile_input(CompilerInput::new(ws, tc))
+}
+
+/// Compile an immutable view over cached workspace data.
+pub fn compile_input(input: CompilerInput<'_>) -> Compilation {
+    let ws = input.workspace;
+    let tc = input.type_check;
+    let root = input.root();
     let mut out = Compilation {
         queries: Vec::new(),
         diagnostics: ws.diags.clone(),
@@ -50,9 +129,12 @@ pub fn compile_checked(ws: &Workspace, tc: &TypeCheck) -> Compilation {
         push_unique(&mut out.diagnostics, error.diag.clone());
     }
 
-    for (index, (name, result)) in elaborate_module(ws, tc, ws.root).into_iter().enumerate() {
+    for (index, (name, result)) in elaborate_module(ws, tc, root.index())
+        .into_iter()
+        .enumerate()
+    {
         let id = DefinitionId {
-            module: ws.root,
+            module: root.index(),
             def: index,
         };
         let result = match result {
@@ -68,7 +150,7 @@ pub fn compile_checked(ws: &Workspace, tc: &TypeCheck) -> Compilation {
                 Err(error) => Err(internal_error(ws, &name, &error)),
             },
             Err(error) if is_not_a_query(&error) => {
-                if let Some(diag) = tc.error_for(ws.root, index) {
+                if let Some(diag) = tc.error_for(root.index(), index) {
                     Err(diag.clone())
                 } else {
                     continue;
@@ -96,7 +178,7 @@ pub fn compile_checked(ws: &Workspace, tc: &TypeCheck) -> Compilation {
 /// Type checking supplies the facts used by source elaboration. A checked
 /// query is the sole source of a production `Rel`.
 pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Rel, Diag>)> {
-    compile_checked(ws, tc)
+    compile_input(CompilerInput::new(ws, tc))
         .queries
         .into_iter()
         .map(|query| (query.name, query.result))
@@ -105,7 +187,7 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
 
 /// Check and compile every query in the root module.
 pub fn root_queries(ws: &Workspace) -> Vec<(String, Result<Rel, Diag>)> {
-    compile(ws)
+    compile_input(CompilerInput::new(ws, &crate::check::check(ws)))
         .queries
         .into_iter()
         .map(|query| (query.name, query.result))
@@ -166,5 +248,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1]
         );
+    }
+
+    #[test]
+    fn compiler_input_is_a_read_only_view_of_the_workspace() {
+        let ws = Workspace::from_source("q = 1\n");
+        let tc = crate::check::check(&ws);
+        let input = CompilerInput::new(&ws, &tc);
+        let root = input.root();
+
+        assert_eq!(root.index(), ws.root);
+        assert_eq!(root.path(), Path::new("<input>"));
+        assert_eq!(root.text(), "q = 1\n");
+        assert_eq!(root.source().defs[0].name, "q");
+        assert!(root.scope().contains_key("q"));
+
+        assert_eq!(compile_input(input), compile_checked(&ws, &tc));
     }
 }

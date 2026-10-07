@@ -18,8 +18,8 @@ pub use check::{check, TypeCheck};
 // cannot assemble a value that skipped the constructors' checks.
 pub use checked::{erase, CheckedExpr, CheckedQuery, ExprKind, QueryKind};
 pub use compile::{
-    compile, compile_checked, root_queries, root_queries_checked, Compilation, CompiledQuery,
-    DefinitionId,
+    compile, compile_checked, compile_input, root_queries, root_queries_checked, Compilation,
+    CompiledQuery, CompilerInput, DefinitionId, ModuleSnapshot,
 };
 pub use core::{Diagnostic, Error, Origin, RowType, ScalarType};
 pub use db::{Database, SourceFile};

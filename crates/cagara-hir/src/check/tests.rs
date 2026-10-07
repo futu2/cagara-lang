@@ -1,5 +1,7 @@
 use super::check;
 use crate::workspace::Workspace;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 const TABLES: &str = "users : query { id = int, name = string, age = int, active = bool } = table \"public\" \"users\"\n\
 orders : query { id = int, user_id = int, amount = float, status = string } = table \"public\" \"orders\"\n";
@@ -585,6 +587,59 @@ fn editing_the_root_rechecks_only_the_root() {
             .any(|e| e.module == ws.root && e.diag.message.contains("type mismatch")),
         "{:?}",
         after.errors
+    );
+}
+
+#[test]
+fn compilation_reuses_the_workspace_cache_and_invalidates_dependents() {
+    let root_path = PathBuf::from("/tmp/cagara-cache/root.cagara");
+    let lib_path = PathBuf::from("/tmp/cagara-cache/lib.cagara");
+    let root_src = "import \"lib.cagara\" as lib\nq = lib.value\n";
+    let lib_src = "value = 42\n";
+    let mut buffers = HashMap::new();
+    buffers.insert(root_path.clone(), root_src.to_string());
+    buffers.insert(lib_path.clone(), lib_src.to_string());
+    let mut ws = Workspace::open_with_buffers(&root_path, root_src.to_string(), &buffers);
+
+    let first = crate::compile::compile(&ws);
+    assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
+    let after_first = super::check_runs();
+
+    let second = crate::compile::compile(&ws);
+    assert!(second.diagnostics.is_empty(), "{:?}", second.diagnostics);
+    assert_eq!(
+        super::check_runs(),
+        after_first,
+        "repeated compilation should reuse cached module checks"
+    );
+
+    let root = ws.root;
+    assert!(ws.set_source(
+        root,
+        "import \"lib.cagara\" as lib\nq = lib.value + 1\n".into()
+    ));
+    let after_root_edit = crate::compile::compile(&ws);
+    assert!(
+        after_root_edit.diagnostics.is_empty(),
+        "{:?}",
+        after_root_edit.diagnostics
+    );
+    assert_eq!(
+        super::check_runs(),
+        after_first + 1,
+        "editing the root should only recheck the root"
+    );
+
+    let lib = ws
+        .module_for_path(Path::new("/tmp/cagara-cache/lib.cagara"))
+        .expect("imported module should be loaded");
+    assert!(ws.set_source(lib, "value = true\n".into()));
+    let after_lib_edit = crate::compile::compile(&ws);
+    assert!(!after_lib_edit.diagnostics.is_empty());
+    assert_eq!(
+        super::check_runs(),
+        after_first + 3,
+        "editing an imported module should recheck it and its root dependent"
     );
 }
 

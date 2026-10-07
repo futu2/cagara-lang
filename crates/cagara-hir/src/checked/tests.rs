@@ -1595,7 +1595,12 @@ fn assert_trees_agree_in(label: &str, ws: Workspace) {
 
     let mut compared = 0;
     let mut skipped = Vec::new();
-    for (name, eval_rel) in crate::eval::root_queries_checked(&ws, &tc) {
+    // Same reason as `assert_source_elaboration_agrees` above: this must be the
+    // evaluator alone. `root_queries_checked` also runs source elaboration and
+    // converts a disagreement into an error, which `continue` below would then
+    // treat as "the evaluator rejects this" — hiding the very mismatch the
+    // comparison is here to find.
+    for (name, eval_rel) in crate::eval::root_queries_via_evaluator(&ws, &tc) {
         let eval_rel = match eval_rel {
             Ok(r) => r,
             // A definition the *evaluator* rejects is a diagnostic, not a
@@ -1736,8 +1741,17 @@ fn assert_source_elaboration_agrees(label: &str, ws: &Workspace) {
     let tc = crate::check::check(ws);
     let m = ws.root;
 
+    // The oracle must be the evaluator *alone*. `root_queries_checked` runs
+    // source elaboration too and turns a disagreement into an error, so
+    // building the oracle from it makes this harness circular: a mismatch
+    // would arrive here as an error, be filtered out by `r.ok()`, and the
+    // definition would simply vanish from the comparison — passing.
+    //
+    // That is exactly the vacuity this harness was written to remove, and it
+    // had reappeared here. `root_queries_via_evaluator` is the evaluator with
+    // no source elaboration involved.
     let evaluated: std::collections::HashMap<String, Rel> =
-        crate::eval::root_queries_checked(ws, &tc)
+        crate::eval::root_queries_via_evaluator(ws, &tc)
             .into_iter()
             .filter_map(|(n, r)| r.ok().map(|r| (n, r)))
             .collect();
@@ -1925,4 +1939,71 @@ fn source_elaboration_agrees_beyond_the_examples() {
         assert!(ws.diags.is_empty(), "{label}: {:?}", ws.diags);
         assert_source_elaboration_agrees(label, &ws);
     }
+}
+
+/// A mismatch on one definition must fail even when other definitions in the
+/// same program compare cleanly.
+///
+/// This is the regression test for the harness's own circularity, and the shape
+/// matters: with several queries and one bad, a harness that dropped failing
+/// definitions would still report "some definitions compared" and pass. The
+/// program below therefore has three query definitions, and the assertion is
+/// that a *deliberately wrong* elaboration of the middle one is caught.
+///
+/// It is driven through a locally-erased tree rather than by mutating
+/// `checked::erase`, because the point is the harness's bookkeeping — that a
+/// single disagreement is not swallowed — not the eraser.
+#[test]
+fn a_mismatch_on_one_definition_is_not_swallowed_by_the_others() {
+    let ws = Workspace::from_source(
+        "t : query { a = int, b = string } = table \"s\" \"t\"\n\
+         q_one = t\n\
+         q_two = t & where (.a > 1)\n\
+         q_three = t & select { x = .a }\n",
+    );
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let tc = crate::check::check(&ws);
+
+    // The oracle, independently of source elaboration.
+    let oracle: std::collections::HashMap<String, Rel> =
+        crate::eval::root_queries_via_evaluator(&ws, &tc)
+            .into_iter()
+            .filter_map(|(n, r)| r.ok().map(|r| (n, r)))
+            .collect();
+    // Four query definitions: the table `t` counts too, which is worth
+    // asserting rather than assuming.
+    assert_eq!(oracle.len(), 4, "expected four query definitions: {oracle:?}");
+
+    let elaborated = crate::elaborate::elaborate_module(&ws, &tc, ws.root);
+    let by_name: std::collections::HashMap<&str, _> =
+        elaborated.iter().map(|(n, r)| (n.as_str(), r)).collect();
+    assert!(by_name.contains_key("q_two"), "q_two must be elaborated");
+
+    // Two of the three agree...
+    for name in ["q_one", "q_three"] {
+        let q = by_name[name].as_ref().expect("elaborated");
+        let from_source = crate::checked::without_at(&crate::checked::erase(q.clone()).unwrap());
+        assert_eq!(
+            from_source,
+            crate::checked::without_at(&oracle[name]),
+            "{name} should agree"
+        );
+    }
+
+    // ...and the middle one, perturbed, must *not* be taken for agreement. A
+    // harness that skipped a definition whose comparison failed would see two
+    // successes here and conclude everything was fine.
+    let q_two = by_name["q_two"].as_ref().expect("elaborated");
+    let mut perturbed = crate::checked::erase(q_two.clone()).unwrap();
+    perturbed = Rel::Limit(Box::new(perturbed), 999);
+    assert_ne!(
+        crate::checked::without_at(&perturbed),
+        crate::checked::without_at(&oracle["q_two"]),
+        "the perturbation must actually change the tree, or this proves nothing"
+    );
+    assert_eq!(
+        crate::checked::without_at(&crate::checked::erase(q_two.clone()).unwrap()),
+        crate::checked::without_at(&oracle["q_two"]),
+        "the unperturbed q_two must agree, so the comparison is live"
+    );
 }

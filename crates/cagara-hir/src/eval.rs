@@ -553,9 +553,34 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
             continue;
         };
         match from_source.get(name.as_str()) {
-            // The elaborator produced nothing for this definition — it is not a
-            // query, or a construct it does not handle. The oracle stands.
-            None | Some(Err(_)) => out.push((name, result)),
+            // The elaborator produced nothing for this definition. That is the
+            // normal case for a definition which is not a query at all, and
+            // `None` is not evidence of a gap: the elaborator lists every
+            // definition it walks, and this one is absent only when it had no
+            // query to elaborate. The oracle stands.
+            None => out.push((name, result)),
+            // The elaborator *saw* a query here and could not build one. This
+            // is the case that must not be silent.
+            //
+            // Because we already know the evaluator produced a relation for this
+            // definition, its inability to elaborate is a capability gap in
+            // `elaborate.rs`, not a user error. Falling back quietly is how a
+            // construct the checked layer cannot handle compiles unnoticed
+            // through the legacy path — which is the whole failure mode the
+            // checked core exists to remove. It is reported exactly like a tree
+            // mismatch: as an internal error, with the evaluator's result still
+            // used so nothing the user could previously compile stops working.
+            Some(Err(e)) => {
+                let d = internal_disagreement(
+                    ws,
+                    &name,
+                    &format!(
+                        "source elaboration cannot handle this definition ({})",
+                        e.message
+                    ),
+                );
+                out.push((name, Err(d)));
+            }
             Some(Ok(query)) => match crate::checked::erase((*query).clone()) {
                 // Erasure is structural and total for query nodes, so this is
                 // an internal inconsistency rather than a user error.
@@ -611,7 +636,21 @@ fn internal_disagreement(ws: &Workspace, name: &str, detail: &str) -> Diag {
 /// The evaluator's path to the erased tree: evaluate, erase the `CoreTerm`,
 /// then validate columns. See [`root_queries_checked`], which wraps this with
 /// the source-elaboration comparison.
-fn root_queries_via_evaluator(
+///
+/// # Why this is reachable
+///
+/// A differential test that builds its oracle by calling
+/// [`root_queries_checked`] is **circular**: that function already runs source
+/// elaboration and, on disagreement, replaces the result with an error. A
+/// harness that then filters errors out would silently drop exactly the
+/// definitions it exists to compare — so a mismatch would look like a
+/// definition the evaluator could not handle, and pass.
+///
+/// The harness therefore compares against *this*, which is the evaluator with
+/// no source elaboration involved at all. It is `pub` for that reason and for
+/// that reason only; it is not part of the compiler's contract and is named to
+/// say so.
+pub fn root_queries_via_evaluator(
     ws: &Workspace,
     tc: &TypeCheck,
 ) -> Vec<(String, Result<Rel, Diag>)> {

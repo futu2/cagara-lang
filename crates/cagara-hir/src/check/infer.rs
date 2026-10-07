@@ -276,7 +276,10 @@ impl<'w> Checker<'w> {
         let t = ann.unwrap_or(t);
         // A member of an overload set is picked by its signature alone, so
         // no use can fill holes of its own: it resolves them like a query.
-        let candidate = defs.iter().filter(|d| d.name == def.name).count() > 1;
+        let candidate = matches!(
+            self.env.scope.get(&def.name),
+            Some(Binding::Overloads(module, _)) if *module == self.module
+        );
         if candidate || matches!(self.resolve(&t), Ty::Con("query", _)) {
             // A query is evaluated, so its overloads must be resolved:
             // default leftover literals, then report what is still open.

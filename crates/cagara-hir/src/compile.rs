@@ -185,6 +185,11 @@ fn compile_input_cached(input: CompilerInput<'_>, previous: Option<&Compilation>
     let tc = input.type_check();
     let root = input.root();
     let keys = definition_keys(root);
+    let previous_queries: HashMap<_, _> = previous
+        .into_iter()
+        .flat_map(|compilation| &compilation.queries)
+        .map(|query| (query.key, query))
+        .collect();
     let mut fingerprint_state = FingerprintState {
         key_cache: HashMap::from([(root.index(), keys.clone())]),
         cache: HashMap::new(),
@@ -207,14 +212,10 @@ fn compile_input_cached(input: CompilerInput<'_>, previous: Option<&Compilation>
             module: root.index(),
             def: index,
         };
-        let result = previous
-            .and_then(|old| {
-                old.queries
-                    .iter()
-                    .find(|query| query.key == key && query.fingerprint == fingerprint)
-                    .filter(|query| query.result.is_ok())
-                    .map(|query| query.result.clone())
-            })
+        let result = previous_queries
+            .get(&key)
+            .filter(|query| query.fingerprint == fingerprint && query.result.is_ok())
+            .map(|query| query.result.clone())
             .or_else(
                 || match elaborate_definition(input, root.index(), index, definition) {
                     Ok(query) => Some(match crate::checked::erase(query) {
@@ -630,22 +631,28 @@ mod tests {
         }
         let mut ws = Workspace::from_source(&source);
         assert!(ws.diags.is_empty(), "load diagnostics: {:?}", ws.diags);
+        let started = std::time::Instant::now();
+        let type_check = crate::check::check(&ws);
+        let check_elapsed = started.elapsed();
+        assert!(type_check.errors.is_empty(), "{:?}", type_check.errors);
+        println!("{count} definitions: type check {check_elapsed:?}");
 
         let started = std::time::Instant::now();
         let first = compile(&ws);
         let first_elapsed = started.elapsed();
         assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
+        println!("{count} definitions: first compilation {first_elapsed:?}");
 
-        let edit = format!(
-            "d0 : query {{ a = int }} = table \"public\" \"changed\"\n{}",
-            source
-                .lines()
-                .skip(1)
-                .map(|line| format!("{line}\n"))
-                .collect::<String>()
-        );
+        let edit_at = source.find("t0\"").expect("first table name") + 1;
+        let mut edit = source.clone();
+        edit.replace_range(edit_at..edit_at + 1, "x");
         let before_edit = crate::elaborate::elaborated_defs().len();
         assert!(ws.set_source(ws.root, edit));
+        let started = std::time::Instant::now();
+        let type_check = crate::check::check(&ws);
+        let check_elapsed = started.elapsed();
+        assert!(type_check.errors.is_empty(), "{:?}", type_check.errors);
+        println!("{count} definitions: edited type check {check_elapsed:?}");
         let started = std::time::Instant::now();
         let second = compile(&ws);
         let second_elapsed = started.elapsed();
@@ -655,7 +662,7 @@ mod tests {
             1,
             "one-definition edits should elaborate one query"
         );
-        println!("{count} definitions: initial {first_elapsed:?}, one-edit {second_elapsed:?}");
+        println!("{count} definitions: cached one-edit compilation {second_elapsed:?}");
     }
 
     #[test]

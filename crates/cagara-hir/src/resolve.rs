@@ -12,12 +12,9 @@ use std::collections::HashMap;
 pub fn module_own(db: &dyn salsa::Database, input: ModuleInput) -> HashMap<String, Binding> {
     let m = *input.index(db);
     let defs = &parse_module(db, *input.file(db)).module.defs;
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut groups = HashMap::<String, Vec<usize>>::new();
     for (i, d) in defs.iter().enumerate() {
-        match groups.iter_mut().find(|(n, _)| *n == d.name) {
-            Some((_, is)) => is.push(i),
-            None => groups.push((d.name.clone(), vec![i])),
-        }
+        groups.entry(d.name.clone()).or_default().push(i);
     }
     groups
         .into_iter()

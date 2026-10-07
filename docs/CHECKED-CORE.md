@@ -364,6 +364,16 @@ That check is live, not decorative. Routing it found two defects no test had:
 
 **Still open:**
 
+* **Point-free composition is not elaborated.**
+  `nextWeek = addDays 7 >>> truncWeek` is the one construct the source
+  elaborator reports rather than handles. `_>>>_` is `f => g => x => g (f x)` —
+  an ordinary lambda over two *function* arguments — and elaborating it means
+  holding `addDays 7` as a deferred value and applying it later, which is a
+  third kind of binding alongside the query and expression ones. An attempt at
+  it was written, did not reproduce the evaluator's tree, and was reverted
+  rather than left as shape-specific code that special-cased `>>>`'s exact
+  body. It is reported as an internal error, so it cannot compile silently
+  through the legacy path.
 * `schema` is still the production column validator. It runs on the same erased
   tree, so it is not bypassed — but the checked constructors have already proved
   what it re-derives, and it can now be demoted to an assertion.
@@ -374,8 +384,20 @@ That check is live, not decorative. Routing it found two defects no test had:
   `#[cfg(test)]` or removed.
 * The evaluator is still the oracle for every definition, so it cannot be
   deleted. Removing it means promoting the elaborator from "agrees with the
-  evaluator" to "is the only implementation" — and the two defects above are
-  the argument for doing that one step at a time.
+  evaluator" to "is the only implementation" — and the defects this section
+  records are the argument for doing that one step at a time.
+
+**What source elaboration now covers.** Overloads are resolved per *use*, not
+per definition: a definition's open overloads are recorded as `Choice::Hole(k)`
+where they are written, and the candidate is recorded against whichever
+definition instantiates it. `h = e => users & select { x = e + 1, id = .id }`
+therefore elaborates differently for `h .age` and `h 1.5`, and
+`quad = x => twice (twice x)` resolves a nested hole from the assignment its
+own use supplied. Lambda application binds parameters into environments —
+separate ones for queries, expressions, and stages, because a `CheckedExpr`
+cannot hold a query and a stage is neither — and a stage argument is recognised
+by being *partially* applied, since `unionAll users users` supplies every
+argument and is a complete call.
 
 **There are two differential harnesses, and only the second is evidence.**
 

@@ -376,4 +376,30 @@ mod tests {
             "changing roots must not reuse the previous root compilation"
         );
     }
+
+    #[test]
+    fn editing_one_definition_currently_reelaborates_all_root_definitions() {
+        let mut ws = Workspace::from_source(
+            "first : query { a = int } = table \"public\" \"first\"\n\
+             second : query { a = int } = table \"public\" \"second\"\n",
+        );
+
+        let first = compile(&ws);
+        assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
+        let before = crate::elaborate::elaborated_defs().len();
+
+        assert!(ws.set_source(
+            ws.root,
+            "first : query { a = int } = table \"public\" \"changed\"\n\
+             second : query { a = int } = table \"public\" \"second\"\n"
+                .into()
+        ));
+        let edited = compile(&ws);
+        assert!(edited.diagnostics.is_empty(), "{:?}", edited.diagnostics);
+        assert_eq!(
+            &crate::elaborate::elaborated_defs()[before..],
+            &[(ws.root, 0), (ws.root, 1)],
+            "the current compilation boundary rebuilds every root definition"
+        );
+    }
 }

@@ -37,11 +37,17 @@ use cagara_syntax::ast::{self, ExprKind, Span};
 #[cfg(test)]
 thread_local! {
     static ELABORATE_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ELABORATED_DEFS: std::cell::RefCell<Vec<(usize, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
 pub(crate) fn elaborate_runs() -> usize {
     ELABORATE_RUNS.with(|runs| runs.get())
+}
+
+#[cfg(test)]
+pub(crate) fn elaborated_defs() -> Vec<(usize, usize)> {
+    ELABORATED_DEFS.with(|defs| defs.borrow().clone())
 }
 
 /// What every elaboration step needs: immutable compiler input, the module and
@@ -163,6 +169,9 @@ fn elaborate_def(
     def: usize,
     d: &ast::Def,
 ) -> R<CheckedQuery> {
+    #[cfg(test)]
+    ELABORATED_DEFS.with(|defs| defs.borrow_mut().push((module, def)));
+
     let tc = input.type_check();
     // A rejected definition has no trustworthy types. Its checker diagnostic
     // is emitted by the compilation boundary, so it must not be elaborated.

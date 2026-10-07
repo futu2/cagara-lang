@@ -310,15 +310,66 @@ pub struct Error {
     pub message: String,
     pub origin: Option<Origin>,
     pub def: Option<usize>,
+    /// Who is at fault: the program, or this phase?
+    ///
+    /// The distinction matters at the production boundary
+    /// (`eval::root_queries_checked`), which compares source elaboration against
+    /// the evaluator and must react to the two differently:
+    ///
+    /// * [`Fault::Program`] — the program is malformed. `schema` would report
+    ///   the same thing and the user should see that message. A `table` whose
+    ///   defining definition declares no columns is an example: the query is
+    ///   genuinely untypeable, and saying so is correct.
+    /// * [`Fault::Compiler`] — the program is fine and this phase cannot build
+    ///   it. The evaluator handles it; source elaboration does not. That is a
+    ///   capability gap, and presenting it as the user's mistake would be a lie.
+    ///
+    /// Conflating the two is not academic. It is why `schema` could not simply
+    /// be demoted: the elaborated path treats a column-less table as a *gap*
+    /// while `schema` treats it as a *program* error, so with `schema` demoted
+    /// to an assertion the compiler panicked on a program that deserves a plain
+    /// diagnostic.
+    pub fault: Fault,
+}
+
+/// Who is at fault for an [`Error`]. See its `fault` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// The program is malformed; the message is for the user.
+    Program,
+    /// This phase cannot handle a program the evaluator can.
+    Compiler,
 }
 
 impl Error {
+    /// An error about the **program**: malformed, and the message is for the
+    /// user. The default, because most constructor rejections are genuine rule
+    /// violations — a column that is not grouped, set operands with different
+    /// columns, an aggregate nested inside an aggregate.
     pub fn new(message: impl Into<String>) -> Self {
         Error {
             message: message.into(),
             origin: None,
             def: None,
+            fault: Fault::Program,
         }
+    }
+
+    /// An error about **this phase**: the program is fine and the evaluator can
+    /// build it, but the checked layer cannot. Used for missing capabilities,
+    /// which the production boundary must not present as a user's mistake.
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Error {
+            message: message.into(),
+            origin: None,
+            def: None,
+            fault: Fault::Compiler,
+        }
+    }
+
+    /// Whether this is a gap in this phase rather than a fault in the program.
+    pub fn is_unsupported(&self) -> bool {
+        self.fault == Fault::Compiler
     }
 
     /// Point the error at an origin, unless it already has one (the innermost

@@ -204,6 +204,13 @@ fn elaborate_primitive(
             // stage would have to guess, which is what `CheckedQuery::table`
             // refuses.
             let row = cx.tc.scheme_fields(cx.module, cx.owner).ok_or_else(|| {
+                // A **program** error rather than a gap: a table whose defining
+                // definition declares no columns is genuinely untypeable, and
+                // `schema` reports exactly this. Classifying it correctly is what
+                // lets the production boundary show it to the user instead of
+                // treating it as a compiler failure — with `schema` demoted to an
+                // assertion, the wrong classification made the compiler *panic*
+                // here on a program that deserves a plain diagnostic.
                 Error::new(format!(
                     "the columns of table `{schema}.{name}` are unknown; give its definition a \
                      closed type, e.g. `t : query {{ id = int }} = table \"{schema}\" \"{name}\"`"
@@ -212,7 +219,7 @@ fn elaborate_primitive(
             })?;
             CheckedQuery::table(schema, name, Some(crate::core::RowType::new(row)), origin)
         }
-        (other, _) => Err(Error::new(format!(
+        (other, _) => Err(Error::unsupported(format!(
             "the primitive `{other}` is not elaborated here; relational primitives are reached \
              through the stage operators"
         ))
@@ -246,7 +253,7 @@ fn elaborate_expr_primitive(
             let items = elaborate_exprs(cx, list_items(list))?;
             CheckedExpr::in_(v, items, false, origin)
         }
-        (other, _) => Err(Error::new(format!(
+        (other, _) => Err(Error::unsupported(format!(
             "the expression primitive `{other}` is not elaborated yet"
         ))
         .at(origin)),
@@ -874,7 +881,7 @@ fn apply_stage(
             if let Some(Binding::Def(dm, di)) = cx.scope.get(stage_name).cloned() {
                 return elaborate_user_stage(cx, dm, di, stage_args, input, origin);
             }
-            Err(Error::new(format!(
+            Err(Error::unsupported(format!(
                 "`{stage_name}` applied to a query as a stage is not elaborated; it is not a \
                  prelude stage and not a definition that takes a query"
             ))
@@ -1099,7 +1106,7 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
                             CheckedExpr::template(sql.clone(), vec![], ty, origin)
                         }
                         Phase::Agg => CheckedExpr::agg_template(sql.clone(), vec![], ty, origin),
-                        Phase::Win => Err(Error::new(format!(
+                        Phase::Win => Err(Error::unsupported(format!(
                             "`{n}` is a window function; window specs are not elaborated yet"
                         ))
                         .at(origin)),
@@ -1133,7 +1140,7 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
             .at(origin)),
         },
         ExprKind::App(f, args) => elaborate_call(cx, f, args, origin),
-        other => Err(Error::new(format!(
+        other => Err(Error::unsupported(format!(
             "cannot elaborate {} as a scalar expression",
             describe(other)
         ))
@@ -1173,7 +1180,7 @@ fn elaborate_call(
                 "`{name}` is applied to too few arguments"
             ))
             .at(origin)),
-            CheckedValue::Query(_) | CheckedValue::Stage(_) => Err(Error::new(format!(
+            CheckedValue::Query(_) | CheckedValue::Stage(_) => Err(Error::unsupported(format!(
                 "`{name}` does not denote an expression"
             ))
             .at(origin)),
@@ -1252,14 +1259,14 @@ fn elaborate_call(
                  an expression"
             ))
             .at(origin)),
-            CheckedValue::Query(_) | CheckedValue::Stage(_) => Err(Error::new(format!(
+            CheckedValue::Query(_) | CheckedValue::Stage(_) => Err(Error::unsupported(format!(
                 "`{name}` does not denote an expression"
             ))
             .at(origin)),
         };
     }
     let ExprKind::Sql(sql) = &body.kind else {
-        return Err(Error::new(format!(
+        return Err(Error::unsupported(format!(
             "`{name}` is neither a `sql` template nor a function; this layer cannot elaborate \
              its body"
         ))
@@ -1792,7 +1799,7 @@ enum Applied {
 /// Apply one argument to a value, completing it or staying deferred.
 fn apply_value(cx: Ctx<'_>, f: CheckedValue, arg: CheckedValue, origin: Origin) -> R<Applied> {
     let CheckedValue::Callable(c) = f else {
-        return Err(Error::new("cannot apply this to an argument").at(origin));
+        return Err(Error::unsupported("cannot apply this to an argument").at(origin));
     };
     match *c {
         Callable::Template {
@@ -1911,7 +1918,7 @@ fn complete_template(
             // window call would need the spec carried in the value; reported
             // rather than guessed.
             let _ = cx;
-            Err(Error::new(
+            Err(Error::unsupported(
                 "a composed window function is not elaborated; call it directly instead",
             )
             .at(origin))

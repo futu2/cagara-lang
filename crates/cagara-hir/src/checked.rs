@@ -1682,7 +1682,7 @@ pub enum StageHint {
 /// because a `CheckedQuery` carries strictly more information than a `Rel`.
 /// That asymmetry is the point — see the doc on [`erase`].
 ///
-/// # Why this is crate-private
+/// # Why this is `cfg(test)`
 ///
 /// **This is the only way to build a `CheckedQuery` without running its
 /// constructors**, and therefore the only way to obtain one whose invariants
@@ -1690,11 +1690,16 @@ pub enum StageHint {
 /// own `Rel` back through the checked eraser and confirm the two agree; that
 /// comparison is the reason the *source* harness beside it can be trusted.
 ///
-/// It was `pub` and is now `pub(crate)`. Nothing outside `cagara-hir` used it,
-/// and nothing should: a caller reaching for it wants a `CheckedQuery` from a
-/// `Rel`, which is a test-shaped need. When the checked path is the only
-/// implementation this should go entirely, at which point the bridge harness
-/// goes with it.
+/// It was `pub`, then `pub(crate)`, and is now test-only. Narrowing it was not a
+/// precaution — each step found out something. `pub(crate)` made `rustc` report
+/// it as dead code in a non-test build, because the only caller really is
+/// `checked/tests.rs`. Gating it means a non-test build cannot reach it at all,
+/// which is the property worth having: it is the one constructor that skips
+/// validation, so it should not exist in a shipping binary.
+///
+/// It should go entirely when the checked path is the only implementation, at
+/// which point the bridge harness goes with it.
+#[cfg(test)]
 pub(crate) fn from_rel_unchecked(
     rel: Rel,
     row: RowType,
@@ -1909,6 +1914,7 @@ pub(crate) fn from_rel_unchecked(
 /// The hint for a projection's *input*. It is the same hint: a `select`'s
 /// input is not itself a projection of a different kind, and the caller that
 /// supplies one knows the node it is reconstructing.
+#[cfg(test)]
 fn hint_forward(hint: StageHint) -> Option<StageHint> {
     Some(hint)
 }
@@ -1919,6 +1925,7 @@ fn hint_forward(hint: StageHint) -> Option<StageHint> {
 /// not carry the affix makes the rename non-invertible, so the input row
 /// cannot be recovered. That is an `Err`, not a guess — returning the output
 /// row here would claim a rename of names that were never renamed.
+#[cfg(test)]
 fn rename_from(
     input: Rel,
     affix: String,

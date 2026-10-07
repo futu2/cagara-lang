@@ -575,14 +575,41 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
             // definition it walks, and this one is absent only when it had no
             // query to elaborate. The evaluator's relation is used.
             None => out.push((name, result)),
-            // The elaborator *saw* a query here and could not build one.
-            //
-            // Because the evaluator produced a relation for this definition, the
-            // failure is a capability gap in `elaborate.rs` and not a user error.
-            // Fail closed: the definition is reported and no `Rel` is emitted
-            // for it. See the policy note on this function for why this is the
-            // temporary choice rather than shipping the oracle's tree.
+            // The elaborator *saw* a query here and could not build one. Which
+            // kind of failure it is decides who hears about it — and that
+            // distinction is load-bearing rather than cosmetic. The column-less
+            // table (`t = table "s" "t"` with no declared columns) reaches here,
+            // and it is a *program* error that `schema` reports with a usable
+            // message; classifying it as a compiler gap is what made demoting
+            // `schema` panic on it.
+            Some(Err(e)) if !e.is_unsupported() => {
+                // Malformed program: report it as the user's, in the elaborated
+                // path's own wording, which is the wording `schema` uses for the
+                // same program.
+                let msg = e.message.clone();
+                let root = ws.root;
+                let d = match e.origin {
+                    Some(o) => ws.diag_span(o.module, o.span, msg),
+                    None => {
+                        // No origin: blame the definition itself, which is the
+                        // closest honest answer and what `schema`'s own
+                        // no-location fallback does.
+                        let span = ws.modules[root]
+                            .module
+                            .defs
+                            .iter()
+                            .find(|d| d.name == name)
+                            .map(|d| d.span)
+                            .unwrap_or(cagara_syntax::ast::Span { start: 0, end: 0 });
+                        ws.diag_span(root, span, msg)
+                    }
+                };
+                out.push((name, Err(d)));
+            }
             Some(Err(e)) => {
+                // A capability gap. Fail closed: reported, and no `Rel` emitted.
+                // See the policy note on this function for why this is the
+                // temporary choice rather than shipping the oracle's tree.
                 let d = internal_disagreement(
                     ws,
                     &name,
@@ -699,6 +726,16 @@ pub(crate) fn root_queries_via_evaluator(
                 // is an internal error rather than a query with no columns.
                 let checked = match crate::core_term::erase_core(*t) {
                     Err(e) => Err(ws.diag_span(m, d.span, e.message)),
+                    // `schema` still runs *here*, and still reports, because this
+                    // path is the oracle: it is consulted for every definition,
+                    // including ones source elaboration is about to reject with a
+                    // better message. Asserting instead would fire on programs
+                    // whose diagnostic the routing layer is about to produce
+                    // correctly — `q = table "s" "t"` panicked exactly that way.
+                    //
+                    // What changed is that its verdict is no longer final. The
+                    // routing below decides what the user sees, and a program
+                    // error source elaboration identified wins.
                     Ok(rel) => match crate::schema::schema_located(&rel) {
                         Ok(_) => Ok(rel),
                         Err((Some(l), msg)) => Err(ws.diag_span(l.module, l.span, msg)),

@@ -738,3 +738,58 @@ fn a_parity_gap_fails_closed_and_says_so() {
         p2.as_ref().err()
     );
 }
+
+/// An elaboration failure is told apart from a program error, and the
+/// difference reaches the user.
+///
+/// Both cases arrive at the same place: source elaboration saw a query and could
+/// not build one. They must not be reported the same way.
+///
+/// * **The program is wrong.** `q = table "s" "t"` declares no columns, so the
+///   query is genuinely untypeable. The user must see that explanation, not an
+///   internal error — and not a panic.
+/// * **The compiler is limited.** A construct the evaluator handles and
+///   `elaborate.rs` does not is a capability gap, reported as an internal error.
+///
+/// Getting this wrong is not cosmetic. Without the distinction, demoting
+/// `schema` from a validator to an assertion made the compiler *panic* on the
+/// first case, because the abandoned validator had been the only thing producing
+/// that message. The fix was to classify the failure (`core::Fault`) rather than
+/// to keep `schema` deciding.
+#[test]
+fn a_program_error_is_not_reported_as_a_compiler_gap() {
+    // A program error: the table's columns are unknown, so nothing can be
+    // checked. The message is the user's, and it must not be an internal error.
+    let ws = Workspace::from_source(
+        "users : query { id = int, age = int } = table \"p\" \"users\"\n\
+         q = table \"s\" \"t\"\n",
+    );
+    assert!(ws.diags.is_empty(), "load diagnostics: {:?}", ws.diags);
+    let tc = crate::check::check(&ws);
+    let out = crate::root_queries_checked(&ws, &tc);
+    let (_, q) = out.iter().find(|(n, _)| n == "q").expect("`q` reported");
+    let d = q
+        .as_ref()
+        .expect_err("a column-less table cannot be compiled");
+    assert!(
+        d.message.contains("columns of table") && d.message.contains("unknown"),
+        "the user must get the column explanation: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("internal error"),
+        "a malformed program is not a compiler bug: {}",
+        d.message
+    );
+
+    // The classification itself, so a future edit to either constructor is
+    // caught here rather than in a panic at the production boundary.
+    let elab = crate::elaborate::elaborate_module(&ws, &tc, ws.root);
+    let (_, r) = elab.iter().find(|(n, _)| n == "q").expect("`q` walked");
+    let e = r.as_ref().expect_err("the elaborator cannot build it");
+    assert!(
+        !e.is_unsupported(),
+        "a column-less table is the program's fault, not this phase's: {}",
+        e.message
+    );
+}

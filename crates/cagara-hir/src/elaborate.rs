@@ -1888,11 +1888,23 @@ fn complete_template(
     origin: Origin,
 ) -> R<CheckedExpr> {
     match kind {
-        // A scalar template folds its arguments' phases (`rules::mix`), which
-        // is what makes `inc count` an aggregate; an aggregate template takes
-        // row-phase arguments only. Both go through `template`/`agg_template`,
-        // and those are the same constructors a direct call uses.
-        DeclaredKind::Scalar | DeclaredKind::Agg => CheckedExpr::template(sql, args, ty, origin),
+        // A scalar template folds its arguments' phases (`rules::mix`), which is
+        // what makes `inc count` an aggregate even though `inc` declares a
+        // scalar result.
+        DeclaredKind::Scalar => CheckedExpr::template(sql, args, ty, origin),
+        // An aggregate template must **not** go through `template`. Its phase is
+        // `Agg` because of what it *is*, not because of what its arguments are,
+        // and `agg_template` additionally enforces the depth-1 rule (an
+        // aggregate's arguments are row phase). Routing it through `template`
+        // silently built a row-phase node, so `apply sum` applied to a column
+        // reported "uses a column that is not grouped" where a direct
+        // `sum .amount` produced `SUM(amount)`.
+        //
+        // These are the same two constructors the direct call in
+        // `elaborate_call` uses, so a deferred call and a written-out one cannot
+        // disagree about phase — which is what the parity check would otherwise
+        // report, or worse, not report.
+        DeclaredKind::Agg => CheckedExpr::agg_template(sql, args, ty, origin),
         DeclaredKind::Win => {
             // A window template's first argument is its spec, which was
             // elaborated as a `WinSpecChecked`, not an expression. A composed

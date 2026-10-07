@@ -514,15 +514,31 @@ pub fn root_queries(ws: &Workspace) -> Vec<(String, Result<Rel, Diag>)> {
 ///   (`core_term::erase_core`). This is the long-standing path, kept as the
 ///   behavioural oracle.
 ///
-/// They must agree, and the agreement is asserted here rather than assumed:
-/// this function compares the two trees and, when they differ, **prefers the
-/// evaluator's** and reports a diagnostic naming the disagreement. That
-/// ordering is deliberate. A difference means source elaboration is wrong —
-/// the oracle has every golden output behind it and the elaborator does not —
-/// so the safe direction is to keep emitting what the compiler has always
-/// emitted while making the bug loud. Falling back quietly would hide exactly
-/// the defect this comparison exists to find; preferring the new path would
-/// ship it.
+/// They must agree, and the agreement is asserted here rather than assumed.
+/// This function compares the two trees and **fails closed**: if they differ, or
+/// if source elaboration cannot build the definition at all, that definition is
+/// reported as an internal error and no `Rel` is returned for it.
+///
+/// Failing closed is a deliberate temporary policy, not the destination. The
+/// destination is for source elaboration to be the only implementation, at which
+/// point there is nothing to compare and this function is the elaborator. Until
+/// then something has to happen when the two disagree, and the options are:
+///
+/// * **ship the evaluator's tree and warn** — keeps working programs working,
+///   but a disagreement is exactly the case where the *compiler* is wrong and
+///   neither tree can be assumed right; silently shipping one of them is how a
+///   wrong answer reaches a user with a note they may never read;
+/// * **fail closed** (chosen) — a disagreement is a compiler bug, and a compiler
+///   bug that produces no output is a bug report, while one that produces
+///   plausible SQL is a data incident.
+///
+/// The cost is real and is the reason this is called temporary: if elaboration
+/// is wrong in a way that affects a definition, that definition stops compiling
+/// even though the evaluator could have built it. The mitigation is coverage —
+/// source elaboration handles every construct in the examples and in the test
+/// corpus, and the parity check reports rather than guesses when it does not.
+/// Preferring the evaluator *quietly* is the one option ruled out, because it
+/// hides precisely the defect this comparison exists to find.
 ///
 /// The comparison ignores `Rel::At` wrappers. Both erasers stamp them, from
 /// different places (the evaluator from explicit `CoreTerm::At` nodes, the
@@ -557,19 +573,15 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
             // normal case for a definition which is not a query at all, and
             // `None` is not evidence of a gap: the elaborator lists every
             // definition it walks, and this one is absent only when it had no
-            // query to elaborate. The oracle stands.
+            // query to elaborate. The evaluator's relation is used.
             None => out.push((name, result)),
-            // The elaborator *saw* a query here and could not build one. This
-            // is the case that must not be silent.
+            // The elaborator *saw* a query here and could not build one.
             //
-            // Because we already know the evaluator produced a relation for this
-            // definition, its inability to elaborate is a capability gap in
-            // `elaborate.rs`, not a user error. Falling back quietly is how a
-            // construct the checked layer cannot handle compiles unnoticed
-            // through the legacy path — which is the whole failure mode the
-            // checked core exists to remove. It is reported exactly like a tree
-            // mismatch: as an internal error, with the evaluator's result still
-            // used so nothing the user could previously compile stops working.
+            // Because the evaluator produced a relation for this definition, the
+            // failure is a capability gap in `elaborate.rs` and not a user error.
+            // Fail closed: the definition is reported and no `Rel` is emitted
+            // for it. See the policy note on this function for why this is the
+            // temporary choice rather than shipping the oracle's tree.
             Some(Err(e)) => {
                 let d = internal_disagreement(
                     ws,
@@ -597,9 +609,11 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
                         );
                         out.push((name, Err(d)));
                     } else {
-                        // Agreed. Keep the oracle's tree: it carries the
-                        // `Rel::At` wrappers `schema_located` blames spans
-                        // with, and the checked tree is equal underneath.
+                        // Agreed — the only case where a relation is emitted for
+                        // a definition source elaboration handled. The
+                        // evaluator's tree is the one kept: it carries the
+                        // `Rel::At` wrappers `schema_located` blames spans with,
+                        // and the checked tree is equal underneath.
                         out.push((name, result));
                     }
                 }
@@ -614,6 +628,12 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
 /// Worded as an internal error, not a program error: it means the compiler has
 /// two implementations that must agree and do not. The definition name is
 /// included because that is what a user can usefully report.
+///
+/// The wording says the program was *not* compiled, because that is what
+/// fail-closed means and the message is the only place a user learns it. An
+/// earlier version said the evaluator's result was used, which was true of the
+/// intent and false of the code: every caller of this returns `Err`, so the
+/// definition is dropped rather than shipped.
 fn internal_disagreement(ws: &Workspace, name: &str, detail: &str) -> Diag {
     let m = ws.root;
     let span = ws.modules[m]
@@ -627,8 +647,9 @@ fn internal_disagreement(ws: &Workspace, name: &str, detail: &str) -> Diag {
         m,
         span,
         format!(
-            "internal error in `{name}`: {detail}. The evaluator's result was used; please report \
-             this"
+            "internal error in `{name}`: {detail}. This definition was not compiled, because the \
+             compiler's two elaboration paths disagree and neither can be trusted here; please \
+             report this"
         ),
     )
 }

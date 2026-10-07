@@ -649,3 +649,92 @@ fn in_takes_its_list_then_its_value() {
     assert_eq!(list.len(), 2, "the list is the list");
     assert_eq!(column_of(value), "age", "the value is the value");
 }
+
+
+/// The production path **fails closed** when the two elaboration paths
+/// disagree, and says so.
+///
+/// `root_queries_checked` runs source elaboration and the evaluator over every
+/// root definition and requires their trees to be equal. This pins what happens
+/// when they are not, because that is a *policy* rather than an accident of the
+/// code:
+///
+/// * the definition is reported as an **error**, so no `Rel` is emitted for it;
+/// * the message is an *internal* error naming the definition, because a
+///   disagreement means the compiler is wrong, not the program;
+/// * the message says the definition **was not compiled**, which is what
+///   fail-closed means. An earlier revision's wording claimed the evaluator's
+///   result was still used, which contradicted the code — every disagreement
+///   path returns `Err`.
+///
+/// Failing closed is temporary while source elaboration is incomplete, so this
+/// test makes changing it a deliberate act: switching to "ship the evaluator's
+/// tree and warn" has to update this test and cannot happen by quietly editing a
+/// comment.
+///
+/// The program below is a genuine gap as of writing, not a hypothetical: a
+/// window template (`sumOver`) taken as a bare value and applied later.
+/// `CheckedValue::Callable::Template` cannot carry a window spec, because a spec
+/// is a `WinSpecChecked` rather than an expression, so the deferred completion
+/// reports it — while the evaluator builds the program fine. When that gap is
+/// closed this test must be given a different program, which is the point.
+#[test]
+fn a_parity_gap_fails_closed_and_says_so() {
+    let ws = Workspace::from_source(
+        "ev : query { id = int, d = date } = table \"p\" \"ev\"\n\
+         idn = f => f\n\
+         w = idn (sumOver { partition = [.id] })\n\
+         q = ev & select { n = w .id }\n",
+    );
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let tc = crate::check::check(&ws);
+
+    // The evaluator alone builds it, which is what makes this a compiler gap
+    // rather than a user error.
+    let oracle = crate::eval::root_queries_via_evaluator(&ws, &tc);
+    let (_, o) = oracle.iter().find(|(n, _)| n == "q").expect("`q`");
+    assert!(
+        o.is_ok(),
+        "this test needs a program the evaluator *can* build, or it proves \
+         nothing about the policy: {o:?}"
+    );
+
+    // Production fails closed: no relation for `q`, and a message that says so.
+    let prod = crate::root_queries_checked(&ws, &tc);
+    let (_, p) = prod.iter().find(|(n, _)| n == "q").expect("`q` reported");
+    let d = p
+        .as_ref()
+        .expect_err("a parity gap must not emit a relation");
+    assert!(
+        d.message.contains("internal error"),
+        "a compiler disagreement is an internal error, not a program error: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("was not compiled"),
+        "the message must tell the user nothing was emitted, which is what \
+         fail-closed means: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("result was used"),
+        "the message must not claim the evaluator's tree shipped, because it \
+         did not: {}",
+        d.message
+    );
+
+    // And the agreeing case still compiles, so failing closed has not been
+    // implemented by failing always.
+    let ok = Workspace::from_source(
+        "ev : query { id = int, d = date } = table \"p\" \"ev\"\n\
+         q = ev & select { n = rowNumber { order = [asc .id] } }\n",
+    );
+    let tc2 = crate::check::check(&ok);
+    let prod2 = crate::root_queries_checked(&ok, &tc2);
+    let (_, p2) = prod2.iter().find(|(n, _)| n == "q").expect("`q` reported");
+    assert!(
+        p2.is_ok(),
+        "a program both paths handle must still compile: {:?}",
+        p2.as_ref().err()
+    );
+}

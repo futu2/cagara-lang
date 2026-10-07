@@ -241,24 +241,32 @@ green:
 3. CheckedQuery/CheckedExpr  (done: constructors enforce the rules)
 4. erase()                   (done: checked IR -> existing Rel)
 5. Rel -> existing lowerer   (done, unchanged)
-6. Evaluator consumes the checked core  (next: elaboration as the production path)
+6. Source elaboration        (done: `elaborate.rs` builds CheckedQuery from the
+                              AST, reading types from the checker)
+7. Production, parity-checked (done: `root_queries_checked` runs both paths and
+                              fails closed when they disagree)
 ```
 
-What the next rung has to do, in order:
+The remaining rungs, in order:
 
-1. Move the checked constructors to the evaluator's call sites, so the value
-   that flows through the interpreter is a `CheckedQuery` rather than a `Rel`.
-   The stage constructors then need the *row* of their input, which the
-   evaluator has as `CheckedProgram`'s per-definition information rather than
-   as a runtime row; that is the real work of this rung.
-2. Replace the `Value::Tpl`/`Value::Prim` saturation path with core lambdas and
-   a normaliser, so templates become `CoreTerm::Tpl` at elaboration time rather
-   than at application time.
-3. Delete `Value::Query`, `Value::Expr`, and the `Prim` table's relational
-   half. The scalar half of `prims` stays: `_+_`, `=<`, `coalesce`, and the
-   other SQL templates are *scalar* lowering, not relational structure.
-4. Then, and only then, the `schema` pass becomes a debug assertion, and the
-   `Rel::At` wrapper can be dropped in favour of `Origin` on every node.
+1. **Restrict the escape hatches.** `root_queries_via_evaluator` and
+   `from_rel_unchecked` exist so the two paths can be compared and so a `Rel`
+   can be read back for tests. Both are now reachable from production code, and
+   neither needs to be.
+2. **Demote `schema` to an assertion.** It still validates columns the checked
+   constructors have already proved, on the same erased tree, so it cannot
+   disagree with them — but it is doing work that is now redundant.
+3. **Delete the evaluator**, only once source-level and SQL golden coverage is
+   broad enough to stand alone. Until then it is the oracle, and the parity
+   check is what makes shipping both paths safe.
+
+Note what rung 6 did *not* do: it did not make the evaluator consume
+`CheckedQuery`. The original plan for this rung was to move the checked
+constructors to the evaluator's call sites, and that turned out to be the wrong
+shape — the evaluator is untyped at application and carries a `Value` model,
+while `CheckedQuery` needs a row at every node. Elaborating from source beside
+the evaluator, and comparing the two, reached the same goal with the oracle
+intact. See the "Source elaboration now runs in production" section below.
 
 Steps 1–3 are worth doing together: doing only step 1 leaves two
 representations of the same query in the interpreter, which is worse than the
@@ -295,15 +303,18 @@ current state.
   (outer-join nullability, `update` precedence) are pinned by row-level tests
   and by the SQL golden tests.
 * **No flag day.** Everything above was added beside the existing pipeline, and
-  the existing tests are the behavioural contract. The checked layer still has
-  no production caller, so nothing downstream depends on it yet.
+  the existing tests are the behavioural contract. Source elaboration now runs
+  *in* production — `root_queries_checked` is the boundary the CLI and the LSP
+  both go through, and it runs both paths and compares them — but it was added
+  beside the evaluator rather than replacing it, so there was still no day on
+  which the output could move.
 
 ## How this was verified
 
 The behavioural contract for this step is the frozen CLI output, not the build:
 
 ```bash
-nix develop --command cargo test --workspace            # 398 passed, 0 failed
+nix develop --command cargo test --workspace            # 400 passed, 0 failed
 nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 nix develop --command cargo build --workspace -q
 <regenerate examples/*.cagara: 6 dialects + --pretty + --types + stderr>
@@ -343,12 +354,24 @@ is now part of the gate.
 **Source elaboration now runs in production, under a parity check.**
 
 `root_queries_checked` — the one boundary the CLI and the LSP both go through —
-runs *both* paths and compares them. If the trees differ it keeps **the
-evaluator's**, because a difference means the elaborator is wrong: the oracle
-has every golden output behind it and the elaborator does not. So the compiler
-still emits what it always emitted, and the disagreement is reported as an
-internal error naming the definition rather than silently preferring either
-side.
+runs *both* paths and compares them, and **fails closed**: if the trees differ,
+or if source elaboration cannot build the definition at all, that definition is
+reported as an internal error and **no relation is emitted for it**.
+
+Failing closed is a temporary policy rather than the destination; the
+destination is for source elaboration to be the only implementation, at which
+point there is nothing to compare. Until then something must happen on a
+disagreement, and the alternative — ship the evaluator's tree and warn — keeps
+programs working but ships one of two trees the compiler has already concluded
+it cannot trust. A compiler bug that produces no output is a bug report; one
+that produces plausible SQL is a data incident. The cost is that a definition
+affected by an elaboration bug stops compiling even though the evaluator could
+have built it, which is why this is called temporary.
+
+The one option ruled out is preferring the evaluator **quietly**: that is
+precisely the defect this comparison exists to find. A production test
+(`a_parity_gap_fails_closed_and_says_so`) pins the policy, including the
+wording, so changing it is a deliberate act rather than a comment edit.
 
 That check is live, not decorative. Routing it found two defects no test had:
 
@@ -405,11 +428,14 @@ where they are written, and the candidate is recorded against whichever
 definition instantiates it. `h = e => users & select { x = e + 1, id = .id }`
 therefore elaborates differently for `h .age` and `h 1.5`, and
 `quad = x => twice (twice x)` resolves a nested hole from the assignment its
-own use supplied. Lambda application binds parameters into environments —
-separate ones for queries, expressions, and stages, because a `CheckedExpr`
-cannot hold a query and a stage is neither — and a stage argument is recognised
-by being *partially* applied, since `unionAll users users` supplies every
-argument and is a complete call.
+own use supplied. Lambda application binds parameters into **one** environment of
+values — the counterpart of the evaluator's `Value` — so a parameter may be a
+query, an expression, a callable, or a stage. An earlier revision kept three
+parallel environments, one per kind, and decided what a name was by *which
+environment it came from*; that could not represent a partially applied
+function at all, which is why point-free composition (`f >>> g`) once failed. A
+stage argument is recognised by being *partially* applied, since
+`unionAll users users` supplies every argument and is a complete call.
 
 **There are two differential harnesses, and only the second is evidence.**
 

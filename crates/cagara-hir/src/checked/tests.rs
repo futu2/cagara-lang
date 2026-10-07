@@ -2063,3 +2063,53 @@ fn source_elaboration_agrees_on_composition() {
         assert_source_elaboration_agrees(label, &ws);
     }
 }
+
+/// An aggregate template keeps its aggregate phase when it is a *deferred
+/// value* rather than a direct call.
+///
+/// `sum` is declared `expr r float -> agg (expr r (maybe float))`, so a direct
+/// `sum .amount` is an `agg_template`. Passing `sum` as a value and applying it
+/// later goes through `apply_value` instead — a different code path — and that
+/// path built a *scalar* template, losing the aggregate phase. The symptom was
+/// not a crash: the tree came out row-phase, so the enclosing `agg` reported
+/// "field `t` uses a column that is not grouped" on a program the evaluator
+/// compiles to `SUM(amount)`.
+///
+/// The two paths must agree, so both are covered here: a composed aggregate and
+/// one passed through a higher-order helper.
+#[test]
+fn source_elaboration_agrees_on_deferred_aggregates() {
+    for (label, src) in [
+        (
+            "passed_through_a_helper",
+            "orders : query { id = int, amount = float } = table \"p\" \"orders\"\n\
+             apply = f => x => f x\n\
+             total = apply sum\n\
+             q = orders & agg { t = total .amount }\n",
+        ),
+        (
+            "passed_as_an_argument",
+            "orders : query { id = int, amount = float } = table \"p\" \"orders\"\n\
+             use = f => orders & agg { t = f .amount }\n\
+             q = use sum\n",
+        ),
+        (
+            "composed_aggregate",
+            "orders : query { id = int, amount = float } = table \"p\" \"orders\"\n\
+             compose = f => g => x => g (f x)\n\
+             tot = compose sum count\n\
+             q = orders & agg { t = tot .amount }\n",
+        ),
+        (
+            // The direct spelling, which never had the bug. Kept beside the
+            // others so a future change to either path has to keep them equal.
+            "direct_call_baseline",
+            "orders : query { id = int, amount = float } = table \"p\" \"orders\"\n\
+             q = orders & agg { t = sum .amount }\n",
+        ),
+    ] {
+        let ws = Workspace::from_source(src);
+        assert!(ws.diags.is_empty(), "{label}: {:?}", ws.diags);
+        assert_source_elaboration_agrees(label, &ws);
+    }
+}

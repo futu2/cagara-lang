@@ -264,10 +264,13 @@ The remaining rungs, in order:
 4. ~~**Remove the evaluator as a producer.**~~ **Done.** Cell (3) — the last path
    that returned an evaluator-built `Rel` — now fails closed. Every compiled
    definition is built by source elaboration. See below.
-5. **Delete the evaluator**, now that nothing in production depends on it. It is
-   the oracle behind the parity check, and the parity check is what would be lost
-   with it, so this is a judgement about how much independent evidence is wanted
-   rather than a blocked step. See below.
+5. ~~**Make the evaluator unreachable from a shipping build.**~~ **Done.** Every
+   route to it is `cfg(test)` and `eval` is `pub(crate)`, so a non-test build
+   cannot name it. See below.
+6. **Delete the evaluator, or keep it as a permanent oracle.** Now a judgement
+   about how much independent evidence to keep rather than a blocked step: the
+   parity check is what would be lost, and it is what found every defect in this
+   layer. See below.
 
 **Rung 3, and what still depended on the evaluator.** `reconcile` computes the
 checked erasure, proves it equal to the oracle under `without_at`, and returns
@@ -297,29 +300,41 @@ compiled definition is built from source.
 That assertion is deliberately stronger than "the two agree": two producers that
 agree today can disagree tomorrow, one producer cannot disagree with itself.
 
-**Rung 5: what is left.** The *pipeline* does not read the evaluator:
-`root_queries_checked` reaches it only as the oracle it compares against, and the
-SQL backend, the CLI and the LSP never touch it.
+**Rung 5: the evaluator is unreachable from a shipping build.** Resolved by
+measuring the surface, then gating it rather than migrating it.
 
-It is **not** yet true that nothing reachable does, and an earlier version of this
-document claimed otherwise, which was wrong. `CheckedProgram::of_elaborated` is a
-`pub` constructor that runs the evaluator through `elaborate_bodies`; its only
-callers today are in-crate tests, but a `pub` API that runs the oracle is a
-production dependency by definition. The contract is now stated rather than
-implied: `of_elaborated` is documented as an **oracle entry point** that does not
-share the pipeline's behaviour, and a caller wanting bodies from source is pointed
-at `elaborate_module`. `Evaluator` is no longer re-exported from the crate root.
+The pipeline never read the evaluator — `root_queries_checked` reaches it only as
+the oracle it compares against, and the SQL backend, the CLI and the LSP never
+touch it. But reachability is not dependency: `CheckedProgram::of_elaborated` was
+`pub` and ran the evaluator, `from_type_check` took an evaluator type as a `pub`
+parameter, `CheckedDef::terms` was a `pub` field holding `eval::Elaborated`, and
+`pub mod eval` exposed `Evaluator` outright. An earlier version of this document
+claimed nothing depended on the evaluator, and that was wrong; the review found it
+by reading `of_elaborated`'s imports rather than its docs, which is the general
+lesson — **a "nothing depends on this" claim is settled by the call graph, not by
+the prose.**
 
-So removing the evaluator also means deciding what `of_elaborated`'s body-filling
-is for: migrate it to source elaboration, or reduce it to a test-only helper.
-`root_core_terms` is in the same position. (The review found this by reading
-`of_elaborated`'s imports rather than its docs — the call graph, not the prose, is
-what settles a "nothing depends on this" claim.) `root_queries` is *not* affected:
-it delegates to `root_queries_checked` and ships the checked tree.
+All four are `cfg(test)` now and `eval` is `pub(crate)`. `of_elaborated`,
+`root_core_terms`, `elaborate_bodies`, `root_queries_via_evaluator` and
+`Elaborated` are test-only; `from_type_check` takes `bodies` only in a test build,
+so an external caller sees an evaluator-free signature.
 
-What remains is a decision about evidence rather than safety — deleting the
-evaluator removes the parity check with it, and every defect found in this layer
-(the aggregate constructor, the panic, the omission hole, the routing gap) was
+The gain is an invariant the compiler checks: in a non-test build
+`CheckedDef::terms` is *always* `None`, because nothing can construct a `Some`.
+Three successive rounds asserted that in prose and were right each time — prose is
+not enforcement, and the difference showed up the moment the compiler was asked
+instead of the docs.
+
+**Why gating rather than migrating** `of_elaborated` to source elaboration:
+`CheckedDef::terms` means "the evaluator's `CoreTerm`", and migrating would change
+that to "the elaborator's `CheckedQuery`" — a different type carrying different
+information, since `CoreTerm` is deliberately row-less. That is a semantic change
+and should not be hidden inside a refactor.
+
+**What remains is a judgement about evidence, not about safety.** The evaluator can
+now be deleted without breaking any caller. What deletion costs is the parity
+check, and every defect found in this layer — the aggregate constructor losing its
+phase, the panic on a column-less table, the omission hole, the routing gap — was
 found *by* that comparison rather than by the goldens.
 
 **Why rung 2 could not be done as written.** Replacing `schema_located` with

@@ -249,16 +249,32 @@ green:
 
 The remaining rungs, in order:
 
-1. **Restrict the escape hatches.** `root_queries_via_evaluator` and
-   `from_rel_unchecked` exist so the two paths can be compared and so a `Rel`
-   can be read back for tests. Both are now reachable from production code, and
-   neither needs to be.
-2. **Demote `schema` to an assertion.** It still validates columns the checked
-   constructors have already proved, on the same erased tree, so it cannot
-   disagree with them — but it is doing work that is now redundant.
+1. ~~**Restrict the escape hatches.**~~ **Done.** `root_queries_via_evaluator` is
+   `pub(crate)`; `from_rel_unchecked` and `without_at` are `cfg(test)`. Narrowing
+   them found out something at each step — see below.
+2. ~~**Demote `schema` to an assertion.**~~ **Done, but not the way it was
+   planned.** `schema` no longer *decides* anything: a malformed program is
+   reported by the elaborated path as a `Fault::Program`. It still runs on the
+   oracle path, because that path is consulted for definitions the routing layer
+   is about to reject with a better message. See below.
 3. **Delete the evaluator**, only once source-level and SQL golden coverage is
    broad enough to stand alone. Until then it is the oracle, and the parity
    check is what makes shipping both paths safe.
+
+**Why rung 2 could not be done as written.** Replacing `schema_located` with
+`debug_assert!` looked safe — with the checked tree emitted instead, all 40 frozen
+outputs and all 400 tests were unchanged. That experiment had a blind spot: the
+suite under the real demotion *panicked* on `q = table "s" "t"`, a table whose
+defining definition declares no columns. `schema` had been producing that
+diagnostic, and the elaborated path treated the same program as a capability gap,
+so failing closed reported a compiler bug where the user deserved a plain error.
+No example contains a column-less table, which is why the golden diff missed it.
+
+So the real gap was that `core::Error` could not say *who was at fault*. It can
+now: `Error::unsupported` marks a missing capability, and `root_queries_checked`
+reports a `Program` fault with the elaborated path's own wording while a
+`Compiler` fault fails closed. `schema`'s verdict is no longer final — that,
+rather than deleting it, is what the demotion amounted to.
 
 Note what rung 6 did *not* do: it did not make the evaluator consume
 `CheckedQuery`. The original plan for this rung was to move the checked
@@ -314,7 +330,7 @@ current state.
 The behavioural contract for this step is the frozen CLI output, not the build:
 
 ```bash
-nix develop --command cargo test --workspace            # 400 passed, 0 failed
+nix develop --command cargo test --workspace            # 401 passed, 0 failed
 nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 nix develop --command cargo build --workspace -q
 <regenerate examples/*.cagara: 6 dialects + --pretty + --types + stderr>
@@ -409,14 +425,15 @@ That check is live, not decorative. Routing it found two defects no test had:
 
 **Still open:**
 
-* `schema` is still the production column validator. It runs on the same erased
-  tree, so it is not bypassed — but the checked constructors have already proved
-  what it re-derives, and it can now be demoted to an assertion.
+* `schema` still runs, on the oracle path, and still reports there. Its verdict is
+  no longer final — the routing layer decides what the user sees, and a
+  `Fault::Program` from the elaborated path wins — but it has not been removed,
+  and on the oracle path it is still doing work the constructors already did.
 * `omit` still restates a rule rather than calling `schema::omit_columns`.
-* `from_rel_unchecked` still exists. It is the only way to build a
-  `CheckedQuery` without running the constructors, and it is now used by tests
-  only — but nothing enforces that, and it should either be gated behind
-  `#[cfg(test)]` or removed.
+* `from_rel_unchecked` still exists, now `cfg(test)`, and it is the only way to
+  build a `CheckedQuery` without running the constructors. A shipping binary can
+  no longer reach it, which was the property worth having; deleting it means
+  deleting the bridge harness with it.
 * The evaluator is still the oracle for every definition, so it cannot be
   deleted. Removing it means promoting the elaborator from "agrees with the
   evaluator" to "is the only implementation" — and the defects this section

@@ -651,11 +651,32 @@ pub(crate) fn reconcile(
             name,
             &format!("source elaboration cannot handle this definition ({msg})"),
         ))),
-        // (3) The elaborator saw no query here. There is nothing to compare, so
-        // the evaluator's result is the only verdict — and a definition that is
-        // not a query is not compiled as one, so `NotQuery` emits nothing.
+        // (3) The elaborator saw no query here, because the checker's scheme for
+        // this definition is not `query r`.
+        //
+        // That test is *structural*: `elaborate_def` checks `scheme_view` before
+        // elaborating, so what arrives here is a definition the checker does not
+        // type as a query, and the evaluator's answer must agree.
+        //
+        // * `Query(Ok(_))` means the evaluator built a query for a definition
+        //   the checker says is not one. Those cannot both be right, and that is
+        //   a disagreement between two stages of the compiler rather than
+        //   anything about the user's program — so it fails closed. It used to
+        //   ship the evaluator's relation as a fallback, which is what kept the
+        //   evaluator a producer here. See
+        //   `a_nonquery_scheme_never_yields_an_evaluator_query`: no accepted
+        //   program reaches this branch, so making it an error costs nothing and
+        //   removes the last fallback that shipped an evaluator-built tree.
+        // * a failure or a non-query from the evaluator is the user's, and is
+        //   reported as such — a scalar definition with a type error has an
+        //   ordinary diagnostic.
         Outcome::NotQuery => match eval {
-            Evaluated::Query(Ok(rel)) => Some(Ok(rel)),
+            Evaluated::Query(Ok(_)) => Some(Err(internal_disagreement(
+                ws,
+                name,
+                "the checker does not type this definition as a query and the evaluator \
+                 built one anyway",
+            ))),
             Evaluated::Query(Err(d)) | Evaluated::Failed(d) | Evaluated::Rejected(d) => {
                 Some(Err(d))
             }

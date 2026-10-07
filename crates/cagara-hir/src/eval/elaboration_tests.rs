@@ -942,7 +942,7 @@ fn the_reconciliation_table_is_the_policy() {
         );
     }
 
-    // ── (3) NotQuery defers entirely to the evaluator ────────────────────────
+    // ── (3) NotQuery: no relation, and a query is a disagreement ─────────────
     //     A definition that is not a query is not compiled as one, so `None`
     //     (no relation) is the answer, not an error.
     assert!(
@@ -953,9 +953,15 @@ fn the_reconciliation_table_is_the_policy() {
         reconcile(&ws, "q", &Outcome::NotQuery, Evaluated::Open).is_none(),
         "an overloaded helper emits nothing"
     );
+    //     The checker does not type this definition as a query, so an evaluator
+    //     that built one disagrees with it. This cell used to ship the
+    //     evaluator's relation as a fallback — the last place an evaluator-built
+    //     tree reached the output — and is now an error, because two stages of
+    //     the compiler cannot both be right about what a definition is.
     assert!(
-        matches!(reconcile(&ws, "q", &Outcome::NotQuery, ok()), Some(Ok(_))),
-        "an evaluator query stands when the elaborator saw none"
+        is_internal(&reconcile(&ws, "q", &Outcome::NotQuery, ok())),
+        "a non-query scheme with an evaluator-built query is a disagreement, not a \
+         fallback"
     );
     for eval in [eval_failed(), eval_rejected()] {
         let r = reconcile(&ws, "q", &Outcome::NotQuery, eval);
@@ -1164,5 +1170,139 @@ fn an_accepted_query_is_never_only_the_evaluator_s() {
     assert!(
         checked > 0,
         "no evaluator-built query definitions were found, so this proves nothing"
+    );
+}
+
+/// Cell (3) is unreachable **structurally**, not just on the corpus so far.
+///
+/// This is the stronger version of
+/// `an_accepted_query_is_never_only_the_evaluator_s`, and it is the evidence the
+/// decision about cell (3) rests on.
+///
+/// Cell (3) needs a definition where the elaborator reports `NotAQuery` — which
+/// it does exactly when `scheme_view` is not `Query` — while the evaluator
+/// produces a query. So the cell needs the checker's *type* and the evaluator's
+/// *runtime shape* to disagree about whether a definition is a query.
+///
+/// They cannot, and the reason is visible in the classification rather than
+/// inferred from examples:
+///
+/// * if `scheme_view` is `Query`, the elaborator proceeds and the cell is not
+///   taken at all;
+/// * if it is **not** `Query`, the definition either has no scheme or has one
+///   the checker could not close, and in every shape tested the evaluator's
+///   outcome is `Rejected` or `NotQuery` — never `Query`.
+///
+/// The two mechanisms that would have to agree are the checker's `scheme_view`
+/// and the evaluator's `Value`, and the second is *built from* the first: the
+/// evaluator reaches `Value::Query` only by evaluating a `table` or a stage,
+/// which the checker types as a query. A scalar-typed definition whose body is a
+/// query is rejected before evaluation, which is why the mismatch never arises.
+#[test]
+fn a_nonquery_scheme_never_yields_an_evaluator_query() {
+    let mut shapes = 0usize;
+    for src in [
+        "t : query { a = int } = table \"s\" \"t\"\nq : int = t\n",
+        "t : query { a = int } = table \"s\" \"t\"\nr : { a = int } = t\n",
+        "t : query { a = int } = table \"s\" \"t\"\nf : int -> int = t\n",
+        "t : query { a = int } = table \"s\" \"t\"\nr : { a = int } = { a = 1 }\nq = t\n",
+        "t : query { a = int } = table \"s\" \"t\"\nh = x => t\nq = t\n",
+        "t : query { a = int } = table \"s\" \"t\"\nf : int -> int = x => x + 1\nq = t\n",
+        "q = 1\n",
+        "q = \"x\"\n",
+        "q : int = 1\n",
+    ] {
+        let ws = Workspace::from_source(src);
+        let tc = crate::check::check(&ws);
+        let root = ws.root;
+        for (i, d) in ws.modules[root].module.defs.iter().enumerate() {
+            shapes += 1;
+            let is_query = matches!(
+                tc.scheme_view(root, i),
+                Some(crate::check::SchemeView::Query { .. })
+            );
+            if is_query {
+                continue;
+            }
+            let built = crate::eval::evaluate_root(&ws, &tc)
+                .into_iter()
+                .any(|(n, e)| n == d.name && matches!(e, crate::eval::Evaluated::Query(_)));
+            assert!(
+                !built,
+                "`{}`: the scheme is not a query but the evaluator built one, so cell \
+                 (3) is reachable and the evaluator is still a producer for it",
+                d.name
+            );
+        }
+    }
+    assert!(
+        shapes >= 15,
+        "only {shapes} definitions were classified, so this proves little"
+    );
+}
+
+/// The evaluator is an **oracle**, not a producer: no path returns its `Rel`.
+///
+/// This is the property the whole migration was for, and until now it was only
+/// *almost* true — cell (3) shipped an evaluator-built relation as a fallback.
+/// With that cell failing closed, the checked erasure is the only tree that
+/// reaches the output, so the evaluator can in principle become test-only.
+///
+/// Asserted by construction rather than by reading: every definition that
+/// compiles must be built by source elaboration. If the evaluator produced a
+/// relation for something source elaboration did not build, some path put it in
+/// the output — and that is exactly the dependency this rules out.
+///
+/// Note this is stronger than "they agree". Two producers that agree today can
+/// disagree tomorrow; one producer cannot disagree with itself.
+#[test]
+fn no_compiled_definition_comes_from_the_evaluator_alone() {
+    let mut sources: Vec<String> = Vec::new();
+    for f in std::fs::read_dir("../../examples").into_iter().flatten().flatten() {
+        let p = f.path();
+        if p.extension().and_then(|e| e.to_str()) == Some("cagara") {
+            if let Ok(src) = std::fs::read_to_string(&p) {
+                sources.push(src);
+            }
+        }
+    }
+    assert!(sources.len() >= 4, "the example corpus is missing");
+    for src in [
+        "t : query { a = int } = table \"s\" \"t\"\nq = t & select { a = .a }\n",
+        "t : query { a = int } = table \"s\" \"t\"\nq = t & where (.a > 1)\n",
+        "t : query { a = int } = table \"s\" \"t\"\nq = t & agg { n = count }\n",
+        "t : query { a = int } = table \"s\" \"t\"\nq = t & order [asc .a] & limit 1\n",
+        "u : query { a = int } = table \"s\" \"u\"\nv : query { a = int } = table \"s\" \"v\"\n\
+         q = u & innerJoin v (.<a == .>a)\n",
+    ] {
+        sources.push(src.to_string());
+    }
+
+    let mut compiled = 0usize;
+    for src in &sources {
+        let ws = Workspace::from_source(src);
+        let tc = crate::check::check(&ws);
+        let root = ws.root;
+        let walked = crate::elaborate::elaborate_module(&ws, &tc, root);
+        let built: std::collections::HashSet<&str> = walked
+            .iter()
+            .filter(|(_, r)| r.is_ok())
+            .map(|(n, _)| n.as_str())
+            .collect();
+        for (name, r) in crate::root_queries_checked(&ws, &tc) {
+            if r.is_err() {
+                continue;
+            }
+            compiled += 1;
+            assert!(
+                built.contains(name.as_str()),
+                "`{name}` compiled, so a relation reached the output for it, but source \
+                 elaboration did not build it — the evaluator is still a producer"
+            );
+        }
+    }
+    assert!(
+        compiled > 0,
+        "nothing compiled, so this test proves nothing"
     );
 }

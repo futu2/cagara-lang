@@ -658,7 +658,7 @@ fn internal_disagreement(ws: &Workspace, name: &str, detail: &str) -> Diag {
 /// then validate columns. See [`root_queries_checked`], which wraps this with
 /// the source-elaboration comparison.
 ///
-/// # Why this is reachable
+/// # Why this is reachable at all
 ///
 /// A differential test that builds its oracle by calling
 /// [`root_queries_checked`] is **circular**: that function already runs source
@@ -667,11 +667,16 @@ fn internal_disagreement(ws: &Workspace, name: &str, detail: &str) -> Diag {
 /// definitions it exists to compare — so a mismatch would look like a
 /// definition the evaluator could not handle, and pass.
 ///
-/// The harness therefore compares against *this*, which is the evaluator with
-/// no source elaboration involved at all. It is `pub` for that reason and for
-/// that reason only; it is not part of the compiler's contract and is named to
-/// say so.
-pub fn root_queries_via_evaluator(
+/// The harness therefore compares against *this*, which is the evaluator with no
+/// source elaboration involved at all.
+///
+/// It is `pub(crate)`, not `pub`: its only callers are the comparison inside
+/// [`root_queries_checked`] and the tests of that comparison, and it is not part
+/// of the compiler's contract. Making it crate-private means another crate
+/// cannot reach past the parity check to the raw evaluator — which is the
+/// property worth having, since reaching past it is exactly how a caller would
+/// bypass the fail-closed behaviour without noticing.
+pub(crate) fn root_queries_via_evaluator(
     ws: &Workspace,
     tc: &TypeCheck,
 ) -> Vec<(String, Result<Rel, Diag>)> {

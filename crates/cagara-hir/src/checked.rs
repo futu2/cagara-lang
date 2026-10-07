@@ -1585,8 +1585,11 @@ pub fn erase_checked(query: CheckedQuery) -> Result<(Rel, Vec<String>), String> 
 /// not part of the relational value. Comparing with `At` in place would
 /// compare the producer's choice of origin rather than the trees.
 ///
-/// This is what `root_queries_checked` compares with, which is why it is public.
-pub fn without_at(r: &Rel) -> Rel {
+/// This is what `root_queries_checked` compares with.
+///
+/// Crate-private: it exists for that comparison and for tests of it, and nothing
+/// outside `cagara-hir` should be able to strip locations from an IR tree.
+pub(crate) fn without_at(r: &Rel) -> Rel {
     match r {
         Rel::At(_, inner) => without_at(inner),
         Rel::Table {
@@ -1678,7 +1681,21 @@ pub enum StageHint {
 /// *not* re-checked: [`erase`] is the total direction, and this cannot be,
 /// because a `CheckedQuery` carries strictly more information than a `Rel`.
 /// That asymmetry is the point — see the doc on [`erase`].
-pub fn from_rel_unchecked(
+///
+/// # Why this is crate-private
+///
+/// **This is the only way to build a `CheckedQuery` without running its
+/// constructors**, and therefore the only way to obtain one whose invariants
+/// were never checked. It exists so the bridge harness can feed the evaluator's
+/// own `Rel` back through the checked eraser and confirm the two agree; that
+/// comparison is the reason the *source* harness beside it can be trusted.
+///
+/// It was `pub` and is now `pub(crate)`. Nothing outside `cagara-hir` used it,
+/// and nothing should: a caller reaching for it wants a `CheckedQuery` from a
+/// `Rel`, which is a test-shaped need. When the checked path is the only
+/// implementation this should go entirely, at which point the bridge harness
+/// goes with it.
+pub(crate) fn from_rel_unchecked(
     rel: Rel,
     row: RowType,
     hint: Option<StageHint>,

@@ -43,9 +43,11 @@ has been removed.
 
 The query compilation entry point is `compile`, which returns one owned
 `Compilation` value containing definition identities, relations, and
-diagnostics. CLI and LSP use it to obtain their results. The workspace and
-`TypeCheck` still expose separate APIs, and the type checker uses mutable
-inference state internally.
+diagnostics. CLI and LSP use it to obtain their results. The workspace keeps a
+previous successful compilation after an edit, and `compile` reuses individual
+erased queries only when a source-based definition key and its checked
+dependency fingerprint match. The workspace and `TypeCheck` still expose
+separate APIs, and the type checker uses mutable inference state internally.
 Those are implementation choices outside the checked relational IR; replacing
 them with a fully immutable whole-program compilation result remains future
 work.

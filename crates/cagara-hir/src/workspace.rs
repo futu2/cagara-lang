@@ -95,6 +95,10 @@ pub struct Workspace {
     /// Immutable compilation result for the current root and source graph.
     /// Invalidated by the mutation methods below.
     compile_cache: RefCell<Option<Compilation>>,
+    /// The last compilation remains available after an accepted edit so the
+    /// compiler can reuse definitions whose source and checked dependencies
+    /// are unchanged.
+    previous_compile_cache: RefCell<Option<Compilation>>,
 }
 
 impl Workspace {
@@ -112,6 +116,7 @@ impl Workspace {
             stack: Vec::new(),
             overlays: HashMap::new(),
             compile_cache: RefCell::new(None),
+            previous_compile_cache: RefCell::new(None),
         };
         ws.add(PathBuf::from(PRELUDE_PATH), PRELUDE_SRC.to_string());
         ws
@@ -309,8 +314,14 @@ impl Workspace {
         *self.compile_cache.borrow_mut() = Some(compilation);
     }
 
+    pub(crate) fn take_previous_compilation(&self) -> Option<Compilation> {
+        self.previous_compile_cache.borrow_mut().take()
+    }
+
     fn invalidate_compile_cache(&mut self) {
-        self.compile_cache.get_mut().take();
+        if let Some(previous) = self.compile_cache.get_mut().take() {
+            *self.previous_compile_cache.get_mut() = Some(previous);
+        }
     }
 
     fn rebuild_diags(&mut self) {

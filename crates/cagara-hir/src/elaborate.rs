@@ -139,13 +139,9 @@ pub(crate) fn is_not_a_query(e: &Error) -> bool {
 /// Returns one entry per definition, in source order, with the same
 /// one result per root definition, in source order.
 pub fn elaborate_module(input: CompilerInput<'_>, module: usize) -> Vec<(String, R<CheckedQuery>)> {
-    #[cfg(test)]
-    ELABORATE_RUNS.with(|runs| runs.set(runs.get() + 1));
-
     let mut out = Vec::new();
     for (i, d) in input.module(module).source().defs.iter().enumerate() {
-        let result = validate_template_definition(module, d)
-            .and_then(|()| elaborate_def(input, module, i, d));
+        let result = elaborate_definition(input, module, i, d);
         out.push((d.name.clone(), result));
     }
     out
@@ -219,6 +215,19 @@ fn elaborate_def(
     };
     let value = elaborate_query(cx, &d.body, origin)?;
     Ok(value)
+}
+
+/// Elaborate one source definition for the compilation boundary.
+pub(crate) fn elaborate_definition(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    definition: &ast::Def,
+) -> R<CheckedQuery> {
+    #[cfg(test)]
+    ELABORATE_RUNS.with(|runs| runs.set(runs.get() + 1));
+    validate_template_definition(module, definition)
+        .and_then(|()| elaborate_def(input, module, def, definition))
 }
 
 ///

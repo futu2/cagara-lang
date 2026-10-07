@@ -2,11 +2,12 @@
 
 use crate::check::TypeCheck;
 use crate::core::{Error, Fault, Origin};
-use crate::elaborate::{elaborate_module, is_not_a_query};
+use crate::elaborate::{elaborate_definition, is_not_a_query};
 use crate::ir::Rel;
 use crate::workspace::{Binding, Diag, LoadedModule, Workspace};
 use cagara_syntax::ast::Module;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 /// Immutable compiler input borrowed from an existing workspace.
@@ -98,7 +99,21 @@ impl<'a> ModuleSnapshot<'a> {
     }
 }
 
-/// Stable identity for a definition inside a loaded workspace.
+/// The source-based identity of a definition inside a loaded workspace.
+///
+/// `def` in [`DefinitionId`] is a source-order position, so inserting a
+/// definition changes the ids of everything after it. This key is independent
+/// of that position: it fingerprints the definition's source and uses an
+/// occurrence number only to distinguish same-name definitions. The numeric
+/// id remains available for APIs that need to address the AST directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DefinitionKey {
+    pub module: usize,
+    pub source_hash: u64,
+    pub occurrence: usize,
+}
+
+/// The numeric source location of a definition in a loaded module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DefinitionId {
     pub module: usize,
@@ -109,6 +124,8 @@ pub struct DefinitionId {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledQuery {
     pub id: DefinitionId,
+    pub key: DefinitionKey,
+    pub fingerprint: u64,
     pub name: String,
     pub result: Result<Rel, Diag>,
 }
@@ -131,7 +148,8 @@ pub fn compile(ws: &Workspace) -> Compilation {
     if let Some(cached) = ws.compilation_cache() {
         return cached;
     }
-    let compilation = compile_uncached(ws);
+    let previous = ws.take_previous_compilation();
+    let compilation = compile_uncached(ws, previous.as_ref());
     ws.set_compilation_cache(compilation.clone());
     compilation
 }
@@ -141,15 +159,16 @@ pub fn compile_diagnostics(ws: &Workspace) -> Vec<Diag> {
     if let Some(diagnostics) = ws.compilation_diagnostics() {
         return diagnostics;
     }
-    let compilation = compile_uncached(ws);
+    let previous = ws.take_previous_compilation();
+    let compilation = compile_uncached(ws, previous.as_ref());
     let diagnostics = compilation.diagnostics.clone();
     ws.set_compilation_cache(compilation);
     diagnostics
 }
 
-fn compile_uncached(ws: &Workspace) -> Compilation {
+fn compile_uncached(ws: &Workspace, previous: Option<&Compilation>) -> Compilation {
     let tc = crate::check::check(ws);
-    compile_input(CompilerInput::new(ws, &tc))
+    compile_input_cached(CompilerInput::new(ws, &tc), previous)
 }
 
 /// Compile a workspace using a type check the caller already computed.
@@ -159,8 +178,13 @@ pub fn compile_checked(ws: &Workspace, tc: &TypeCheck) -> Compilation {
 
 /// Compile an immutable view over cached workspace data.
 pub fn compile_input(input: CompilerInput<'_>) -> Compilation {
+    compile_input_cached(input, None)
+}
+
+fn compile_input_cached(input: CompilerInput<'_>, previous: Option<&Compilation>) -> Compilation {
     let tc = input.type_check();
     let root = input.root();
+    let keys = definition_keys(root);
     let mut out = Compilation {
         queries: Vec::new(),
         diagnostics: input.diagnostics().to_vec(),
@@ -169,46 +193,267 @@ pub fn compile_input(input: CompilerInput<'_>) -> Compilation {
         push_unique(&mut out.diagnostics, error.diag.clone());
     }
 
-    for (index, (name, result)) in elaborate_module(input, root.index())
-        .into_iter()
-        .enumerate()
-    {
+    for (index, definition) in root.source().defs.iter().enumerate() {
+        let name = definition.name.clone();
+        let key = keys[index];
+        let fingerprint = definition_fingerprint(input, root.index(), index, key);
         let id = DefinitionId {
             module: root.index(),
             def: index,
         };
-        let result =
-            match result {
-                Ok(query) => match crate::checked::erase(query) {
-                    Ok(rel) => match crate::schema::schema_located(&rel) {
-                        Ok(_) => Ok(rel),
-                        Err((location, message)) => Err(input
-                            .diagnostic(location.map(|l| Origin::new(l.module, l.span)), message)),
-                    },
-                    Err(error) => Err(internal_error(input, &name, &error)),
-                },
-                Err(error) if is_not_a_query(&error) => {
-                    if let Some(diag) = tc.error_for(root.index(), index) {
-                        Err(diag.clone())
-                    } else {
-                        continue;
+        let result = previous
+            .and_then(|old| {
+                old.queries
+                    .iter()
+                    .find(|query| query.key == key && query.fingerprint == fingerprint)
+                    .filter(|query| query.result.is_ok())
+                    .map(|query| query.result.clone())
+            })
+            .or_else(
+                || match elaborate_definition(input, root.index(), index, definition) {
+                    Ok(query) => Some(match crate::checked::erase(query) {
+                        Ok(rel) => match crate::schema::schema_located(&rel) {
+                            Ok(_) => Ok(rel),
+                            Err((location, message)) => Err(input.diagnostic(
+                                location.map(|l| Origin::new(l.module, l.span)),
+                                message,
+                            )),
+                        },
+                        Err(error) => Err(internal_error(input, &name, &error)),
+                    }),
+                    Err(error) if is_not_a_query(&error) => {
+                        tc.error_for(root.index(), index).cloned().map(Err)
                     }
-                }
-                Err(error) => {
-                    let diag = match error.fault {
+                    Err(error) => Some(Err(match error.fault {
                         Fault::Program => input.diagnostic(error.origin, error.message),
                         Fault::Compiler => internal_error(input, &name, &error),
                         Fault::NotAQuery => unreachable!("handled above"),
-                    };
-                    Err(diag)
-                }
-            };
+                    })),
+                },
+            );
+        let Some(result) = result else {
+            continue;
+        };
         if let Err(diag) = &result {
             push_unique(&mut out.diagnostics, diag.clone());
         }
-        out.queries.push(CompiledQuery { id, name, result });
+        out.queries.push(CompiledQuery {
+            id,
+            key,
+            fingerprint,
+            name,
+            result,
+        });
     }
     out
+}
+
+#[derive(Default)]
+struct StableHasher(u64);
+
+impl Hasher for StableHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let mut hash = if self.0 == 0 {
+            0xcbf29ce484222325
+        } else {
+            self.0
+        };
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        self.0 = hash;
+    }
+}
+
+fn stable_hash<T: Hash>(value: &T) -> u64 {
+    let mut hasher = StableHasher::default();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Build source-based identities before elaboration drops non-query
+/// definitions from the result. Occurrences are counted by name, so editing a
+/// definition's body does not renumber a later overload with the same name.
+fn definition_keys(module: ModuleSnapshot<'_>) -> Vec<DefinitionKey> {
+    let mut occurrences = HashMap::<&str, usize>::new();
+    module
+        .source()
+        .defs
+        .iter()
+        .map(|definition| {
+            let occurrence = occurrences.entry(definition.name.as_str()).or_insert(0);
+            let source = module
+                .text()
+                .get(definition.span.start as usize..definition.span.end as usize)
+                .unwrap_or_default();
+            let key = DefinitionKey {
+                module: module.index(),
+                source_hash: stable_hash(&source),
+                occurrence: *occurrence,
+            };
+            *occurrence += 1;
+            key
+        })
+        .collect()
+}
+
+fn definition_fingerprint(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    key: DefinitionKey,
+) -> u64 {
+    let tc = input.type_check();
+    let mut facts = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    collect_definition_facts(input, tc, module, def, &mut seen, &mut facts);
+    stable_hash(&(key, facts))
+}
+
+type DefinitionFacts = (
+    DefinitionKey,
+    String,
+    usize,
+    String,
+    String,
+    Vec<String>,
+    Vec<String>,
+);
+
+fn collect_definition_facts(
+    input: CompilerInput<'_>,
+    tc: &TypeCheck,
+    module: usize,
+    def: usize,
+    seen: &mut std::collections::HashSet<(usize, usize)>,
+    facts: &mut Vec<DefinitionFacts>,
+) {
+    if !seen.insert((module, def)) {
+        return;
+    }
+    let snapshot = input.module(module);
+    let Some(definition) = snapshot.source().defs.get(def) else {
+        return;
+    };
+    let key = definition_keys(snapshot)[def];
+    let choices = tc
+        .choices_of(module, def)
+        .into_iter()
+        .map(|(_, hole, choice)| format!("{hole}:{choice:?}"))
+        .collect();
+    let uses = expression_types(tc, module, &definition.body);
+    facts.push((
+        key,
+        tc.type_of(module, def).unwrap_or_default().to_string(),
+        tc.holes(module, def),
+        format!("{:?}", tc.scheme_view(module, def)),
+        format!("{:?}", tc.result_expr(module, def)),
+        choices,
+        uses,
+    ));
+    collect_expression_dependencies(input, tc, module, &definition.body, seen, facts);
+}
+
+fn expression_types(
+    tc: &TypeCheck,
+    module: usize,
+    expression: &cagara_syntax::ast::Expr,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    walk_expression(expression, &mut |e| {
+        if let Some(ty) = tc.use_ty(module, e.id) {
+            out.push(format!("{ty:?}"));
+        }
+    });
+    out
+}
+
+fn collect_expression_dependencies(
+    input: CompilerInput<'_>,
+    tc: &TypeCheck,
+    module: usize,
+    expression: &cagara_syntax::ast::Expr,
+    seen: &mut std::collections::HashSet<(usize, usize)>,
+    facts: &mut Vec<DefinitionFacts>,
+) {
+    walk_expression(expression, &mut |e| {
+        let snapshot = input.module(module);
+        match &e.kind {
+            cagara_syntax::ast::ExprKind::Name(name) => {
+                if let Some(binding) = snapshot.scope().get(name) {
+                    collect_binding_facts(input, tc, binding, seen, facts);
+                }
+            }
+            cagara_syntax::ast::ExprKind::Proj(base, field) => {
+                if let cagara_syntax::ast::ExprKind::Name(alias) = &base.kind {
+                    if let Some(Binding::Module(target)) = snapshot.scope().get(alias) {
+                        if let Some(binding) = input.module(*target).own().get(field) {
+                            collect_binding_facts(input, tc, binding, seen, facts);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
+fn collect_binding_facts(
+    input: CompilerInput<'_>,
+    tc: &TypeCheck,
+    binding: &Binding,
+    seen: &mut std::collections::HashSet<(usize, usize)>,
+    facts: &mut Vec<DefinitionFacts>,
+) {
+    match binding {
+        Binding::Def(module, def) => {
+            collect_definition_facts(input, tc, *module, *def, seen, facts)
+        }
+        Binding::Overloads(module, defs) => {
+            for def in defs {
+                collect_definition_facts(input, tc, *module, *def, seen, facts);
+            }
+        }
+        Binding::Module(_) | Binding::Prim(_) => {}
+    }
+}
+
+fn walk_expression(
+    expression: &cagara_syntax::ast::Expr,
+    visit: &mut impl FnMut(&cagara_syntax::ast::Expr),
+) {
+    visit(expression);
+    match &expression.kind {
+        cagara_syntax::ast::ExprKind::Proj(base, _)
+        | cagara_syntax::ast::ExprKind::Lambda(_, base) => walk_expression(base, visit),
+        cagara_syntax::ast::ExprKind::App(function, args) => {
+            walk_expression(function, visit);
+            for arg in args.iter() {
+                walk_expression(arg, visit);
+            }
+        }
+        cagara_syntax::ast::ExprKind::Record(fields) => {
+            for (_, value) in fields {
+                walk_expression(value, visit);
+            }
+        }
+        cagara_syntax::ast::ExprKind::List(values) => {
+            for value in values {
+                walk_expression(value, visit);
+            }
+        }
+        cagara_syntax::ast::ExprKind::Name(_)
+        | cagara_syntax::ast::ExprKind::Lit(_)
+        | cagara_syntax::ast::ExprKind::Field(_, _)
+        | cagara_syntax::ast::ExprKind::Sql(_)
+        | cagara_syntax::ast::ExprKind::Primitive(_)
+        | cagara_syntax::ast::ExprKind::Error => {}
+    }
 }
 
 /// Elaborate root definitions directly into checked queries and erase them.
@@ -279,6 +524,111 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1]
         );
+        assert_ne!(
+            compilation.queries[0].key, compilation.queries[1].key,
+            "duplicate definitions need distinct cache identities"
+        );
+    }
+
+    #[test]
+    fn definition_keys_survive_unrelated_insertions() {
+        let mut ws = Workspace::from_source(
+            "first : query { a = int } = table \"public\" \"first\"\n\
+             second : query { a = int } = table \"public\" \"second\"\n",
+        );
+        let before = compile(&ws);
+        let keys_before: Vec<_> = before.queries.iter().map(|query| query.key).collect();
+
+        assert!(ws.set_source(
+            ws.root,
+            "inserted : query { a = int } = table \"public\" \"inserted\"\n\
+             first : query { a = int } = table \"public\" \"first\"\n\
+             second : query { a = int } = table \"public\" \"second\"\n"
+                .into()
+        ));
+        let after = compile(&ws);
+        let by_name: HashMap<_, _> = after
+            .queries
+            .iter()
+            .map(|query| (query.name.as_str(), query.key))
+            .collect();
+
+        assert_eq!(by_name["first"], keys_before[0]);
+        assert_eq!(by_name["second"], keys_before[1]);
+    }
+
+    #[test]
+    fn inserting_a_definition_reuses_unchanged_queries() {
+        let mut ws = Workspace::from_source(
+            "first : query { a = int } = table \"public\" \"first\"\n\
+             second : query { a = int } = table \"public\" \"second\"\n",
+        );
+        compile(&ws);
+        let before = crate::elaborate::elaborated_defs().len();
+
+        assert!(ws.set_source(
+            ws.root,
+            "inserted : query { a = int } = table \"public\" \"inserted\"\n\
+             first : query { a = int } = table \"public\" \"first\"\n\
+             second : query { a = int } = table \"public\" \"second\"\n"
+                .into()
+        ));
+        let after = compile(&ws);
+
+        assert!(after.diagnostics.is_empty(), "{:?}", after.diagnostics);
+        assert_eq!(
+            &crate::elaborate::elaborated_defs()[before..],
+            &[(ws.root, 0)],
+            "only the inserted definition should be elaborated"
+        );
+    }
+
+    #[test]
+    fn changing_a_dependency_reelaborates_its_users() {
+        let mut ws = Workspace::from_source(
+            "base : query { a = int } = table \"public\" \"base\"\n\
+             q = base\n",
+        );
+        let first = compile(&ws);
+        assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
+        let before = crate::elaborate::elaborated_defs().len();
+
+        assert!(ws.set_source(
+            ws.root,
+            "base : query { a = int } = table \"public\" \"changed\"\n\
+             q = base\n"
+                .into()
+        ));
+        let edited = compile(&ws);
+
+        assert!(edited.diagnostics.is_empty(), "{:?}", edited.diagnostics);
+        assert_eq!(
+            &crate::elaborate::elaborated_defs()[before..],
+            &[(ws.root, 0), (ws.root, 1)],
+            "a dependent definition must not reuse a stale expanded query"
+        );
+    }
+
+    #[test]
+    fn editing_one_definition_changes_only_its_key() {
+        let mut ws = Workspace::from_source(
+            "first : query { a = int } = table \"public\" \"first\"\n\
+             second : query { a = int } = table \"public\" \"second\"\n",
+        );
+        let before = compile(&ws);
+        let first_before = before.queries[0].key;
+        let second_before = before.queries[1].key;
+
+        assert!(ws.set_source(
+            ws.root,
+            "first : query { a = int } = table \"public\" \"changed\"\n\
+             second : query { a = int } = table \"public\" \"second\"\n"
+                .into()
+        ));
+        let after = compile(&ws);
+
+        assert_ne!(after.queries[0].key, first_before);
+        assert_eq!(after.queries[1].key, second_before);
     }
 
     #[test]
@@ -378,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn editing_one_definition_currently_reelaborates_all_root_definitions() {
+    fn editing_one_definition_reuses_unchanged_root_definitions() {
         let mut ws = Workspace::from_source(
             "first : query { a = int } = table \"public\" \"first\"\n\
              second : query { a = int } = table \"public\" \"second\"\n",
@@ -398,8 +748,8 @@ mod tests {
         assert!(edited.diagnostics.is_empty(), "{:?}", edited.diagnostics);
         assert_eq!(
             &crate::elaborate::elaborated_defs()[before..],
-            &[(ws.root, 0), (ws.root, 1)],
-            "the current compilation boundary rebuilds every root definition"
+            &[(ws.root, 0)],
+            "an unchanged definition should reuse its erased query"
         );
     }
 }

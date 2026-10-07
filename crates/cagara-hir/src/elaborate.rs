@@ -74,6 +74,33 @@ pub(crate) struct Ctx<'a> {
     /// Query-valued bindings, the counterpart of `env` for parameters applied
     /// to a query. Kept separate because the two hold different types.
     pub qenv: &'a [(String, CheckedQuery)],
+    /// The overload candidates chosen for the definition currently being
+    /// elaborated, indexed by hole.
+    ///
+    /// This is the elaborator's half of the evaluator's `Inst { def, holes }`
+    /// (`eval.rs:23`), and it exists because a *polymorphic* definition's
+    /// overloaded sites are not resolved where they are written.
+    ///
+    /// `h = e => users & select { x = e + 1, id = .id }` has one open overload
+    /// (`+`), so the checker records its site as `Choice::Hole(0)` — the same
+    /// entry whatever `h` is applied to. The resolution lives at the *use*:
+    /// `i = h .age` records `Def(0, 85)` (the int `+`) against the use site,
+    /// and `f = h 1.5` would record the float one. So `h`'s body must be
+    /// elaborated once per hole assignment, and this is where that assignment
+    /// travels.
+    pub holes: &'a [(usize, usize)],
+    /// Parameters bound to a *stage* rather than to a query or an expression.
+    ///
+    /// `h = p => users & select { id = .id } & p` takes a stage as its
+    /// parameter — `a = h (select { z = .id })` passes one — so `& p` is a stage
+    /// application whose operator is a variable. The evaluator handles this
+    /// because `select {..}` with one of its two arguments supplied is a
+    /// partially applied primitive awaiting the query (`eval.rs:288`), and it is
+    /// applied the same way any other stage would be.
+    ///
+    /// A stage binding is stored as the *stage form it was written as*, so
+    /// applying it re-runs the ordinary stage dispatch on that form.
+    pub senv: &'a [(String, CheckedStage)],
     /// The definitions currently being expanded, outermost first.
     ///
     /// Descending into a definition's body means elaborating it, and a
@@ -147,7 +174,24 @@ fn elaborate_def(
     let active = [(module, def)];
     let env: [(String, CheckedExpr); 0] = [];
     let qenv: [(String, CheckedQuery); 0] = [];
-    let cx = Ctx { ws, tc, module, owner: def, scope, env: &env, qenv: &qenv, active: &active };
+    // A definition elaborated on its own has no assignment for its open
+    // overloads: those are chosen per use, and a definition with holes is
+    // skipped by `elaborate_module` anyway. See `Ctx::holes`.
+    let holes: [(usize, usize); 0] = [];
+    // A definition elaborated on its own takes no stage arguments either.
+    let senv: [(String, CheckedStage); 0] = [];
+    let cx = Ctx {
+        ws,
+        tc,
+        module,
+        owner: def,
+        scope,
+        env: &env,
+        qenv: &qenv,
+        holes: &holes,
+        senv: &senv,
+        active: &active,
+    };
     let value = elaborate_query(cx, &d.body, origin)?;
     Ok(value)
 }
@@ -299,13 +343,15 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                         owner: *di,
                         scope: &cx.ws.modules[*dm].scope,
                         active: &active,
+                        holes: cx.holes,
+                        senv: cx.senv,
                         env: cx.env,
                         qenv: cx.qenv,
                     };
                     elaborate_query(inner, body, inner_origin)
                 }
                 Some(Binding::Overloads(dm, is)) => {
-                    let di = choose(cx.tc, cx.module, cx.owner, e.id, is)?;
+                    let di = choose(cx.tc, cx.module, cx.owner, e.id, is, cx.holes)?;
                     let body = &cx.ws.modules[*dm].module.defs[di].body;
                     let inner_origin = at(cx.ws.modules[*dm].module.defs[di].span);
                     let active = enter(&cx, *dm, di)?;
@@ -316,6 +362,8 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                         owner: di,
                         scope: &cx.ws.modules[*dm].scope,
                         active: &active,
+                        holes: cx.holes,
+                        senv: cx.senv,
                         env: cx.env,
                         qenv: cx.qenv,
                     };
@@ -341,7 +389,7 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
             let (dm, di) = match binding {
                 Binding::Def(dm, di) => (dm, di),
                 Binding::Overloads(dm, is) => {
-                    (dm, choose(cx.tc, cx.module, cx.owner, e.id, &is)?)
+                    (dm, choose(cx.tc, cx.module, cx.owner, e.id, &is, cx.holes)?)
                 }
                 _ => {
                     return Err(
@@ -360,6 +408,8 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                 owner: di,
                 scope: &inner_scope,
                 active: &active,
+                holes: cx.holes,
+                senv: cx.senv,
                 env: cx.env,
                 qenv: cx.qenv,
             };
@@ -402,7 +452,7 @@ fn elaborate_application(
             let chosen = match binding {
                 Some(Binding::Def(dm, di)) => Some((dm, di)),
                 Some(Binding::Overloads(dm, is)) => {
-                    Some((dm, choose(cx.tc, cx.module, cx.owner, f.id, &is)?))
+                    Some((dm, choose(cx.tc, cx.module, cx.owner, f.id, &is, cx.holes)?))
                 }
                 _ => None,
             };
@@ -431,7 +481,33 @@ fn elaborate_application(
                     // the more specific one and must win.
                     let mut qbound: Vec<(String, CheckedQuery)> = Vec::new();
                     let mut ebound: Vec<(String, CheckedExpr)> = Vec::new();
+                    let mut sbound: Vec<(String, CheckedStage)> = Vec::new();
                     for (p, a) in params.iter().zip(args) {
+                        // A stage argument: `h (select { z = .id })` passes a
+                        // stage, which is an application of a stage operator to
+                        // its own operand. Recognised before the query reading
+                        // because `select {..}` is *not* a query — it is a
+                        // function from a query — so the query reading would fail
+                        // on it, and could otherwise succeed for a stage spelled
+                        // like a query name.
+                        //
+                        // It must be **partially** applied to count. `select {..}`
+                        // supplies one of its two arguments, with the query still
+                        // to come; `union users users` supplies both and is a
+                        // complete call whose result is a query. Treating the
+                        // latter as a stage made `q = union users users` reach the
+                        // `__union` primitive and fail.
+                        if let ExprKind::App(sf, sargs) = &a.kind {
+                            if let ExprKind::Name(op) = &sf.kind {
+                                if is_stage_form(op) && stage_wants_more(cx, op, sargs.len()) {
+                                    sbound.push((
+                                        p.clone(),
+                                        CheckedStage::Applied(op.clone(), sargs.to_vec()),
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
                         // The query reading runs in the *caller's* context, so a
                         // failure here is expected for a scalar argument.
                         match elaborate_query(cx, a, at(a.span)) {
@@ -445,6 +521,14 @@ fn elaborate_application(
                     qenv.extend(qbound);
                     let mut env: Vec<(String, CheckedExpr)> = cx.env.to_vec();
                     env.extend(ebound);
+                    let mut senv: Vec<(String, CheckedStage)> = cx.senv.to_vec();
+                    senv.extend(sbound);
+                    // The callee's open overloads are resolved by this use
+                    // site, exactly as in the expression path. Setting
+                    // `cx.holes` here instead was the bug that kept these
+                    // definitions unelaborated: the caller's assignment
+                    // addresses the *caller's* holes, not the callee's.
+                    let holes = holes_at(cx, dm, di, f.id)?;
                     let callee = Ctx {
                         ws: cx.ws,
                         tc: cx.tc,
@@ -454,6 +538,8 @@ fn elaborate_application(
                         env: &env,
                         qenv: &qenv,
                         active: &active,
+                        holes: &holes,
+                        senv: &senv,
                     };
                     return elaborate_query(callee, inner, at(e.span));
                 }
@@ -469,6 +555,20 @@ fn elaborate_application(
         if let Some(Binding::Def(pm, pi)) = cx.scope.get(n).cloned() {
             let body = &cx.ws.modules[pm].module.defs[pi].body;
             if let ExprKind::Primitive(prim) = &body.kind {
+                // A *set operation* defined as a bare primitive is still a set
+                // operation, and `q = unionAll users users` is an ordinary call
+                // to it. Reaching `elaborate_primitive` would report
+                // "`__unionAll` is not elaborated", because that function
+                // handles the primitives that build a query from nothing
+                // (`table`) rather than those combining two.
+                //
+                // This goes to `elaborate_set_op` directly rather than through
+                // `apply_stage`, because a direct call has no piped input: there
+                // is nothing to pass as one, and inventing a placeholder query
+                // would be a fabricated value that the constructors might accept.
+                if let Some(kind) = set_kind_of(n) {
+                    return elaborate_set_op(cx, kind, args, at(e.span));
+                }
                 return elaborate_primitive(cx, e, args, prim, at(e.span));
             }
         }
@@ -521,6 +621,17 @@ fn elaborate_application(
             // The operator in `f` *is* the stage, and `stage_e` is its argument.
             (pipe_op.as_str(), std::slice::from_ref(stage_e))
         };
+        // `& p` where `p` is a *parameter* bound to a stage:
+        // `h = p => users & select { id = .id } & p`, applied as
+        // `a = h (select { z = .id })`. The binding holds the form the argument
+        // was written in, so applying it re-runs the ordinary dispatch on that
+        // form — which is what the evaluator does when it applies the partially
+        // applied primitive that the argument evaluated to.
+        if let Some((_, CheckedStage::Applied(op, st_args))) =
+            cx.senv.iter().rev().find(|(k, _)| k == stage_name)
+        {
+            return apply_stage(cx, op, st_args, input, at(input_e.span));
+        }
         return apply_stage(cx, stage_name, stage_args, input, at(input_e.span));
     }
 
@@ -528,6 +639,122 @@ fn elaborate_application(
         "only a pipeline stage applied to a query is elaborated at present",
     )
     .at(at(e.span)))
+}
+
+/// Does `op` applied to `given` arguments still await more — i.e. is this a
+/// *partially applied* stage rather than a complete call?
+///
+/// A stage takes the piped query as its last argument, so a form written as a
+/// stage supplies one fewer than the stage's arity. `select {..}` gives 1 of 2;
+/// `union users users` gives 2 of 2 and is therefore a finished call, not a
+/// stage to be applied later.
+///
+/// The arity comes from the stage definition's **signature**, counted the way
+/// `eval::shape` counts it (`eval.rs:367`), so a new prelude stage needs no
+/// change here. The bare prelude name and the `_op_` spelling are both looked
+/// up, since either may appear.
+fn stage_wants_more(cx: Ctx<'_>, op: &str, given: usize) -> bool {
+    let arity = cx
+        .scope
+        .get(op)
+        .and_then(|b| match b {
+            Binding::Def(m, i) => Some((*m, *i)),
+            Binding::Overloads(m, is) => is.first().map(|i| (*m, *i)),
+            _ => None,
+        })
+        .map(|(m, i)| {
+            let mut n = 0;
+            let mut t = cx.ws.modules[m].module.defs[i].ty.as_ref();
+            while let Some(ast::TypeExpr::Fun(_, r)) = t {
+                n += 1;
+                t = Some(r);
+            }
+            n
+        });
+    match arity {
+        // Unknown (a stage spelled some other way): assume it is a stage, which
+        // is the previous behaviour and the more specific reading.
+        None => true,
+        Some(n) => given < n,
+    }
+}
+
+/// The set operation a name denotes, for either spelling.
+///
+/// `&|`/`_&|_` and `union` are the same operation; recognising both here keeps
+/// the two spellings from drifting apart, which is exactly the class of bug the
+/// production parity check caught once already.
+fn set_kind_of(name: &str) -> Option<crate::ir::SetKind> {
+    match name {
+        "_&|_" | "union" => Some(crate::ir::SetKind::Union),
+        "_&!_" | "unionAll" => Some(crate::ir::SetKind::UnionAll),
+        "_&^_" | "intersect" => Some(crate::ir::SetKind::Intersect),
+        "_&~_" | "except" => Some(crate::ir::SetKind::Except),
+        _ => None,
+    }
+}
+
+/// A set operation written as a **direct call**: `q = unionAll users users`.
+///
+/// Both operands arrive in source order, and no piped query is involved. This is
+/// the counterpart of the piped form (`q & unionAll other`, where the piped
+/// query is the right operand) and the two must stay distinct — sharing one
+/// operand order between them is what reversed a set operation earlier in this
+/// work.
+fn elaborate_set_op(
+    cx: Ctx<'_>,
+    kind: crate::ir::SetKind,
+    args: &[ast::Expr],
+    origin: Origin,
+) -> R<CheckedQuery> {
+    let at = |span: Span| Origin::new(cx.module, span);
+    match args {
+        [l, r] => {
+            let left = elaborate_query(cx, l, at(l.span))?;
+            let right = elaborate_query(cx, r, at(r.span))?;
+            CheckedQuery::set(kind, left, right, origin)
+        }
+        _ => Err(Error::new("a set operation takes two queries").at(origin)),
+    }
+}
+
+/// Is `name` something [`apply_stage`] can dispatch?
+///
+/// Deliberately *not* `rules::is_pipe_name`. That answers a different question
+/// — whether a name is one of the `_op_` *spellings* an operator desugars to,
+/// which decides where a diagnostic is located (`rules.rs:33`) — and it is
+/// false for the bare prelude names. Both spellings are stages here: `_&=_` and
+/// `select` are the same stage, and `is_pipe_name` recognises only the first.
+///
+/// Getting this wrong is not cosmetic. Using `is_pipe_name` to recognise a
+/// *stage argument* fails on `select {..}`, which then falls through to the
+/// scalar path and is reported as "the expression primitive `__select` is not
+/// elaborated".
+fn is_stage_form(name: &str) -> bool {
+    matches!(
+        name,
+        "_&?_" | "where"
+            | "_&=_" | "select"
+            | "_&+_" | "update"
+            | "_&*_" | "agg"
+            | "_&._" | "order"
+            | "_&-_" | "limit"
+            | "offset"
+            | "distinct"
+            | "omit"
+            | "prefix"
+            | "suffix"
+            | "_&|_" | "union"
+            | "_&!_" | "unionAll"
+            | "_&^_" | "intersect"
+            | "_&~_" | "except"
+            | "_?_" | "innerJoin"
+            | "_<?_" | "leftJoin"
+            | "_?>_" | "rightJoin"
+            | "_<?>_" | "fullJoin"
+            | "semiJoin"
+            | "antiJoin"
+    )
 }
 
 /// Dispatch one stage operator to its checked constructor.
@@ -668,17 +895,19 @@ fn apply_stage(
             CheckedQuery::set(kind, input, other, origin)
         }
         "union" | "unionAll" | "intersect" | "except" => {
-            let other_e = one_arg("a set operation")?;
-            let other = elaborate_query(cx, other_e, at(other_e.span))?;
-            let kind = match stage_name {
-                "union" => crate::ir::SetKind::Union,
-                "unionAll" => crate::ir::SetKind::UnionAll,
-                "intersect" => crate::ir::SetKind::Intersect,
-                _ => crate::ir::SetKind::Except,
-            };
-            // Bare name: its argument is the left operand, the piped query the
-            // right one, because `q & union other` is `union other q`.
-            CheckedQuery::set(kind, other, input, origin)
+            // A bare-name set operation reached through the pipe: `q & union o`
+            // desugars to `union o q`, so the single argument is the *left*
+            // operand and the piped query is the right one. The direct-call
+            // shape (`union a b`) has no piped query and is handled by
+            // `elaborate_set_op`, which is why the argument count decides.
+            let kind = set_kind_of(stage_name).expect("matched by name just above");
+            match stage_args {
+                [only] => {
+                    let other = elaborate_query(cx, only, at(only.span))?;
+                    CheckedQuery::set(kind, other, input, origin)
+                }
+                _ => elaborate_set_op(cx, kind, stage_args, origin),
+            }
         }
         // A **user-defined stage**: `no_id = omit "id"` then `users & no_id`.
         //
@@ -726,6 +955,8 @@ fn elaborate_user_stage(
         owner: di,
         scope: &inner_scope,
         active: &active,
+        holes: cx.holes,
+        senv: cx.senv,
         env: cx.env,
         qenv: cx.qenv,
     };
@@ -823,6 +1054,8 @@ pub fn elaborate_expr(
     // caller-facing entry point and keeps the signature it has always had.
     let env: [(String, CheckedExpr); 0] = [];
     let qenv: [(String, CheckedQuery); 0] = [];
+    let holes: [(usize, usize); 0] = [];
+    let senv: [(String, CheckedStage); 0] = [];
     elaborate_expr_inner(
         Ctx {
             ws,
@@ -832,6 +1065,8 @@ pub fn elaborate_expr(
             scope,
             env: &env,
             qenv: &qenv,
+            holes: &holes,
+            senv: &senv,
             active: &active,
         },
         e,
@@ -925,6 +1160,8 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
                         env: cx.env,
                         qenv: cx.qenv,
                         active: &active,
+                        holes: cx.holes,
+                        senv: cx.senv,
                     };
                     elaborate_expr_inner(inner, &body)
                 }
@@ -962,7 +1199,7 @@ fn elaborate_call(
     let binding = cx.scope.get(name).cloned();
     let (dm, di) = match binding {
         Some(Binding::Def(dm, di)) => (dm, di),
-        Some(Binding::Overloads(dm, is)) => (dm, choose(cx.tc, cx.module, cx.owner, f.id, &is)?),
+        Some(Binding::Overloads(dm, is)) => (dm, choose(cx.tc, cx.module, cx.owner, f.id, &is, cx.holes)?),
         _ => {
             return Err(Error::new(format!(
                 "`{name}` is not a scalar function this layer can elaborate"
@@ -986,7 +1223,7 @@ fn elaborate_call(
     // argument's type came from the checker and the body's structure is the
     // user's.
     if matches!(body.kind, ExprKind::Lambda(..)) {
-        return elaborate_lambda(cx, dm, di, name, body, args, origin);
+        return elaborate_lambda(cx, (dm, di), name, body, args, f.id, origin);
     }
     let ExprKind::Sql(sql) = &body.kind else {
         return Err(Error::new(format!(
@@ -1067,6 +1304,24 @@ fn elaborate_call(
     }
 }
 
+/// A stage passed as an argument, kept in the form it was written.
+///
+/// `a = h (select { z = .id })` passes `select { z = .id }` — an application of
+/// the `select` operator to its field record, with the query still to come. The
+/// evaluator represents that as a partially applied primitive; here it is kept
+/// as the operator name plus its already-elaborated operand, so applying it
+/// later goes through the same [`apply_stage`] dispatch as any other stage.
+#[derive(Debug, Clone)]
+pub(crate) enum CheckedStage {
+    /// `select {..}`, `where p`, …: the operator and its own argument.
+    ///
+    /// The argument is kept as source because a stage's own argument is
+    /// elaborated against the *input* row, which is not known until the stage
+    /// is applied; elaborating it early would need a row that does not exist
+    /// yet. That is why this holds `ast::Expr` rather than a `CheckedExpr`.
+    Applied(String, Vec<ast::Expr>),
+}
+
 /// How a `sql` template's result is *declared* to behave, read from its type
 /// expression the way the evaluator reads it (`eval.rs:342`).
 ///
@@ -1094,6 +1349,75 @@ fn declared_kind(d: &ast::Def) -> DeclaredKind {
     }
 }
 
+/// The overload candidates chosen for `callee` **used at `site`**.
+///
+/// This is the elaborator's counterpart of the evaluator's `use_def`/`choose`
+/// pair (`eval.rs:130-148`), and it is what makes one definition elaborate
+/// differently at each of its uses.
+///
+/// `tc.holes(dm, di)` counts the callee's open overloads. `tc.choice(dm, di,
+/// site, k)` then holds the answer recorded *for that use*: the checker
+/// rewrites a definition's own `Hole(k)` constraints into `Site(site, k)` when
+/// it instantiates that definition at a use (`infer.rs:835`), and records the
+/// chosen candidate against the callee keyed by that use site.
+///
+/// An open hole with nothing recorded is a real gap, not an absence of
+/// overloads, so it is reported rather than defaulting to candidate 0.
+fn holes_at(cx: Ctx<'_>, dm: usize, di: usize, site: u32) -> R<Vec<(usize, usize)>> {
+    let n = cx.tc.holes(dm, di);
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        // Read through the **caller's** map, not the callee's.
+        //
+        // The checker records a definition's body once, leaving its overloads
+        // as `Hole(k)`; the resolution performed when that definition is
+        // *instantiated at a use* is recorded against the definition being
+        // checked at the time, which is the caller
+        // (`infer.rs:1746`, `self.active.last()`). So for `ok = h .age` the
+        // candidate for `h`'s hole lives in `ok`'s entry at `ok`'s site, and
+        // `tc.choice(h, use_site, k)` is `None`.
+        //
+        // Verified rather than assumed: `h`'s own entry holds
+        // `[(7, 0, Hole(0))]` while `ok`'s holds `[(16, 0, Def(0, 85))]`.
+        match cx.tc.choice(cx.module, cx.owner, site, k) {
+            Some(Choice::Def(_, chosen)) => out.push((dm, chosen)),
+            // The use sits at a site that is itself an open hole **of the
+            // definition being elaborated** — the nested case:
+            //
+            //   twice = x => x + x
+            //   quad  = x => twice (twice x)
+            //   q     = orders & select { a = quad .user_id }
+            //
+            // `quad` has two holes (its two uses of `twice`), recorded as
+            // `Hole(0)`/`Hole(1)`; `q` resolves both against `quad`'s entry at
+            // its own site. So when elaborating `quad`'s body the assignment is
+            // already in `cx.holes`, indexed by exactly the `k` the site
+            // recorded.
+            Some(Choice::Hole(h)) => match cx.holes.get(h) {
+                Some((_, chosen)) => out.push((dm, *chosen)),
+                None => {
+                    let name = &cx.ws.modules[dm].module.defs[di].name;
+                    return Err(Error::new(format!(
+                        "`{name}` is used at an open hole ({h}) of the definition being \
+                         elaborated, and no assignment for it was supplied"
+                    )));
+                }
+            },
+            None => {
+                let name = &cx.ws.modules[dm].module.defs[di].name;
+                return Err(Error::new(format!(
+                    "`{name}` has an open overload (hole {k}) that this use does not \
+                     instantiate; give the definition a type signature that fixes it"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Elaborate an application of an ordinary function body, by binding the
 /// parameters to the elaborated arguments and elaborating the body.
 ///
@@ -1111,13 +1435,20 @@ fn declared_kind(d: &ast::Def) -> DeclaredKind {
 /// result is simply elaborated again on the next application.
 fn elaborate_lambda(
     cx: Ctx<'_>,
-    dm: usize,
-    di: usize,
+    // The callee: `(module, definition)`. Bundled because they always travel
+    // together as "which definition is this", and separately they pushed this
+    // function past the argument-count lint for no benefit.
+    callee_def: (usize, usize),
     name: &str,
     body: &ast::Expr,
     args: &[ast::Expr],
+    // The `ExprId` of the application: the *use site* the checker keyed this
+    // instance's overload choices by. A line comment because a doc comment is
+    // not allowed on a parameter.
+    site: u32,
     origin: Origin,
 ) -> R<CheckedExpr> {
+    let (dm, di) = callee_def;
     // Walk the nested `Lambda`s, binding one argument to each parameter.
     let (mut params, mut inner) = (Vec::new(), body);
     while let ExprKind::Lambda(p, b) = &inner.kind {
@@ -1150,6 +1481,12 @@ fn elaborate_lambda(
     let mut env: Vec<(String, CheckedExpr)> = cx.env.to_vec();
     let base = env.len();
     env.extend(bound);
+    // The callee's own open overloads are resolved by *this* use site, which is
+    // what makes `h .age` and `h 1.5` elaborate to different trees from one
+    // definition. Replacing rather than extending is deliberate: a hole index is
+    // local to the definition being elaborated, so the caller's assignment
+    // would be addressing different holes.
+    let holes = holes_at(cx, dm, di, site)?;
     let callee = Ctx {
         ws: cx.ws,
         tc: cx.tc,
@@ -1159,6 +1496,8 @@ fn elaborate_lambda(
         env: &env,
         qenv: cx.qenv,
         active: &active,
+        holes: &holes,
+        senv: cx.senv,
     };
 
     // No arguments left over: the body itself is the result. This is the
@@ -1207,6 +1546,8 @@ fn elaborate_winspec(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::checked::WinSpecChe
                 owner: di,
                 scope: &inner_scope,
                 active: &active,
+                holes: cx.holes,
+                senv: cx.senv,
                 env: cx.env,
                 qenv: cx.qenv,
             };
@@ -1275,6 +1616,8 @@ fn elaborate_frame(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::ir::Frame> {
                 owner: di,
                 scope: &inner_scope,
                 active: &active,
+                holes: cx.holes,
+                senv: cx.senv,
                 env: cx.env,
                 qenv: cx.qenv,
             };
@@ -1337,7 +1680,14 @@ fn elaborate_bound(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::ir::Bound> {
 /// `TypeCheck::choices_of(module, def)`). So the definition whose body contains
 /// the use is what this needs — not the candidate list's module, which is a
 /// different thing that an earlier draft conflated.
-fn choose(tc: &TypeCheck, module: usize, owner_def: usize, site: u32, cands: &[usize]) -> R<usize> {
+fn choose(
+    tc: &TypeCheck,
+    module: usize,
+    owner_def: usize,
+    site: u32,
+    cands: &[usize],
+    holes: &[(usize, usize)],
+) -> R<usize> {
     if cands.len() == 1 {
         return Ok(cands[0]);
     }
@@ -1345,8 +1695,22 @@ fn choose(tc: &TypeCheck, module: usize, owner_def: usize, site: u32, cands: &[u
         if choice_site != site {
             continue;
         }
-        if let Choice::Def(_, di) = c {
-            return Ok(di);
+        match c {
+            Choice::Def(_, di) => return Ok(di),
+            // The site is open inside its own definition — `Hole(k)` — so the
+            // candidate for this instance comes from the hole assignment the
+            // caller passed down. This is the per-use instantiation: the same
+            // site resolves differently for `h .age` and `h 1.5`, and the
+            // assignment is the only thing that distinguishes them.
+            Choice::Hole(k) => {
+                if let Some((_, di)) = holes.get(k) {
+                    return Ok(*di);
+                }
+                return Err(Error::new(format!(
+                    "hole {k} of this use was not instantiated (definition {owner_def}, site \
+                     {site}); the caller did not supply an assignment"
+                )));
+            }
         }
     }
     Err(Error::new(format!(

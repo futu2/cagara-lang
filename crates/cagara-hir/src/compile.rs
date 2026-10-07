@@ -6,33 +6,72 @@ use crate::elaborate::{elaborate_module, is_not_a_query};
 use crate::ir::Rel;
 use crate::workspace::{Diag, Workspace};
 
-/// Elaborate root definitions directly into checked queries and erase them.
-///
-/// Type checking supplies the facts used by source elaboration. A checked
-/// query is the sole source of a production `Rel`.
-pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Rel, Diag>)> {
-    let elaborated = elaborate_module(ws, tc, ws.root);
-    let mut out = Vec::new();
+/// Stable identity for a definition inside a loaded workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DefinitionId {
+    pub module: usize,
+    pub def: usize,
+}
 
-    for (index, (name, result)) in elaborated.into_iter().enumerate() {
-        match result {
+/// One root definition that was considered by compilation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompiledQuery {
+    pub id: DefinitionId,
+    pub name: String,
+    pub result: Result<Rel, Diag>,
+}
+
+/// The complete result of checking and compiling a workspace's root module.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Compilation {
+    pub queries: Vec<CompiledQuery>,
+    pub diagnostics: Vec<Diag>,
+}
+
+impl Compilation {
+    pub fn is_ok(&self) -> bool {
+        self.diagnostics.is_empty()
+    }
+}
+
+/// Check and compile every query in the root module.
+pub fn compile(ws: &Workspace) -> Compilation {
+    let tc = crate::check::check(ws);
+    compile_checked(ws, &tc)
+}
+
+/// Compile a workspace using a type check the caller already computed.
+pub fn compile_checked(ws: &Workspace, tc: &TypeCheck) -> Compilation {
+    let mut out = Compilation {
+        queries: Vec::new(),
+        diagnostics: ws.diags.clone(),
+    };
+    for error in &tc.errors {
+        push_unique(&mut out.diagnostics, error.diag.clone());
+    }
+
+    for (index, (name, result)) in elaborate_module(ws, tc, ws.root).into_iter().enumerate() {
+        let id = DefinitionId {
+            module: ws.root,
+            def: index,
+        };
+        let result = match result {
             Ok(query) => match crate::checked::erase(query) {
                 Ok(rel) => match crate::schema::schema_located(&rel) {
-                    Ok(_) => out.push((name, Ok(rel))),
-                    Err((location, message)) => out.push((
-                        name,
-                        Err(diagnostic_at(
-                            ws,
-                            location.map(|l| Origin::new(l.module, l.span)),
-                            message,
-                        )),
+                    Ok(_) => Ok(rel),
+                    Err((location, message)) => Err(diagnostic_at(
+                        ws,
+                        location.map(|l| Origin::new(l.module, l.span)),
+                        message,
                     )),
                 },
-                Err(error) => out.push((name.clone(), Err(internal_error(ws, &name, &error)))),
+                Err(error) => Err(internal_error(ws, &name, &error)),
             },
             Err(error) if is_not_a_query(&error) => {
                 if let Some(diag) = tc.error_for(ws.root, index) {
-                    out.push((name, Err(diag.clone())));
+                    Err(diag.clone())
+                } else {
+                    continue;
                 }
             }
             Err(error) => {
@@ -41,16 +80,42 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
                     Fault::Compiler => internal_error(ws, &name, &error),
                     Fault::NotAQuery => unreachable!("handled above"),
                 };
-                out.push((name, Err(diag)));
+                Err(diag)
             }
+        };
+        if let Err(diag) = &result {
+            push_unique(&mut out.diagnostics, diag.clone());
         }
+        out.queries.push(CompiledQuery { id, name, result });
     }
     out
 }
 
+/// Elaborate root definitions directly into checked queries and erase them.
+///
+/// Type checking supplies the facts used by source elaboration. A checked
+/// query is the sole source of a production `Rel`.
+pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Rel, Diag>)> {
+    compile_checked(ws, tc)
+        .queries
+        .into_iter()
+        .map(|query| (query.name, query.result))
+        .collect()
+}
+
 /// Check and compile every query in the root module.
 pub fn root_queries(ws: &Workspace) -> Vec<(String, Result<Rel, Diag>)> {
-    root_queries_checked(ws, &crate::check::check(ws))
+    compile(ws)
+        .queries
+        .into_iter()
+        .map(|query| (query.name, query.result))
+        .collect()
+}
+
+fn push_unique(diags: &mut Vec<Diag>, diag: Diag) {
+    if !diags.contains(&diag) {
+        diags.push(diag);
+    }
 }
 
 fn diagnostic_at(ws: &Workspace, origin: Option<Origin>, message: impl Into<String>) -> Diag {
@@ -77,10 +142,12 @@ mod tests {
              q : query { a = int } = table \"s\" \"two\"\n",
         );
         let tc = crate::check::check(&ws);
-        let queries = root_queries_checked(&ws, &tc);
-        let tables: Vec<_> = queries
+        let compilation = compile_checked(&ws, &tc);
+        assert!(compilation.diagnostics.is_empty());
+        let tables: Vec<_> = compilation
+            .queries
             .into_iter()
-            .map(|(_, result)| match result.unwrap() {
+            .map(|query| match query.result.unwrap() {
                 Rel::At(_, rel) => match *rel {
                     Rel::Table { name, .. } => name,
                     other => panic!("expected table, got {other:?}"),
@@ -89,5 +156,15 @@ mod tests {
             })
             .collect();
         assert_eq!(tables, vec!["one", "two"]);
+
+        let compilation = compile(&ws);
+        assert_eq!(
+            compilation
+                .queries
+                .iter()
+                .map(|query| query.id.def)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 }

@@ -17,7 +17,10 @@ pub use check::{check, TypeCheck};
 // enums are deliberately *not* re-exported, so a caller outside this crate
 // cannot assemble a value that skipped the constructors' checks.
 pub use checked::{erase, CheckedExpr, CheckedQuery, ExprKind, QueryKind};
-pub use compile::{root_queries, root_queries_checked};
+pub use compile::{
+    compile, compile_checked, root_queries, root_queries_checked, Compilation, CompiledQuery,
+    DefinitionId,
+};
 pub use core::{Diagnostic, Error, Origin, RowType, ScalarType};
 pub use db::{Database, SourceFile};
 pub use workspace::{Diag, Workspace};

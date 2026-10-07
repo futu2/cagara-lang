@@ -4,7 +4,7 @@
 //! LSP positions count UTF-16 code units; the workspace uses byte offsets.
 
 use cagara_hir::check::{check, TypeCheck, PROBE_FIELD};
-use cagara_hir::root_queries_checked;
+use cagara_hir::compile;
 use cagara_hir::workspace::{Binding, Diag, Workspace};
 use cagara_syntax::ast::{Expr, ExprKind, Span};
 use line_index::{LineIndex, TextRange, TextSize, WideEncoding};
@@ -15,20 +15,13 @@ use lsp_types::{
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-/// Every diagnostic in the root file: loading (syntax, imports,
-/// overloads), type errors, and evaluation / schema errors.
+/// Every diagnostic in the root file: loading (syntax, imports, overloads),
+/// type errors, and compilation errors.
 pub fn diagnostics(ws: &Workspace) -> Vec<(Range, String)> {
-    let tc = check(ws);
+    let compilation = compile(ws);
     let root = ws.modules[ws.root].path.display().to_string();
-    let mut all: Vec<Diag> = ws.diags.clone();
-    all.extend(tc.errors.iter().map(|e| e.diag.clone()));
-    all.extend(
-        root_queries_checked(ws, &tc)
-            .into_iter()
-            .filter_map(|(_, r)| r.err()),
-    );
     let mut out: Vec<(Range, String)> = Vec::new();
-    for d in all.iter().filter(|d| d.path == root) {
+    for d in compilation.diagnostics.iter().filter(|d| d.path == root) {
         let item = (diag_range(d), d.message.clone());
         if !out.contains(&item) {
             out.push(item);

@@ -63,26 +63,21 @@ responsible for semantic validity on the source compilation path.
 
 `Workspace` loads files, imports, overlays, and the embedded prelude. Salsa
 memoizes parsing, resolution, and type-checking queries for editor updates.
-`root_queries_checked` is the current shared boundary used by CLI and LSP to
-turn a checked workspace into relations. File access, incremental state,
-diagnostic formatting, and SQL dialect options remain outside the semantic
-tree.
+`compile` is the shared boundary used by CLI and LSP to turn a checked
+workspace into relations and diagnostics. It preserves source definition
+identity even when names repeat. File access, incremental state, diagnostic
+formatting, and SQL dialect options remain outside the semantic tree.
 
-The next architectural improvement is to make that boundary explicit as one
-compilation result:
+The compilation result is:
 
 ```text
-compile : ModuleSnapshot -> Options -> Compilation
+compile : Workspace -> Compilation
 
 Compilation {
-  queries: [(DefinitionId, Result<Rel, Diagnostic>)],
-  diagnostics: [Diagnostic]
+  queries: [CompiledQuery],
+  diagnostics: [Diag]
 }
 ```
-
-That would give CLI, LSP, and tests one diagnostic policy and preserve
-definition identity without making names serve as keys. It can be introduced
-without changing the relational IR or SQL backend.
 
 ## Paper claims
 

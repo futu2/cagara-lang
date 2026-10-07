@@ -6,7 +6,7 @@
 //! `--types` the inferred type of every root definition. `cagara fmt`
 //! formats files in place. `cagara lsp` runs the language server over stdio.
 
-use cagara_hir::{check, root_queries_checked, Workspace};
+use cagara_hir::{check, compile_checked, Workspace};
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
@@ -158,7 +158,9 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode
     // that uses it, so the same diagnostic can arrive more than once. Print
     // each distinct one once, in the order it first appears.
     let mut seen: HashSet<String> = HashSet::new();
-    for (name, result) in root_queries_checked(&ws, &tc) {
+    for query in compile_checked(&ws, &tc).queries {
+        let name = query.name;
+        let result = query.result;
         if only.as_deref().is_some_and(|o| o != name) {
             continue;
         }

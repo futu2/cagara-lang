@@ -39,7 +39,7 @@ Primitive declarations live in `primitive.rs` because name resolution and type
 inference need their static names and arities. The old primitive interpreter
 has been removed.
 
-## Remaining boundary
+## Compilation boundary
 
 The query compilation entry point is `compile`, which returns one owned
 `Compilation` value containing definition identities, relations, and

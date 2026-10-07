@@ -76,6 +76,10 @@ iterative worklist. Only successful, unaffected queries are reused. Moved
 definitions are rebuilt so `Rel::At` spans stay current, and failures are
 rendered against the latest text. Module inference is still memoized at module
 granularity; `TypeCheck` shares its immutable results across requests.
+Imported type schemes are borrowed as needed. Workspace views share immutable
+name maps, and elaboration borrows them without copying a catalog. See
+[catalog performance](PERFORMANCE.md) for reproducible measurements at up to
+one million definitions and the remaining costs of module-wide edits.
 
 `CompilerInput` and `ModuleSnapshot` expose the source graph and checker facts
 read-only to the compiler. Cache ownership and invalidation live in

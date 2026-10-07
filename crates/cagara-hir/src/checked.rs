@@ -185,21 +185,31 @@ impl CheckedProgram {
     /// [`CheckedProgram::of`], with definition bodies filled in **from the
     /// evaluator**.
     ///
-    /// # This is an oracle entry point, not the compilation path
+    /// # This is an oracle entry point, and it is test-only
     ///
     /// The bodies it fills are `CoreTerm`s produced by the evaluator, which is
     /// the thing source elaboration replaced. It therefore does not share the
     /// pipeline's behaviour: it can produce bodies for definitions the
     /// elaborator rejects, and it reports evaluation diagnostics rather than the
-    /// elaborated path's. Its callers are in-crate tests that need the
-    /// evaluator's own view.
+    /// elaborated path's.
     ///
-    /// It is `pub` because `CheckedProgram` is a published type, but **nothing in
-    /// this crate's compilation path calls it** and no other crate does either.
-    /// Making it the production source of bodies would mean the compiler
-    /// depending on the oracle it is meant to be checked against, so a future
-    /// caller wanting bodies from source should use
-    /// [`crate::elaborate::elaborate_module`] instead.
+    /// It is `#[cfg(test)]`, which was the decision rather than a tidy-up. The
+    /// alternative — migrating it to source elaboration — would have meant
+    /// changing what `CheckedDef::terms` *means*, from "the evaluator's
+    /// `CoreTerm`" to "the elaborator's `CheckedQuery`", and that is a different
+    /// type with different information. Doing that as part of this work would
+    /// have hidden a semantic change inside a refactor.
+    ///
+    /// So the surface was measured first: `terms`, [`CheckedDef::query_terms`]
+    /// and `Elaborated` have **no consumers outside this crate's tests**, and
+    /// `CheckedProgram` itself is not referenced by the CLI, the LSP or the SQL
+    /// backend. An API whose only caller is a test is a test helper, and gating
+    /// it means the compiler cannot start depending on the oracle by accident —
+    /// which `pub` allowed and which a doc comment could only discourage.
+    ///
+    /// A caller genuinely needing bodies from source should use
+    /// [`crate::elaborate::elaborate_module`].
+    #[cfg(test)]
     pub fn of_elaborated(ws: &crate::workspace::Workspace) -> Self {
         let tc = crate::check::check(ws);
         let (bodies, eval_diags) = crate::eval::elaborate_bodies(ws, &tc);

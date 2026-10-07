@@ -17,12 +17,18 @@
 //! the elaborator, so the decision to keep it is about evidence, not about
 //! whether anything still depends on it (nothing does).
 //!
-//! # What is still reachable, and why
+//! # What is still reachable
 //!
-//! `Evaluator`, [`root_core_terms`] and [`elaborate_bodies`] are `pub(crate)` or
-//! unexported; `Evaluator` is deliberately not re-exported from the crate root.
-//! The tests reach them through this module. See `docs/CHECKED-CORE.md` for the
-//! planned end state.
+//! Everything here that a caller could use to obtain a `Rel` or a body is now
+//! `cfg(test)`: [`root_queries_via_evaluator`], [`root_core_terms`] and
+//! [`elaborate_bodies`]. `Evaluator` is `pub(crate)` and no longer re-exported
+//! from the crate root, and the one production entry point, [`evaluate_root`], is
+//! `pub(crate)` and consumed solely by [`root_queries_checked`] as the oracle it
+//! compares against.
+//!
+//! That is the shape worth having: a shipping binary cannot reach the evaluator
+//! at all, while a *test* can still compare the two paths — which is the whole
+//! reason this module still exists.
 //!
 //! What changed earlier in the migration is what flows through the evaluator: a
 //! `Prim` no longer *is* the meaning of `where` — it is classified
@@ -1096,9 +1102,14 @@ pub(crate) fn root_queries_via_evaluator(
         .collect()
 }
 
-/// Evaluate every definition of the root module and return the query ones as
-/// the *core* term, before erasure. The entry point for callers that want to
-/// inspect the elaboration rather than only its `Rel` encoding.
+/// Evaluate every definition of the root module and return the query ones as the
+/// *core* term, before erasure.
+///
+/// `cfg(test)`: the core term is the evaluator's row-less representation, and
+/// its only callers are tests comparing the two paths' trees. Source elaboration
+/// produces [`crate::checked::CheckedQuery`] instead, which carries the row the
+/// `CoreTerm` deliberately omits; see `docs/CHECKED-CORE.md`.
+#[cfg(test)]
 pub fn root_core_terms(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<CoreTerm, Diag>)> {
     let mut ev = Evaluator::new(ws, tc);
     let m = ws.root;
@@ -1164,6 +1175,10 @@ pub enum Elaborated {
 /// with no diagnostic here, because the checker's diagnostic is already in
 /// `CheckedProgram::diagnostics` and duplicating it would report one error
 /// twice.
+///
+/// `cfg(test)`: reached only from [`crate::CheckedProgram::of_elaborated`], which
+/// is itself a test helper, because the bodies it returns are the evaluator's.
+#[cfg(test)]
 pub fn elaborate_bodies(
     ws: &Workspace,
     tc: &TypeCheck,

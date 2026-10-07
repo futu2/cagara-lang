@@ -303,7 +303,7 @@ current state.
 The behavioural contract for this step is the frozen CLI output, not the build:
 
 ```bash
-nix develop --command cargo test --workspace            # 396 passed, 0 failed
+nix develop --command cargo test --workspace            # 398 passed, 0 failed
 nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 nix develop --command cargo build --workspace -q
 <regenerate examples/*.cagara: 6 dialects + --pretty + --types + stderr>
@@ -362,18 +362,30 @@ That check is live, not decorative. Routing it found two defects no test had:
   (argument left). One operand order cannot serve both, and `union` being
   symmetric hid it until a `union` had differently-filtered operands.
 
+**Resolved since the last revision:**
+
+* **Point-free composition is now elaborated**, and how it was fixed is worth
+  recording because the obstacle was structural rather than a missing case.
+  `nextWeek = addDays 7 >>> truncWeek` desugars to
+  `_>>>_ (addDays 7) truncWeek`, where `_>>>_` is `f => g => x => g (f x)` — an
+  ordinary lambda over two *function* arguments — so `addDays 7` has to be held
+  as a partially applied function and applied later.
+
+  The earlier design kept three parallel binding environments (queries,
+  expressions, stages) and decided what a name was by *which environment it came
+  from*. A partially applied function belongs to none of them, so a fix along
+  those lines needed `>>>`'s exact body spelled out and still failed. There is
+  now one environment of [`CheckedValue`] — the counterpart of the evaluator's
+  `Value`, which is a single `Env` for the same reason — and `apply_value`
+  mirrors `eval::apply`: push an argument, then either complete the value or stay
+  deferred. Nothing in that path looks at an operator's *name*.
+
+  It is covered by five cases, including `<<<`, a three-stage chain, a composed
+  function used twice, and the same composition written as a direct application
+  of `_>>>_` — the last guarding against the operator being recognised by name.
+
 **Still open:**
 
-* **Point-free composition is not elaborated.**
-  `nextWeek = addDays 7 >>> truncWeek` is the one construct the source
-  elaborator reports rather than handles. `_>>>_` is `f => g => x => g (f x)` —
-  an ordinary lambda over two *function* arguments — and elaborating it means
-  holding `addDays 7` as a deferred value and applying it later, which is a
-  third kind of binding alongside the query and expression ones. An attempt at
-  it was written, did not reproduce the evaluator's tree, and was reverted
-  rather than left as shape-specific code that special-cased `>>>`'s exact
-  body. It is reported as an internal error, so it cannot compile silently
-  through the legacy path.
 * `schema` is still the production column validator. It runs on the same erased
   tree, so it is not bypassed — but the checked constructors have already proved
   what it re-derives, and it can now be demoted to an assertion.

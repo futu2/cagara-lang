@@ -33,5 +33,9 @@ pub use core::{Diagnostic, Error, Origin, RowType, ScalarType};
 // `Prim` (see `docs/CHECKED-CORE.md`).
 pub use core_term::CoreTerm;
 pub use db::{Database, SourceFile};
-pub use eval::{root_queries, root_queries_checked, Evaluator};
+// `Evaluator` is deliberately **not** re-exported. It is the oracle behind the
+// parity check rather than a producer — nothing in the pipeline reads its output
+// — so publishing it would invite a second caller to depend on the thing this
+// work exists to retire. The in-crate tests reach it through `crate::eval`.
+pub use eval::{root_queries, root_queries_checked};
 pub use workspace::{Diag, Workspace};

@@ -168,10 +168,10 @@ impl CheckedProgram {
     ///
     /// This runs the existing checker and groups its output per module; it does
     /// **not** change what is checked or in what order. Every
-    /// [`CheckedDef::terms`] is left `None`, because elaborating a definition
-    /// to a `CoreTerm` means evaluating it, and this function arranges rather
-    /// than evaluates. Use [`CheckedProgram::of_elaborated`] when the bodies
-    /// are needed.
+    /// [`CheckedDef::terms`] is left `None`, because this function arranges
+    /// rather than elaborates. Use [`CheckedProgram::of_elaborated`] when the
+    /// bodies are needed — and read its contract first, because it is an oracle
+    /// entry point rather than the compilation path.
     ///
     /// Everything else here *is* filled in from the checker: the printed
     /// scheme, the closed `ScalarType` and row, the open-overload count, and
@@ -182,11 +182,24 @@ impl CheckedProgram {
         Self::from_type_check(ws, &tc, None)
     }
 
-    /// [`CheckedProgram::of`], with definition bodies elaborated.
+    /// [`CheckedProgram::of`], with definition bodies filled in **from the
+    /// evaluator**.
     ///
-    /// Elaboration goes through the evaluator, which is why it is a separate
-    /// entry point rather than something `of` does implicitly: a caller that
-    /// only wants types should not pay for evaluation.
+    /// # This is an oracle entry point, not the compilation path
+    ///
+    /// The bodies it fills are `CoreTerm`s produced by the evaluator, which is
+    /// the thing source elaboration replaced. It therefore does not share the
+    /// pipeline's behaviour: it can produce bodies for definitions the
+    /// elaborator rejects, and it reports evaluation diagnostics rather than the
+    /// elaborated path's. Its callers are in-crate tests that need the
+    /// evaluator's own view.
+    ///
+    /// It is `pub` because `CheckedProgram` is a published type, but **nothing in
+    /// this crate's compilation path calls it** and no other crate does either.
+    /// Making it the production source of bodies would mean the compiler
+    /// depending on the oracle it is meant to be checked against, so a future
+    /// caller wanting bodies from source should use
+    /// [`crate::elaborate::elaborate_module`] instead.
     pub fn of_elaborated(ws: &crate::workspace::Workspace) -> Self {
         let tc = crate::check::check(ws);
         let (bodies, eval_diags) = crate::eval::elaborate_bodies(ws, &tc);

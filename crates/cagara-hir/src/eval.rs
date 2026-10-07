@@ -1,13 +1,34 @@
-//! Compile-time evaluator. Runs a Cagara program (prelude included) and
-//! reduces each definition to a value; query definitions become `CoreTerm`,
-//! which is erased to `Rel` IR at the one boundary (`root_queries_checked`)
-//! where the SQL backend and the schema validator need it.
+//! The **oracle**: a compile-time evaluator used to check the elaborator.
 //!
-//! The evaluator is still the production path. What changed is what flows
-//! through it: a `Prim` no longer *is* the meaning of `where` — it is
-//! classified (`Prim::classify`) and handed to an explicit `CoreTerm`
-//! constructor, so the intermediate representation carries the relational
-//! structure and `Rel` is only an encoding of it.
+//! It runs a Cagara program (prelude included), reduces each definition to a
+//! value, and turns query definitions into `CoreTerm`, which is erased to `Rel`.
+//!
+//! # It is not the production path
+//!
+//! Source elaboration is. `root_queries_checked` runs both and **returns the
+//! checked tree**; the evaluator's `Rel` is computed only to compare against,
+//! and a disagreement fails closed rather than shipping either tree. Nothing in
+//! the pipeline reads this module's output.
+//!
+//! It is kept because the comparison is what has found every defect in this
+//! layer — the aggregate constructor losing its phase, the panic on a
+//! column-less table, the omission hole, the routing gap — none of which the
+//! frozen goldens caught. Removing it would remove the only independent check on
+//! the elaborator, so the decision to keep it is about evidence, not about
+//! whether anything still depends on it (nothing does).
+//!
+//! # What is still reachable, and why
+//!
+//! `Evaluator`, [`root_core_terms`] and [`elaborate_bodies`] are `pub(crate)` or
+//! unexported; `Evaluator` is deliberately not re-exported from the crate root.
+//! The tests reach them through this module. See `docs/CHECKED-CORE.md` for the
+//! planned end state.
+//!
+//! What changed earlier in the migration is what flows through the evaluator: a
+//! `Prim` no longer *is* the meaning of `where` — it is classified
+//! (`Prim::classify`) and handed to an explicit `CoreTerm` constructor, so the
+//! intermediate representation carries the relational structure and `Rel` is
+//! only an encoding of it.
 
 use crate::check::{Choice, TypeCheck};
 use crate::core_term::CoreTerm;
@@ -565,10 +586,8 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
     // closes the omission hole: previously the list held only the queries, so a
     // definition the evaluator saw as a scalar had no entry and was never
     // reconciled, letting one the elaborator built as a query go unchecked.
-    //
-    // The elaborator's list is cross-checked at the end for anything it walked
-    // that the evaluator did not report, which cannot happen today but would be
-    // an omission of the same kind.
+    // Captured before the loop consumes `evaluated`, for the name-set check below.
+    let evaluated_names: Vec<String> = evaluated.iter().map(|(n, _)| n.clone()).collect();
     let mut out = Vec::with_capacity(evaluated.len());
     for (name, eval) in evaluated {
         // Both paths are consulted for *every* definition, including ones either
@@ -588,6 +607,50 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
         let result = reconcile(ws, &name, &from_elab, eval);
         if let Some(r) = result {
             out.push((name, r));
+        }
+    }
+
+    // The two paths must have considered the same definitions.
+    //
+    // The loop above iterates the *evaluator's* outcomes, so a definition the
+    // elaborator walked and the evaluator did not report would never be
+    // reconciled — it would simply not appear in the output, which is the same
+    // silent-omission failure the `Evaluated` refactor closed. `evaluate_root`
+    // reports an entry for every definition, so this cannot happen today; the
+    // check turns that from an assumption into a fact.
+    //
+    // Compared as sorted multisets, not sets: a name can legitimately appear
+    // more than once, because an overload set is several definitions sharing a
+    // name. A set collapses those and reports a false mismatch — which is what
+    // the first version of this check did.
+    let mut mine = evaluated_names.clone();
+    let mut theirs: Vec<String> = elaborated.iter().map(|(n, _)| n.clone()).collect();
+    mine.sort();
+    theirs.sort();
+    debug_assert_eq!(
+        mine, theirs,
+        "the evaluator and the elaborator considered different definitions"
+    );
+    for (name, _) in &elaborated {
+        // What the two legitimate absences look like from here: the elaborator
+        // reported no query for it, so nothing is emitted and its absence from
+        // `out` is correct.
+        let saw_nothing = from_source
+            .get(name.as_str())
+            .is_some_and(|r| r.as_ref().err().is_some_and(crate::elaborate::is_not_a_query));
+        if saw_nothing {
+            continue;
+        }
+        if !out.iter().any(|(n, _)| n == name) {
+            out.push((
+                name.clone(),
+                Err(internal_disagreement(
+                    ws,
+                    name,
+                    "source elaboration walked this definition and the evaluator produced no \
+                     outcome for it, so the two paths did not consider the same definitions",
+                )),
+            ));
         }
     }
     out
@@ -677,17 +740,32 @@ pub(crate) fn reconcile(
                 "the checker does not type this definition as a query and the evaluator \
                  built one anyway",
             ))),
-            Evaluated::Query(Err(d)) | Evaluated::Failed(d) | Evaluated::Rejected(d) => {
-                Some(Err(d))
-            }
+            Evaluated::Query(Err(d))
+            | Evaluated::Failed { diag: d, .. }
+            | Evaluated::Rejected(d) => Some(Err(d)),
             Evaluated::NotQuery(_) | Evaluated::Open => None,
         },
         // (4) Both paths claim this definition is a query, so they must agree —
         // including on whether it compiles at all.
         Outcome::Built(q) => Some(match eval {
-            // An overloaded helper is meaningful only at its uses, so neither
-            // path has a body to have compared.
-            Evaluated::Open => return None,
+            // Both sides skipped this definition as an overloaded helper — the
+            // elaborator because `tc.holes(module, def) > 0`, the evaluator
+            // because `tc.holes(m, i) > 0`. The same condition on the same
+            // `TypeCheck`, so they cannot disagree today.
+            //
+            // It is still a disagreement rather than `None` if they do, because
+            // "one path built a query and the other skipped it" is exactly the
+            // shape of the omission hole this reconciliation was written to
+            // close, and returning no relation would hide it: the definition
+            // would simply not appear. `None` is reserved for the case where
+            // *neither* path has a body to compare, which is checked below.
+            Evaluated::Open => Err(internal_disagreement(
+                ws,
+                name,
+                "source elaboration built a query for this definition and the evaluator \
+                 skipped it as an overloaded helper; they disagree about whether it has a \
+                 body",
+            )),
             // The evaluator failed where source elaboration succeeded.
             //
             // Two very different situations arrive here, and telling them apart
@@ -706,18 +784,20 @@ pub(crate) fn reconcile(
             //
             // The distinguishing evidence is the span: a diagnostic pointing
             // outside this definition's own body was not caused by it.
-            Evaluated::Failed(d) if originates_in(ws, name, &d) => Err(internal_disagreement(
-                ws,
-                name,
-                &format!(
-                    "source elaboration built this definition and the evaluator failed on it \
-                     ({})",
-                    d.message
-                ),
-            )),
+            Evaluated::Failed { diag, origin } if originates_in(ws, name, origin) => {
+                Err(internal_disagreement(
+                    ws,
+                    name,
+                    &format!(
+                        "source elaboration built this definition and the evaluator failed on \
+                         it ({})",
+                        diag.message
+                    ),
+                ))
+            }
             // Propagated: the user's diagnostic, already reported against
             // whichever definition actually failed.
-            Evaluated::Failed(d) => Err(d),
+            Evaluated::Failed { diag, .. } => Err(diag),
             Evaluated::Rejected(d) => Err(internal_disagreement(
                 ws,
                 name,
@@ -787,20 +867,36 @@ pub(crate) fn reconcile(
 /// originated or was inherited, and adding one would mean changing how the
 /// evaluator reports every error. The span is enough, because a diagnostic
 /// outside the definition's own body cannot have been caused by it.
-pub(crate) fn originates_in(ws: &Workspace, name: &str, d: &Diag) -> bool {
+pub(crate) fn originates_in(
+    ws: &Workspace,
+    name: &str,
+    origin: (usize, Option<cagara_syntax::ast::Span>),
+) -> bool {
     let root = ws.root;
+    let (module, span) = origin;
+    // A failure in a different module than the definition being reconciled did
+    // not arise inside it, so it is propagated.
+    //
+    // Read from the **structured** origin rather than reconstructed from a
+    // `Diag`'s `line`/`col`. Those are indices into *some* module's text and a
+    // `Diag` does not say which, so the earlier version's arithmetic against the
+    // root module would have mis-attributed an imported module's failure to a
+    // root definition — turning the user's error into an internal one.
+    if module != root {
+        return false;
+    }
     let Some(def) = ws.modules[root].module.defs.iter().find(|x| x.name == name) else {
         // No definition to compare against; treat it as originating, because a
         // failure with no home is not something to attribute to a user.
         return true;
     };
-    // The evaluator's diagnostics are anchored in the root module's text, and a
-    // location outside this definition's span came from somewhere else.
-    let start = def.span.start as usize;
-    let end = def.span.end as usize;
-    let offset = ws.modules[root].text.lines().take(d.line.saturating_sub(1)).map(|l| l.len() + 1).sum::<usize>()
-        + d.col.saturating_sub(1);
-    offset >= start && offset < end.max(start + 1)
+    // With no span, nothing says the failure arose here. Attributing it to this
+    // definition would turn a propagated error into an internal one, so the
+    // conservative answer is "propagated".
+    let Some(span) = span else {
+        return false;
+    };
+    span.start >= def.span.start && span.start < def.span.end.max(def.span.start + 1)
 }
 
 /// Build a user-facing diagnostic at `span`, or at the definition when the error
@@ -900,7 +996,20 @@ pub(crate) enum Evaluated {
     /// from "no entry", with the kind named for the diagnostic.
     NotQuery(String),
     /// Evaluation failed: a type error or an evaluation error.
-    Failed(Diag),
+    ///
+    /// Carries the **structured** origin — the module the failure is in and its
+    /// span — rather than only a rendered [`Diag`]. The reconciler has to answer
+    /// "did this failure arise inside this definition's own body, or was it
+    /// propagated from another definition?", and a `Diag` cannot be asked that
+    /// safely: its `line`/`col` belong to some module's text, so reconstructing
+    /// an offset without knowing *which* text is a guess. An earlier version did
+    /// exactly that against the root module and would have mis-attributed a
+    /// failure from an imported module.
+    Failed {
+        diag: Diag,
+        /// The module the failure is in, and its span if it has one.
+        origin: (usize, Option<cagara_syntax::ast::Span>),
+    },
     /// Not evaluated at all because the checker rejected it; the diagnostic is
     /// the checker's.
     Rejected(Diag),
@@ -942,7 +1051,10 @@ pub(crate) fn evaluate_root(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Eval
                 },
             }),
             Ok(other) => Evaluated::NotQuery(other.kind().to_string()),
-            Err(e) => Evaluated::Failed(ws.eval_diag(&e)),
+            Err(e) => Evaluated::Failed {
+                diag: ws.eval_diag(&e),
+                origin: (e.module, e.span),
+            },
         };
         out.push((d.name.clone(), outcome));
     }
@@ -978,7 +1090,7 @@ pub(crate) fn root_queries_via_evaluator(
             Evaluated::Query(r) => Some((name, r)),
             // The evaluator rejected it, so there is a diagnostic the harness
             // should see rather than a silent omission.
-            Evaluated::Failed(d) | Evaluated::Rejected(d) => Some((name, Err(d))),
+            Evaluated::Failed { diag: d, .. } | Evaluated::Rejected(d) => Some((name, Err(d))),
             Evaluated::NotQuery(_) | Evaluated::Open => None,
         })
         .collect()

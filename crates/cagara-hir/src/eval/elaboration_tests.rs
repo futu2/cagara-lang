@@ -914,7 +914,14 @@ fn the_reconciliation_table_is_the_policy() {
     let def_span = ws.modules[root].module.defs[0].span;
     let diag = |m: &str| ws.diag_span(root, def_span, m);
     let ok = || Evaluated::Query(Ok(rel.clone()));
-    let eval_failed = || Evaluated::Failed(diag("evaluator said no"));
+    // The origin is **structured** now, and carrying it here is what makes the
+    // matrix exercise the real path-detection rather than a rendered string.
+    // A failure inside `q`'s own span is the definition's; see the separate test
+    // for a failure outside it.
+    let eval_failed = || Evaluated::Failed {
+        diag: diag("evaluator said no"),
+        origin: (root, Some(def_span)),
+    };
     let eval_rejected = || Evaluated::Rejected(diag("checker said no"));
 
     // Helper: is this cell an internal (compiler) error rather than a program
@@ -995,9 +1002,14 @@ fn the_reconciliation_table_is_the_policy() {
         is_internal(&reconcile(&ws, "q", &built(&ws), Evaluated::Query(Err(diag("bad tree"))))),
         "Built + evaluator tree that fails validation is a disagreement"
     );
+    //     Both sides skip an overloaded helper (`tc.holes > 0`), so today they
+    //     agree. If they ever stop agreeing this must be a disagreement rather
+    //     than a silent `None`: "one path built a query, the other skipped it" is
+    //     the omission-hole shape, and returning no relation would hide it by
+    //     making the definition disappear from the output.
     assert!(
-        reconcile(&ws, "q", &built(&ws), Evaluated::Open).is_none(),
-        "an overloaded helper has no body to compare"
+        is_internal(&reconcile(&ws, "q", &built(&ws), Evaluated::Open)),
+        "Built + evaluator-skipped must be a disagreement, not an omission"
     );
     assert!(
         matches!(reconcile(&ws, "q", &built(&ws), ok()), Some(Ok(_))),
@@ -1304,5 +1316,140 @@ fn no_compiled_definition_comes_from_the_evaluator_alone() {
     assert!(
         compiled > 0,
         "nothing compiled, so this test proves nothing"
+    );
+}
+
+/// A failure propagated from another **module** is not attributed to this one.
+///
+/// `originates_in` decides whether an evaluator failure arose inside a
+/// definition's own body — a genuine disagreement — or was inherited from a
+/// definition that actually failed, which is the user's error and already
+/// reported against its source. Getting it wrong turns a user's error into
+/// "internal error in ...", which is both wrong and unactionable.
+///
+/// The first version reconstructed a byte offset from the diagnostic's
+/// `line`/`col` **against the root module's text**, without checking the
+/// diagnostic's path. `line`/`col` are indices into *some* module's text and a
+/// `Diag` does not say which, so a failure in an imported module could be
+/// measured against the root's text and land inside a root definition's span —
+/// reporting a propagated error as a compiler bug.
+///
+/// The fix carries the evaluator's `(module, span)` structurally. This test
+/// pins it from the outside: the failure is in an imported module, and the root
+/// definition that uses it must report the *user's* error.
+#[test]
+fn a_failure_from_another_module_is_not_attributed_to_this_one() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let root = PathBuf::from("/tmp/cagara-origin-mod/root.cagara");
+    let lib = PathBuf::from("/tmp/cagara-origin-mod/lib.cagara");
+    let mut buffers: HashMap<PathBuf, String> = HashMap::new();
+    // `pad*` first, so the failing root definition is not at index 0 and the
+    // indices cannot coincide with the imported module's.
+    buffers.insert(
+        root.clone(),
+        "import \"lib.cagara\" as lib\n\
+         pad0 = 1\n\
+         pad1 = 2\n\
+         pad2 = 3\n\
+         q = lib.boom 1\n"
+            .into(),
+    );
+    // In the imported module, `boom` applies itself forever: a real failure,
+    // raised in *that* module.
+    buffers.insert(lib.clone(), "boom = x => boom x\n".into());
+    let ws = Workspace::open_with_buffers(&root, buffers[&root].clone(), &buffers);
+    let tc = crate::check::check(&ws);
+
+    let root_mod = ws.root;
+    let q_index = ws.modules[root_mod]
+        .module
+        .defs
+        .iter()
+        .position(|d| d.name == "q")
+        .expect("`q` is a root definition");
+
+    // The evaluator's failure for `q` must carry the *imported* module, not the
+    // root. This is the structured evidence the reconciler now uses.
+    let evaluated = crate::eval::evaluate_root(&ws, &tc);
+    let (_, e) = evaluated
+        .iter()
+        .find(|(n, _)| n == "q")
+        .expect("`q` is evaluated");
+    let crate::eval::Evaluated::Failed { origin, .. } = e else {
+        panic!("`q` must fail, since it applies a non-terminating function");
+    };
+    assert_ne!(
+        origin.0, root_mod,
+        "the failure must be recorded as arising in the imported module; if this \
+         ever becomes the root module the test below stops proving anything"
+    );
+    assert!(
+        !crate::eval::originates_in(&ws, "q", *origin),
+        "a failure in another module is propagated, not caused by `q`"
+    );
+
+    // And the user-visible outcome: `q` is not blamed as a compiler bug.
+    let out = crate::root_queries_checked(&ws, &tc);
+    let (_, q) = out.iter().find(|(n, _)| n == "q").expect("`q` reported");
+    let d = q.as_ref().expect_err("`q` cannot compile");
+    assert!(
+        !d.message.contains("internal error"),
+        "a failure propagated from another module is the user's error, not a \
+         compiler bug: {}",
+        d.message
+    );
+    let _ = q_index;
+}
+
+/// A failure whose span lands inside this definition's range **but in another
+/// module** is still propagated.
+///
+/// The companion to the test above, and it exists because that test passes even
+/// with the module check removed: the imported failure's span happens not to
+/// fall inside `q`'s range, so the span test alone rejects it there. Two guards
+/// that are individually sufficient on one input do not both get tested by it.
+///
+/// This isolates the module rule by constructing the conflicting case directly —
+/// a span inside the definition's range, attributed to a different module. That
+/// is exactly what the old path-blind arithmetic produced: it read `line`/`col`
+/// as offsets into the root's text whatever module the failure came from.
+#[test]
+fn a_module_mismatch_beats_a_coinciding_span() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let root = PathBuf::from("/tmp/cagara-origin-coincide/root.cagara");
+    let lib = PathBuf::from("/tmp/cagara-origin-coincide/lib.cagara");
+    let mut buffers: HashMap<PathBuf, String> = HashMap::new();
+    buffers.insert(
+        root.clone(),
+        "import \"lib.cagara\" as lib\nq = lib.boom 1\n".into(),
+    );
+    buffers.insert(lib.clone(), "boom = x => boom x\n".into());
+    let ws = Workspace::open_with_buffers(&root, buffers[&root].clone(), &buffers);
+
+    let root_mod = ws.root;
+    let q = ws.modules[root_mod]
+        .module
+        .defs
+        .iter()
+        .find(|d| d.name == "q")
+        .expect("`q` is a root definition");
+
+    // A span **inside `q`** — the span test alone would call this originating.
+    let inside = q.span;
+    let other = (root_mod + 1) % ws.modules.len().max(2);
+    assert_ne!(other, root_mod, "need a different module to attribute to");
+    assert!(
+        crate::eval::originates_in(&ws, "q", (root_mod, Some(inside))),
+        "a span inside the definition, in this module, does arise here"
+    );
+    assert!(
+        !crate::eval::originates_in(&ws, "q", (other, Some(inside))),
+        "the same span attributed to another module must be propagated: a \
+         diagnostic's line/col index *some* module's text, and a `Diag` does not \
+         say which — reading them as the root's is what the path-blind version did"
     );
 }

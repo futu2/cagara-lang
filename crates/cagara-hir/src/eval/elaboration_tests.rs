@@ -1076,3 +1076,93 @@ fn every_definition_reaches_reconciliation() {
         "`h` evaluates to a closure, which is now *reported* rather than dropped"
     );
 }
+
+/// The invariant that gates making the evaluator test-only.
+///
+/// Only one cell of the reconciliation table still ships an evaluator-produced
+/// `Rel`: cell (3), where the elaborator reports `NotAQuery` and the evaluator
+/// built a query. Everything else ships the checked erasure.
+///
+/// That cell has a precondition, and this test states it: **a definition the
+/// checker accepts as a query is built by the elaborator.** If the elaborator
+/// says `NotAQuery`, the evaluator either failed or produced a non-query — never
+/// a query.
+///
+/// Two consequences, both worth having:
+///
+/// * cell (3)'s `Query(Ok)` branch is currently **unreachable for accepted
+///   programs**, so the evaluator is not deciding output in practice. That is
+///   the precondition for making it test-only, and it is now asserted rather
+///   than believed.
+/// * if the elaborator ever stops building something it used to build, a
+///   definition moves into cell (3) and the evaluator silently resumes being a
+///   producer. That is exactly the regression this catches.
+///
+/// The corpus is every definition of the examples plus a set of type shapes
+/// chosen to reach the boundary — a query-typed definition whose body is a
+/// query, a scalar-typed one whose body is a query, a row-typed one, a helper
+/// left open, and an overload set.
+#[test]
+fn an_accepted_query_is_never_only_the_evaluator_s() {
+    let mut sources: Vec<String> = Vec::new();
+    for f in std::fs::read_dir("../../examples").into_iter().flatten().flatten() {
+        let p = f.path();
+        if p.extension().and_then(|e| e.to_str()) == Some("cagara") {
+            if let Ok(src) = std::fs::read_to_string(&p) {
+                sources.push(src);
+            }
+        }
+    }
+    assert!(
+        sources.len() >= 4,
+        "the example corpus is missing; this test would pass vacuously \
+         with {} sources",
+        sources.len()
+    );
+    // Shapes chosen to reach the boundary, including ones the checker rejects:
+    // the point is to cover the *classification*, not to compile.
+    for src in [
+        "t : query { a = int } = table \"s\" \"t\"\nq : query { a = int } = t\n",
+        "t : query { a = int } = table \"s\" \"t\"\nq : int = t\n",
+        "t : query { a = int } = table \"s\" \"t\"\nr : { a = int } = { a = 1 }\nq = t\n",
+        "t : query { a = int } = table \"s\" \"t\"\nh = x => t\nq = t\n",
+        "t : query { a = int } = table \"s\" \"t\"\nf : int -> int = x => x + 1\nq = t\n",
+    ] {
+        sources.push(src.to_string());
+    }
+
+    let mut checked = 0usize;
+    for src in &sources {
+        let ws = Workspace::from_source(src);
+        let tc = crate::check::check(&ws);
+        let walked = crate::elaborate::elaborate_module(&ws, &tc, ws.root);
+        for (name, e) in crate::eval::evaluate_root(&ws, &tc) {
+            // Only definitions the evaluator builds as a query could be produced
+            // by cell (3).
+            if !matches!(e, crate::eval::Evaluated::Query(Ok(_))) {
+                continue;
+            }
+            checked += 1;
+            let built = walked.iter().any(|(n, r)| n == &name && r.is_ok());
+            let not_query = walked.iter().any(|(n, r)| {
+                n == &name && r.as_ref().err().is_some_and(crate::elaborate::is_not_a_query)
+            });
+            assert!(
+                built,
+                "`{name}`: the evaluator built a query and the elaborator reported \
+                 `NotAQuery`, so this definition takes cell (3) and the evaluator is \
+                 deciding output. Either the elaborator regressed, or cell (3) is \
+                 genuinely live and the evaluator cannot become test-only yet."
+            );
+            assert!(
+                !not_query,
+                "`{name}`: the elaborator reported `NotAQuery` while the evaluator \
+                 built a query — cell (3), reached"
+            );
+        }
+    }
+    assert!(
+        checked > 0,
+        "no evaluator-built query definitions were found, so this proves nothing"
+    );
+}

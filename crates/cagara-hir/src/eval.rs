@@ -736,7 +736,16 @@ pub(crate) fn reconcile(
                             "source elaboration and the evaluator produced different trees",
                         ))
                     } else {
-                        Ok(oracle)
+                        // The **checked** tree ships. The evaluator is the oracle
+                        // now: it is what the comparison above is against, and
+                        // nothing downstream should read its output.
+                        //
+                        // The two are equal under `without_at`, so this is not a
+                        // behavioural change — and that is the point. It makes
+                        // the checked erasure the production relation, so the
+                        // evaluator can become test-only without a second
+                        // behavioural change hidden behind the same commit.
+                        Ok(rel)
                     }
                 }
             },

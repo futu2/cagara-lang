@@ -259,9 +259,28 @@ The remaining rungs, in order:
    reported by the elaborated path as a `Fault::Program`. It still runs on the
    oracle path, because that path is consulted for definitions the routing layer
    is about to reject with a better message. See below.
-3. **Delete the evaluator**, only once source-level and SQL golden coverage is
+3. ~~**Make the checked erasure the returned relation.**~~ **Done.** On agreement
+   the *checked* tree ships and the evaluator is an oracle rather than a producer.
+   See below for why this was a one-line change with no behavioural effect, which
+   is the property that made it safe to do separately.
+4. **Delete the evaluator**, only once source-level and SQL golden coverage is
    broad enough to stand alone. Until then it is the oracle, and the parity
    check is what makes shipping both paths safe.
+
+**Rung 3, and what still depends on the evaluator.** `reconcile` computes the
+checked erasure, proves it equal to the oracle under `without_at`, and now
+returns *that* rather than the oracle. The two are equal by construction, so all
+404 tests and all 40 frozen outputs are unchanged — deliberately in a commit of
+its own, so a future behavioural change cannot hide behind it.
+
+Exactly one path still ships an evaluator-produced `Rel`: cell (3) of the
+reconciliation table, where the elaborator saw no query and so has nothing to
+compare. On the four examples it never fires for a query definition — every one
+is built from source — and `assert_source_elaboration_agrees` asserts the same
+over the whole embedded test corpus, failing if any query definition is anything
+other than `Ok`. So the evaluator cannot be made test-only until that harness's
+coverage is what the *production* examples rely on, rather than the other way
+round.
 
 **Why rung 2 could not be done as written.** Replacing `schema_located` with
 `debug_assert!` looked safe — with the checked tree emitted instead, all 40 frozen

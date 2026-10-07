@@ -259,37 +259,52 @@ The remaining rungs, in order:
    reported by the elaborated path as a `Fault::Program`. It still runs on the
    oracle path, because that path is consulted for definitions the routing layer
    is about to reject with a better message. See below.
-3. ~~**Make the checked erasure the returned relation.**~~ **Done.** On agreement
-   the *checked* tree ships and the evaluator is an oracle rather than a producer.
-   See below for why this was a one-line change with no behavioural effect, which
-   is the property that made it safe to do separately.
-4. **Delete the evaluator**, only once source-level and SQL golden coverage is
-   broad enough to stand alone. Until then it is the oracle, and the parity
-   check is what makes shipping both paths safe.
+3. ~~**Make the checked erasure the returned relation.**~~ **Done.** The *checked*
+   tree ships and the evaluator is an oracle rather than a producer. See below.
+4. ~~**Remove the evaluator as a producer.**~~ **Done.** Cell (3) — the last path
+   that returned an evaluator-built `Rel` — now fails closed. Every compiled
+   definition is built by source elaboration. See below.
+5. **Delete the evaluator**, now that nothing in production depends on it. It is
+   the oracle behind the parity check, and the parity check is what would be lost
+   with it, so this is a judgement about how much independent evidence is wanted
+   rather than a blocked step. See below.
 
-**Rung 3, and what still depends on the evaluator.** `reconcile` computes the
-checked erasure, proves it equal to the oracle under `without_at`, and now
-returns *that* rather than the oracle. The two are equal by construction, so all
-404 tests and all 40 frozen outputs are unchanged — deliberately in a commit of
-its own, so a future behavioural change cannot hide behind it.
+**Rung 3, and what still depended on the evaluator.** `reconcile` computes the
+checked erasure, proves it equal to the oracle under `without_at`, and returns
+*that* rather than the oracle. The two are equal by construction, so every test
+and frozen output was unchanged — deliberately in a commit of its own, so a later
+behavioural change cannot hide behind it.
 
-Exactly one path *could* still ship an evaluator-produced `Rel`: cell (3) of the
-reconciliation table, where the elaborator reports `NotAQuery`.
+Exactly one path *could* still ship an evaluator-produced `Rel`: cell (3), where
+the elaborator reports `NotAQuery`.
 
-**It is unreachable for accepted programs**, and that is now asserted rather than
-assumed. The precondition is that a definition the checker accepts as a query is
-built by the elaborator. Instrumenting the classification over the examples and
-over five boundary shapes found no case where the evaluator built a query and the
-elaborator said `NotAQuery`; whenever the elaborator said `NotAQuery`, the
-evaluator had failed or produced a non-query.
-`an_accepted_query_is_never_only_the_evaluator_s` pins it, mutation-checked.
+**Rung 4: it was structurally unreachable, so it became an error.** `NotAQuery`
+is reported exactly when `scheme_view` is not `Query`, so the cell needed the
+checker's *type* and the evaluator's *runtime shape* to disagree about whether a
+definition is a query. Probing that directly — over the examples and nine boundary
+shapes — found no such case, and the reason is structural rather than
+coincidental: the evaluator reaches `Value::Query` only by evaluating a `table` or
+a stage, which the checker types as a query, so a scalar-typed definition whose
+body is a query is rejected before evaluation runs.
 
-So the evaluator is already an oracle in practice, and what remains before it can
-be test-only is a *shape* decision rather than coverage: cell (3) exists because
-the reconciler cannot yet treat "the elaborator saw no query" as impossible.
-Removing the cell means deciding that a definition the evaluator builds and the
-elaborator does not is an error rather than a fallback — a policy change, which
-should be made deliberately with its own evidence.
+`a_nonquery_scheme_never_yields_an_evaluator_query` pins that, so a future change
+to either classification is caught there. With the branch turned into a
+disagreement, `Some(Ok(rel))` — the last expression returning an evaluator-built
+tree — is gone from `reconcile`, and
+`no_compiled_definition_comes_from_the_evaluator_alone` asserts that every
+compiled definition is built from source.
+
+That assertion is deliberately stronger than "the two agree": two producers that
+agree today can disagree tomorrow, one producer cannot disagree with itself.
+
+**Rung 5: what is left.** Nothing in production reads the evaluator. `root_queries`,
+`root_core_terms` and `Evaluator` are used only from `#[cfg(test)]`-gated tests
+plus `cagara-sql/tests/engines.rs`, and `root_queries_checked` reaches the
+evaluator only as the oracle it compares against. Deleting it means deleting the
+parity check with it, so the question is no longer "is it safe" but "how much
+independent evidence is wanted" — and the answer so far has been that every
+defect found in this layer (the aggregate constructor, the panic, the omission
+hole, the routing gap) was found *by* the comparison rather than by the goldens.
 
 **Why rung 2 could not be done as written.** Replacing `schema_located` with
 `debug_assert!` looked safe — with the checked tree emitted instead, all 40 frozen
@@ -360,7 +375,7 @@ current state.
 The behavioural contract for this step is the frozen CLI output, not the build:
 
 ```bash
-nix develop --command cargo test --workspace            # 405 passed, 0 failed
+nix develop --command cargo test --workspace            # 407 passed, 0 failed
 nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 nix develop --command cargo build --workspace -q
 <regenerate examples/*.cagara: 6 dialects + --pretty + --types + stderr>

@@ -330,7 +330,7 @@ current state.
 The behavioural contract for this step is the frozen CLI output, not the build:
 
 ```bash
-nix develop --command cargo test --workspace            # 401 passed, 0 failed
+nix develop --command cargo test --workspace            # 403 passed, 0 failed
 nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 nix develop --command cargo build --workspace -q
 <regenerate examples/*.cagara: 6 dialects + --pretty + --types + stderr>
@@ -490,5 +490,9 @@ produces`.
 
 The same comparison also runs **in production** now, on every compile, inside
 `root_queries_checked` — so agreement is asserted where it matters rather than
-only in tests. The evaluator stays as the behavioural oracle, and on
-disagreement its tree is the one that ships.
+only in tests. The evaluator stays as the behavioural oracle, and on disagreement
+the compiler **fails closed**: it reports an internal error and emits no relation
+for that definition, rather than shipping either tree. See the policy note on
+`root_queries_checked`; briefly, a disagreement means the compiler has concluded
+it cannot trust either tree, and a compiler bug that produces no output is a bug
+report while one that produces plausible SQL is a data incident.

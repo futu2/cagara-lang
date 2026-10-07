@@ -793,3 +793,161 @@ fn a_program_error_is_not_reported_as_a_compiler_gap() {
         e.message
     );
 }
+
+/// The elaborated path's verdict is what reaches the user, even for a program
+/// the *evaluator* also rejects.
+///
+/// This is the routing gap the earlier `assert!`-based test could not see. That
+/// test checked the elaborator's classification in isolation, and its production
+/// assertion passed on the `schema` diagnostic alone — which was the point: for
+/// this program `schema_located` produces the identical message, so the
+/// assertion could not tell which path had spoken.
+///
+/// The routing used to return the evaluator's error *before* consulting the
+/// elaborated path, so for any program both paths reject, `schema` decided while
+/// the surrounding code claimed the elaborated path did. Now both outcomes are
+/// computed and reconciled first, which this test distinguishes by construction:
+/// it asserts that the elaborated path reached its own classification, and that
+/// the message the user gets is that one.
+#[test]
+fn the_elaborated_verdict_wins_over_a_schema_error() {
+    let ws = Workspace::from_source("q = table \"s\" \"t\"\n");
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let tc = crate::check::check(&ws);
+
+    // The evaluator alone rejects this too — so the old routing short-circuited
+    // here and never looked at the elaborated path.
+    let oracle = crate::eval::root_queries_via_evaluator(&ws, &tc);
+    let (_, o) = oracle.iter().find(|(n, _)| n == "q").expect("`q`");
+    assert!(
+        o.is_err(),
+        "this test needs a program the evaluator *also* rejects, or it does not \
+         exercise the routing gap: {o:?}"
+    );
+
+    // Source elaboration classifies it as a program error, not a gap.
+    let elab = crate::elaborate::elaborate_module(&ws, &tc, ws.root);
+    let (_, r) = elab.iter().find(|(n, _)| n == "q").expect("`q` walked");
+    let e = r.as_ref().expect_err("a column-less table cannot be built");
+    assert!(!crate::elaborate::is_not_a_query(e), "it is a query definition");
+    assert!(
+        !e.is_unsupported(),
+        "a column-less table is the program's fault: {}",
+        e.message
+    );
+
+    // The user gets the elaborated path's verdict: a plain program error, not
+    // an internal error.
+    //
+    // **On the message alone this test could not tell which path spoke.** For
+    // this program `schema_located` produces the *identical* string — the two
+    // were deliberately written to share wording so a user sees one
+    // explanation — so asserting on the text passes whichever path decided.
+    // That is precisely the limitation the earlier test had.
+    //
+    // What distinguishes them is the **location**. The elaborated path reports
+    // at its own `Origin` (the `table` primitive, column 5); `schema_located`
+    // blames the `Rel` node it walked, which for this program is the whole
+    // definition. So the span is the observable, and it is what is asserted.
+    let out = crate::root_queries_checked(&ws, &tc);
+    let (_, q) = out.iter().find(|(n, _)| n == "q").expect("`q` reported");
+    let d = q.as_ref().expect_err("it cannot compile");
+    assert!(
+        !d.message.contains("internal error"),
+        "a malformed program is not a compiler bug: {}",
+        d.message
+    );
+    // The elaborated error's origin is the `table` primitive; `schema_located`
+    // would blame the definition. Columns differ, so this distinguishes them.
+    let origin = e.origin.expect("the elaborated error carries an origin");
+    let start = origin.span.start as usize;
+    let text = &ws.modules[origin.module].text;
+    let origin_col = text[..start.min(text.len())]
+        .rfind('\n')
+        .map(|i| start - i)
+        .unwrap_or(start + 1);
+    assert_eq!(
+        d.col, origin_col,
+        "the diagnostic must come from the elaborated path at its own origin, not \
+         from schema at the definition: {} at col {}, elaborated origin at col {}",
+        d.message, d.col, origin_col
+    );
+}
+
+/// The reconciliation table, asserted case by case.
+///
+/// This tests the *decision* rather than its output, which matters here: for the
+/// programs that motivated the routing fix, `schema` and the checked
+/// constructors produce the **identical message and column**, so no assertion on
+/// a diagnostic can tell which path spoke. Disabling the elaborated path
+/// entirely leaves those outputs unchanged — verified by doing it.
+///
+/// So the policy is pinned where it lives, on `reconcile`, which takes both
+/// paths' verdicts explicitly. Every cell of the table is covered, including the
+/// ones that are currently unreachable, so a future edit that reorders or drops
+/// a case fails here rather than silently changing who decides.
+#[test]
+fn the_reconciliation_table_is_the_policy() {
+    use crate::eval::{reconcile, Outcome};
+
+    let ws = Workspace::from_source("q = 1\n");
+
+    let rel = crate::core_term::erase_core(crate::core_term::CoreTerm::table(
+        "p".into(),
+        "t".into(),
+    ))
+    .unwrap();
+    let diag = ws.diag_span(0, ws.modules[0].module.defs[0].span, "evaluator said no");
+
+    // (1) A program error wins, even when the evaluator also failed. This is the
+    //     routing gap: before, the evaluator's error was returned first and this
+    //     case never ran.
+    let r = reconcile(
+        &ws,
+        "q",
+        &Outcome::ProgramError("elaborated said no", None),
+        Err(diag.clone()),
+    );
+    let d = r.expect_err("a program error must not compile");
+    assert_eq!(
+        d.message, "elaborated said no",
+        "the elaborated path's verdict must win over the evaluator's, not be skipped"
+    );
+
+    // (1b) And it wins when the evaluator *succeeded* too, so the case is not
+    //      accidentally about the evaluator's failure.
+    let r = reconcile(
+        &ws,
+        "q",
+        &Outcome::ProgramError("elaborated said no", None),
+        Ok(rel.clone()),
+    );
+    assert_eq!(
+        r.expect_err("a program error must not compile").message,
+        "elaborated said no"
+    );
+
+    // (2) A capability gap fails closed, whatever the evaluator produced.
+    for eval in [Ok(rel.clone()), Err(diag.clone())] {
+        let r = reconcile(&ws, "q", &Outcome::Unsupported("no can do"), eval);
+        let d = r.expect_err("a gap must fail closed, not ship a relation");
+        assert!(
+            d.message.contains("internal error") && d.message.contains("no can do"),
+            "a gap is a compiler bug, reported as one: {}",
+            d.message
+        );
+    }
+
+    // (3) "Not a query" is no verdict, so the evaluator's result stands in both
+    //     directions — including when it is an error.
+    assert!(
+        reconcile(&ws, "q", &Outcome::NotQuery, Ok(rel.clone())).is_ok(),
+        "the evaluator's relation stands when the elaborator saw no query"
+    );
+    assert_eq!(
+        reconcile(&ws, "q", &Outcome::NotQuery, Err(diag.clone()))
+            .expect_err("the evaluator's error stands too")
+            .message,
+        "evaluator said no"
+    );
+}

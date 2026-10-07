@@ -339,6 +339,15 @@ pub enum Fault {
     Program,
     /// This phase cannot handle a program the evaluator can.
     Compiler,
+    /// Not a failure at all: the definition simply is not a query, so there is
+    /// nothing here for the checked layer to build.
+    ///
+    /// A third case rather than overloading the two above, because the
+    /// production boundary must treat it as *no verdict*: reporting it would
+    /// invent an error for a scalar definition the evaluator handles correctly,
+    /// and ignoring it silently would lose the distinction between "nothing to
+    /// do" and "could not do it".
+    NotAQuery,
 }
 
 impl Error {

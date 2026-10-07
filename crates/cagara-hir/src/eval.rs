@@ -562,92 +562,128 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
 
     let mut out = Vec::with_capacity(via_evaluator.len());
     for (name, result) in via_evaluator {
-        let Ok(oracle) = &result else {
-            // Already a diagnostic (type or evaluation error): nothing to
-            // compare, and it is the user's error rather than an internal one.
-            out.push((name, result));
-            continue;
+        // Both paths are consulted for *every* definition, including ones either
+        // path rejected. That is the point: an earlier version returned the
+        // evaluator's error immediately, so for a program both paths reject, the
+        // elaborated path's fault classification was never reached — `schema`
+        // decided while the routing below claimed to.
+        let from_elab = match from_source.get(name.as_str()) {
+            Some(Ok(q)) => Outcome::Built(q),
+            // "Not a query" is a finding, not a failure — see `NOT_A_QUERY`.
+            Some(Err(e)) if crate::elaborate::is_not_a_query(e) => Outcome::NotQuery,
+            Some(Err(e)) if e.is_unsupported() => Outcome::Unsupported(&e.message),
+            Some(Err(e)) => Outcome::ProgramError(&e.message, e.origin),
+            // The elaborator did not walk this definition at all.
+            None => Outcome::NotQuery,
         };
-        match from_source.get(name.as_str()) {
-            // The elaborator produced nothing for this definition. That is the
-            // normal case for a definition which is not a query at all, and
-            // `None` is not evidence of a gap: the elaborator lists every
-            // definition it walks, and this one is absent only when it had no
-            // query to elaborate. The evaluator's relation is used.
-            None => out.push((name, result)),
-            // The elaborator *saw* a query here and could not build one. Which
-            // kind of failure it is decides who hears about it — and that
-            // distinction is load-bearing rather than cosmetic. The column-less
-            // table (`t = table "s" "t"` with no declared columns) reaches here,
-            // and it is a *program* error that `schema` reports with a usable
-            // message; classifying it as a compiler gap is what made demoting
-            // `schema` panic on it.
-            Some(Err(e)) if !e.is_unsupported() => {
-                // Malformed program: report it as the user's, in the elaborated
-                // path's own wording, which is the wording `schema` uses for the
-                // same program.
-                let msg = e.message.clone();
-                let root = ws.root;
-                let d = match e.origin {
-                    Some(o) => ws.diag_span(o.module, o.span, msg),
-                    None => {
-                        // No origin: blame the definition itself, which is the
-                        // closest honest answer and what `schema`'s own
-                        // no-location fallback does.
-                        let span = ws.modules[root]
-                            .module
-                            .defs
-                            .iter()
-                            .find(|d| d.name == name)
-                            .map(|d| d.span)
-                            .unwrap_or(cagara_syntax::ast::Span { start: 0, end: 0 });
-                        ws.diag_span(root, span, msg)
-                    }
-                };
-                out.push((name, Err(d)));
-            }
-            Some(Err(e)) => {
-                // A capability gap. Fail closed: reported, and no `Rel` emitted.
-                // See the policy note on this function for why this is the
-                // temporary choice rather than shipping the oracle's tree.
-                let d = internal_disagreement(
-                    ws,
-                    &name,
-                    &format!(
-                        "source elaboration cannot handle this definition ({})",
-                        e.message
-                    ),
-                );
-                out.push((name, Err(d)));
-            }
-            Some(Ok(query)) => match crate::checked::erase((*query).clone()) {
-                // Erasure is structural and total for query nodes, so this is
-                // an internal inconsistency rather than a user error.
-                Err(e) => {
-                    let d = internal_disagreement(ws, &name, &e.message);
-                    out.push((name, Err(d)));
-                }
-                Ok(rel) => {
-                    if crate::checked::without_at(&rel) != crate::checked::without_at(oracle) {
-                        let d = internal_disagreement(
-                            ws,
-                            &name,
-                            "source elaboration and the evaluator produced different trees",
-                        );
-                        out.push((name, Err(d)));
-                    } else {
-                        // Agreed — the only case where a relation is emitted for
-                        // a definition source elaboration handled. The
-                        // evaluator's tree is the one kept: it carries the
-                        // `Rel::At` wrappers `schema_located` blames spans with,
-                        // and the checked tree is equal underneath.
-                        out.push((name, result));
-                    }
-                }
-            },
-        }
+        out.push((name.clone(), reconcile(ws, &name, &from_elab, result)));
     }
     out
+}
+
+/// What **source elaboration** concluded about a definition.
+///
+/// Named rather than inferred from "is the result an `Err`?". Inferring it is
+/// how the elaborated path's verdict went unconsulted for programs the evaluator
+/// also rejects. The evaluator needs no such type: it is the reference
+/// implementation, so its `Ok` is a relation and its `Err` is the program's
+/// fault.
+pub(crate) enum Outcome<'a> {
+    /// The elaborator walked this definition and saw no query here.
+    ///
+    /// Not a verdict and not a gap — the normal case for a scalar definition.
+    NotQuery,
+    /// A query, built successfully.
+    Built(&'a crate::checked::CheckedQuery),
+    /// The program is malformed; the message is for the user.
+    ProgramError(&'a str, Option<crate::core::Origin>),
+    /// The program is fine and this path cannot build it.
+    Unsupported(&'a str),
+}
+
+/// Reconcile source elaboration's verdict with the evaluator's result.
+///
+/// The order of these cases *is* the policy, so it is a flat match over the
+/// elaborated outcome rather than a chain of guards over the evaluator's:
+///
+/// 1. a program error belongs to the user, whichever path found it — and when
+///    the evaluator rejects too, the elaborated path's wording is the one used,
+///    because that is the message the checked layer is responsible for;
+/// 2. a capability gap fails closed;
+/// 3. the elaborator seeing no query means the evaluator's result is the only
+///    verdict there is, so it stands — including when it is an error;
+/// 4. a built query must erase to the evaluator's tree, and only then ship.
+pub(crate) fn reconcile(
+    ws: &Workspace,
+    name: &str,
+    from_elab: &Outcome<'_>,
+    evaluator: Result<Rel, Diag>,
+) -> Result<Rel, Diag> {
+    match from_elab {
+        // (1) The program is wrong. Report it as the user's, with the elaborated
+        // path's wording and location, whether or not the evaluator also failed.
+        //
+        // This case previously never ran for a program the evaluator also
+        // rejected: the evaluator's diagnostic was returned first, so `schema`'s
+        // message was what the user saw even though the check that produced it
+        // was supposed to have been demoted.
+        Outcome::ProgramError(msg, origin) => {
+            Err(diagnose_at_def(ws, name, origin.map(|o| (o.module, o.span)), msg))
+        }
+        // (2) A gap in this phase. Fail closed.
+        Outcome::Unsupported(msg) => Err(internal_disagreement(
+            ws,
+            name,
+            &format!("source elaboration cannot handle this definition ({msg})"),
+        )),
+        // (3) The elaborator saw no query here, so the evaluator's result is the
+        // only verdict there is — including when it is an error.
+        Outcome::NotQuery => evaluator,
+        // (4) Both built something, and they must agree.
+        Outcome::Built(q) => {
+            let oracle = evaluator?;
+            match crate::checked::erase((*q).clone()) {
+                // Erasure is structural and total for query nodes, so this is an
+                // internal inconsistency rather than a user error.
+                Err(e) => Err(internal_disagreement(ws, name, &e.message)),
+                Ok(rel) => {
+                    if crate::checked::without_at(&rel) != crate::checked::without_at(&oracle) {
+                        Err(internal_disagreement(
+                            ws,
+                            name,
+                            "source elaboration and the evaluator produced different trees",
+                        ))
+                    } else {
+                        Ok(oracle)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Build a user-facing diagnostic at `span`, or at the definition when the error
+/// carries no location of its own.
+fn diagnose_at_def(
+    ws: &Workspace,
+    name: &str,
+    span: Option<(usize, cagara_syntax::ast::Span)>,
+    msg: &str,
+) -> Diag {
+    match span {
+        Some((module, span)) => ws.diag_span(module, span, msg.to_string()),
+        None => {
+            let root = ws.root;
+            let span = ws.modules[root]
+                .module
+                .defs
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.span)
+                .unwrap_or(cagara_syntax::ast::Span { start: 0, end: 0 });
+            ws.diag_span(root, span, msg.to_string())
+        }
+    }
 }
 
 /// A diagnostic for a disagreement between the two elaboration paths.

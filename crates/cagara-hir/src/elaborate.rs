@@ -119,6 +119,29 @@ fn enter<'a>(cx: &Ctx<'a>, module: usize, def: usize) -> R<Vec<(usize, usize)>> 
 /// What elaborating one expression produced.
 type R<T> = Result<T, Error>;
 
+/// The marker a definition that is not a query fails with.
+///
+/// A sentinel rather than a real error: "this definition has no query to
+/// elaborate" is a *finding*, not a failure, but `elaborate_module` returns one
+/// `Result` per definition and a sentinel is the smallest way to add the third
+/// outcome without changing that shape for every caller.
+///
+/// It is recognised by [`is_not_a_query`] rather than by comparing messages,
+/// and its text is deliberately something no real diagnostic would say, so a
+/// mistake shows up as strange output rather than as a silently swallowed
+/// program error.
+pub(crate) const NOT_A_QUERY: Error = Error {
+    message: String::new(),
+    origin: None,
+    def: None,
+    fault: crate::core::Fault::NotAQuery,
+};
+
+/// Whether an elaboration result means "this definition is not a query".
+pub(crate) fn is_not_a_query(e: &Error) -> bool {
+    e.fault == crate::core::Fault::NotAQuery
+}
+
 /// Elaborate the root module's definitions from source.
 ///
 /// Returns one entry per definition, in source order, with the same
@@ -148,8 +171,20 @@ fn elaborate_def(
     // A definition the checker rejected has no trustworthy types, so there is
     // nothing to elaborate: report the checker's own failure rather than build
     // a tree out of unsolved variables.
+    // A definition the checker rejected has no trustworthy types, so there is
+    // nothing to elaborate. This is **not** the elaborated path's error to
+    // report: the evaluator path already produces exactly this diagnostic from
+    // `tc.error_for` (`eval.rs`), and reporting it here too made the user see it
+    // twice — once at the use span and once at the definition. So it is handed
+    // back as `NotAQuery`: a *finding* meaning "this definition needs no
+    // elaboration from me", which defers to the evaluator's message.
+    //
+    // `main()` in the CLI does deduplicate by message, but that is a
+    // presentation detail and the LSP does not; a duplicate here reached the
+    // editor as two squiggles.
     if let Some(e) = tc.error_for(module, def) {
-        return Err(Error::new(e.message.clone()));
+        let _ = e;
+        return Err(NOT_A_QUERY);
     }
     // A definition that leaves open overloads is meaningful only at its uses.
     if tc.holes(module, def) > 0 {
@@ -157,6 +192,22 @@ fn elaborate_def(
             "`{}` leaves open overloads; it has no body of its own",
             d.name
         )));
+    }
+    // A definition that is **not a query** has nothing to elaborate here, and
+    // that is not a failure. `bad : expr r int -> expr r int = sql "$0"` is a
+    // function; building a `CheckedQuery` from it fails with "expected a query",
+    // which is true and useless. A caller must be able to tell "not a query"
+    // from "a query I could not build", because the production boundary reports
+    // the second as a compiler gap and must stay silent about the first.
+    //
+    // Structural, on the scheme, rather than by catching error text:
+    // `SchemeView::Query` is `query r`, and `Function`/`Scalar`/`Row` are
+    // everything else.
+    if !matches!(
+        tc.scheme_view(module, def),
+        Some(crate::check::SchemeView::Query { .. })
+    ) {
+        return Err(NOT_A_QUERY);
     }
     let origin = Origin::new(module, d.span);
     let scope = &ws.modules[module].scope;

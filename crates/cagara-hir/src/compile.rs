@@ -616,6 +616,49 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "large-definition benchmark; set CAGARA_BENCH_DEFINITIONS to scale it"]
+    fn large_definition_cache_benchmark() {
+        let count = std::env::var("CAGARA_BENCH_DEFINITIONS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(100_000);
+        let mut source = String::with_capacity(count.saturating_mul(64));
+        for i in 0..count {
+            source.push_str(&format!(
+                "d{i} : query {{ a = int }} = table \"public\" \"t{i}\"\n"
+            ));
+        }
+        let mut ws = Workspace::from_source(&source);
+        assert!(ws.diags.is_empty(), "load diagnostics: {:?}", ws.diags);
+
+        let started = std::time::Instant::now();
+        let first = compile(&ws);
+        let first_elapsed = started.elapsed();
+        assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
+
+        let edit = format!(
+            "d0 : query {{ a = int }} = table \"public\" \"changed\"\n{}",
+            source
+                .lines()
+                .skip(1)
+                .map(|line| format!("{line}\n"))
+                .collect::<String>()
+        );
+        let before_edit = crate::elaborate::elaborated_defs().len();
+        assert!(ws.set_source(ws.root, edit));
+        let started = std::time::Instant::now();
+        let second = compile(&ws);
+        let second_elapsed = started.elapsed();
+        assert!(second.diagnostics.is_empty(), "{:?}", second.diagnostics);
+        assert_eq!(
+            crate::elaborate::elaborated_defs().len() - before_edit,
+            1,
+            "one-definition edits should elaborate one query"
+        );
+        println!("{count} definitions: initial {first_elapsed:?}, one-edit {second_elapsed:?}");
+    }
+
+    #[test]
     fn editing_one_definition_changes_only_its_key() {
         let mut ws = Workspace::from_source(
             "first : query { a = int } = table \"public\" \"first\"\n\

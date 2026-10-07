@@ -32,6 +32,19 @@ impl<'a> CompilerInput<'a> {
         self.type_check
     }
 
+    pub fn diagnostics(&self) -> &'a [Diag] {
+        &self.workspace.diags
+    }
+
+    pub fn diagnostic(&self, origin: Option<Origin>, message: impl Into<String>) -> Diag {
+        match origin {
+            Some(origin) => self
+                .workspace
+                .diag_span(origin.module, origin.span, message),
+            None => self.workspace.diag(self.workspace.root, 0, message),
+        }
+    }
+
     pub fn root(&self) -> ModuleSnapshot<'a> {
         self.module(self.workspace.root)
     }
@@ -126,12 +139,11 @@ pub fn compile_checked(ws: &Workspace, tc: &TypeCheck) -> Compilation {
 
 /// Compile an immutable view over cached workspace data.
 pub fn compile_input(input: CompilerInput<'_>) -> Compilation {
-    let ws = input.workspace;
-    let tc = input.type_check;
+    let tc = input.type_check();
     let root = input.root();
     let mut out = Compilation {
         queries: Vec::new(),
-        diagnostics: ws.diags.clone(),
+        diagnostics: input.diagnostics().to_vec(),
     };
     for error in &tc.errors {
         push_unique(&mut out.diagnostics, error.diag.clone());
@@ -145,34 +157,32 @@ pub fn compile_input(input: CompilerInput<'_>) -> Compilation {
             module: root.index(),
             def: index,
         };
-        let result = match result {
-            Ok(query) => match crate::checked::erase(query) {
-                Ok(rel) => match crate::schema::schema_located(&rel) {
-                    Ok(_) => Ok(rel),
-                    Err((location, message)) => Err(diagnostic_at(
-                        ws,
-                        location.map(|l| Origin::new(l.module, l.span)),
-                        message,
-                    )),
+        let result =
+            match result {
+                Ok(query) => match crate::checked::erase(query) {
+                    Ok(rel) => match crate::schema::schema_located(&rel) {
+                        Ok(_) => Ok(rel),
+                        Err((location, message)) => Err(input
+                            .diagnostic(location.map(|l| Origin::new(l.module, l.span)), message)),
+                    },
+                    Err(error) => Err(internal_error(input, &name, &error)),
                 },
-                Err(error) => Err(internal_error(ws, &name, &error)),
-            },
-            Err(error) if is_not_a_query(&error) => {
-                if let Some(diag) = tc.error_for(root.index(), index) {
-                    Err(diag.clone())
-                } else {
-                    continue;
+                Err(error) if is_not_a_query(&error) => {
+                    if let Some(diag) = tc.error_for(root.index(), index) {
+                        Err(diag.clone())
+                    } else {
+                        continue;
+                    }
                 }
-            }
-            Err(error) => {
-                let diag = match error.fault {
-                    Fault::Program => diagnostic_at(ws, error.origin, error.message),
-                    Fault::Compiler => internal_error(ws, &name, &error),
-                    Fault::NotAQuery => unreachable!("handled above"),
-                };
-                Err(diag)
-            }
-        };
+                Err(error) => {
+                    let diag = match error.fault {
+                        Fault::Program => input.diagnostic(error.origin, error.message),
+                        Fault::Compiler => internal_error(input, &name, &error),
+                        Fault::NotAQuery => unreachable!("handled above"),
+                    };
+                    Err(diag)
+                }
+            };
         if let Err(diag) = &result {
             push_unique(&mut out.diagnostics, diag.clone());
         }
@@ -208,17 +218,10 @@ fn push_unique(diags: &mut Vec<Diag>, diag: Diag) {
     }
 }
 
-fn diagnostic_at(ws: &Workspace, origin: Option<Origin>, message: impl Into<String>) -> Diag {
-    match origin {
-        Some(origin) => ws.diag_span(origin.module, origin.span, message),
-        None => ws.diag(ws.root, 0, message),
-    }
-}
-
-fn internal_error(ws: &Workspace, name: &str, error: &Error) -> Diag {
+fn internal_error(input: CompilerInput<'_>, name: &str, error: &Error) -> Diag {
     let detail = error.message.clone();
     let message = format!("internal error in `{name}`: {detail}");
-    diagnostic_at(ws, error.origin, message)
+    input.diagnostic(error.origin, message)
 }
 
 #[cfg(test)]
@@ -272,5 +275,15 @@ mod tests {
         assert!(root.scope().contains_key("q"));
 
         assert_eq!(compile_input(input), compile_checked(&ws, &tc));
+    }
+
+    #[test]
+    fn compiler_input_preserves_source_diagnostics() {
+        let ws = Workspace::from_source("q = (\n");
+        let tc = crate::check::check(&ws);
+        let compilation = compile_input(CompilerInput::new(&ws, &tc));
+
+        assert!(!compilation.diagnostics.is_empty());
+        assert_eq!(compilation.diagnostics, ws.diags);
     }
 }

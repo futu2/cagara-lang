@@ -297,14 +297,30 @@ compiled definition is built from source.
 That assertion is deliberately stronger than "the two agree": two producers that
 agree today can disagree tomorrow, one producer cannot disagree with itself.
 
-**Rung 5: what is left.** Nothing in production reads the evaluator. `root_queries`,
-`root_core_terms` and `Evaluator` are used only from `#[cfg(test)]`-gated tests
-plus `cagara-sql/tests/engines.rs`, and `root_queries_checked` reaches the
-evaluator only as the oracle it compares against. Deleting it means deleting the
-parity check with it, so the question is no longer "is it safe" but "how much
-independent evidence is wanted" — and the answer so far has been that every
-defect found in this layer (the aggregate constructor, the panic, the omission
-hole, the routing gap) was found *by* the comparison rather than by the goldens.
+**Rung 5: what is left.** The *pipeline* does not read the evaluator:
+`root_queries_checked` reaches it only as the oracle it compares against, and the
+SQL backend, the CLI and the LSP never touch it.
+
+It is **not** yet true that nothing reachable does, and an earlier version of this
+document claimed otherwise, which was wrong. `CheckedProgram::of_elaborated` is a
+`pub` constructor that runs the evaluator through `elaborate_bodies`; its only
+callers today are in-crate tests, but a `pub` API that runs the oracle is a
+production dependency by definition. The contract is now stated rather than
+implied: `of_elaborated` is documented as an **oracle entry point** that does not
+share the pipeline's behaviour, and a caller wanting bodies from source is pointed
+at `elaborate_module`. `Evaluator` is no longer re-exported from the crate root.
+
+So removing the evaluator also means deciding what `of_elaborated`'s body-filling
+is for: migrate it to source elaboration, or reduce it to a test-only helper.
+`root_core_terms` is in the same position. (The review found this by reading
+`of_elaborated`'s imports rather than its docs — the call graph, not the prose, is
+what settles a "nothing depends on this" claim.) `root_queries` is *not* affected:
+it delegates to `root_queries_checked` and ships the checked tree.
+
+What remains is a decision about evidence rather than safety — deleting the
+evaluator removes the parity check with it, and every defect found in this layer
+(the aggregate constructor, the panic, the omission hole, the routing gap) was
+found *by* that comparison rather than by the goldens.
 
 **Why rung 2 could not be done as written.** Replacing `schema_located` with
 `debug_assert!` looked safe — with the checked tree emitted instead, all 40 frozen

@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const PRELUDE_SRC: &str = include_str!("../../../prelude.cagara");
 pub const PRELUDE_PATH: &str = "<prelude>";
@@ -33,9 +34,9 @@ pub struct LoadedModule {
     pub path: PathBuf,
     pub text: String,
     pub module: Module,
-    pub scope: HashMap<String, Binding>,
+    pub scope: Arc<HashMap<String, Binding>>,
     /// This module's own definitions (what `import` and `alias.name` see).
-    pub own: HashMap<String, Binding>,
+    pub own: Arc<HashMap<String, Binding>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,7 +287,8 @@ impl Workspace {
         file.set_text(&mut self.db).to(text.clone());
         let path = self.modules[m].path.clone();
         // Exports of `m` feed the scopes of its importers: refresh all
-        // modules (the queries recompute only what changed).
+        // modules (the queries recompute only what changed, and immutable
+        // maps are shared without copying unrelated catalogs).
         for k in 0..self.modules.len() {
             let input = self.inputs[k];
             self.modules[k].own = module_own(&self.db, input).clone();
@@ -517,6 +519,32 @@ mod tests {
             .module_for_path(Path::new("/tmp/cagara-shared/lib.cagara"))
             .is_some());
         assert_eq!(ws.modules[ws.root].module.defs[0].name, "q");
+    }
+
+    #[test]
+    fn edits_share_unchanged_scopes_and_preserve_previous_exports() {
+        use std::sync::Arc;
+
+        let root = PathBuf::from("/tmp/cagara-scopes/root.cagara");
+        let lib = root.with_file_name("lib.cagara");
+        let source = "import \"lib.cagara\"\nq = value\n";
+        let buffers = HashMap::from([(lib.clone(), "value = 42\n".into())]);
+        let mut ws = Workspace::open_with_buffers(&root, source.into(), &buffers);
+        let imported = ws.module_for_path(&lib).unwrap();
+        let exports = Arc::clone(&ws.modules[imported].own);
+        let scope = Arc::clone(&ws.modules[imported].scope);
+
+        assert!(ws.set_source(ws.root, source.replace("q = value", "q = value + 1")));
+        assert!(Arc::ptr_eq(&exports, &ws.modules[imported].own));
+        assert!(Arc::ptr_eq(&scope, &ws.modules[imported].scope));
+        assert!(crate::check::check(&ws).errors.is_empty());
+
+        assert!(ws.set_source(imported, "other = 42\n".into()));
+        assert!(exports.contains_key("value"));
+        assert!(!exports.contains_key("other"));
+        assert!(!ws.modules[ws.root].scope.contains_key("value"));
+        assert!(ws.modules[ws.root].scope.contains_key("other"));
+        assert!(!crate::check::check(&ws).errors.is_empty());
     }
 
     /// The db text and the workspace text must always be the same text:

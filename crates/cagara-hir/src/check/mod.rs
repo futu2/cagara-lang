@@ -362,7 +362,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         scope: module_scope(db, input),
         owns: imported
             .iter()
-            .map(|t| (*t.index(db), module_own(db, *t)))
+            .map(|t| (*t.index(db), module_own(db, *t).as_ref()))
             .collect(),
         schemes: imported
             .iter()

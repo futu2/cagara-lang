@@ -460,14 +460,14 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                 _ => return Err(Error::new(format!("`{alias}.{f}` is not a query")).at(at(e.span))),
             };
             let body = cx.input.module(dm).def(di).body.clone();
-            let inner_scope = cx.input.module(dm).scope().clone();
+            let inner_scope = cx.input.module(dm).scope();
 
             let active = enter(&cx, dm, di)?;
             let inner = Ctx {
                 input: cx.input,
                 module: dm,
                 owner: di,
-                scope: &inner_scope,
+                scope: inner_scope,
                 active: &active,
                 holes: cx.holes,
                 env: cx.env,
@@ -551,7 +551,7 @@ fn elaborate_application(
                     for (p, a) in params.iter().zip(args) {
                         bound.push((p.clone(), elaborate_value(cx, a)?));
                     }
-                    let inner_scope = cx.input.module(dm).scope().clone();
+                    let inner_scope = cx.input.module(dm).scope();
                     let active = enter(&cx, dm, di)?;
                     let mut env: Vec<(String, CheckedValue)> = cx.env.to_vec();
                     env.extend(bound);
@@ -565,7 +565,7 @@ fn elaborate_application(
                         input: cx.input,
                         module: dm,
                         owner: di,
-                        scope: &inner_scope,
+                        scope: inner_scope,
                         env: &env,
                         active: &active,
                         holes: &holes,
@@ -986,13 +986,13 @@ fn elaborate_user_stage(
 ) -> R<CheckedQuery> {
     let body = cx.input.module(dm).def(di).body.clone();
     let name = cx.input.module(dm).def(di).name.clone();
-    let inner_scope = cx.input.module(dm).scope().clone();
+    let inner_scope = cx.input.module(dm).scope();
     let active = enter(&cx, dm, di)?;
     let inner = Ctx {
         input: cx.input,
         module: dm,
         owner: di,
-        scope: &inner_scope,
+        scope: inner_scope,
         active: &active,
         holes: cx.holes,
         env: cx.env,
@@ -1204,13 +1204,13 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
                     // Its body is elaborated in the definition's own module and
                     // scope, which is where its names resolve.
                     let body = body.clone();
-                    let inner_scope = cx.input.module(dm).scope().clone();
+                    let inner_scope = cx.input.module(dm).scope();
                     let active = enter(&cx, dm, di)?;
                     let inner = Ctx {
                         input: cx.input,
                         module: dm,
                         owner: di,
-                        scope: &inner_scope,
+                        scope: inner_scope,
                         env: cx.env,
                         active: &active,
                         holes: cx.holes,
@@ -1322,14 +1322,14 @@ fn elaborate_call(
     // operator goes through it unchanged.
     if matches!(body.kind, ExprKind::App(..)) {
         let body = body.clone();
-        let inner_scope = cx.input.module(dm).scope().clone();
+        let inner_scope = cx.input.module(dm).scope();
         let active = enter(&cx, dm, di)?;
         let holes = holes_at(cx, dm, di, f.id)?;
         let callee = Ctx {
             input: cx.input,
             module: dm,
             owner: di,
-            scope: &inner_scope,
+            scope: inner_scope,
             env: cx.env,
             holes: &holes,
             active: &active,
@@ -1744,7 +1744,7 @@ fn elaborate_lambda(
         bound.push((p.clone(), elaborate_value(cx, a)?));
     }
 
-    let scope = cx.input.module(dm).scope().clone();
+    let scope = cx.input.module(dm).scope();
     let active = enter(&cx, dm, di)?;
     // The callee's environment is the caller's bindings plus the new ones.
     // Keeping the caller's bindings lets a nested lambda see what the outer
@@ -1762,7 +1762,7 @@ fn elaborate_lambda(
         input: cx.input,
         module: dm,
         owner: di,
-        scope: &scope,
+        scope,
         env: &env,
         active: &active,
         holes: &holes,
@@ -1997,7 +1997,7 @@ fn apply_value(cx: Ctx<'_>, f: CheckedValue, arg: CheckedValue, origin: Origin) 
             env.push((param, arg));
             if params.is_empty() {
                 let (dm, di) = def;
-                let scope = cx.input.module(dm).scope().clone();
+                let scope = cx.input.module(dm).scope();
                 let holes = holes_at(cx, dm, di, site)?;
                 let mut active = cx.active.to_vec();
                 if !active.contains(&(dm, di)) {
@@ -2007,7 +2007,7 @@ fn apply_value(cx: Ctx<'_>, f: CheckedValue, arg: CheckedValue, origin: Origin) 
                     input: cx.input,
                     module: dm,
                     owner: di,
-                    scope: &scope,
+                    scope,
                     env: &env,
                     holes: &holes,
                     active: &active,
@@ -2088,14 +2088,14 @@ fn elaborate_winspec(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::checked::WinSpecChe
         if let Some(Binding::Def(dm, di)) = cx.scope.get(n).cloned() {
             let body = cx.input.module(dm).def(di).body.clone();
             // The body is evaluated in its own module's scope.
-            let inner_scope = cx.input.module(dm).scope().clone();
+            let inner_scope = cx.input.module(dm).scope();
 
             let active = enter(&cx, dm, di)?;
             let inner = Ctx {
                 input: cx.input,
                 module: dm,
                 owner: di,
-                scope: &inner_scope,
+                scope: inner_scope,
                 active: &active,
                 holes: cx.holes,
                 env: cx.env,
@@ -2155,14 +2155,14 @@ fn elaborate_frame(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::ir::Frame> {
     if let ExprKind::Name(n) = &e.kind {
         if let Some(Binding::Def(dm, di)) = cx.scope.get(n).cloned() {
             let body = cx.input.module(dm).def(di).body.clone();
-            let inner_scope = cx.input.module(dm).scope().clone();
+            let inner_scope = cx.input.module(dm).scope();
 
             let active = enter(&cx, dm, di)?;
             let inner = Ctx {
                 input: cx.input,
                 module: dm,
                 owner: di,
-                scope: &inner_scope,
+                scope: inner_scope,
                 active: &active,
                 holes: cx.holes,
                 env: cx.env,

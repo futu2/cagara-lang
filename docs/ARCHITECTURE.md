@@ -69,9 +69,10 @@ identity even when names repeat. A definition also has a source-based cache
 key separate from its source-order index. After an edit, the compiler reuses a
 successful erased query only when that key and the checked facts of the
 definition's referenced definitions still match; failed results are rebuilt so
-their diagnostics always use current source spans. File access, incremental
-state, diagnostic formatting, and SQL dialect options remain outside the
-semantic tree.
+their diagnostics always use current source spans. Dependency fingerprints are
+memoized within a compilation, so a shared helper chain is walked once. File
+access, incremental state, diagnostic formatting, and SQL dialect options
+remain outside the semantic tree.
 
 The compilation result is:
 

@@ -185,6 +185,11 @@ fn compile_input_cached(input: CompilerInput<'_>, previous: Option<&Compilation>
     let tc = input.type_check();
     let root = input.root();
     let keys = definition_keys(root);
+    let mut fingerprint_state = FingerprintState {
+        key_cache: HashMap::from([(root.index(), keys.clone())]),
+        cache: HashMap::new(),
+        active: std::collections::HashSet::new(),
+    };
     let mut out = Compilation {
         queries: Vec::new(),
         diagnostics: input.diagnostics().to_vec(),
@@ -196,7 +201,8 @@ fn compile_input_cached(input: CompilerInput<'_>, previous: Option<&Compilation>
     for (index, definition) in root.source().defs.iter().enumerate() {
         let name = definition.name.clone();
         let key = keys[index];
-        let fingerprint = definition_fingerprint(input, root.index(), index, key);
+        let fingerprint =
+            fingerprint_definition(input, tc, root.index(), index, key, &mut fingerprint_state);
         let id = DefinitionId {
             module: root.index(),
             def: index,
@@ -302,52 +308,39 @@ fn definition_keys(module: ModuleSnapshot<'_>) -> Vec<DefinitionKey> {
         .collect()
 }
 
-fn definition_fingerprint(
-    input: CompilerInput<'_>,
-    module: usize,
-    def: usize,
-    key: DefinitionKey,
-) -> u64 {
-    let tc = input.type_check();
-    let mut facts = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    collect_definition_facts(input, tc, module, def, &mut seen, &mut facts);
-    stable_hash(&(key, facts))
+struct FingerprintState {
+    key_cache: HashMap<usize, Vec<DefinitionKey>>,
+    cache: HashMap<(usize, usize), u64>,
+    active: std::collections::HashSet<(usize, usize)>,
 }
 
-type DefinitionFacts = (
-    DefinitionKey,
-    String,
-    usize,
-    String,
-    String,
-    Vec<String>,
-    Vec<String>,
-);
-
-fn collect_definition_facts(
+fn fingerprint_definition(
     input: CompilerInput<'_>,
     tc: &TypeCheck,
     module: usize,
     def: usize,
-    seen: &mut std::collections::HashSet<(usize, usize)>,
-    facts: &mut Vec<DefinitionFacts>,
-) {
-    if !seen.insert((module, def)) {
-        return;
+    key: DefinitionKey,
+    state: &mut FingerprintState,
+) -> u64 {
+    if let Some(&fingerprint) = state.cache.get(&(module, def)) {
+        return fingerprint;
+    }
+    if !state.active.insert((module, def)) {
+        // Cycles are rejected by elaboration; this marker only keeps the
+        // fingerprint walk finite while a diagnostic is being built.
+        return stable_hash(&(key, "cycle"));
     }
     let snapshot = input.module(module);
     let Some(definition) = snapshot.source().defs.get(def) else {
-        return;
+        return stable_hash(&(key, "missing"));
     };
-    let key = definition_keys(snapshot)[def];
-    let choices = tc
+    let choices: Vec<_> = tc
         .choices_of(module, def)
         .into_iter()
         .map(|(_, hole, choice)| format!("{hole}:{choice:?}"))
         .collect();
     let uses = expression_types(tc, module, &definition.body);
-    facts.push((
+    let direct = (
         key,
         tc.type_of(module, def).unwrap_or_default().to_string(),
         tc.holes(module, def),
@@ -355,8 +348,32 @@ fn collect_definition_facts(
         format!("{:?}", tc.result_expr(module, def)),
         choices,
         uses,
-    ));
-    collect_expression_dependencies(input, tc, module, &definition.body, seen, facts);
+    );
+    let mut dependencies = definition_dependencies(input, module, &definition.body);
+    dependencies.sort_unstable();
+    dependencies.dedup();
+    let dependency_fingerprints: Vec<_> = dependencies
+        .into_iter()
+        .map(|(dependency_module, dependency_def)| {
+            let dependency_key = state
+                .key_cache
+                .entry(dependency_module)
+                .or_insert_with(|| definition_keys(input.module(dependency_module)))
+                [dependency_def];
+            fingerprint_definition(
+                input,
+                tc,
+                dependency_module,
+                dependency_def,
+                dependency_key,
+                state,
+            )
+        })
+        .collect();
+    state.active.remove(&(module, def));
+    let fingerprint = stable_hash(&(direct, dependency_fingerprints));
+    state.cache.insert((module, def), fingerprint);
+    fingerprint
 }
 
 fn expression_types(
@@ -373,27 +390,25 @@ fn expression_types(
     out
 }
 
-fn collect_expression_dependencies(
+fn definition_dependencies(
     input: CompilerInput<'_>,
-    tc: &TypeCheck,
     module: usize,
     expression: &cagara_syntax::ast::Expr,
-    seen: &mut std::collections::HashSet<(usize, usize)>,
-    facts: &mut Vec<DefinitionFacts>,
-) {
+) -> Vec<(usize, usize)> {
+    let mut dependencies = Vec::new();
     walk_expression(expression, &mut |e| {
         let snapshot = input.module(module);
         match &e.kind {
             cagara_syntax::ast::ExprKind::Name(name) => {
                 if let Some(binding) = snapshot.scope().get(name) {
-                    collect_binding_facts(input, tc, binding, seen, facts);
+                    collect_binding_dependencies(binding, &mut dependencies);
                 }
             }
             cagara_syntax::ast::ExprKind::Proj(base, field) => {
                 if let cagara_syntax::ast::ExprKind::Name(alias) = &base.kind {
                     if let Some(Binding::Module(target)) = snapshot.scope().get(alias) {
                         if let Some(binding) = input.module(*target).own().get(field) {
-                            collect_binding_facts(input, tc, binding, seen, facts);
+                            collect_binding_dependencies(binding, &mut dependencies);
                         }
                     }
                 }
@@ -401,23 +416,14 @@ fn collect_expression_dependencies(
             _ => {}
         }
     });
+    dependencies
 }
 
-fn collect_binding_facts(
-    input: CompilerInput<'_>,
-    tc: &TypeCheck,
-    binding: &Binding,
-    seen: &mut std::collections::HashSet<(usize, usize)>,
-    facts: &mut Vec<DefinitionFacts>,
-) {
+fn collect_binding_dependencies(binding: &Binding, dependencies: &mut Vec<(usize, usize)>) {
     match binding {
-        Binding::Def(module, def) => {
-            collect_definition_facts(input, tc, *module, *def, seen, facts)
-        }
+        Binding::Def(module, def) => dependencies.push((*module, *def)),
         Binding::Overloads(module, defs) => {
-            for def in defs {
-                collect_definition_facts(input, tc, *module, *def, seen, facts);
-            }
+            dependencies.extend(defs.iter().map(|def| (*module, *def)))
         }
         Binding::Module(_) | Binding::Prim(_) => {}
     }

@@ -249,9 +249,11 @@ green:
 
 The remaining rungs, in order:
 
-1. ~~**Restrict the escape hatches.**~~ **Done.** `root_queries_via_evaluator` is
-   `pub(crate)`; `from_rel_unchecked` and `without_at` are `cfg(test)`. Narrowing
-   them found out something at each step — see below.
+1. ~~**Restrict the escape hatches.**~~ **Done.** All three of
+   `root_queries_via_evaluator`, `from_rel_unchecked` and `without_at` are now
+   `cfg(test)`. Narrowing them found out something at each step: none has a
+   non-test caller, and `rustc` says so once the signature stops promising
+   otherwise. See below.
 2. ~~**Demote `schema` to an assertion.**~~ **Done, but not the way it was
    planned.** `schema` no longer *decides* anything: a malformed program is
    reported by the elaborated path as a `Fault::Program`. It still runs on the
@@ -330,7 +332,7 @@ current state.
 The behavioural contract for this step is the frozen CLI output, not the build:
 
 ```bash
-nix develop --command cargo test --workspace            # 403 passed, 0 failed
+nix develop --command cargo test --workspace            # 404 passed, 0 failed
 nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 nix develop --command cargo build --workspace -q
 <regenerate examples/*.cagara: 6 dialects + --pretty + --types + stderr>

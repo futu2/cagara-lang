@@ -24,6 +24,8 @@
 use crate::core_term::CoreTerm;
 use crate::workspace::Workspace;
 use crate::ir::{JoinKind, Lit};
+use crate::ir::Rel;
+use crate::workspace::Diag;
 
 /// The elaborated core term of one query definition of `src`.
 fn core_of(src: &str, name: &str) -> CoreTerm {
@@ -874,80 +876,203 @@ fn the_elaborated_verdict_wins_over_a_schema_error() {
     );
 }
 
-/// The reconciliation table, asserted case by case.
+/// The reconciliation table, asserted **cell by cell**.
 ///
-/// This tests the *decision* rather than its output, which matters here: for the
-/// programs that motivated the routing fix, `schema` and the checked
-/// constructors produce the **identical message and column**, so no assertion on
-/// a diagnostic can tell which path spoke. Disabling the elaborated path
-/// entirely leaves those outputs unchanged — verified by doing it.
+/// This tests the decision rather than its output, and that is not a stylistic
+/// choice. For the programs that motivated the routing work, `schema` and the
+/// checked constructors produce the *identical message and column*, so no
+/// assertion on a diagnostic can tell which path spoke — disabling the
+/// elaborated path entirely leaves those outputs unchanged, verified by doing
+/// it. The policy therefore has to be pinned where it lives.
 ///
-/// So the policy is pinned where it lives, on `reconcile`, which takes both
-/// paths' verdicts explicitly. Every cell of the table is covered, including the
-/// ones that are currently unreachable, so a future edit that reorders or drops
-/// a case fails here rather than silently changing who decides.
+/// The matrix is `Outcome` (source elaboration) against `Evaluated` (the
+/// evaluator). `Option` is part of the answer: `None` means *no relation is
+/// emitted*, which is the correct outcome for a definition that is not a query
+/// rather than an error.
+///
+/// Every cell is covered, including ones not currently reachable, so reordering
+/// or dropping a case fails here instead of silently changing who decides.
 #[test]
 fn the_reconciliation_table_is_the_policy() {
-    use crate::eval::{reconcile, Outcome};
+    use crate::eval::{reconcile, Evaluated, Outcome};
 
-    let ws = Workspace::from_source("q = 1\n");
+    // One real program, so the agreeing cell exercises the real erasure and the
+    // real comparison rather than two unrelated stand-ins.
+    let ws = Workspace::from_source("q : query { a = int } = table \"p\" \"t\"\n");
+    let tc = crate::check::check(&ws);
+    let Evaluated::Query(Ok(rel)) = crate::eval::evaluate_root(&ws, &tc)
+        .into_iter()
+        .find(|(n, _)| n == "q")
+        .expect("`q` evaluated")
+        .1
+    else {
+        panic!("`q` must be a query the evaluator builds");
+    };
+    // `ws.root`, not module 0: the prelude is module 0, so hardcoding it built
+    // diagnostics out of the prelude's `_&_` span instead of `q`'s.
+    let root = ws.root;
+    let def_span = ws.modules[root].module.defs[0].span;
+    let diag = |m: &str| ws.diag_span(root, def_span, m);
+    let ok = || Evaluated::Query(Ok(rel.clone()));
+    let eval_failed = || Evaluated::Failed(diag("evaluator said no"));
+    let eval_rejected = || Evaluated::Rejected(diag("checker said no"));
 
-    let rel = crate::core_term::erase_core(crate::core_term::CoreTerm::table(
-        "p".into(),
-        "t".into(),
-    ))
-    .unwrap();
-    let diag = ws.diag_span(0, ws.modules[0].module.defs[0].span, "evaluator said no");
+    // Helper: is this cell an internal (compiler) error rather than a program
+    // error or a success?
+    let is_internal = |r: &Option<Result<Rel, Diag>>| {
+        matches!(r, Some(Err(d)) if d.message.contains("internal error"))
+    };
 
-    // (1) A program error wins, even when the evaluator also failed. This is the
-    //     routing gap: before, the evaluator's error was returned first and this
-    //     case never ran.
-    let r = reconcile(
-        &ws,
-        "q",
-        &Outcome::ProgramError("elaborated said no", None),
-        Err(diag.clone()),
-    );
-    let d = r.expect_err("a program error must not compile");
-    assert_eq!(
-        d.message, "elaborated said no",
-        "the elaborated path's verdict must win over the evaluator's, not be skipped"
-    );
-
-    // (1b) And it wins when the evaluator *succeeded* too, so the case is not
-    //      accidentally about the evaluator's failure.
-    let r = reconcile(
-        &ws,
-        "q",
-        &Outcome::ProgramError("elaborated said no", None),
-        Ok(rel.clone()),
-    );
-    assert_eq!(
-        r.expect_err("a program error must not compile").message,
-        "elaborated said no"
-    );
-
-    // (2) A capability gap fails closed, whatever the evaluator produced.
-    for eval in [Ok(rel.clone()), Err(diag.clone())] {
-        let r = reconcile(&ws, "q", &Outcome::Unsupported("no can do"), eval);
-        let d = r.expect_err("a gap must fail closed, not ship a relation");
-        assert!(
-            d.message.contains("internal error") && d.message.contains("no can do"),
-            "a gap is a compiler bug, reported as one: {}",
-            d.message
+    // ── (1) ProgramError from source elaboration wins over anything ──────────
+    for eval in [ok(), eval_failed(), eval_rejected(), Evaluated::Open] {
+        let r = reconcile(&ws, "q", &Outcome::ProgramError("elaborated said no", None), eval);
+        assert_eq!(
+            r.expect("a program error still yields a diagnostic").expect_err("cannot compile").message,
+            "elaborated said no",
+            "the elaborated path's verdict must be the user's message"
         );
     }
 
-    // (3) "Not a query" is no verdict, so the evaluator's result stands in both
-    //     directions — including when it is an error.
+    // ── (2) Unsupported fails closed, whatever the evaluator did ─────────────
+    for eval in [ok(), eval_failed(), Evaluated::Rejected(diag("x")), Evaluated::NotQuery("a lambda".into()), Evaluated::Open] {
+        let r = reconcile(&ws, "q", &Outcome::Unsupported("no can do"), eval);
+        assert!(
+            is_internal(&r),
+            "a capability gap must fail closed as an internal error, got {r:?}"
+        );
+    }
+
+    // ── (3) NotQuery defers entirely to the evaluator ────────────────────────
+    //     A definition that is not a query is not compiled as one, so `None`
+    //     (no relation) is the answer, not an error.
     assert!(
-        reconcile(&ws, "q", &Outcome::NotQuery, Ok(rel.clone())).is_ok(),
-        "the evaluator's relation stands when the elaborator saw no query"
+        reconcile(&ws, "q", &Outcome::NotQuery, Evaluated::NotQuery("an int".into())).is_none(),
+        "a scalar definition emits nothing and is not an error"
     );
+    assert!(
+        reconcile(&ws, "q", &Outcome::NotQuery, Evaluated::Open).is_none(),
+        "an overloaded helper emits nothing"
+    );
+    assert!(
+        matches!(reconcile(&ws, "q", &Outcome::NotQuery, ok()), Some(Ok(_))),
+        "an evaluator query stands when the elaborator saw none"
+    );
+    for eval in [eval_failed(), eval_rejected()] {
+        let r = reconcile(&ws, "q", &Outcome::NotQuery, eval);
+        assert!(
+            matches!(&r, Some(Err(d)) if !d.message.contains("internal error")),
+            "the evaluator's own failure is a user diagnostic, not an internal error: {r:?}"
+        );
+    }
+
+    // ── (4) Built: only agreement ships ──────────────────────────────────────
+    //     This is the cell the review found missing. A built query plus an
+    //     evaluator failure is a *disagreement*, not a program error: one path
+    //     says the program is fine, so presenting the evaluator's diagnostic
+    //     would blame the user for a compiler disagreement.
+    assert!(
+        is_internal(&reconcile(&ws, "q", &built(&ws), eval_failed())),
+        "Built + evaluator failure must be an internal disagreement"
+    );
+    assert!(
+        is_internal(&reconcile(&ws, "q", &built(&ws), eval_rejected())),
+        "Built + checker rejection must be an internal disagreement"
+    );
+    //     The omission hole: a definition the evaluator evaluated to a non-query
+    //     while the elaborator built a query. Under the old shape this case had
+    //     no entry at all, so nothing was reported.
+    assert!(
+        is_internal(&reconcile(&ws, "q", &built(&ws), Evaluated::NotQuery("a lambda".into()))),
+        "Built + evaluator NotQuery is the omission hole and must be reported"
+    );
+    assert!(
+        is_internal(&reconcile(&ws, "q", &built(&ws), Evaluated::Query(Err(diag("bad tree"))))),
+        "Built + evaluator tree that fails validation is a disagreement"
+    );
+    assert!(
+        reconcile(&ws, "q", &built(&ws), Evaluated::Open).is_none(),
+        "an overloaded helper has no body to compare"
+    );
+    assert!(
+        matches!(reconcile(&ws, "q", &built(&ws), ok()), Some(Ok(_))),
+        "two agreeing queries ship the relation"
+    );
+}
+
+/// The elaborator side of the matrix: the `CheckedQuery` for the same program.
+fn built(ws: &Workspace) -> crate::eval::Outcome<'static> {
+    // Built by the real constructors, so the agreeing cell exercises the real
+    // erasure and comparison. Leaked deliberately: this lives for one test, and
+    // the alternative is threading a lifetime through every call above.
+    let tc = crate::check::check(ws);
+    let elab = crate::elaborate::elaborate_module(ws, &tc, ws.root);
+    let q = elab
+        .into_iter()
+        .find_map(|(n, r)| if n == "q" { r.ok() } else { None })
+        .expect("`q` elaborates");
+    crate::eval::Outcome::Built(Box::leak(Box::new(q)))
+}
+
+/// No definition can be silently omitted from the parity check.
+///
+/// The review's second finding, and the sharper of the two. `root_queries_
+/// via_evaluator` used to drop an `Ok(Value)` that was not a query, and the
+/// reconciler iterates only what it returns — so a definition the evaluator
+/// evaluated to a scalar or a lambda had **no entry** and was never compared.
+/// A definition the elaborator built as a query could therefore go unchecked and
+/// vanish from the output with nothing reported.
+///
+/// `h = x => x` is the concrete case: a lambda, evaluated to a closure, dropped.
+///
+/// The fix is that the evaluator now reports an outcome for every definition
+/// (`Evaluated`), so absence is no longer the way "not a query" is expressed.
+/// What this test pins is the *property*, not the mechanism: every definition
+/// the elaborator walks appears in the evaluator's outcome list, so no
+/// definition can be skipped by the reconciler.
+#[test]
+fn every_definition_reaches_reconciliation() {
+    let src = "t : query { a = int, b = string } = table \"p\" \"t\"\n\
+               h = x => x\n\
+               n = 1\n\
+               q = t & select { a = h .a }\n";
+    let ws = Workspace::from_source(src);
+    let tc = crate::check::check(&ws);
+    let root = ws.root;
+
+    let evaluated: Vec<String> = crate::eval::evaluate_root(&ws, &tc)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let walked = crate::elaborate::elaborate_module(&ws, &tc, root);
+
+    // Every definition of the user's module is reported by the evaluator. This
+    // is what makes the omission hole impossible: the reconciler iterates this
+    // list, so a missing entry is a missing comparison.
+    for d in &ws.modules[root].module.defs {
+        assert!(
+            evaluated.contains(&d.name),
+            "`{}` was not evaluated, so the reconciler never sees it — this is the \
+             omission hole. Evaluated: {evaluated:?}",
+            d.name
+        );
+    }
+
+    // And the elaborator walked all of them too, so the two lists line up.
     assert_eq!(
-        reconcile(&ws, "q", &Outcome::NotQuery, Err(diag.clone()))
-            .expect_err("the evaluator's error stands too")
-            .message,
-        "evaluator said no"
+        walked.len(),
+        ws.modules[root].module.defs.len(),
+        "the elaborator must report one outcome per definition"
+    );
+
+    // `h` is the specific case that used to vanish: it is a lambda, so the
+    // evaluator produces a non-query value for it.
+    let h = crate::eval::evaluate_root(&ws, &tc)
+        .into_iter()
+        .find(|(n, _)| n == "h")
+        .expect("`h` is evaluated")
+        .1;
+    assert!(
+        matches!(h, crate::eval::Evaluated::NotQuery(_)),
+        "`h` evaluates to a closure, which is now *reported* rather than dropped"
     );
 }

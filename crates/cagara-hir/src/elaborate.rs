@@ -186,12 +186,13 @@ fn elaborate_def(
         let _ = e;
         return Err(NOT_A_QUERY);
     }
-    // A definition that leaves open overloads is meaningful only at its uses.
+    // A definition that leaves open overloads is meaningful only at its uses:
+    // it has no body of its own, so there is nothing here to elaborate. This is
+    // the same situation as "not a query" — a *finding*, not a failure — and it
+    // is reported the same way. The evaluator reports it as `Evaluated::Open`,
+    // and the reconciler treats the pair as "no body to compare".
     if tc.holes(module, def) > 0 {
-        return Err(Error::new(format!(
-            "`{}` leaves open overloads; it has no body of its own",
-            d.name
-        )));
+        return Err(NOT_A_QUERY);
     }
     // A definition that is **not a query** has nothing to elaborate here, and
     // that is not a failure. `bad : expr r int -> expr r int = sql "$0"` is a

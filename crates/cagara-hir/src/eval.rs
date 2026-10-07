@@ -551,7 +551,7 @@ pub fn root_queries(ws: &Workspace) -> Vec<(String, Result<Rel, Diag>)> {
 /// re-derives column existence, which the `CoreTerm` constructors do not carry
 /// rows for — `CoreTerm` is deliberately the row-less twin of `CheckedQuery`.
 pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Rel, Diag>)> {
-    let via_evaluator = root_queries_via_evaluator(ws, tc);
+    let evaluated = evaluate_root(ws, tc);
     let elaborated = crate::elaborate::elaborate_module(ws, tc, ws.root);
 
     let mut from_source: HashMap<&str, &Result<crate::checked::CheckedQuery, crate::core::Error>> =
@@ -560,13 +560,22 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
         from_source.insert(name.as_str(), r);
     }
 
-    let mut out = Vec::with_capacity(via_evaluator.len());
-    for (name, result) in via_evaluator {
+    // Iterate the **evaluator's** outcome list, which now has an entry for every
+    // definition — including ones it evaluated to a non-query. That is what
+    // closes the omission hole: previously the list held only the queries, so a
+    // definition the evaluator saw as a scalar had no entry and was never
+    // reconciled, letting one the elaborator built as a query go unchecked.
+    //
+    // The elaborator's list is cross-checked at the end for anything it walked
+    // that the evaluator did not report, which cannot happen today but would be
+    // an omission of the same kind.
+    let mut out = Vec::with_capacity(evaluated.len());
+    for (name, eval) in evaluated {
         // Both paths are consulted for *every* definition, including ones either
-        // path rejected. That is the point: an earlier version returned the
-        // evaluator's error immediately, so for a program both paths reject, the
-        // elaborated path's fault classification was never reached — `schema`
-        // decided while the routing below claimed to.
+        // path rejected. An earlier version returned the evaluator's error
+        // immediately, so for a program both paths reject the elaborated path's
+        // fault classification was never reached — `schema` decided while the
+        // routing below claimed to.
         let from_elab = match from_source.get(name.as_str()) {
             Some(Ok(q)) => Outcome::Built(q),
             // "Not a query" is a finding, not a failure — see `NOT_A_QUERY`.
@@ -576,7 +585,10 @@ pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Resu
             // The elaborator did not walk this definition at all.
             None => Outcome::NotQuery,
         };
-        out.push((name.clone(), reconcile(ws, &name, &from_elab, result)));
+        let result = reconcile(ws, &name, &from_elab, eval);
+        if let Some(r) = result {
+            out.push((name, r));
+        }
     }
     out
 }
@@ -617,32 +629,102 @@ pub(crate) fn reconcile(
     ws: &Workspace,
     name: &str,
     from_elab: &Outcome<'_>,
-    evaluator: Result<Rel, Diag>,
-) -> Result<Rel, Diag> {
+    eval: Evaluated,
+) -> Option<Result<Rel, Diag>> {
     match from_elab {
         // (1) The program is wrong. Report it as the user's, with the elaborated
-        // path's wording and location, whether or not the evaluator also failed.
+        // path's wording and location, whatever the evaluator did.
         //
         // This case previously never ran for a program the evaluator also
         // rejected: the evaluator's diagnostic was returned first, so `schema`'s
         // message was what the user saw even though the check that produced it
         // was supposed to have been demoted.
-        Outcome::ProgramError(msg, origin) => {
-            Err(diagnose_at_def(ws, name, origin.map(|o| (o.module, o.span)), msg))
-        }
+        Outcome::ProgramError(msg, origin) => Some(Err(diagnose_at_def(
+            ws,
+            name,
+            origin.map(|o| (o.module, o.span)),
+            msg,
+        ))),
         // (2) A gap in this phase. Fail closed.
-        Outcome::Unsupported(msg) => Err(internal_disagreement(
+        Outcome::Unsupported(msg) => Some(Err(internal_disagreement(
             ws,
             name,
             &format!("source elaboration cannot handle this definition ({msg})"),
-        )),
-        // (3) The elaborator saw no query here, so the evaluator's result is the
-        // only verdict there is — including when it is an error.
-        Outcome::NotQuery => evaluator,
-        // (4) Both built something, and they must agree.
-        Outcome::Built(q) => {
-            let oracle = evaluator?;
-            match crate::checked::erase((*q).clone()) {
+        ))),
+        // (3) The elaborator saw no query here. There is nothing to compare, so
+        // the evaluator's result is the only verdict — and a definition that is
+        // not a query is not compiled as one, so `NotQuery` emits nothing.
+        Outcome::NotQuery => match eval {
+            Evaluated::Query(Ok(rel)) => Some(Ok(rel)),
+            Evaluated::Query(Err(d)) | Evaluated::Failed(d) | Evaluated::Rejected(d) => {
+                Some(Err(d))
+            }
+            Evaluated::NotQuery(_) | Evaluated::Open => None,
+        },
+        // (4) Both paths claim this definition is a query, so they must agree —
+        // including on whether it compiles at all.
+        Outcome::Built(q) => Some(match eval {
+            // An overloaded helper is meaningful only at its uses, so neither
+            // path has a body to have compared.
+            Evaluated::Open => return None,
+            // The evaluator failed where source elaboration succeeded.
+            //
+            // Two very different situations arrive here, and telling them apart
+            // is what keeps this from reporting user errors as compiler bugs:
+            //
+            // * the failure was **propagated** from another definition — `q`
+            //   fails because `bad` does, and the evaluator reports it at
+            //   `bad`'s span. That is the user's error, reported once against
+            //   `bad` itself, and repeating it as an internal error on `q` is
+            //   both wrong and noisy: the CLI test
+            //   `a_shared_failure_is_reported_once` caught exactly that.
+            // * the failure **originates here** — the evaluator failed inside
+            //   this definition's own body while source elaboration built it.
+            //   That is a genuine disagreement, and the case the parity check
+            //   exists for.
+            //
+            // The distinguishing evidence is the span: a diagnostic pointing
+            // outside this definition's own body was not caused by it.
+            Evaluated::Failed(d) if originates_in(ws, name, &d) => Err(internal_disagreement(
+                ws,
+                name,
+                &format!(
+                    "source elaboration built this definition and the evaluator failed on it \
+                     ({})",
+                    d.message
+                ),
+            )),
+            // Propagated: the user's diagnostic, already reported against
+            // whichever definition actually failed.
+            Evaluated::Failed(d) => Err(d),
+            Evaluated::Rejected(d) => Err(internal_disagreement(
+                ws,
+                name,
+                &format!(
+                    "source elaboration built this definition and the checker rejected it ({})",
+                    d.message
+                ),
+            )),
+            // The evaluator says this is not a query. The two paths disagree
+            // about what the definition *is*, which is the omission hole this
+            // routing closes: under the old shape this case had no entry at all.
+            Evaluated::NotQuery(kind) => Err(internal_disagreement(
+                ws,
+                name,
+                &format!(
+                    "source elaboration built a query here and the evaluator produced {kind}"
+                ),
+            )),
+            Evaluated::Query(Err(d)) => Err(internal_disagreement(
+                ws,
+                name,
+                &format!(
+                    "source elaboration built this definition and the evaluator's tree failed \
+                     validation ({})",
+                    d.message
+                ),
+            )),
+            Evaluated::Query(Ok(oracle)) => match crate::checked::erase((*q).clone()) {
                 // Erasure is structural and total for query nodes, so this is an
                 // internal inconsistency rather than a user error.
                 Err(e) => Err(internal_disagreement(ws, name, &e.message)),
@@ -657,9 +739,38 @@ pub(crate) fn reconcile(
                         Ok(oracle)
                     }
                 }
-            }
-        }
+            },
+        }),
     }
+}
+
+/// Did the evaluator's failure arise *inside* this definition's own body?
+///
+/// The evaluator propagates a failure upward, so a definition that uses a broken
+/// one fails too. That propagated diagnostic points at the definition that
+/// actually failed — `bad`'s `sql "$0"` span, not `q`'s pipeline — which is what
+/// distinguishes "the user's program is broken" from "the two elaboration paths
+/// disagree about this definition".
+///
+/// Reading the span is the available evidence: the evaluator's diagnostic
+/// carries a location (`Diag::path`/`col`) but no marker saying whether it
+/// originated or was inherited, and adding one would mean changing how the
+/// evaluator reports every error. The span is enough, because a diagnostic
+/// outside the definition's own body cannot have been caused by it.
+pub(crate) fn originates_in(ws: &Workspace, name: &str, d: &Diag) -> bool {
+    let root = ws.root;
+    let Some(def) = ws.modules[root].module.defs.iter().find(|x| x.name == name) else {
+        // No definition to compare against; treat it as originating, because a
+        // failure with no home is not something to attribute to a user.
+        return true;
+    };
+    // The evaluator's diagnostics are anchored in the root module's text, and a
+    // location outside this definition's span came from somewhere else.
+    let start = def.span.start as usize;
+    let end = def.span.end as usize;
+    let offset = ws.modules[root].text.lines().take(d.line.saturating_sub(1)).map(|l| l.len() + 1).sum::<usize>()
+        + d.col.saturating_sub(1);
+    offset >= start && offset < end.max(start + 1)
 }
 
 /// Build a user-facing diagnostic at `span`, or at the definition when the error
@@ -739,52 +850,108 @@ fn internal_disagreement(ws: &Workspace, name: &str, detail: &str) -> Diag {
 /// cannot reach past the parity check to the raw evaluator — which is the
 /// property worth having, since reaching past it is exactly how a caller would
 /// bypass the fail-closed behaviour without noticing.
-pub(crate) fn root_queries_via_evaluator(
-    ws: &Workspace,
-    tc: &TypeCheck,
-) -> Vec<(String, Result<Rel, Diag>)> {
+/// What the **evaluator** concluded about one definition.
+///
+/// An explicit outcome per definition, rather than "the query results it
+/// produced". The difference matters: the query-results shape has no way to say
+/// "this definition evaluated successfully to something that is not a query",
+/// so a definition the evaluator saw as a scalar simply had no entry. That is a
+/// hole in the parity check — the reconciler iterates these, so a definition
+/// absent from them was never reconciled at all, and one the elaborator built as
+/// a query could go unchecked and vanish from the output.
+///
+/// `h = x => x` is the concrete case: the elaborator walks `h`, the evaluator
+/// evaluates it to a closure, and under the old shape `h` was dropped.
+pub(crate) enum Evaluated {
+    /// A query, erased to `Rel` and validated.
+    Query(Result<Rel, Diag>),
+    /// Evaluated successfully to something that is not a query — a scalar, a
+    /// lambda, a list. Normal, and reported so the reconciler can tell it apart
+    /// from "no entry", with the kind named for the diagnostic.
+    NotQuery(String),
+    /// Evaluation failed: a type error or an evaluation error.
+    Failed(Diag),
+    /// Not evaluated at all because the checker rejected it; the diagnostic is
+    /// the checker's.
+    Rejected(Diag),
+    /// An overloaded helper, meaningful only at its uses. There is no body to
+    /// evaluate, and the elaborator skips it for the same reason.
+    Open,
+}
+
+/// The evaluator's outcome for **every** root definition, in source order.
+///
+/// See [`Evaluated`] for why this returns an outcome per definition rather than
+/// only the queries.
+pub(crate) fn evaluate_root(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Evaluated)> {
     let mut ev = Evaluator::new(ws, tc);
     let m = ws.root;
     let mut out = Vec::new();
     for (i, d) in ws.modules[m].module.defs.iter().enumerate() {
         if let Some(e) = tc.error_for(m, i) {
-            out.push((d.name.clone(), Err(e.clone())));
+            out.push((d.name.clone(), Evaluated::Rejected(e.clone())));
             continue;
         }
         if tc.holes(m, i) > 0 {
-            // Overloaded helper: only meaningful at its uses.
+            out.push((d.name.clone(), Evaluated::Open));
             continue;
         }
-        match ev.def_value(m, i) {
-            Ok(Value::Query(t)) => {
-                // Erasure is fallible: a `CoreTerm` is an open sum, and a
-                // definition that elaborated to something which is not a query
-                // is an internal error rather than a query with no columns.
-                let checked = match crate::core_term::erase_core(*t) {
-                    Err(e) => Err(ws.diag_span(m, d.span, e.message)),
-                    // `schema` still runs *here*, and still reports, because this
-                    // path is the oracle: it is consulted for every definition,
-                    // including ones source elaboration is about to reject with a
-                    // better message. Asserting instead would fire on programs
-                    // whose diagnostic the routing layer is about to produce
-                    // correctly — `q = table "s" "t"` panicked exactly that way.
-                    //
-                    // What changed is that its verdict is no longer final. The
-                    // routing below decides what the user sees, and a program
-                    // error source elaboration identified wins.
-                    Ok(rel) => match crate::schema::schema_located(&rel) {
-                        Ok(_) => Ok(rel),
-                        Err((Some(l), msg)) => Err(ws.diag_span(l.module, l.span, msg)),
-                        Err((None, msg)) => Err(ws.diag_span(m, d.span, msg)),
-                    },
-                };
-                out.push((d.name.clone(), checked));
-            }
-            Ok(_) => {}
-            Err(e) => out.push((d.name.clone(), Err(ws.eval_diag(&e)))),
-        }
+        let outcome = match ev.def_value(m, i) {
+            Ok(Value::Query(t)) => Evaluated::Query(match crate::core_term::erase_core(*t) {
+                Err(e) => Err(ws.diag_span(m, d.span, e.message)),
+                // `schema` still runs here, and still reports, because this path
+                // is the oracle: it is consulted for every definition, including
+                // ones source elaboration is about to reject with a better
+                // message. Its verdict is no longer final — the reconciler
+                // decides what the user sees — but it is still the second
+                // opinion the checked tree is compared against.
+                Ok(rel) => match crate::schema::schema_located(&rel) {
+                    Ok(_) => Ok(rel),
+                    Err((Some(l), msg)) => Err(ws.diag_span(l.module, l.span, msg)),
+                    Err((None, msg)) => Err(ws.diag_span(m, d.span, msg)),
+                },
+            }),
+            Ok(other) => Evaluated::NotQuery(other.kind().to_string()),
+            Err(e) => Evaluated::Failed(ws.eval_diag(&e)),
+        };
+        out.push((d.name.clone(), outcome));
     }
     out
+}
+/// The evaluator's `Rel`s, as the differential harnesses want them: one entry per
+/// definition the evaluator produced a query for.
+///
+/// A **projection of [`evaluate_root`]**, not a second implementation. It used to
+/// re-run the evaluator itself, and that duplication is how the omission hole
+/// survived: the query-only shape here dropped non-query successes, so a
+/// definition could have no entry at all — and a caller iterating this could not
+/// tell "not a query" from "never looked at". Keeping one implementation means
+/// the harness and the compiler cannot disagree about what the evaluator said.
+///
+/// Non-query successes and overloaded helpers are omitted because a harness
+/// comparing erased trees has nothing to compare them against; `evaluate_root` is
+/// the shape for anything that needs every definition accounted for.
+///
+/// `cfg(test)`: it is the raw evaluator with no parity check, and its only
+/// callers are the differential harnesses. It was `pub`, then `pub(crate)`,
+/// and narrowing it found the same thing each time — the pattern of these
+/// escape hatches is that nothing outside the tests wants them, and the
+/// compiler says so once the signature stops promising otherwise.
+#[cfg(test)]
+pub(crate) fn root_queries_via_evaluator(
+    ws: &Workspace,
+    tc: &TypeCheck,
+) -> Vec<(String, Result<Rel, Diag>)> {
+    evaluate_root(ws, tc)
+        .into_iter()
+        .filter_map(|(name, e)| match e {
+            Evaluated::Query(r) => Some((name, r)),
+            // The evaluator rejected it, so there is a diagnostic the harness
+            // should see rather than a silent omission.
+            Evaluated::Failed(d) | Evaluated::Rejected(d) => Some((name, Err(d))),
+            Evaluated::NotQuery(_) | Evaluated::Open => None,
+        })
+        .collect()
 }
 
 /// Evaluate every definition of the root module and return the query ones as

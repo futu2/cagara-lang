@@ -273,14 +273,23 @@ returns *that* rather than the oracle. The two are equal by construction, so all
 404 tests and all 40 frozen outputs are unchanged — deliberately in a commit of
 its own, so a future behavioural change cannot hide behind it.
 
-Exactly one path still ships an evaluator-produced `Rel`: cell (3) of the
-reconciliation table, where the elaborator saw no query and so has nothing to
-compare. On the four examples it never fires for a query definition — every one
-is built from source — and `assert_source_elaboration_agrees` asserts the same
-over the whole embedded test corpus, failing if any query definition is anything
-other than `Ok`. So the evaluator cannot be made test-only until that harness's
-coverage is what the *production* examples rely on, rather than the other way
-round.
+Exactly one path *could* still ship an evaluator-produced `Rel`: cell (3) of the
+reconciliation table, where the elaborator reports `NotAQuery`.
+
+**It is unreachable for accepted programs**, and that is now asserted rather than
+assumed. The precondition is that a definition the checker accepts as a query is
+built by the elaborator. Instrumenting the classification over the examples and
+over five boundary shapes found no case where the evaluator built a query and the
+elaborator said `NotAQuery`; whenever the elaborator said `NotAQuery`, the
+evaluator had failed or produced a non-query.
+`an_accepted_query_is_never_only_the_evaluator_s` pins it, mutation-checked.
+
+So the evaluator is already an oracle in practice, and what remains before it can
+be test-only is a *shape* decision rather than coverage: cell (3) exists because
+the reconciler cannot yet treat "the elaborator saw no query" as impossible.
+Removing the cell means deciding that a definition the evaluator builds and the
+elaborator does not is an error rather than a fallback — a policy change, which
+should be made deliberately with its own evidence.
 
 **Why rung 2 could not be done as written.** Replacing `schema_located` with
 `debug_assert!` looked safe — with the checked tree emitted instead, all 40 frozen

@@ -4,7 +4,7 @@
 //! LSP positions count UTF-16 code units; the workspace uses byte offsets.
 
 use cagara_hir::check::{check, TypeCheck, PROBE_FIELD};
-use cagara_hir::compile;
+use cagara_hir::compile_diagnostics;
 use cagara_hir::workspace::{Binding, Diag, Workspace};
 use cagara_syntax::ast::{Expr, ExprKind, Span};
 use line_index::{LineIndex, TextRange, TextSize, WideEncoding};
@@ -18,10 +18,10 @@ use std::path::PathBuf;
 /// Every diagnostic in the root file: loading (syntax, imports, overloads),
 /// type errors, and compilation errors.
 pub fn diagnostics(ws: &Workspace) -> Vec<(Range, String)> {
-    let compilation = compile(ws);
+    let compilation_diagnostics = compile_diagnostics(ws);
     let root = ws.modules[ws.root].path.display().to_string();
     let mut out: Vec<(Range, String)> = Vec::new();
-    for d in compilation.diagnostics.iter().filter(|d| d.path == root) {
+    for d in compilation_diagnostics.iter().filter(|d| d.path == root) {
         let item = (diag_range(d), d.message.clone());
         if !out.contains(&item) {
             out.push(item);

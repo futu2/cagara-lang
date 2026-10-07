@@ -298,6 +298,13 @@ impl Workspace {
         self.compile_cache.borrow().clone()
     }
 
+    pub(crate) fn compilation_diagnostics(&self) -> Option<Vec<Diag>> {
+        self.compile_cache
+            .borrow()
+            .as_ref()
+            .map(|compilation| compilation.diagnostics.clone())
+    }
+
     pub(crate) fn set_compilation_cache(&self, compilation: Compilation) {
         *self.compile_cache.borrow_mut() = Some(compilation);
     }

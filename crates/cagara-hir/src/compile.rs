@@ -131,10 +131,25 @@ pub fn compile(ws: &Workspace) -> Compilation {
     if let Some(cached) = ws.compilation_cache() {
         return cached;
     }
-    let tc = crate::check::check(ws);
-    let compilation = compile_input(CompilerInput::new(ws, &tc));
+    let compilation = compile_uncached(ws);
     ws.set_compilation_cache(compilation.clone());
     compilation
+}
+
+/// Return diagnostics while avoiding a full clone of cached query trees.
+pub fn compile_diagnostics(ws: &Workspace) -> Vec<Diag> {
+    if let Some(diagnostics) = ws.compilation_diagnostics() {
+        return diagnostics;
+    }
+    let compilation = compile_uncached(ws);
+    let diagnostics = compilation.diagnostics.clone();
+    ws.set_compilation_cache(compilation);
+    diagnostics
+}
+
+fn compile_uncached(ws: &Workspace) -> Compilation {
+    let tc = crate::check::check(ws);
+    compile_input(CompilerInput::new(ws, &tc))
 }
 
 /// Compile a workspace using a type check the caller already computed.
@@ -290,6 +305,22 @@ mod tests {
 
         assert!(!compilation.diagnostics.is_empty());
         assert_eq!(compilation.diagnostics, ws.diags);
+    }
+
+    #[test]
+    fn diagnostics_reuse_the_cached_compilation() {
+        let ws = Workspace::from_source("q = (\n");
+
+        let first = compile_diagnostics(&ws);
+        let after_first = crate::elaborate::elaborate_runs();
+        let second = compile_diagnostics(&ws);
+
+        assert_eq!(second, first);
+        assert_eq!(
+            crate::elaborate::elaborate_runs(),
+            after_first,
+            "cached diagnostics should not re-elaborate the source"
+        );
     }
 
     #[test]

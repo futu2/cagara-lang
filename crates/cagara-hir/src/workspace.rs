@@ -3,8 +3,8 @@
 
 use crate::db::{Database, ModuleInput, SourceFile};
 use crate::lower::{parse_module, ParsedModule};
+use crate::primitive::Prim;
 use crate::resolve::{module_own, module_scope};
-use crate::value::{EvalError, Prim};
 use cagara_syntax::ast::{Import, Module, Span};
 use salsa::Setter;
 use std::collections::HashMap;
@@ -331,13 +331,6 @@ impl Workspace {
     pub fn diag_span(&self, m: usize, span: Span, message: impl Into<String>) -> Diag {
         let md = &self.modules[m];
         diag_in(&md.path, &md.text, span, message)
-    }
-
-    pub fn eval_diag(&self, e: &EvalError) -> Diag {
-        match e.span {
-            Some(s) => self.diag_span(e.module, s, e.message.clone()),
-            None => self.diag(e.module, 0, e.message.clone()),
-        }
     }
 }
 

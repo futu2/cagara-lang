@@ -1,10 +1,7 @@
 //! Source elaboration: build the checked tree directly from source.
 //!
-//! This is the layer that makes the checked core *authoritative* rather than a
-//! parallel description. Before it, the only way to obtain a `CheckedQuery`
-//! was to rebuild one from the evaluator's own `Rel` output
-//! (`from_rel_unchecked`), so a test could compare the two and pass even if
-//! nothing in the compiler ever constructed a `CheckedQuery` from source.
+//! Type checking supplies the facts used to construct `CheckedQuery` directly
+//! from source. The result is erased only at the SQL boundary.
 //!
 //! # What it reads, and what it does not compute
 //!
@@ -15,13 +12,9 @@
 //! * `scheme_view` / `scheme_fields` — the row shape of a definition;
 //! * `choices_of` — which overload candidate a use resolved to;
 //! * `rules::is_pipe_name` and the prelude's stage declarations — which
-//!   operator is a pipeline stage, so stage structure comes from the same table
-//!   the evaluator uses rather than from a hand-written list here.
+//!   operator is a pipeline stage.
 //!
-//! Re-deriving any of those would create a second source of truth for types,
-//! which is the failure this whole migration exists to remove. See
-//! `verify/elaborator-feasibility.md` for the probe results that established
-//! each fact is available.
+//! Re-deriving any of those would create a second source of truth for types.
 //!
 //! # Scope
 //!
@@ -60,17 +53,8 @@ pub(crate) struct Ctx<'a> {
     pub scope: &'a std::collections::HashMap<String, Binding>,
     /// Parameters bound by an enclosing application, innermost last.
     ///
-    /// This is the elaborator's counterpart of the evaluator's `Env`
-    /// (`eval.rs:173`): when a lambda is applied its parameter is bound to the
-    /// already elaborated argument, and a name resolving here shadows the
-    /// module scope. It is what lets `f = x => k x (1 + 2)` be elaborated by
-    /// substituting into the body rather than by re-deriving anything.
-    /// This one environment replaced three parallel maps — expressions, queries,
-    /// and stages — which between them still could not express a *partially
-    /// applied function*, and so could not elaborate
-    /// `nextWeek = addDays 7 >>> truncWeek`. The evaluator keeps a single `Env`
-    /// of `Value`s for exactly this reason (`eval.rs:173`); here a value may be
-    /// a query, an expression, a callable, or a stage — see [`CheckedValue`].
+    /// Lambda parameters are bound to elaborated arguments here, shadowing the
+    /// module scope. Values may be queries, expressions, callables, or stages.
     ///
     /// A `Vec` of pairs rather than a map, because a name may be shadowed by a
     /// nearer binding and the innermost must win, which a plain map would lose.
@@ -78,9 +62,8 @@ pub(crate) struct Ctx<'a> {
     /// The overload candidates chosen for the definition currently being
     /// elaborated, indexed by hole.
     ///
-    /// This is the elaborator's half of the evaluator's `Inst { def, holes }`
-    /// (`eval.rs:23`), and it exists because a *polymorphic* definition's
-    /// overloaded sites are not resolved where they are written.
+    /// A polymorphic definition's overloaded sites are resolved at each use,
+    /// not where they are written.
     ///
     /// `h = e => users & select { x = e + 1, id = .id }` has one open overload
     /// (`+`), so the checker records its site as `Choice::Hole(0)` — the same
@@ -92,24 +75,22 @@ pub(crate) struct Ctx<'a> {
     pub holes: &'a [(usize, usize)],
     /// The definitions currently being expanded, outermost first.
     ///
-    /// Descending into a definition's body means elaborating it, and a
-    /// definition may name itself. The evaluator refuses that with "`q` refers
-    /// to itself; recursion is not supported" (`eval.rs:89`) and tracks the
-    /// same way; without this the elaborator recursed until the stack
-    /// overflowed on `q = q`. The message here matches the evaluator's so a
-    /// user sees one diagnostic whichever path reports it.
+    /// A definition may name itself; this tracks expansion to detect recursion.
     pub active: &'a [(usize, usize)],
 }
 
 /// The result of descending into a definition: either it is not already being
-/// expanded, or this is a cycle the evaluator would also reject.
+/// expanded, or this is a recursive definition.
 fn enter<'a>(cx: &Ctx<'a>, module: usize, def: usize) -> R<Vec<(usize, usize)>> {
     if cx.active.contains(&(module, def)) {
         let name = &cx.ws.modules[module].module.defs[def].name;
         return Err(Error::new(format!(
             "`{name}` refers to itself; recursion is not supported"
         ))
-        .at(Origin::new(module, cx.ws.modules[module].module.defs[def].span)));
+        .at(Origin::new(
+            module,
+            cx.ws.modules[module].module.defs[def].span,
+        )));
     }
     let mut next = cx.active.to_vec();
     next.push((module, def));
@@ -145,8 +126,7 @@ pub(crate) fn is_not_a_query(e: &Error) -> bool {
 /// Elaborate the root module's definitions from source.
 ///
 /// Returns one entry per definition, in source order, with the same
-/// `Elaborated` outcomes the evaluator-based path reports — so a caller can
-/// switch between them and compare.
+/// one result per root definition, in source order.
 pub fn elaborate_module(
     ws: &Workspace,
     tc: &TypeCheck,
@@ -154,10 +134,22 @@ pub fn elaborate_module(
 ) -> Vec<(String, R<CheckedQuery>)> {
     let mut out = Vec::new();
     for (i, d) in ws.modules[module].module.defs.iter().enumerate() {
-        let result = elaborate_def(ws, tc, module, i, d);
+        let result = validate_template_definition(module, d)
+            .and_then(|()| elaborate_def(ws, tc, module, i, d));
         out.push((d.name.clone(), result));
     }
     out
+}
+
+fn validate_template_definition(module: usize, d: &ast::Def) -> R<()> {
+    let ExprKind::Sql(sql) = &d.body.kind else {
+        return Ok(());
+    };
+    let Some(ty) = d.ty.as_ref() else {
+        return Ok(());
+    };
+    let arity = template_arity_from_type(ty, declared_kind(d));
+    check_placeholders(sql, arity).map_err(|e| e.at(Origin::new(module, d.body.span)))
 }
 
 /// Elaborate one definition's body to a checked query.
@@ -168,29 +160,14 @@ fn elaborate_def(
     def: usize,
     d: &ast::Def,
 ) -> R<CheckedQuery> {
-    // A definition the checker rejected has no trustworthy types, so there is
-    // nothing to elaborate: report the checker's own failure rather than build
-    // a tree out of unsolved variables.
-    // A definition the checker rejected has no trustworthy types, so there is
-    // nothing to elaborate. This is **not** the elaborated path's error to
-    // report: the evaluator path already produces exactly this diagnostic from
-    // `tc.error_for` (`eval.rs`), and reporting it here too made the user see it
-    // twice — once at the use span and once at the definition. So it is handed
-    // back as `NotAQuery`: a *finding* meaning "this definition needs no
-    // elaboration from me", which defers to the evaluator's message.
-    //
-    // `main()` in the CLI does deduplicate by message, but that is a
-    // presentation detail and the LSP does not; a duplicate here reached the
-    // editor as two squiggles.
-    if let Some(e) = tc.error_for(module, def) {
-        let _ = e;
+    // A rejected definition has no trustworthy types. Its checker diagnostic
+    // is emitted by the compilation boundary, so it must not be elaborated.
+    if tc.error_for(module, def).is_some() {
         return Err(NOT_A_QUERY);
     }
     // A definition that leaves open overloads is meaningful only at its uses:
     // it has no body of its own, so there is nothing here to elaborate. This is
-    // the same situation as "not a query" — a *finding*, not a failure — and it
-    // is reported the same way. The evaluator reports it as `Evaluated::Open`,
-    // and the reconciler treats the pair as "no body to compare".
+    // the same situation as "not a query": it has no query body to elaborate.
     if tc.holes(module, def) > 0 {
         return Err(NOT_A_QUERY);
     }
@@ -231,7 +208,6 @@ fn elaborate_def(
     let value = elaborate_query(cx, &d.body, origin)?;
     Ok(value)
 }
-
 
 ///
 /// `table "s" "t"` is the one a definition body starts from, so it is the one
@@ -297,9 +273,8 @@ fn elaborate_expr_primitive(
         }
         // `inList [..] .x`: the list comes first, then the value, matching
         // `inList : list a -> expr r a -> expr r bool` (`prelude.cagara:110`)
-        // and the order the evaluator reads them in (`prims.rs:374` reads the
-        // list first). Swapping them can still produce a well-typed tree, so
-        // the order is worth stating rather than leaving implicit.
+        // and the order declared by the prelude. Swapping them can still
+        // produce a well-typed tree, so the order is stated explicitly.
         ("__in", [list, value]) => {
             let v = elaborate_expr_inner(cx, value)?;
             let items = elaborate_exprs(cx, list_items(list))?;
@@ -347,8 +322,11 @@ fn join_kind(cx: Ctx<'_>, name: &str) -> Option<crate::ir::JoinKind> {
 fn string_literal(e: &ast::Expr, what: &str) -> R<String> {
     match &e.kind {
         ExprKind::Lit(ast::Lit::Str(s)) => Ok(s.clone()),
-        other => Err(Error::new(format!("`{what}` expects a string, found {}", describe(other)))
-            .at(Origin::new(0, e.span))),
+        other => Err(Error::new(format!(
+            "`{what}` expects a string, found {}",
+            describe(other)
+        ))
+        .at(Origin::new(0, e.span))),
     }
 }
 
@@ -432,19 +410,16 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                 return Err(Error::new(format!("`{alias}` is not a module")).at(at(base.span)));
             };
             let Some(binding) = cx.ws.modules[target].own.get(f).cloned() else {
-                return Err(Error::new(format!("module `{alias}` has no definition `{f}`"))
-                    .at(at(e.span)));
+                return Err(
+                    Error::new(format!("module `{alias}` has no definition `{f}`")).at(at(e.span)),
+                );
             };
             let (dm, di) = match binding {
                 Binding::Def(dm, di) => (dm, di),
                 Binding::Overloads(dm, is) => {
                     (dm, choose(cx.tc, cx.module, cx.owner, e.id, &is, cx.holes)?)
                 }
-                _ => {
-                    return Err(
-                        Error::new(format!("`{alias}.{f}` is not a query")).at(at(e.span))
-                    )
-                }
+                _ => return Err(Error::new(format!("`{alias}.{f}` is not a query")).at(at(e.span))),
             };
             let body = cx.ws.modules[dm].module.defs[di].body.clone();
             let inner_scope = cx.ws.modules[dm].scope.clone();
@@ -463,11 +438,9 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
             elaborate_query(inner, &body, at(e.span))
         }
         ExprKind::App(f, args) => elaborate_application(cx, e, f, args),
-        other => Err(Error::new(format!(
-            "expected a query, found {}",
-            describe(other)
-        ))
-        .at(at(e.span))),
+        other => {
+            Err(Error::new(format!("expected a query, found {}", describe(other))).at(at(e.span)))
+        }
     }
 }
 
@@ -484,8 +457,7 @@ fn elaborate_application(
     // A **query-valued lambda**, e.g.
     // `f = q => users & leftJoin (q & select {..}) (.<id eq .>uid)` applied as
     // `f u`. The parameter is bound to the elaborated query argument and the
-    // body is elaborated under it — the counterpart of the evaluator binding a
-    // closure parameter (`eval.rs:278`), with query bindings kept in `qenv`.
+    // body is elaborated under it, with query bindings kept in `qenv`.
     //
     // This must not run for the *pipe*: `_&_ : a -> (a -> b) -> b = x => f => f x`
     // (`prelude.cagara:37`) is itself a two-parameter lambda, and every
@@ -519,8 +491,7 @@ fn elaborate_application(
                     // actually is. A lambda may take a query
                     // (`f = q => users & leftJoin q (..)`) or an expression
                     // (`h = e => users & select { x = e + 1 }`), and the
-                    // elaborator is untyped at application just as the evaluator
-                    // is, so the argument decides.
+                    // elaboration uses the argument's shape to decide.
                     //
                     // Trying the query reading first is deliberate: a column
                     // reference cannot be a query, and a bare name that *is* a
@@ -589,9 +560,7 @@ fn elaborate_application(
     }
 
     // `q & stage arg` desugars to `_&_ q (stage arg)`, and the stage operators
-    // are exactly those the prelude declares at the pipe's level — the same
-    // table the evaluator consults, so the two cannot disagree about what a
-    // stage is.
+    // are exactly those the prelude declares at the pipe's level.
     let is_pipe = matches!(&f.kind, ExprKind::Name(n) if rules::is_pipe_name(n));
     if is_pipe && args.len() == 2 {
         let (input_e, stage_e) = (&args[0], &args[1]);
@@ -639,19 +608,20 @@ fn elaborate_application(
         // `h = p => users & select { id = .id } & p`, applied as
         // `a = h (select { z = .id })`. The binding holds the form the argument
         // was written in, so applying it re-runs the ordinary dispatch on that
-        // form — which is what the evaluator does when it applies the partially
-        // applied primitive that the argument evaluated to.
-        if let Some((_, CheckedValue::Stage(s))) = cx.env.iter().rev().find(|(k, _)| k == stage_name) {
+        // form, matching the normal stage dispatch path.
+        if let Some((_, CheckedValue::Stage(s))) =
+            cx.env.iter().rev().find(|(k, _)| k == stage_name)
+        {
             let s = s.clone();
             return apply_stage(cx, &s.op, &s.arg, input, at(input_e.span));
         }
         return apply_stage(cx, stage_name, stage_args, input, at(input_e.span));
     }
 
-    Err(Error::new(
-        "only a pipeline stage applied to a query is elaborated at present",
+    Err(
+        Error::new("only a pipeline stage applied to a query is elaborated at present")
+            .at(at(e.span)),
     )
-    .at(at(e.span)))
 }
 
 /// Does `op` applied to `given` arguments still await more — i.e. is this a
@@ -663,7 +633,7 @@ fn elaborate_application(
 /// stage to be applied later.
 ///
 /// The arity comes from the stage definition's **signature**, counted the way
-/// `eval::shape` counts it (`eval.rs:367`), so a new prelude stage needs no
+/// its type signature, so a new prelude stage needs no
 /// change here. The bare prelude name and the `_op_` spelling are both looked
 /// up, since either may appear.
 fn stage_wants_more(cx: Ctx<'_>, op: &str, given: usize) -> bool {
@@ -746,25 +716,39 @@ fn elaborate_set_op(
 fn is_stage_form(name: &str) -> bool {
     matches!(
         name,
-        "_&?_" | "where"
-            | "_&=_" | "select"
-            | "_&+_" | "update"
-            | "_&*_" | "agg"
-            | "_&._" | "order"
-            | "_&-_" | "limit"
+        "_&?_"
+            | "where"
+            | "_&=_"
+            | "select"
+            | "_&+_"
+            | "update"
+            | "_&*_"
+            | "agg"
+            | "_&._"
+            | "order"
+            | "_&-_"
+            | "limit"
             | "offset"
             | "distinct"
             | "omit"
             | "prefix"
             | "suffix"
-            | "_&|_" | "union"
-            | "_&!_" | "unionAll"
-            | "_&^_" | "intersect"
-            | "_&~_" | "except"
-            | "_?_" | "innerJoin"
-            | "_<?_" | "leftJoin"
-            | "_?>_" | "rightJoin"
-            | "_<?>_" | "fullJoin"
+            | "_&|_"
+            | "union"
+            | "_&!_"
+            | "unionAll"
+            | "_&^_"
+            | "intersect"
+            | "_&~_"
+            | "except"
+            | "_?_"
+            | "innerJoin"
+            | "_<?_"
+            | "leftJoin"
+            | "_?>_"
+            | "rightJoin"
+            | "_<?>_"
+            | "fullJoin"
             | "semiJoin"
             | "antiJoin"
     )
@@ -857,9 +841,8 @@ fn apply_stage(
         // from resolving the name through the prelude, not from a list here.
         "innerJoin" | "leftJoin" | "rightJoin" | "fullJoin" | "semiJoin" | "antiJoin" | "_?_"
         | "_<?_" | "_?>_" | "_<?>_" => {
-            let kind = join_kind(cx, stage_name).ok_or_else(|| {
-                Error::new(format!("`{stage_name}` is not a join")).at(origin)
-            })?;
+            let kind = join_kind(cx, stage_name)
+                .ok_or_else(|| Error::new(format!("`{stage_name}` is not a join")).at(origin))?;
             let (right_e, pred_e) = match stage_args {
                 [r, p] => (r, p),
                 _ => {
@@ -889,9 +872,9 @@ fn apply_stage(
         //     `q & union other` desugars to `union other q` and the piped query
         //     lands on the **right**.
         //
-        // Verified against the evaluator rather than inferred: for
-        // `s & select {..} & union (users & select {..})` the evaluator emits
-        // `users UNION s`, and `union A B` emits `A UNION B`. Treating both
+        // The piped and direct forms have different operand order: for
+        // `s & select {..} & union (users & select {..})` the result is
+        // `users UNION s`, while `union A B` emits `A UNION B`. Treating both
         // spellings alike reverses whichever one is wrong — which is what the
         // production parity check caught, and why `except` and `union` cannot
         // both be served by one operand order.
@@ -926,7 +909,7 @@ fn apply_stage(
         //
         // `no_id`'s body is `omit "id"`, which is a *function* of one query
         // (`omit` is `string -> query r -> query k`), so applying it to the
-        // piped input is what the evaluator does. Recognising it here means
+        // piped input follows its declared function shape. Recognising it here means
         // elaborating the body with the input bound to whatever the body's
         // argument is, which is what `elaborate_stage_body` does.
         _ => {
@@ -946,8 +929,8 @@ fn apply_stage(
 /// applied to its argument, e.g. `no_id = omit "id"`.
 ///
 /// The body is an application (`omit "id"`) whose *last* argument is the query
-/// it takes, so the piped input is bound there. Only the shapes the evaluator
-/// actually resolves are handled; anything else is reported rather than given a
+/// it takes, so the piped input is bound there. Only supported source shapes
+/// are handled; anything else is reported rather than given a
 /// guessed tree.
 fn elaborate_user_stage(
     cx: Ctx<'_>,
@@ -987,7 +970,12 @@ fn elaborate_user_stage(
 
 /// Apply a definition's body to a query, treating the body as a one-argument
 /// query function.
-fn apply_stage_body(cx: Ctx<'_>, body: &ast::Expr, input: CheckedQuery, origin: Origin) -> R<CheckedQuery> {
+fn apply_stage_body(
+    cx: Ctx<'_>,
+    body: &ast::Expr,
+    input: CheckedQuery,
+    origin: Origin,
+) -> R<CheckedQuery> {
     let ExprKind::App(f, args) = &body.kind else {
         return Err(Error::new(format!(
             "expected a stage definition's body to apply a stage to its argument, found {}",
@@ -1021,8 +1009,11 @@ fn elaborate_fields(cx: Ctx<'_>, e: &ast::Expr) -> R<Vec<(String, CheckedExpr)>>
 fn elaborate_order(cx: Ctx<'_>, e: &ast::Expr) -> R<Vec<(CheckedExpr, bool)>> {
     let at = |span: Span| Origin::new(cx.module, span);
     let ExprKind::List(xs) = &e.kind else {
-        return Err(Error::new(format!("expected a list of sort keys, found {}", describe(&e.kind)))
-            .at(at(e.span)));
+        return Err(Error::new(format!(
+            "expected a list of sort keys, found {}",
+            describe(&e.kind)
+        ))
+        .at(at(e.span)));
     };
     xs.iter()
         .map(|x| {
@@ -1101,7 +1092,9 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
 
     match &e.kind {
         // `.x`, `.<x`, `.>x`
-        ExprKind::Field(side, n) => Ok(CheckedExpr::column(*side, n.clone(), ty("column")?, origin)),
+        ExprKind::Field(side, n) => {
+            Ok(CheckedExpr::column(*side, n.clone(), ty("column")?, origin))
+        }
         ExprKind::Lit(l) => Ok(CheckedExpr::lit(lit_of(l), origin)),
         // A `sql "..."` template used as an expression.
         ExprKind::Sql(sql) => {
@@ -1114,9 +1107,8 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
             Err(Error::new("a list is not a scalar expression").at(origin))
         }
         // A name bound by an enclosing application — a lambda parameter — wins
-        // over the module scope. The evaluator resolves it the same way and in
-        // the same order (`eval.rs:173` consults `env` before the scope), and
-        // the binding is the *already elaborated* argument, so this substitutes
+        // over the module scope. The binding is the *already elaborated*
+        // argument, so this substitutes
         // a value rather than re-deriving one.
         ExprKind::Name(n) if cx.env.iter().any(|(k, _)| k == n) => {
             let (_, v) = cx
@@ -1167,9 +1159,7 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
                     // A definition whose body is an *expression*:
                     // `adult = .age >= 18`, used bare as in `users & where adult`.
                     // Its body is elaborated in the definition's own module and
-                    // scope, which is where its names resolve — the evaluator
-                    // does the same, evaluating a definition's body in the
-                    // module it was written in.
+                    // scope, which is where its names resolve.
                     let body = body.clone();
                     let inner_scope = cx.ws.modules[dm].scope.clone();
                     let active = enter(&cx, dm, di)?;
@@ -1210,7 +1200,7 @@ fn elaborate_call(
 ) -> R<CheckedExpr> {
     let ExprKind::Name(name) = &f.kind else {
         return Err(
-            Error::new("only a named definition can be applied in an expression").at(origin)
+            Error::new("only a named definition can be applied in an expression").at(origin),
         );
     };
 
@@ -1228,10 +1218,9 @@ fn elaborate_call(
         }
         return match value {
             CheckedValue::Expr(e) => Ok(e),
-            CheckedValue::Callable(_) => Err(Error::new(format!(
-                "`{name}` is applied to too few arguments"
-            ))
-            .at(origin)),
+            CheckedValue::Callable(_) => {
+                Err(Error::new(format!("`{name}` is applied to too few arguments")).at(origin))
+            }
             CheckedValue::Query(_) | CheckedValue::Stage(_) => Err(Error::unsupported(format!(
                 "`{name}` does not denote an expression"
             ))
@@ -1244,7 +1233,9 @@ fn elaborate_call(
     let binding = cx.scope.get(name).cloned();
     let (dm, di) = match binding {
         Some(Binding::Def(dm, di)) => (dm, di),
-        Some(Binding::Overloads(dm, is)) => (dm, choose(cx.tc, cx.module, cx.owner, f.id, &is, cx.holes)?),
+        Some(Binding::Overloads(dm, is)) => {
+            (dm, choose(cx.tc, cx.module, cx.owner, f.id, &is, cx.holes)?)
+        }
         _ => {
             return Err(Error::new(format!(
                 "`{name}` is not a scalar function this layer can elaborate"
@@ -1261,10 +1252,8 @@ fn elaborate_call(
         return elaborate_expr_primitive(cx, prim, args, origin);
     }
     // An **ordinary function body**: `f : expr r int -> expr r int = x => ...`.
-    // The evaluator applies a closure by binding the parameter in an
-    // environment and re-evaluating the body (`eval.rs:278`), so the
-    // elaborator's counterpart is to bind each parameter to the elaborated
-    // argument and elaborate the body under it. Nothing is re-derived: the
+    // Bind each parameter to the elaborated argument and elaborate the body
+    // under that environment. Nothing is re-derived: the
     // argument's type came from the checker and the body's structure is the
     // user's.
     if matches!(body.kind, ExprKind::Lambda(..)) {
@@ -1276,8 +1265,7 @@ fn elaborate_call(
     // The body is elaborated into a value — here a callable, because `_>>>_` is
     // a lambda and `addDays 7` is a partially applied template — and this call's
     // arguments are then applied to it through the same `apply_value` every
-    // other application uses. That is what the evaluator does: it evaluates the
-    // body to a closure and applies the argument to that.
+    // other application uses.
     //
     // No case for `>>>` or `<<<` appears here and none is needed: nothing in
     // this path looks at the operator's name, so a user's own composition
@@ -1337,8 +1325,8 @@ fn elaborate_call(
     //
     // Only the scalar type is taken from the resolved scheme. The *phase* is
     // deliberately not: the scheme is what the checker inferred, and for a
-    // template whose arguments promote it that disagrees with the node the
-    // evaluator emits (see below).
+    // template whose arguments promote it that disagrees with the node built
+    // below.
     let (_phase, ty) = cx.tc.result_expr(dm, di).ok_or_else(|| {
         Error::new(format!(
             "`{name}` does not return an expression, so its call has no phase or scalar type"
@@ -1354,13 +1342,11 @@ fn elaborate_call(
     // result, and for inference the checker rewrites its scheme to
     // `agg (expr r int) -> agg (expr r int)`. Reading that resolved scheme says
     // "aggregate", so an earlier version built an `agg_template` — but `inc` is
-    // a scalar template whose *argument* happens to be an aggregate, and the
-    // evaluator emits `Tpl("$1 + 1", [Agg(..)])` for `inc count`
-    // (`prims.rs:29-37`). Wrapping it in `agg_template` instead trips the
-    // no-nested-aggregates rule on a program the evaluator compiles.
+    // a scalar template whose *argument* happens to be an aggregate. Wrapping
+    // it in `agg_template` instead trips the no-nested-aggregates rule.
     //
     // `CheckedExpr::template` folds the argument phases with `rules::mix`, which
-    // is exactly the promotion rule `CoreTerm::Tpl` uses (`core_term.rs:583`),
+    // is exactly the promotion rule used by checked templates,
     // so a scalar template over aggregate arguments still comes out aggregate —
     // without the constructors fighting each other.
     let declared = declared_kind(&cx.ws.modules[dm].module.defs[di]);
@@ -1398,17 +1384,8 @@ fn elaborate_call(
 
 /// What a name bound by an enclosing application stands for.
 ///
-/// This is the elaborator's counterpart of the evaluator's `Value`
-/// (`value.rs:137`), and it exists for the same reason: a function can be
-/// partially applied, so the *result of evaluating an expression* is not always
-/// an expression. `nextWeek = addDays 7 >>> truncWeek` evaluates `addDays 7` to
-/// a function that is then passed as an argument, and the earlier design — one
-/// environment per kind of thing (query, expression, stage) — could not hold
-/// that. That is why it needed special cases and still could not express it.
-///
-/// The difference from `Value` is what each variant carries: the evaluator
-/// keeps core terms, while this keeps source plus what is already known,
-/// because these must be able to sit unapplied until a row exists.
+/// A value during source expansion. It may be partially applied and awaiting
+/// more arguments, or a stage awaiting its input query.
 #[derive(Debug, Clone)]
 pub(crate) enum CheckedValue {
     /// A query. The stage constructs produce these.
@@ -1417,9 +1394,7 @@ pub(crate) enum CheckedValue {
     Expr(CheckedExpr),
     /// A callable, awaiting arguments.
     ///
-    /// One variant for everything callable, because that is how the evaluator
-    /// applies them: `eval::apply` (`eval.rs:265`) pushes the argument and
-    /// either completes the value or stays deferred, whether the callee was a
+    /// One variant for every callable, whether the callee was a
     /// closure, a template, or a primitive. Splitting them would reintroduce the
     /// special-casing this type exists to remove.
     Callable(Box<Callable>),
@@ -1462,8 +1437,8 @@ pub(crate) enum Callable {
         site: u32,
         /// The bindings this closure captured, innermost last.
         ///
-        /// The counterpart of `Closure::env` (`eval.rs:235`): a partially
-        /// applied function must carry the arguments already bound to it, or the
+        /// A partially applied function carries the arguments already bound to
+        /// it, so the next application can see them — a curried
         /// next application would not see them — a curried `k = x => y => x`
         /// applied one argument at a time would lose `x`.
         env: Vec<(String, CheckedValue)>,
@@ -1481,7 +1456,7 @@ pub(crate) struct CheckedStage {
 }
 
 /// How a `sql` template's result is *declared* to behave, read from its type
-/// expression the way the evaluator reads it (`eval.rs:342`).
+/// expression.
 ///
 /// Deliberately not the resolved scheme — see the comment at the use site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1494,29 +1469,104 @@ pub(crate) enum DeclaredKind {
 /// The declared result kind of a `sql` template definition.
 /// How many expression arguments a `sql` template definition takes.
 ///
-/// Counted from its signature the way `eval::shape` counts it (`eval.rs:367`),
+/// Counted from its signature,
 /// minus one for a window template, whose first argument is its spec rather than
 /// an expression.
 fn template_arity(cx: Ctx<'_>, dm: usize, di: usize) -> usize {
     let d = &cx.ws.modules[dm].module.defs[di];
+    template_arity_from_type(
+        d.ty.as_ref().expect("typed template definition"),
+        declared_kind(d),
+    )
+}
+
+fn template_arity_from_type(t: &ast::TypeExpr, kind: DeclaredKind) -> usize {
     let mut n: usize = 0;
-    let mut t = d.ty.as_ref();
-    while let Some(ast::TypeExpr::Fun(_, r)) = t {
+    let mut ty = t;
+    while let ast::TypeExpr::Fun(_, r) = ty {
         n += 1;
-        t = Some(r);
+        ty = r;
     }
-    if declared_kind(d) == DeclaredKind::Win {
+    if kind == DeclaredKind::Win {
         n.saturating_sub(1)
     } else {
         n
     }
 }
 
+fn check_placeholders(sql: &str, expr_args: usize) -> R<()> {
+    let bytes = sql.as_bytes();
+    let mut seen = vec![false; expr_args + 1];
+    let mut i = 0;
+    let mut highest = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if in_string && bytes.get(i + 1) == Some(&b'\'') {
+                i += 2;
+            } else {
+                in_string = !in_string;
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut end = i + 1;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end == i + 1 {
+            return Err(Error::new(format!(
+                "SQL template `{sql}`: a `$` at byte {start} is not a placeholder"
+            )));
+        }
+        let n = sql[i + 1..end]
+            .parse::<usize>()
+            .map_err(|_| Error::new("SQL template placeholder is too large"))?;
+        let glued = |byte: u8| byte == b'_' || byte.is_ascii_alphanumeric() || byte == b'$';
+        if in_string || bytes.get(end).copied().is_some_and(glued) || (i > 0 && glued(bytes[i - 1]))
+        {
+            return Err(Error::new(format!(
+                "SQL template `{sql}`: `{}` must stand alone (not inside a name or string)",
+                &sql[i..end]
+            )));
+        }
+        if n == 0 {
+            return Err(Error::new(format!(
+                "SQL template `{sql}`: placeholders are 1-based, so `${n}` is not an argument"
+            )));
+        }
+        if n > expr_args {
+            return Err(Error::new(format!(
+                "template uses placeholders up to ${n} but its signature has {expr_args} expression argument(s)"
+            )));
+        }
+        seen[n] = true;
+        highest = highest.max(n);
+        i = end;
+    }
+    if let Some(missing) = (1..=highest).find(|&n| !seen[n]) {
+        return Err(Error::new(format!(
+            "SQL template `{sql}` is missing placeholder `${missing}`"
+        )));
+    }
+    if highest < expr_args {
+        return Err(Error::new(format!(
+            "template uses placeholders up to ${highest} but its signature has {expr_args} expression argument(s)"
+        )));
+    }
+    Ok(())
+}
+
 fn declared_kind(d: &ast::Def) -> DeclaredKind {
     let Some(mut t) = d.ty.as_ref() else {
         return DeclaredKind::Scalar;
     };
-    // Strip the argument arrows to reach the result, as `eval::shape` does.
+    // Strip the argument arrows to reach the result.
     while let ast::TypeExpr::Fun(_, r) = t {
         t = r;
     }
@@ -1529,9 +1579,7 @@ fn declared_kind(d: &ast::Def) -> DeclaredKind {
 
 /// The overload candidates chosen for `callee` **used at `site`**.
 ///
-/// This is the elaborator's counterpart of the evaluator's `use_def`/`choose`
-/// pair (`eval.rs:130-148`), and it is what makes one definition elaborate
-/// differently at each of its uses.
+/// This makes a polymorphic definition elaborate differently at each use.
 ///
 /// `tc.holes(dm, di)` counts the callee's open overloads. `tc.choice(dm, di,
 /// site, k)` then holds the answer recorded *for that use*: the checker
@@ -1599,15 +1647,11 @@ fn holes_at(cx: Ctx<'_>, dm: usize, di: usize, site: u32) -> R<Vec<(usize, usize
 /// Elaborate an application of an ordinary function body, by binding the
 /// parameters to the elaborated arguments and elaborating the body.
 ///
-/// This mirrors the evaluator's closure application (`eval.rs:265`): bind the
-/// parameter into the environment, then evaluate the body. Doing it as an
-/// *environment* rather than as a syntactic substitution is not an
-/// implementation detail — it is what makes shadowing behave the same way the
-/// evaluator does, and what lets a name in the body refer to a captured value
-/// from an enclosing application.
+/// Bind parameters in an environment, then elaborate the body. This preserves
+/// shadowing and lets nested applications refer to captured values.
 ///
-/// Curried parameters are handled one application at a time, as the evaluator
-/// does: `k = x => y => x` applied to one argument binds `x` and leaves a
+/// Curried parameters are handled one application at a time: `k = x => y => x`
+/// applied to one argument binds `x` and leaves a
 /// function over `y`, so the extra `Lambda` layers are bound as more arguments
 /// arrive. Applying fewer arguments than binders is not an error here — the
 /// result is simply elaborated again on the next application.
@@ -1654,8 +1698,8 @@ fn elaborate_lambda(
     let scope = cx.ws.modules[dm].scope.clone();
     let active = enter(&cx, dm, di)?;
     // The callee's environment is the caller's bindings plus the new ones.
-    // Keeping the caller's is what makes a nested lambda see what the outer
-    // application bound, as `Closure::env` does in the evaluator.
+    // Keeping the caller's bindings lets a nested lambda see what the outer
+    // application bound.
     let mut env: Vec<(String, CheckedValue)> = cx.env.to_vec();
     let base = env.len();
     env.extend(bound);
@@ -1700,9 +1744,7 @@ fn elaborate_lambda(
 ///
 /// This is the piece the earlier design was missing. It replaces a sequence of
 /// "try it as a stage, then as a query, then as an expression" guesses with a
-/// single reading driven by the **shape of the expression**, which is what the
-/// evaluator effectively does: `eval` returns a `Value`, and only the caller's
-/// context decides how it is used.
+/// single reading driven by the **shape of the expression**.
 ///
 /// Order matters where two readings could both succeed:
 ///
@@ -1785,6 +1827,7 @@ fn elaborate_callable(cx: Ctx<'_>, e: &ast::Expr) -> R<Option<Callable>> {
         // A `sql` template still short of arguments.
         ExprKind::Sql(sql) => {
             let arity = template_arity(cx, dm, di);
+            check_placeholders(sql, arity).map_err(|e| e.at(Origin::new(dm, body.span)))?;
             if args.len() >= arity {
                 return Ok(None);
             }
@@ -1830,17 +1873,12 @@ fn elaborate_callable(cx: Ctx<'_>, e: &ast::Expr) -> R<Option<Callable>> {
     }
 }
 
-
-
 // ── applying a value to an argument ─────────────────────────────────────────
 
 /// The outcome of applying a value to one argument.
 ///
-/// Mirrors the evaluator's `apply` (`eval.rs:265`), which returns a completed or
-/// a partially applied value from the same call. Making that explicit is what
-/// lets a caller stop guessing whether it holds a function or a result — the
-/// earlier design tried to answer that by *which environment* a name lived in,
-/// which is exactly why it could not represent a partially applied function.
+/// Applying one argument either completes the call or returns a partially
+/// applied callable.
 enum Applied {
     /// The call completed; this is its value.
     Done(CheckedValue),
@@ -2194,8 +2232,11 @@ fn int_literal(e: &ast::Expr, what: &str) -> R<i64> {
             "`{what}` needs a non-negative count, got {n}"
         ))
         .at(Origin::new(0, e.span))),
-        other => Err(Error::new(format!("`{what}` expects an int, found {}", describe(other)))
-            .at(Origin::new(0, e.span))),
+        other => Err(Error::new(format!(
+            "`{what}` expects an int, found {}",
+            describe(other)
+        ))
+        .at(Origin::new(0, e.span))),
     }
 }
 

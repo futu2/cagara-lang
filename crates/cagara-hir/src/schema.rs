@@ -222,11 +222,9 @@ pub fn merge_columns<T, U>(
     Ok(out)
 }
 
-/// Columns of `update`. The checker and the evaluator both reject an empty
-/// field list and a repeated field before a `Rel` is ever built, so the only
-/// checks left here are the ones they do not do: every field's value refers
-/// to an input column and sits in the select phase. The empty case is still
-/// caught, by `merge_columns`.
+/// Columns of `update`. The checker rejects an empty field list and repeated
+/// fields. This validator also checks that each value refers to an input column
+/// and sits in the select phase.
 fn merge(fs: &[(String, Expr)], cols: &[String]) -> Result<Vec<String>, String> {
     for (n, e) in fs {
         refs(e, cols, "update").map_err(|m| format!("field `{n}`: {m}"))?;

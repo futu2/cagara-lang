@@ -401,20 +401,18 @@ fn overloads_need_signatures() {
 }
 
 #[test]
-fn checker_rejects_what_the_evaluator_cannot_build() {
-    // `asc` takes an expression, not a sort key: `asc (desc .id)` used to
-    // type-check and then fail in the evaluator.
+fn checker_rejects_invalid_sort_keys_and_templates() {
+    // `asc` takes an expression, not another sort key.
     let e = err("q = users & order [asc (desc .id)]\n", "q");
     assert!(e.contains("sortkey"), "{e}");
-    // A template needs its signature, or the evaluator cannot size it.
+    // A template needs its signature to determine its argument shape.
     let e = err("q = users & select { x = sql \"1\" }\n", "q");
     assert!(e.contains("signature"), "{e}");
 }
 
 #[test]
 fn sql_templates_need_signatures() {
-    // A template's arity and phase come from its signature; without one the
-    // checker used to hand out a fresh variable and the evaluator rejected it.
+    // A template's arity and phase come from its signature.
     let e = err("f = sql \"1\"\n", "f");
     assert!(e.contains("needs a type signature"), "{e}");
 }
@@ -595,7 +593,7 @@ fn edits_update_names_checks_and_diagnostics() {
     let mut ws = Workspace::from_source(&format!("{TABLES}q = users & where (.age > 1)\n"));
     let root = ws.root;
     // A new definition is visible to later ones (scope is a query, not a
-    // snapshot from load time), to the checker, and to the evaluator.
+    // snapshot from load time), and to compilation.
     assert!(ws.set_source(
         root,
         format!("{TABLES}adult = .age >= 18\nq = users & where adult\n")

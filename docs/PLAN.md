@@ -1,14 +1,14 @@
 # Architecture and status
 
 Cagara is a typed query language that compiles queries to SQL. The
-prelude is written in Cagara; Rust supplies the relational primitives, type
-checker, evaluator, language server, and SQL backend.
+prelude is written in Cagara; Rust supplies name resolution, type checking,
+source elaboration, relational IR, language server, and SQL backend.
 
 ## Pipeline
 
 ```text
-source -> syntax/AST -> type checker -> relational IR -> schema validation
-        -> SQL lowering -> dialect rewrite -> SQL
+source -> syntax/AST -> type checker -> checked relational tree -> erasure
+        -> schema validation -> SQL lowering -> dialect rewrite -> SQL
 ```
 
 The intended simplification of this pipeline is described in
@@ -19,7 +19,7 @@ the single source of validity rules.
 | Crate | Role |
 |---|---|
 | `cagara-syntax` | Lexer, lossless parser, AST, formatter |
-| `cagara-hir` | Modules, name resolution, HM rows, evaluator, IR, validation |
+| `cagara-hir` | Modules, name resolution, HM rows, checked relational tree, validation |
 | `cagara-sql` | SQL lowering, templates, dialect-specific intrinsics |
 | `cagara-lsp` | Diagnostics, hover, definitions, references, symbols, completion |
 | `cagara-cli` | `cagara` executable and CLI integration |

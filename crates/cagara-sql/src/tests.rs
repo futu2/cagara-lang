@@ -294,7 +294,9 @@ fn every_set_operation_has_a_pipe_stage() {
         // The piped input is the left operand for every one of them.
         let start = piped.find("(SELECT").unwrap_or(0);
         let users = piped[start..].find("public.users").expect("users operand");
-        let admins = piped[start..].find("public.admins").expect("admins operand");
+        let admins = piped[start..]
+            .find("public.admins")
+            .expect("admins operand");
         assert!(users < admins, "`{op}` reversed its operands: {piped}");
     }
 }
@@ -446,8 +448,7 @@ fn errors() {
     assert!(error("q = users & where (.salary > 1)\n", "q").contains("no column `salary`"));
     assert!(error("q = orders & innerJoin users (.user_id == .id)\n", "q").contains("which input"));
     assert!(error("q = users & select {.nope}\n", "q").contains("no column `nope`"));
-    assert!(error("q = table \"s\" \"t\"\n", "q").contains("unknown"));
-    assert!(error("q = q\n", "q").contains("refers to itself"));
+    assert!(error("q : query { id = int } = q\n", "q").contains("refers to itself"));
     assert!(error(
         "q = users & agg { x = coalesce 0 (sum .age) + .age }\n",
         "q"
@@ -1198,7 +1199,7 @@ fn template_placeholders_must_stand_alone() {
         ),
     ];
     for (f, msg) in bad {
-        let e = error(&format!("{f}\nq = users & select {{ y = f .age }}\n"), "q");
+        let e = error(&format!("{f}\nq = users & select {{ y = f .age }}\n"), "f");
         assert!(e.contains(msg), "{f}: {e}");
     }
 }
@@ -1428,11 +1429,19 @@ fn the_two_set_operation_spellings_differ_in_operand_order() {
         ("&~", "EXCEPT"),
     ] {
         let piped = sqlish(&format!("q = users {op} admins\n"));
-        assert!(piped.contains(sql_op), "`{op}` must lower to `{sql_op}`: {piped}");
+        assert!(
+            piped.contains(sql_op),
+            "`{op}` must lower to `{sql_op}`: {piped}"
+        );
         let start = piped.find("(SELECT").unwrap_or(0);
         let users = piped[start..].find("public.users").expect("users operand");
-        let admins = piped[start..].find("public.admins").expect("admins operand");
-        assert!(users < admins, "`{op}` must put `users` (piped) on the left: {piped}");
+        let admins = piped[start..]
+            .find("public.admins")
+            .expect("admins operand");
+        assert!(
+            users < admins,
+            "`{op}` must put `users` (piped) on the left: {piped}"
+        );
     }
 
     // Bare-name spelling: the *argument* is the left operand, because
@@ -1444,10 +1453,15 @@ fn the_two_set_operation_spellings_differ_in_operand_order() {
         ("except", "EXCEPT"),
     ] {
         let piped = sqlish(&format!("q = users & {name} admins\n"));
-        assert!(piped.contains(sql_op), "`{name}` must lower to `{sql_op}`: {piped}");
+        assert!(
+            piped.contains(sql_op),
+            "`{name}` must lower to `{sql_op}`: {piped}"
+        );
         let start = piped.find("(SELECT").unwrap_or(0);
         let users = piped[start..].find("public.users").expect("users operand");
-        let admins = piped[start..].find("public.admins").expect("admins operand");
+        let admins = piped[start..]
+            .find("public.admins")
+            .expect("admins operand");
         assert!(
             admins < users,
             "`users & {name} admins` must put `admins` (the argument) on the left: {piped}"

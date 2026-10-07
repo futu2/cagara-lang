@@ -8,9 +8,9 @@
 //! mutable machinery that produced it. `Verified` is the one wrapper for
 //! values that a constructor has already validated.
 
+use crate::primitive::TplKind;
 use crate::rules;
 use crate::schema;
-use crate::value::TplKind;
 use crate::workspace::Diag;
 use cagara_syntax::ast::Span;
 
@@ -160,7 +160,10 @@ impl RowType {
     /// are known — needs this.
     pub fn unknown(columns: Vec<String>) -> Self {
         RowType {
-            columns: columns.into_iter().map(|n| (n, ScalarType::Unknown)).collect(),
+            columns: columns
+                .into_iter()
+                .map(|n| (n, ScalarType::Unknown))
+                .collect(),
         }
     }
 
@@ -235,7 +238,12 @@ impl RowType {
     /// layer and `schema.rs` cannot drift apart.
     pub fn rename_all(&self, affix: &str, prefix: bool) -> RowType {
         let names = schema::rename_columns(&self.names(), affix, prefix);
-        RowType::new(names.into_iter().zip(self.columns.iter().map(|(_, t)| t.clone())).collect())
+        RowType::new(
+            names
+                .into_iter()
+                .zip(self.columns.iter().map(|(_, t)| t.clone()))
+                .collect(),
+        )
     }
 
     /// The **join** row former: the left row's columns in place, then the
@@ -313,16 +321,15 @@ pub struct Error {
     /// Who is at fault: the program, or this phase?
     ///
     /// The distinction matters at the production boundary
-    /// (`eval::root_queries_checked`), which compares source elaboration against
-    /// the evaluator and must react to the two differently:
+    /// (`compile::root_queries_checked`), which reports source elaboration
+    /// failures at the compilation boundary:
     ///
     /// * [`Fault::Program`] — the program is malformed. `schema` would report
     ///   the same thing and the user should see that message. A `table` whose
     ///   defining definition declares no columns is an example: the query is
     ///   genuinely untypeable, and saying so is correct.
     /// * [`Fault::Compiler`] — the program is fine and this phase cannot build
-    ///   it. The evaluator handles it; source elaboration does not. That is a
-    ///   capability gap, and presenting it as the user's mistake would be a lie.
+    ///   it. That is a compiler capability gap, not a user mistake.
     ///
     /// Conflating the two is not academic. It is why `schema` could not simply
     /// be demoted: the elaborated path treats a column-less table as a *gap*
@@ -337,15 +344,15 @@ pub struct Error {
 pub enum Fault {
     /// The program is malformed; the message is for the user.
     Program,
-    /// This phase cannot handle a program the evaluator can.
+    /// This phase cannot handle a well-typed program yet.
     Compiler,
     /// Not a failure at all: the definition simply is not a query, so there is
     /// nothing here for the checked layer to build.
     ///
     /// A third case rather than overloading the two above, because the
     /// production boundary must treat it as *no verdict*: reporting it would
-    /// invent an error for a scalar definition the evaluator handles correctly,
-    /// and ignoring it silently would lose the distinction between "nothing to
+    /// invent an error for a scalar definition, and ignoring it silently would
+    /// lose the distinction between "nothing to
     /// do" and "could not do it".
     NotAQuery,
 }
@@ -364,8 +371,8 @@ impl Error {
         }
     }
 
-    /// An error about **this phase**: the program is fine and the evaluator can
-    /// build it, but the checked layer cannot. Used for missing capabilities,
+    /// An error about **this phase**: the program is fine but this layer cannot
+    /// build it. Used for missing capabilities,
     /// which the production boundary must not present as a user's mistake.
     pub fn unsupported(message: impl Into<String>) -> Self {
         Error {
@@ -437,8 +444,7 @@ impl<T> Verified<T> {
 
 /// The scalar type a value of this template phase has.
 ///
-/// A template's *kind* says which constructor builds it (`Value::Tpl`), and
-/// the checked layer has a separate node for each; this maps the evaluator's
+/// A template's *kind* says which checked constructor builds it; this maps the
 /// three-case enum onto that split, so a caller holding a `TplKind` knows
 /// which checked constructor to call without matching on the enum itself.
 pub fn template_node_kind(kind: TplKind) -> TemplateNodeKind {
@@ -477,7 +483,12 @@ mod tests {
     use super::*;
 
     fn int_row(names: &[&str]) -> RowType {
-        RowType::new(names.iter().map(|n| (n.to_string(), ScalarType::Int)).collect())
+        RowType::new(
+            names
+                .iter()
+                .map(|n| (n.to_string(), ScalarType::Int))
+                .collect(),
+        )
     }
 
     #[test]
@@ -493,7 +504,10 @@ mod tests {
     #[test]
     fn scalar_types_print_the_way_signatures_spell_them() {
         assert_eq!(ScalarType::Int.to_string(), "int");
-        assert_eq!(ScalarType::Maybe(Box::new(ScalarType::Int)).to_string(), "maybe int");
+        assert_eq!(
+            ScalarType::Maybe(Box::new(ScalarType::Int)).to_string(),
+            "maybe int"
+        );
         assert_eq!(
             ScalarType::List(Box::new(ScalarType::String)).to_string(),
             "list string"
@@ -537,7 +551,10 @@ mod tests {
     #[test]
     fn omit_drops_a_column_and_keeps_the_rest_in_order() {
         let row = int_row(&["a", "b", "c"]);
-        assert_eq!(row.omit("b").names(), vec!["a".to_string(), "c".to_string()]);
+        assert_eq!(
+            row.omit("b").names(),
+            vec!["a".to_string(), "c".to_string()]
+        );
         assert_eq!(row.omit("zzz"), row);
     }
 
@@ -552,7 +569,10 @@ mod tests {
             row.rename_all("_v2", false).names(),
             vec!["a_v2".to_string(), "b_v2".to_string()]
         );
-        assert_eq!(row.rename_all("u_", true).get("u_a"), Some(&ScalarType::Int));
+        assert_eq!(
+            row.rename_all("u_", true).get("u_a"),
+            Some(&ScalarType::Int)
+        );
     }
 
     #[test]
@@ -562,7 +582,10 @@ mod tests {
             ("b".into(), ScalarType::Maybe(Box::new(ScalarType::String))),
         ]);
         let mapped = row.map_value_nullable();
-        assert_eq!(mapped.get("a"), Some(&ScalarType::Maybe(Box::new(ScalarType::Int))));
+        assert_eq!(
+            mapped.get("a"),
+            Some(&ScalarType::Maybe(Box::new(ScalarType::Int)))
+        );
         // Already nullable: `maybe (maybe t) = maybe t`.
         assert_eq!(
             mapped.get("b"),

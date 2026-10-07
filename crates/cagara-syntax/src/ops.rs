@@ -175,8 +175,8 @@ impl Ops {
         }
     }
 
-    /// Is `name` (an `_op_` definition name) a stage operator? Used by the
-    /// evaluator to recognise `q & stage` through its desugared call.
+    /// Is `name` (an `_op_` definition name) a stage operator? Source
+    /// elaboration uses it to recognise `q & stage` through its desugared call.
     pub fn is_stage_name(&self, name: &str) -> bool {
         op_spelling(name).is_some_and(|s| self.is_stage(s))
     }
@@ -300,7 +300,9 @@ mod tests {
     fn the_prelude_declares_the_pipeline() {
         let ops = ops();
         assert_eq!(ops.pipe_fixity().unwrap().precedence(), (1, 2));
-        for s in ["&", "&?", "&=", "&+", "&*", "&.", "&-", "&|", "&!", "&^", "&~"] {
+        for s in [
+            "&", "&?", "&=", "&+", "&*", "&.", "&-", "&|", "&!", "&^", "&~",
+        ] {
             let f = ops.find(s).unwrap_or_else(|| panic!("`{s}` is undeclared"));
             assert_eq!(f.precedence(), (1, 2), "`{s}` must sit at the pipe level");
             assert!(ops.is_stage(s), "`{s}` must be a stage");
@@ -314,8 +316,8 @@ mod tests {
         }
         // Every operator declared at the pipe level is a stage, and this list
         // is the whole of them. Keeping it exact is the point: the stage set
-        // is what the evaluator uses to recognise `q & stage`, so a new
-        // declaration at this level silently changes how a pipeline is
+        // is what source elaboration uses to recognise `q & stage`, so a new
+        // declaration at this level changes how a pipeline is
         // located for diagnostics.
         assert_eq!(
             ops.stages(),

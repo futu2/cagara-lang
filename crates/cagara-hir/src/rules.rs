@@ -9,8 +9,7 @@ pub const JOIN_ONLY: &str =
     "`.<x` and `.>x` refer to the inputs of a join and can only be used in a join predicate";
 
 /// Fields of a window spec record (`{ partition = [..], order = [..], frame = .. }`).
-/// The checker gives them their types and the evaluator reads them, so the
-/// names live here instead of being spelled out in both.
+/// The checker and source elaborator share these names.
 pub mod winspec {
     pub const PARTITION: &str = "partition";
     pub const ORDER: &str = "order";
@@ -149,8 +148,7 @@ pub fn join_columns<T: Clone>(left: &[(String, T)], right: &[(String, T)]) -> Ve
 mod tests {
     use super::*;
 
-    /// The names the checker and the evaluator must agree on. Both used to
-    /// spell them out, so a rename in one place silently desynchronized them.
+    /// The names used by the checker and source elaborator.
     #[test]
     fn shared_names_are_the_ones_the_prelude_uses() {
         assert_eq!(winspec::ALL, ["partition", "order", "frame"]);

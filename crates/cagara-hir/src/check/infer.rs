@@ -15,7 +15,7 @@ impl<'w> Checker<'w> {
             return Some(s.clone());
         }
         if self.active.contains(&(m, i)) || m != self.module {
-            // Recursion (the evaluator reports it), or a module that is not
+            // Recursion, or a module that is not
             // loaded before this one (cannot happen for valid imports).
             return None;
         }
@@ -1660,8 +1660,7 @@ impl<'w> Checker<'w> {
             }
             Asc | Desc => {
                 // `asc .x`: a row-phase expression becomes a sort key. Taking
-                // an `expr` rather than a `sortkey` rejects `asc (desc .x)`,
-                // which the evaluator cannot build.
+                // an `expr` rather than a `sortkey` rejects `asc (desc .x)`.
                 let (r, a) = (self.fresh(), self.fresh());
                 fun(expr(con("row"), r.clone(), a), sortkey(r))
             }

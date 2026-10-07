@@ -1,5 +1,5 @@
 //! Type checker: Hindley–Milner inference with extensible (Rémy-style) rows,
-//! run over the AST before evaluation.
+//! run over the source AST.
 //!
 //! - Surface types: `expr r a` (row expression), `agg (expr r a)` and
 //!   `win (expr r a)`. Internally one `expr` constructor carries a phase slot
@@ -28,8 +28,8 @@
 //!   `Overload` constraint, resolved by trial unification once exactly one
 //!   candidate fits. A definition whose overloads stay open (`x => x + x`)
 //!   keeps them as holes in its scheme; each use fills them, and the
-//!   evaluator follows the recorded choices (dictionary passing, resolved at
-//!   compile time). In a query definition, leftover literals default to
+//!   source elaboration follows the recorded choices (dictionary passing,
+//!   resolved at compile time). In a query definition, leftover literals default to
 //!   their own type before overloads are forced.
 //!
 //! - Nullability is explicit: `maybe a` is a type, and type variables in
@@ -77,9 +77,9 @@ pub(crate) use crate::core::ScalarType;
 pub(crate) use crate::db::ModuleInput;
 pub(crate) use crate::ir::{JoinKind, Phase};
 pub(crate) use crate::lower::parse_module;
+pub(crate) use crate::primitive::Prim;
 pub(crate) use crate::resolve::{module_own, module_scope};
 pub(crate) use crate::rules::{self};
-pub(crate) use crate::value::Prim;
 pub(crate) use crate::workspace::{diag_in, Binding, Diag, Workspace};
 pub(crate) use cagara_syntax::ast::{self, ExprKind, Side, Span, TypeExpr};
 pub(crate) use std::collections::{HashMap, HashSet};
@@ -235,8 +235,8 @@ impl TypeCheck {
     /// [`ScalarType`]s in declaration order.
     ///
     /// This is the typed twin of [`TypeCheck::type_of`]. A phase that needs a
-    /// definition's columns — the checked layer recording a `CheckedModule`,
-    /// for instance — reads them here instead of parsing the printed string.
+    /// definition's columns reads them here instead of parsing the printed
+    /// string.
     ///
     /// The columns of a definition's *closed* query row, or `None` when the
     /// scheme is not a closed query.

@@ -1,4 +1,4 @@
-//! [`Checker`] overload fitting and the choices recorded for the evaluator.
+//! [`Checker`] overload fitting and the choices recorded for source elaboration.
 //!
 //! Split out of the single `check.rs` for readability only: whole items and
 //! whole `Checker` methods were moved, and no logic was changed.

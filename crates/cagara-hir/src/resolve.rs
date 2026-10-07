@@ -2,7 +2,7 @@
 
 use crate::db::ModuleInput;
 use crate::lower::parse_module;
-use crate::value::PRIMS;
+use crate::primitive::PRIMS;
 use crate::workspace::Binding;
 use std::collections::HashMap;
 

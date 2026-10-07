@@ -348,16 +348,12 @@ pub fn check(ws: &Workspace) -> TypeCheck {
 fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck> {
     #[cfg(test)]
     CHECK_RUNS.with(|c| c.set(c.get() + 1));
-    let mut deps = HashMap::new();
     let imported: Vec<ModuleInput> = input
         .prelude(db)
         .iter()
         .copied()
         .chain(input.imports(db).iter().map(|(_, t)| *t))
         .collect();
-    for d in &imported {
-        deps.extend(module_check(db, *d).schemes.clone());
-    }
     let file = *input.file(db);
     let parsed = parse_module(db, file);
     let env = ModuleEnv {
@@ -368,8 +364,12 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
             .iter()
             .map(|t| (*t.index(db), module_own(db, *t)))
             .collect(),
+        schemes: imported
+            .iter()
+            .map(|t| (*t.index(db), &module_check(db, *t).schemes))
+            .collect(),
     };
-    Arc::new(check_module(env, &deps))
+    Arc::new(check_module(env))
 }
 
 #[cfg(test)]
@@ -405,16 +405,18 @@ pub(crate) struct ModuleEnv<'w> {
     pub(crate) scope: &'w HashMap<String, Binding>,
     /// Exports of the modules it imports, by module index.
     pub(crate) owns: HashMap<usize, &'w HashMap<String, Binding>>,
+    /// Borrowed checked exports; looking up one name never copies a catalog.
+    pub(crate) schemes: HashMap<usize, &'w HashMap<(usize, usize), Scheme>>,
 }
 
 /// Check one module against the schemes of the modules it may use.
-fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> ModuleCheck {
+fn check_module(env: ModuleEnv<'_>) -> ModuleCheck {
     let m = env.module;
     let mut c = Checker {
         env,
         module: m,
         vars: Vec::new(),
-        schemes: deps.clone(),
+        schemes: HashMap::new(),
         failed: HashSet::new(),
         active: Vec::new(),
         depth: 0,
@@ -438,13 +440,8 @@ fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> M
     for i in 0..c.env.defs.len() {
         c.def_scheme(m, i);
     }
-    let schemes: HashMap<_, _> = c
+    let types = c
         .schemes
-        .iter()
-        .filter(|(k, _)| k.0 == m)
-        .map(|(k, s)| (*k, s.clone()))
-        .collect();
-    let types = schemes
         .iter()
         .filter(|(k, _)| !c.failed.contains(k))
         .map(|(k, s)| (*k, c.show_scheme(s)))
@@ -453,7 +450,7 @@ fn check_module(env: ModuleEnv<'_>, deps: &HashMap<(usize, usize), Scheme>) -> M
     let use_types = c.use_types;
     let use_tys = c.use_tys;
     ModuleCheck {
-        schemes,
+        schemes: c.schemes,
         errors: c.errors,
         types,
         holes: c.holes,

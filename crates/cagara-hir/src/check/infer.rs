@@ -11,12 +11,14 @@ impl<'w> Checker<'w> {
     // ── definitions and schemes ────────────────────────────────────────────
 
     pub(crate) fn def_scheme(&mut self, m: usize, i: usize) -> Option<Scheme> {
+        if m != self.module {
+            return self.env.schemes.get(&m)?.get(&(m, i)).cloned();
+        }
         if let Some(s) = self.schemes.get(&(m, i)) {
             return Some(s.clone());
         }
-        if self.active.contains(&(m, i)) || m != self.module {
-            // Recursion, or a module that is not
-            // loaded before this one (cannot happen for valid imports).
+        if self.active.contains(&(m, i)) {
+            // Recursive definition.
             return None;
         }
         if self.depth >= MAX_DEF_DEPTH {

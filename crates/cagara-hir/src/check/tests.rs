@@ -644,6 +644,28 @@ fn compilation_reuses_the_workspace_cache_and_invalidates_dependents() {
 }
 
 #[test]
+fn checks_share_immutable_module_results_across_requests() {
+    let mut ws = Workspace::from_source("value = 1\n");
+    let first = check(&ws);
+    let repeated = check(&ws);
+    for (a, b) in first.modules.iter().zip(&repeated.modules) {
+        assert!(std::sync::Arc::ptr_eq(a, b));
+    }
+    assert!(ws.set_source(ws.root, "value = true\n".into()));
+    let edited = check(&ws);
+    assert!(std::sync::Arc::ptr_eq(
+        &first.modules[0],
+        &edited.modules[0]
+    ));
+    assert!(!std::sync::Arc::ptr_eq(
+        &first.modules[ws.root],
+        &edited.modules[ws.root]
+    ));
+    assert_eq!(first.type_of(ws.root, 0), Some("int"));
+    assert_eq!(edited.type_of(ws.root, 0), Some("bool"));
+}
+
+#[test]
 fn edits_update_names_checks_and_diagnostics() {
     let mut ws = Workspace::from_source(&format!("{TABLES}q = users & where (.age > 1)\n"));
     let root = ws.root;

@@ -54,6 +54,8 @@ mod reduce;
 mod ty;
 mod unify;
 
+use std::sync::Arc;
+
 // The type layer, the row-term reductions, and the `Checker` struct itself
 // are shared by every sibling module. Re-exporting them here lets each module
 // reach them with a single `use super::*;`, exactly as the pre-split single file
@@ -102,34 +104,9 @@ pub(crate) struct RawTypeError {
 /// Result of checking every definition in a workspace.
 pub struct TypeCheck {
     pub errors: Vec<TypeError>,
-    types: HashMap<(usize, usize), String>,
-    holes: HashMap<(usize, usize), usize>,
-    /// Per definition: `(use site, hole of the referenced definition)` → choice.
-    /// Hole 0 of a direct overload-set use is the overload itself.
-    choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
-    /// Per module: the columns known at its `PROBE_FIELD` reference.
-    probe_fields: HashMap<usize, Vec<(String, String)>>,
-    /// Printed type of each name use, by `(module, span start, span end)`:
-    /// the instance at that use, not the definition's scheme.
-    use_types: HashMap<(usize, u32, u32), String>,
-    /// The type each expression got, keyed by `ExprId` and its module.
-    ///
-    /// `use_types` above is keyed by *location* and holds a printed string;
-    /// this is keyed by the *node* and holds the resolved `Ty`. A phase that
-    /// builds a typed tree from source walks the AST and needs the second:
-    /// given the `ExprId` of an expression, what type did it receive?
-    /// [`TypeCheck::use_ty`] converts on the way out, so `Ty` stays private.
-    use_tys: HashMap<(usize, u32), Ty>,
-    /// The schemes themselves, alongside the printed `types`.
-    ///
-    /// `types` is what a user reads; this is what a *phase* reads. The checked
-    /// layer needs a definition's row and scalar types as data, not as a
-    /// formatted string, so the schemes cannot be dropped when the per-module
-    /// results are merged. `Scheme` stays crate-private: `Ty` is inference
-    /// state, and the only things a later phase gets out of it are
-    /// [`TypeCheck::scheme_fields`] and [`TypeCheck::def_scalar`], which are
-    /// closed [`ScalarType`] / row values rather than type variables.
-    schemes: HashMap<(usize, usize), Scheme>,
+    /// Immutable Salsa results shared by compiler and editor requests.
+    /// Indices match the workspace; their per-expression maps stay in place.
+    modules: Vec<Arc<ModuleCheck>>,
 }
 
 /// A column name no user writes (`__` names are reserved). A reference to
@@ -141,17 +118,29 @@ impl TypeCheck {
     /// Columns (name, printed type) of the row seen by the `PROBE_FIELD`
     /// reference in `module`, if it has one and its definition got that far.
     pub fn probe_fields(&self, module: usize) -> Option<&[(String, String)]> {
-        self.probe_fields.get(&module).map(Vec::as_slice)
+        self.modules
+            .get(module)?
+            .probe_fields
+            .as_ref()
+            .map(|(_, fields)| fields.as_slice())
     }
 
     /// Printed type scheme of a well-typed definition.
     pub fn type_of(&self, module: usize, def: usize) -> Option<&str> {
-        self.types.get(&(module, def)).map(String::as_str)
+        self.modules
+            .get(module)?
+            .types
+            .get(&(module, def))
+            .map(String::as_str)
     }
 
     /// Number of open overloads a definition leaves to its users.
     pub fn holes(&self, module: usize, def: usize) -> usize {
-        self.holes.get(&(module, def)).copied().unwrap_or(0)
+        self.modules
+            .get(module)
+            .and_then(|m| m.holes.get(&(module, def)))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Choice for hole `k` at use site `site` inside definition `(module, def)`.
@@ -163,7 +152,12 @@ impl TypeCheck {
     /// [`TypeCheck::choices_of`], which takes the pairs the checker actually
     /// recorded and cannot be called with the wrong key.
     pub fn choice(&self, module: usize, def: usize, site: u32, k: usize) -> Option<Choice> {
-        self.choices.get(&(module, def))?.get(&(site, k)).copied()
+        self.modules
+            .get(module)?
+            .choices
+            .get(&(module, def))?
+            .get(&(site, k))
+            .copied()
     }
 
     /// Every resolved overload choice of a definition, as
@@ -174,7 +168,11 @@ impl TypeCheck {
     /// to know the site ids in advance; it reads the same map
     /// [`TypeCheck::choice`] does, so the two cannot disagree.
     pub fn choices_of(&self, module: usize, def: usize) -> Vec<(u32, usize, Choice)> {
-        let Some(by_site) = self.choices.get(&(module, def)) else {
+        let Some(by_site) = self
+            .modules
+            .get(module)
+            .and_then(|m| m.choices.get(&(module, def)))
+        else {
             return Vec::new();
         };
         // HashMap iteration order is not stable, so sort: a phase that records
@@ -190,7 +188,9 @@ impl TypeCheck {
 
     /// Printed type of the name use whose expression spans `span` in `module`.
     pub fn use_type(&self, module: usize, span: Span) -> Option<&str> {
-        self.use_types
+        self.modules
+            .get(module)?
+            .use_types
             .get(&(module, span.start, span.end))
             .map(String::as_str)
     }
@@ -209,7 +209,7 @@ impl TypeCheck {
     /// `Some(Unknown)` when it is a scalar the checker never solved. The
     /// distinction matches [`TypeCheck::def_scalar`], and for the same reason.
     pub fn use_ty(&self, module: usize, id: u32) -> Option<ScalarType> {
-        let t = self.use_tys.get(&(module, id))?;
+        let t = self.modules.get(module)?.use_tys.get(&(module, id))?;
         match scheme_view(t) {
             SchemeView::Scalar(s) => Some(s),
             SchemeView::Open => Some(ScalarType::Unknown),
@@ -221,7 +221,10 @@ impl TypeCheck {
     ///
     /// For a caller that wants to know what is available before walking.
     pub fn use_ids(&self, module: usize) -> Vec<u32> {
-        let mut out: Vec<u32> = self
+        let Some(checked) = self.modules.get(module) else {
+            return Vec::new();
+        };
+        let mut out: Vec<u32> = checked
             .use_tys
             .keys()
             .filter(|(m, _)| *m == module)
@@ -246,7 +249,7 @@ impl TypeCheck {
     /// to know whether there are any, and the shapes differ in more ways than
     /// the answer. Use [`TypeCheck::scheme_view`] to tell *which* shape it is.
     pub fn scheme_fields(&self, module: usize, def: usize) -> Option<Vec<(String, ScalarType)>> {
-        let s = self.schemes.get(&(module, def))?;
+        let s = self.modules.get(module)?.schemes.get(&(module, def))?;
         match scheme_view(&s.ty) {
             SchemeView::Query { fields } => fields,
             SchemeView::Row { fields } => Some(fields),
@@ -264,7 +267,7 @@ impl TypeCheck {
     /// The phase and scalar type a definition *returns*, for a call site. See
     /// `check::ty::scheme_result_expr`.
     pub fn result_expr(&self, module: usize, def: usize) -> Option<(Phase, ScalarType)> {
-        let s = self.schemes.get(&(module, def))?;
+        let s = self.modules.get(module)?.schemes.get(&(module, def))?;
         scheme_result_expr(&s.ty)
     }
 
@@ -275,12 +278,12 @@ impl TypeCheck {
     /// expression; an application has no recorded entry, so its type comes from
     /// the callee signature.
     pub fn result_scalar(&self, module: usize, def: usize) -> Option<ScalarType> {
-        let s = self.schemes.get(&(module, def))?;
+        let s = self.modules.get(module)?.schemes.get(&(module, def))?;
         scheme_result_scalar(&s.ty)
     }
 
     pub fn scheme_view(&self, module: usize, def: usize) -> Option<SchemeView> {
-        let s = self.schemes.get(&(module, def))?;
+        let s = self.modules.get(module)?.schemes.get(&(module, def))?;
         Some(scheme_view(&s.ty))
     }
 
@@ -293,7 +296,7 @@ impl TypeCheck {
     /// [`TypeCheck::scheme_view`] exposes, so a function is now `None` rather
     /// than a misleading `Some(Unknown)`.
     pub fn def_scalar(&self, module: usize, def: usize) -> Option<ScalarType> {
-        let s = self.schemes.get(&(module, def))?;
+        let s = self.modules.get(module)?.schemes.get(&(module, def))?;
         match scheme_view(&s.ty) {
             SchemeView::Scalar(t) => Some(t),
             SchemeView::Open => Some(ScalarType::Unknown),
@@ -318,13 +321,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
     // edited module and the modules that (transitively) depend on it.
     let mut out = TypeCheck {
         errors: vec![],
-        types: HashMap::new(),
-        holes: HashMap::new(),
-        choices: HashMap::new(),
-        probe_fields: HashMap::new(),
-        use_types: HashMap::new(),
-        use_tys: HashMap::new(),
-        schemes: HashMap::new(),
+        modules: Vec::with_capacity(ws.inputs.len()),
     };
     for &input in &ws.inputs {
         let mc = module_check(&ws.db, input);
@@ -338,13 +335,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
                 e.message.clone(),
             ),
         }));
-        out.types.extend(mc.types.clone());
-        out.holes.extend(mc.holes.clone());
-        out.choices.extend(mc.choices.clone());
-        out.probe_fields.extend(mc.probe_fields.clone());
-        out.use_types.extend(mc.use_types.clone());
-        out.use_tys.extend(mc.use_tys.clone());
-        out.schemes.extend(mc.schemes.clone());
+        out.modules.push(Arc::clone(mc));
     }
     out
 }
@@ -352,7 +343,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
 /// Check one module (memoized). Dependencies are checked first; only their
 /// self-contained schemes are used.
 #[salsa::tracked(returns(ref))]
-fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> ModuleCheck {
+fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck> {
     #[cfg(test)]
     CHECK_RUNS.with(|c| c.set(c.get() + 1));
     let mut deps = HashMap::new();
@@ -376,7 +367,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> ModuleCheck {
             .map(|t| (*t.index(db), module_own(db, *t)))
             .collect(),
     };
-    check_module(env, &deps)
+    Arc::new(check_module(env, &deps))
 }
 
 #[cfg(test)]

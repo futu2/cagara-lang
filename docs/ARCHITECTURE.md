@@ -65,14 +65,22 @@ responsible for semantic validity on the source compilation path.
 memoizes parsing, resolution, and type-checking queries for editor updates.
 `compile` is the shared boundary used by CLI and LSP to turn a checked
 workspace into relations and diagnostics. It preserves source definition
-identity even when names repeat. A definition also has a source-based cache
-key separate from its source-order index. After an edit, the compiler reuses a
-successful erased query only when that key and the checked facts of the
-definition's referenced definitions still match; failed results are rebuilt so
-their diagnostics always use current source spans. Dependency fingerprints are
-memoized within a compilation, so a shared helper chain is walked once. File
-access, incremental state, diagnostic formatting, and SQL dialect options
-remain outside the semantic tree.
+identity even when names repeat. A definition also has a source-based key
+separate from its source-order index. This key is an identity hint; it is not
+a proof that a query can be reused.
+
+Salsa memoizes exact per-definition facts: source, locations, closed types,
+overload choices, and referenced bindings. The incremental shell compares
+these facts and propagates changes through the dependency graph using an
+iterative worklist. Only successful, unaffected queries are reused. Moved
+definitions are rebuilt so `Rel::At` spans stay current, and failures are
+rendered against the latest text. Module inference is still memoized at module
+granularity; `TypeCheck` shares its immutable results across requests.
+
+`CompilerInput` and `ModuleSnapshot` expose the source graph and checker facts
+read-only to the compiler. Cache ownership and invalidation live in
+`incremental.rs` and `Workspace`; compilation and erasure consume immutable
+inputs. File access, diagnostic formatting, and SQL options stay in the shell.
 
 The compilation result is:
 
@@ -96,7 +104,7 @@ The current checked layer supports local, testable claims:
   output rows.
 - Erasure is structural and leaves no type-checking work to SQL lowering.
 
-The stronger purity claim still requires moving from the current workspace and
-`TypeCheck` APIs to an explicit immutable module snapshot and compilation
-result. That is a separate follow-up after the single compilation boundary is
-established.
+The compiler uses an explicit immutable input view and produces an owned
+compilation result. The shell still owns Salsa state and the checker uses
+mutable inference state internally; this boundary does not assert that every
+implementation phase is purely functional.

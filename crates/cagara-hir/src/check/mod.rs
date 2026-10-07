@@ -47,6 +47,7 @@
 //! The implementation is split by concern; see each module for its part:
 //! [`ty`], [`reduce`], [`unify`], [`overload`], [`infer`], [`print`].
 
+mod facts;
 mod infer;
 mod overload;
 mod print;
@@ -63,6 +64,7 @@ use std::sync::Arc;
 pub(crate) use reduce::*;
 pub(crate) use ty::*;
 
+pub(crate) use facts::{definition_facts, DefinitionFacts};
 pub use ty::Choice;
 /// What shape a definition's scheme has.
 ///

@@ -3,6 +3,7 @@
 
 use crate::compile::Compilation;
 use crate::db::{Database, ModuleInput, SourceFile};
+use crate::incremental::CachedCompilation;
 use crate::lower::{parse_module, ParsedModule};
 use crate::primitive::Prim;
 use crate::resolve::{module_own, module_scope};
@@ -94,11 +95,11 @@ pub struct Workspace {
     overlays: HashMap<PathBuf, String>,
     /// Immutable compilation result for the current root and source graph.
     /// Invalidated by the mutation methods below.
-    compile_cache: RefCell<Option<Compilation>>,
+    compile_cache: RefCell<Option<CachedCompilation>>,
     /// The last compilation remains available after an accepted edit so the
     /// compiler can reuse definitions whose source and checked dependencies
     /// are unchanged.
-    previous_compile_cache: RefCell<Option<Compilation>>,
+    previous_compile_cache: RefCell<Option<CachedCompilation>>,
 }
 
 impl Workspace {
@@ -300,21 +301,24 @@ impl Workspace {
     }
 
     pub(crate) fn compilation_cache(&self) -> Option<Compilation> {
-        self.compile_cache.borrow().clone()
+        self.compile_cache
+            .borrow()
+            .as_ref()
+            .map(|cached| cached.compilation.clone())
     }
 
     pub(crate) fn compilation_diagnostics(&self) -> Option<Vec<Diag>> {
         self.compile_cache
             .borrow()
             .as_ref()
-            .map(|compilation| compilation.diagnostics.clone())
+            .map(|cached| cached.compilation.diagnostics.clone())
     }
 
-    pub(crate) fn set_compilation_cache(&self, compilation: Compilation) {
+    pub(crate) fn set_compilation_cache(&self, compilation: CachedCompilation) {
         *self.compile_cache.borrow_mut() = Some(compilation);
     }
 
-    pub(crate) fn take_previous_compilation(&self) -> Option<Compilation> {
+    pub(crate) fn take_previous_compilation(&self) -> Option<CachedCompilation> {
         self.previous_compile_cache.borrow_mut().take()
     }
 

@@ -27,3 +27,4 @@ pub use db::{Database, SourceFile};
 pub use workspace::{Diag, Workspace};
 
 mod compile;
+mod incremental;

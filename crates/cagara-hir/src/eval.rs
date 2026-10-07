@@ -1150,6 +1150,7 @@ pub fn root_core_terms(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Co
 /// Previously a definition in any of the last three cases simply had no entry,
 /// so "a scalar", "an open-hole helper", and "evaluation blew up" were the same
 /// observation: a missing key. A caller could not report the third at all.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Elaborated {
     /// A query, with one term per overload-hole assignment.

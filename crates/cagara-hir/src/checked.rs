@@ -65,8 +65,16 @@ pub struct CheckedDef {
     /// previous behaviour, and it made an evaluator error indistinguishable
     /// from a definition that legitimately has no relational term.
     ///
-    /// `CheckedProgram::of` does not elaborate, so it leaves this `None`;
-    /// [`CheckedProgram::of_elaborated`] fills it in.
+    /// `CheckedProgram::of` does not elaborate, so it leaves this `None`, and
+    /// [`CheckedProgram::of_elaborated`] — the only thing that fills it in — is
+    /// test-only. So in a shipping build this field is *always* `None`, and the
+    /// compiler enforces it: `cfg(test)` here means no non-test code can observe
+    /// or construct a `Some`, which is stronger than documenting the invariant.
+    ///
+    /// Worth noting what it cost to get here. Three rounds of this field being
+    /// "`None` in practice" were each true and each unenforced, and the round
+    /// that mattered was the one that read the call graph instead of the docs.
+    #[cfg(test)]
     pub terms: Option<crate::eval::Elaborated>,
 }
 
@@ -76,6 +84,10 @@ impl CheckedDef {
     /// `None` covers every other case — not elaborated, not a query, failed —
     /// so callers that want terms should also consult
     /// [`CheckedDef::terms`] when the *reason* matters.
+    ///
+    /// `cfg(test)`, with the field: it can only ever be `Some` in a test build,
+    /// so a non-test accessor would return `None` unconditionally.
+    #[cfg(test)]
     pub fn query_terms(&self) -> Option<&[crate::CoreTerm]> {
         match self.terms.as_ref()? {
             crate::eval::Elaborated::Query(ts) => Some(ts),
@@ -179,7 +191,14 @@ impl CheckedProgram {
     /// gets a complete picture of what was checked.
     pub fn of(ws: &crate::workspace::Workspace) -> Self {
         let tc = crate::check::check(ws);
-        Self::from_type_check(ws, &tc, None)
+        #[cfg(test)]
+        {
+            Self::from_type_check(ws, &tc, None)
+        }
+        #[cfg(not(test))]
+        {
+            Self::from_type_check(ws, &tc)
+        }
     }
 
     /// [`CheckedProgram::of`], with definition bodies filled in **from the
@@ -231,13 +250,15 @@ impl CheckedProgram {
 
     /// [`CheckedProgram::of`], reusing a type check the caller already ran.
     ///
-    /// `bodies` is `None` for "not elaborated", which is recorded as
-    /// `CheckedDef::terms == None` rather than as an empty list: those are
-    /// different facts and a caller needs to tell them apart.
+    /// The `bodies` parameter is `cfg(test)`-only, like the field it fills, so a
+    /// non-test caller sees a single-argument constructor and cannot name an
+    /// evaluator type at all. That keeps the same "the oracle cannot leak into
+    /// the pipeline" property that gating `of_elaborated` established, at the
+    /// one other place it was still possible.
     pub fn from_type_check(
         ws: &crate::workspace::Workspace,
         tc: &TypeCheck,
-        bodies: Option<HashMap<(usize, usize), crate::eval::Elaborated>>,
+        #[cfg(test)] bodies: Option<HashMap<(usize, usize), crate::eval::Elaborated>>,
     ) -> Self {
         let mut out = CheckedProgram::new();
         for index in 0..ws.modules.len() {
@@ -283,6 +304,11 @@ impl CheckedProgram {
                     scalar: tc.def_scalar(index, def),
                     row: scheme_row(tc, index, def),
                     holes,
+                    // Only a test build can carry bodies: the field and the entry
+                    // point that fills it are both `cfg(test)`, so this initialiser
+                    // is too. A non-test build has no way to produce a `Some` and
+                    // no way to name the type — which is the invariant.
+                    #[cfg(test)]
                     terms: bodies
                         .as_ref()
                         .and_then(|b| b.get(&(index, def)).cloned()),

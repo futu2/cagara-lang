@@ -8,7 +8,11 @@ pub mod core;
 pub mod core_term;
 pub mod db;
 pub mod elaborate;
-pub mod eval;
+// The evaluator is the *oracle*, not a producer: nothing in the pipeline reads
+// its output, and everything here that could hand out a `Rel` or a body is
+// `cfg(test)`. The module is crate-private so its types — `Evaluator`,
+// `Elaborated`, `Value` — are not part of the published surface at all.
+pub(crate) mod eval;
 pub mod ir;
 pub mod lower;
 pub mod prims;

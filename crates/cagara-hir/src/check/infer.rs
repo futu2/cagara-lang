@@ -1714,518 +1714,592 @@ impl<'w> Checker<'w> {
     /// `Ok(true)` when solved, `Ok(false)` when it must wait.
     pub(crate) fn step(&mut self, c: &Cons, sp: Span) -> Result<bool, String> {
         match c {
-            Cons::Overload {
-                name,
-                module,
-                cands,
-                target,
-                origin,
-            } => {
-                let fits = self.fitting(*module, cands, target);
-                match fits.as_slice() {
-                    [] => {
-                        let shown: Vec<String> =
-                            cands.iter().map(|&i| self.cand_shown(*module, i)).collect();
-                        Err(format!(
-                            "no overload of `{}` matches {}; candidates: {}",
-                            op_name(name),
-                            self.show(target),
-                            shown.join(", ")
-                        ))
-                    }
-                    [i] => {
-                        let s = self.cand_scheme(*module, *i);
-                        if s.failed {
-                            return Err(self.failed_use(*module, *i));
-                        }
-                        let t = self.instantiate(&s, sp, None)?;
-                        self.unify(&t, target)?;
-                        let Origin::Site(site) = *origin else {
-                            return Err(format!(
-                                "internal error: unresolved hole of `{}`",
-                                op_name(name)
-                            ));
-                        };
-                        let (use_site, k) = decode(site);
-                        let key = *self.active.last().expect("solving inside a definition");
-                        self.record(key, use_site, k, Choice::Def(*module, *i));
-                        Ok(true)
-                    }
-                    _ => Ok(false),
-                }
+            Cons::Overload { .. } => self.step_overload(c, sp),
+            Cons::Filter { .. } => self.step_filter(c, sp),
+            Cons::Project { .. } => self.step_project(c, sp),
+            Cons::JoinOn { .. } => self.step_join_on(c, sp),
+            Cons::Set { .. } => self.step_set(c, sp),
+            Cons::Lit { .. } => self.step_lit(c, sp),
+            Cons::Within { .. } => self.step_within(c, sp),
+            Cons::Update { .. } => self.step_update(c, sp),
+            Cons::Omit { .. } => self.step_omit(c, sp),
+            Cons::MapKey { .. } => self.step_map_key(c, sp),
+            Cons::MapValue { .. } => self.step_map_value(c, sp),
+            Cons::Merge { .. } => self.step_merge(c, sp),
+            Cons::JoinOut { .. } => self.step_join_out(c, sp),
+        }
+    }
+
+    fn step_overload(&mut self, c: &Cons, sp: Span) -> Result<bool, String> {
+        let Cons::Overload {
+            name,
+            module,
+            cands,
+            target,
+            origin,
+        } = c
+        else {
+            unreachable!("dispatched on Cons::Overload")
+        };
+        let fits = self.fitting(*module, cands, target);
+        match fits.as_slice() {
+            [] => {
+                let shown: Vec<String> =
+                    cands.iter().map(|&i| self.cand_shown(*module, i)).collect();
+                Err(format!(
+                    "no overload of `{}` matches {}; candidates: {}",
+                    op_name(name),
+                    self.show(target),
+                    shown.join(", ")
+                ))
             }
-            Cons::Filter { pred, row } => match self.resolve(pred) {
-                Ty::Var(_) => Ok(false),
-                Ty::Con("bool", _) => Ok(true),
-                Ty::Con("expr", a) => {
-                    let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
-                    if is_join(&self.resolve(&r)) {
-                        return Err(rules::JOIN_ONLY.into());
-                    }
-                    self.place(Place::Where, &p)?;
-                    if matches!(self.resolve(row), Ty::Var(_)) {
-                        return Ok(false);
-                    }
-                    self.unify(row, &r)?;
-                    self.unify(&v, &con("bool")).map_err(|_| {
-                        format!("`where` needs a bool condition, found {}", self.show(&v))
-                    })?;
-                    Ok(true)
+            [i] => {
+                let s = self.cand_scheme(*module, *i);
+                if s.failed {
+                    return Err(self.failed_use(*module, *i));
                 }
-                o => Err(format!(
-                    "`where` needs a bool condition, found {}",
-                    self.show(&o)
-                )),
-            },
-            Cons::Project {
-                fields,
-                input,
-                output,
-                agg,
-            } => {
-                let stage = if *agg { "agg" } else { "select" };
-                // A mapped row with an open inner row cannot yet tell us the
-                // value type of a projected mapped label. Keep the projection
-                // pending until the `keyMap` term reduces; consuming it here
-                // would leave those values as unconstrained variables.
-                let (_, input_tail) = self.flatten(input);
-                if matches!(
-                    input_tail,
-                    Ty::Var(_) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..)
-                ) {
-                    return Ok(false);
-                }
-                let (fs, tail) = self.flatten(fields);
-                match tail {
-                    Ty::Empty => {}
-                    Ty::Var(_) | Ty::Rigid(..) if fs.is_empty() => return Ok(false),
-                    _ => {
-                        let msg = format!(
-                            "`{stage}` expects a record of column expressions, found {}",
-                            self.show(fields)
-                        );
-                        return Err(msg);
-                    }
-                }
-                if fs.is_empty() {
-                    return Err(format!("`{stage}` needs at least one field"));
-                }
-                if fs
-                    .iter()
-                    .any(|(_, t)| matches!(self.resolve(t), Ty::Var(_)))
-                {
-                    return Ok(false);
-                }
-                let mut out = Vec::new();
-                for (l, t) in fs {
-                    match self.resolve(&t) {
-                        Ty::Con(s, sa) if sa.is_empty() && SCALARS.contains(&s) => out.push((l, t)),
-                        Ty::Con("expr", a) => {
-                            let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
-                            if is_join(&self.resolve(&r)) {
-                                return Err(format!("field `{l}`: {}", rules::JOIN_ONLY));
-                            }
-                            self.stage_phase(&p, *agg)
-                                .map_err(|m| format!("field `{l}` {m}"))?;
-                            self.unify(input, &r)
-                                .map_err(|m| format!("field `{l}`: {m}"))?;
-                            out.push((l, v));
-                        }
-                        o => {
-                            let msg = format!("field `{l}` of `{stage}` must be a column expression or constant, found {}", self.show(&o));
-                            return Err(msg);
-                        }
-                    }
-                }
-                self.unify(&row(out, Ty::Empty), output)?;
+                let t = self.instantiate(&s, sp, None)?;
+                self.unify(&t, target)?;
+                let Origin::Site(site) = *origin else {
+                    return Err(format!(
+                        "internal error: unresolved hole of `{}`",
+                        op_name(name)
+                    ));
+                };
+                let (use_site, k) = decode(site);
+                let key = *self.active.last().expect("solving inside a definition");
+                self.record(key, use_site, k, Choice::Def(*module, *i));
                 Ok(true)
             }
-            Cons::JoinOn { pred, left, right } => {
-                let (p, r, v) = match self.resolve(pred) {
-                    Ty::Var(_) => return Ok(false),
-                    Ty::Con("bool", _) => return Ok(true),
-                    Ty::Con("expr", a) => (a[0].clone(), a[1].clone(), a[2].clone()),
-                    o => {
-                        return Err(format!(
-                            "a join predicate must be a bool expression, found {}",
-                            self.show(&o)
-                        ))
-                    }
-                };
-                self.place(Place::JoinOn, &p)?;
-                match self.resolve(&r) {
-                    Ty::Con("join", sides) => {
-                        if [left, right]
-                            .iter()
-                            .any(|t| matches!(self.resolve(t), Ty::Var(_)))
-                        {
-                            return Ok(false);
-                        }
-                        let (sl, sr) = (sides[0].clone(), sides[1].clone());
-                        self.unify(left, &sl)
-                            .map_err(|m| format!("left join input: {m}"))?;
-                        self.unify(right, &sr)
-                            .map_err(|m| format!("right join input: {m}"))?;
-                    }
-                    Ty::Var(_) => {
-                        self.unify(&r, &Ty::Con("join", vec![left.clone(), right.clone()]))?
-                    }
-                    o => {
-                        let (fs, _) = self.flatten(&o);
-                        let n = fs.first().map_or("x", |(k, _)| k.as_str());
-                        return Err(rules::needs_side(n));
-                    }
+            _ => Ok(false),
+        }
+    }
+
+    fn step_filter(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+        let Cons::Filter { pred, row } = c else {
+            unreachable!("dispatched on Cons::Filter")
+        };
+        match self.resolve(pred) {
+            Ty::Var(_) => Ok(false),
+            Ty::Con("bool", _) => Ok(true),
+            Ty::Con("expr", a) => {
+                let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
+                if is_join(&self.resolve(&r)) {
+                    return Err(rules::JOIN_ONLY.into());
                 }
+                self.place(Place::Where, &p)?;
+                if matches!(self.resolve(row), Ty::Var(_)) {
+                    return Ok(false);
+                }
+                self.unify(row, &r)?;
                 self.unify(&v, &con("bool")).map_err(|_| {
-                    format!("a join predicate must be bool, found {}", self.show(&v))
+                    format!("`where` needs a bool condition, found {}", self.show(&v))
                 })?;
                 Ok(true)
             }
-            Cons::Set { left, right, out } => {
-                self.unify(left, right)
-                    .map_err(|m| format!("set-operation inputs: {m}"))?;
-                self.unify(out, left)
-                    .map_err(|m| format!("set-operation output: {m}"))?;
-                Ok(true)
+            o => Err(format!(
+                "`where` needs a bool condition, found {}",
+                self.show(&o)
+            )),
+        }
+    }
+
+    fn step_project(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+        let Cons::Project {
+            fields,
+            input,
+            output,
+            agg,
+        } = c
+        else {
+            unreachable!("dispatched on Cons::Project")
+        };
+        let stage = if *agg { "agg" } else { "select" };
+        // A mapped row with an open inner row cannot yet tell us the
+        // value type of a projected mapped label. Keep the projection
+        // pending until the `keyMap` term reduces; consuming it here
+        // would leave those values as unconstrained variables.
+        let (_, input_tail) = self.flatten(input);
+        if matches!(
+            input_tail,
+            Ty::Var(_) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..)
+        ) {
+            return Ok(false);
+        }
+        let (fs, tail) = self.flatten(fields);
+        match tail {
+            Ty::Empty => {}
+            Ty::Var(_) | Ty::Rigid(..) if fs.is_empty() => return Ok(false),
+            _ => {
+                let msg = format!(
+                    "`{stage}` expects a record of column expressions, found {}",
+                    self.show(fields)
+                );
+                return Err(msg);
             }
-            Cons::Lit { lit, target } => match self.resolve(target) {
-                Ty::Var(_) => Ok(false),
-                _ => self.lift(lit, target).map(|_| true),
-            },
-            Cons::Within { req, row } => match self.resolve(row) {
-                Ty::Var(_) => Ok(false),
-                _ => self.unify(row, req).map(|_| true),
-            },
-            Cons::Update {
-                fields,
-                input,
-                output,
-                result,
-            } => {
-                // The record of new values must be known, and so must the
-                // input's columns: the output depends on both.
-                let (fs, tail) = self.flatten(fields);
-                match tail {
-                    Ty::Empty => {}
-                    Ty::Var(_) | Ty::Rigid(..) if fs.is_empty() => return Ok(false),
-                    _ => {
-                        return Err(format!(
-                            "`update` expects a record of column expressions, found {}",
-                            self.show(fields)
-                        ))
+        }
+        if fs.is_empty() {
+            return Err(format!("`{stage}` needs at least one field"));
+        }
+        if fs
+            .iter()
+            .any(|(_, t)| matches!(self.resolve(t), Ty::Var(_)))
+        {
+            return Ok(false);
+        }
+        let mut out = Vec::new();
+        for (l, t) in fs {
+            match self.resolve(&t) {
+                Ty::Con(s, sa) if sa.is_empty() && SCALARS.contains(&s) => out.push((l, t)),
+                Ty::Con("expr", a) => {
+                    let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
+                    if is_join(&self.resolve(&r)) {
+                        return Err(format!("field `{l}`: {}", rules::JOIN_ONLY));
                     }
+                    self.stage_phase(&p, *agg)
+                        .map_err(|m| format!("field `{l}` {m}"))?;
+                    self.unify(input, &r)
+                        .map_err(|m| format!("field `{l}`: {m}"))?;
+                    out.push((l, v));
                 }
-                if fs.is_empty() {
-                    return Err("`update` needs at least one field".into());
+                o => {
+                    let msg = format!("field `{l}` of `{stage}` must be a column expression or constant, found {}", self.show(&o));
+                    return Err(msg);
                 }
-                let mut seen: Vec<String> = Vec::new();
-                for (n, _) in &fs {
-                    if seen.contains(n) {
-                        return Err(format!("field `{n}` appears twice in `update`"));
-                    }
-                    seen.push(n.clone());
-                }
-                // Each updated expression is checked exactly like a `select`
-                // field: row-phase, over the input row. A scalar constant is
-                // allowed and lifted the same way.
-                let mut values = Vec::new();
-                for (l, t) in &fs {
-                    match self.resolve(t) {
-                        Ty::Con(s, sa) if sa.is_empty() && SCALARS.contains(&s) => {
-                            values.push((l.clone(), None, t.clone()))
-                        }
-                        Ty::Con("expr", a) => {
-                            let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
-                            if is_join(&self.resolve(&r)) {
-                                return Err(format!("field `{l}`: {}", rules::JOIN_ONLY));
-                            }
-                            self.stage_phase(&p, false)
-                                .map_err(|m| format!("field `{l}` {m}"))?;
-                            if matches!(self.resolve(input), Ty::Var(_)) {
-                                return Ok(false);
-                            }
-                            self.unify(input, &r)
-                                .map_err(|m| format!("field `{l}`: {m}"))?;
-                            values.push((l.clone(), Some(v.clone()), v));
-                        }
-                        o => {
-                            return Err(format!(
-                                "field `{l}` of `update` must be a column expression or \
-                                 constant, found {}",
-                                self.show(&o)
-                            ))
-                        }
-                    }
-                }
-                let (ifs, itail) = self.flatten(input);
-                if matches!(
-                    itail,
-                    Ty::Var(_) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..)
-                ) {
-                    return Ok(false);
-                }
-                let named = ifs.iter().map(|(k, _)| (k.clone(), ())).collect::<Vec<_>>();
-                let cols = crate::schema::merge_columns(&named, &fs)?;
-                // Each output column keeps the input's type, unless the field
-                // list replaced it; a name the input does not have is new, so
-                // its type comes from the new expression alone.
-                let out = cols
-                    .into_iter()
-                    .map(|name| {
-                        let old = ifs.iter().find(|(k, _)| *k == name).map(|(_, t)| t.clone());
-                        match values.iter().find(|(k, _, _)| *k == name) {
-                            Some((_, _, v)) => (name, v.clone()),
-                            None => (name, old.unwrap_or_else(|| self.fresh())),
-                        }
-                    })
-                    .collect();
-                // `output` is the row of updated fields (`s`), while
-                // `result` is the merged query row (`merge r s`).
-                let updated = values
+            }
+        }
+        self.unify(&row(out, Ty::Empty), output)?;
+        Ok(true)
+    }
+
+    fn step_join_on(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+        let Cons::JoinOn { pred, left, right } = c else {
+            unreachable!("dispatched on Cons::JoinOn")
+        };
+        let (p, r, v) = match self.resolve(pred) {
+            Ty::Var(_) => return Ok(false),
+            Ty::Con("bool", _) => return Ok(true),
+            Ty::Con("expr", a) => (a[0].clone(), a[1].clone(), a[2].clone()),
+            o => {
+                return Err(format!(
+                    "a join predicate must be a bool expression, found {}",
+                    self.show(&o)
+                ))
+            }
+        };
+        self.place(Place::JoinOn, &p)?;
+        match self.resolve(&r) {
+            Ty::Con("join", sides) => {
+                if [left, right]
                     .iter()
-                    .map(|(name, _, value)| (name.clone(), value.clone()))
-                    .collect();
-                self.unify(&row(updated, Ty::Empty), output)?;
-                self.unify(&row_or_tail(out, itail), result)?;
-                Ok(true)
-            }
-            Cons::Omit { key, input, output } => {
-                // `omit` *is* this equation. The unifier's own leftover rule
-                // binds `output` to the rest of the row in the input's order,
-                // and a missing key is reported through the ordinary
-                // `missing()` path. No column computation happens here.
-                if matches!(self.resolve(input), Ty::Var(_)) {
-                    return Ok(false);
-                }
-                let t = self.fresh();
-                self.unify(input, &row(vec![(key.clone(), t)], output.clone()))?;
-                Ok(true)
-            }
-            Cons::MapKey {
-                marker,
-                key,
-                input,
-                output,
-            } => {
-                // `output ~ keyMap key input`, reduced as soon as both the
-                // mapper and the row are known.
-                //
-                // The invariant this maintains is that **a `MapKey` term's row
-                // is the input row**: `keyMap m r` denotes `m` applied to `r`,
-                // and `r` itself stays unrenamed. Binding `output` to the
-                // *renamed* row here would encode the mapping twice — once in
-                // the term and once in the row — so a later stage would apply
-                // it again (`prefix "u_" & suffix "_v2"` produced `u_u_id_v2`).
-                let mut key = self.resolve(key);
-                // A deferred helper carries its affix as an ordinary string,
-                // so the mapper witness can be rebound when that helper is
-                // instantiated. Preserve the stage direction while doing so;
-                // otherwise a stale mapper variable can make `suffix` act as
-                // a prefix.
-                if let Ty::KeyAffix(_, affix) = &key {
-                    let constructor = match marker {
-                        KeyMarker::Prefix => "KeyMapPrefix",
-                        KeyMarker::Suffix => "KeyMapSuffix",
-                        _ => "",
-                    };
-                    if !constructor.is_empty() {
-                        key = Ty::KeyAffix(constructor, affix.clone());
-                    }
-                }
-                let (input_fields, input_tail) = self.flatten(input);
-                let input = row_or_tail(input_fields, input_tail);
-                let mut output_ty = self.resolve(output);
-                if let Ty::MapKey(mapper, row) = output_ty.clone() {
-                    if let Ty::KeyAffix(_, affix) = self.resolve(&mapper) {
-                        let constructor = match marker {
-                            KeyMarker::Prefix => "KeyMapPrefix",
-                            KeyMarker::Suffix => "KeyMapSuffix",
-                            _ => "",
-                        };
-                        if !constructor.is_empty() {
-                            output_ty = Ty::MapKey(Box::new(Ty::KeyAffix(constructor, affix)), row);
-                        }
-                    }
-                }
-                if let Ty::MapKey(mapper, row) = output_ty.clone() {
-                    self.unify(&mapper, &key)?;
-                    self.unify(&row, &input)?;
-                    output_ty = self.zonk(output);
-                }
-                match reduce_mapkey(&key, &input) {
-                    Some(reduced) => {
-                        let stage = match KeyMap::of_ty(&key) {
-                            Some(KeyMap::Suffix(_)) => "suffix",
-                            _ => "prefix",
-                        };
-                        self.unify(&reduced, &output_ty)
-                            .map_err(|m| format!("`{stage}` cannot map its input row: {m}"))?;
-                        Ok(true)
-                    }
-                    // Not reducible *yet*: the mapper is still a helper's
-                    // variable, or the row is still open. Stay pending rather
-                    // than binding `output` to the symbolic term: once bound, it
-                    // could never become the rewritten row, so the reduction
-                    // above would never fire. Waiting costs nothing — `solve`
-                    // re-runs this after every binding.
-                    None => Ok(false),
-                }
-            }
-            Cons::MapValue {
-                wrapper,
-                input,
-                output,
-            } => {
-                // `mapValue` wraps each field type.
-                // If the tail is open (Var or Rigid), defer as a MapValue term.
-                let (ifs, itail) = self.flatten(input);
-
-                // Parse the wrapper
-                let vm = match wrapper.as_str() {
-                    "nullable" => ValueMap::AsNullable,
-                    "list" => ValueMap::AsList,
-                    "id" => ValueMap::Id,
-                    _ => return Err(format!("unknown wrapper `{}`", wrapper)),
-                };
-
-                // Handle Id early: no transformation needed
-                if matches!(vm, ValueMap::Id) {
-                    self.unify(input, output)?;
-                    return Ok(true);
-                }
-
-                let input_row = row_or_tail(ifs.clone(), itail.clone());
-
-                // Try to reduce at type level first
-                match reduce_mapvalue(&vm, &input_row) {
-                    Some(reduced) => {
-                        // Successful eager reduction - unify with output
-                        self.unify(&reduced, output)?;
-                        Ok(true)
-                    }
-                    None => {
-                        // Cannot reduce yet (open row)
-                        match itail {
-                            Ty::Empty => {
-                                // Closed row but reduction failed: should not happen
-                                // for ValueMap since it has no validation errors
-                                unreachable!("reduce_mapvalue should succeed on closed rows")
-                            }
-                            Ty::Var(_) => {
-                                // Open variable tail: wait for it to be bound
-                                Ok(false)
-                            }
-                            Ty::Rigid(..) => {
-                                // Open rigid tail: defer as a MapValue term
-                                let deferred = Ty::MapValue(vm, Box::new(input_row));
-                                self.unify(&deferred, output)?;
-                                Ok(true)
-                            }
-                            _ => unreachable!("flatten only returns Empty, Var, or Rigid tails"),
-                        }
-                    }
-                }
-            }
-            Cons::Merge { left, right, out } => {
-                // Merge combines two rows; wait if either is open
-                let (lf, lt) = self.flatten(left);
-                let (rf, rt) = self.flatten(right);
-                if !matches!(lt, Ty::Empty) || !matches!(rt, Ty::Empty) {
-                    return Ok(false);
-                }
-                // Merge logic: right-wins, keeps left positions, appends right-only
-                let mut merged: Vec<(String, Ty)> = lf.clone();
-                for (rname, rty) in &rf {
-                    if let Some(pos) = merged.iter().position(|(n, _)| n == rname) {
-                        // Replace with right's type
-                        merged[pos].1 = rty.clone();
-                    } else {
-                        // Append new field
-                        merged.push((rname.clone(), rty.clone()));
-                    }
-                }
-                self.unify(&row(merged, Ty::Empty), out)?;
-                Ok(true)
-            }
-            Cons::JoinOut {
-                left,
-                right,
-                out,
-                nullable,
-                left_only,
-            } => {
-                let (lf, lt) = self.flatten(left);
-                let (rf, rt) = self.flatten(right);
-                if !matches!(lt, Ty::Empty) || !matches!(rt, Ty::Empty) {
-                    // Wait for both inputs; with a rigid tail the output
-                    // columns are not statically known.
-                    return Ok(false);
-                }
-                // The far side of an outer join may be missing: its columns
-                // become `maybe` (once; `maybe (maybe a)` is `maybe a`). That
-                // needs to know which already are: wait for a column whose
-                // type may still turn out to be a `maybe`.
-                let open = |t: &Ty| match self.resolve(t) {
-                    Ty::Var(v) => !self.vars[v as usize].nonnull,
-                    _ => false,
-                };
-                if (nullable.0 && lf.iter().any(|(_, t)| open(t)))
-                    || (nullable.1 && rf.iter().any(|(_, t)| open(t)))
+                    .any(|t| matches!(self.resolve(t), Ty::Var(_)))
                 {
                     return Ok(false);
                 }
-                if *left_only {
-                    self.unify(&row(lf, Ty::Empty), out)?;
-                    return Ok(true);
-                }
-                let wrap = |this: &Self, on: bool, (k, t): (String, Ty)| match this.resolve(&t) {
-                    Ty::Con("maybe", _) => (k, t),
-                    _ if on => (k, Ty::Con("maybe", vec![t])),
-                    _ => (k, t),
-                };
-                let lf: Vec<_> = lf.into_iter().map(|c| wrap(self, nullable.0, c)).collect();
-                let rf: Vec<_> = rf.into_iter().map(|c| wrap(self, nullable.1, c)).collect();
-                let actual = row(rules::join_columns(&lf, &rf), Ty::Empty);
-                // An annotated join wrapper exposes `merge r s` in its result
-                // type. Bind those row operands from the actual inputs before
-                // comparing the computed output, so fields discovered by the
-                // predicate (`.<id`) cannot leave the public merge open.
-                let public_merge = matches!(self.resolve(out), Ty::Merge(..));
-                if let Ty::Merge(al, ar) = self.resolve(out) {
-                    let bind_input = |this: &mut Self, input: &Ty, schema: &Ty| {
-                        match this.resolve(schema) {
-                            // Outer-join signatures wrap the missing side in
-                            // `mapValue`; the join input itself still has the
-                            // unwrapped row.
-                            Ty::MapValue(_, row) => this.unify(input, &row),
-                            _ => this.unify(input, schema),
-                        }
-                    };
-                    bind_input(self, left, &al)?;
-                    bind_input(self, right, &ar)?;
-                }
-                if public_merge {
-                    // Reduce the public row former after its operands have
-                    // been tied to the concrete inputs. This keeps later
-                    // projections from seeing an open `merge` term. The
-                    // public type is right-biased; the runtime join retains
-                    // its established left-column collision behavior.
-                    let Ty::Merge(al, ar) = self.resolve(out) else {
-                        unreachable!("join output changed while resolving its merge");
-                    };
-                    let (alf, alt) = self.flatten(&al);
-                    let (arf, art) = self.flatten(&ar);
-                    let al = row_or_tail(alf, alt);
-                    let ar = row_or_tail(arf, art);
-                    if let Some(public_row) = reduce_merge(&al, &ar) {
-                        self.unify(&public_row, out)?;
-                    }
-                } else {
-                    self.unify(&actual, out)?;
-                }
-                Ok(true)
+                let (sl, sr) = (sides[0].clone(), sides[1].clone());
+                self.unify(left, &sl)
+                    .map_err(|m| format!("left join input: {m}"))?;
+                self.unify(right, &sr)
+                    .map_err(|m| format!("right join input: {m}"))?;
+            }
+            Ty::Var(_) => self.unify(&r, &Ty::Con("join", vec![left.clone(), right.clone()]))?,
+            o => {
+                let (fs, _) = self.flatten(&o);
+                let n = fs.first().map_or("x", |(k, _)| k.as_str());
+                return Err(rules::needs_side(n));
             }
         }
+        self.unify(&v, &con("bool"))
+            .map_err(|_| format!("a join predicate must be bool, found {}", self.show(&v)))?;
+        Ok(true)
+    }
+
+    fn step_set(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+        let Cons::Set { left, right, out } = c else {
+            unreachable!("dispatched on Cons::Set")
+        };
+        self.unify(left, right)
+            .map_err(|m| format!("set-operation inputs: {m}"))?;
+        self.unify(out, left)
+            .map_err(|m| format!("set-operation output: {m}"))?;
+        Ok(true)
+    }
+
+    fn step_lit(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+        let Cons::Lit { lit, target } = c else {
+            unreachable!("dispatched on Cons::Lit")
+        };
+        match self.resolve(target) {
+            Ty::Var(_) => Ok(false),
+            _ => self.lift(lit, target).map(|_| true),
+        }
+    }
+
+    fn step_within(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+        let Cons::Within { req, row } = c else {
+            unreachable!("dispatched on Cons::Within")
+        };
+        match self.resolve(row) {
+            Ty::Var(_) => Ok(false),
+            _ => self.unify(row, req).map(|_| true),
+        }
+    }
+
+    /// The record of new values must be known, and so must the
+    /// input's columns: the output depends on both.
+    fn step_update(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+        let Cons::Update {
+            fields,
+            input,
+            output,
+            result,
+        } = c
+        else {
+            unreachable!("dispatched on Cons::Update")
+        };
+        let (fs, tail) = self.flatten(fields);
+        match tail {
+            Ty::Empty => {}
+            Ty::Var(_) | Ty::Rigid(..) if fs.is_empty() => return Ok(false),
+            _ => {
+                return Err(format!(
+                    "`update` expects a record of column expressions, found {}",
+                    self.show(fields)
+                ))
+            }
+        }
+        if fs.is_empty() {
+            return Err("`update` needs at least one field".into());
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for (n, _) in &fs {
+            if seen.contains(n) {
+                return Err(format!("field `{n}` appears twice in `update`"));
+            }
+            seen.push(n.clone());
+        }
+        // Each updated expression is checked exactly like a `select`
+        // field: row-phase, over the input row. A scalar constant is
+        // allowed and lifted the same way.
+        let mut values = Vec::new();
+        for (l, t) in &fs {
+            match self.resolve(t) {
+                Ty::Con(s, sa) if sa.is_empty() && SCALARS.contains(&s) => {
+                    values.push((l.clone(), None, t.clone()))
+                }
+                Ty::Con("expr", a) => {
+                    let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
+                    if is_join(&self.resolve(&r)) {
+                        return Err(format!("field `{l}`: {}", rules::JOIN_ONLY));
+                    }
+                    self.stage_phase(&p, false)
+                        .map_err(|m| format!("field `{l}` {m}"))?;
+                    if matches!(self.resolve(input), Ty::Var(_)) {
+                        return Ok(false);
+                    }
+                    self.unify(input, &r)
+                        .map_err(|m| format!("field `{l}`: {m}"))?;
+                    values.push((l.clone(), Some(v.clone()), v));
+                }
+                o => {
+                    return Err(format!(
+                        "field `{l}` of `update` must be a column expression or \
+                                 constant, found {}",
+                        self.show(&o)
+                    ))
+                }
+            }
+        }
+        let (ifs, itail) = self.flatten(input);
+        if matches!(
+            itail,
+            Ty::Var(_) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..)
+        ) {
+            return Ok(false);
+        }
+        let named = ifs.iter().map(|(k, _)| (k.clone(), ())).collect::<Vec<_>>();
+        let cols = crate::schema::merge_columns(&named, &fs)?;
+        // Each output column keeps the input's type, unless the field
+        // list replaced it; a name the input does not have is new, so
+        // its type comes from the new expression alone.
+        let out = cols
+            .into_iter()
+            .map(|name| {
+                let old = ifs.iter().find(|(k, _)| *k == name).map(|(_, t)| t.clone());
+                match values.iter().find(|(k, _, _)| *k == name) {
+                    Some((_, _, v)) => (name, v.clone()),
+                    None => (name, old.unwrap_or_else(|| self.fresh())),
+                }
+            })
+            .collect();
+        // `output` is the row of updated fields (`s`), while
+        // `result` is the merged query row (`merge r s`).
+        let updated = values
+            .iter()
+            .map(|(name, _, value)| (name.clone(), value.clone()))
+            .collect();
+        self.unify(&row(updated, Ty::Empty), output)?;
+        self.unify(&row_or_tail(out, itail), result)?;
+        Ok(true)
+    }
+
+    /// `omit` *is* this equation. The unifier's own leftover rule
+    /// binds `output` to the rest of the row in the input's order,
+    /// and a missing key is reported through the ordinary
+    /// `missing()` path. No column computation happens here.
+    fn step_omit(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+        let Cons::Omit { key, input, output } = c else {
+            unreachable!("dispatched on Cons::Omit")
+        };
+        if matches!(self.resolve(input), Ty::Var(_)) {
+            return Ok(false);
+        }
+        let t = self.fresh();
+        self.unify(input, &row(vec![(key.clone(), t)], output.clone()))?;
+        Ok(true)
+    }
+
+    /// `output ~ keyMap key input`, reduced as soon as both the
+    /// mapper and the row are known.
+    ///
+    /// The invariant this maintains is that **a `MapKey` term's row
+    /// is the input row**: `keyMap m r` denotes `m` applied to `r`,
+    /// and `r` itself stays unrenamed. Binding `output` to the
+    /// *renamed* row here would encode the mapping twice — once in
+    /// the term and once in the row — so a later stage would apply
+    /// it again (`prefix "u_" & suffix "_v2"` produced `u_u_id_v2`).
+    fn step_map_key(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+        let Cons::MapKey {
+            marker,
+            key,
+            input,
+            output,
+        } = c
+        else {
+            unreachable!("dispatched on Cons::MapKey")
+        };
+        let mut key = self.resolve(key);
+        // A deferred helper carries its affix as an ordinary string,
+        // so the mapper witness can be rebound when that helper is
+        // instantiated. Preserve the stage direction while doing so;
+        // otherwise a stale mapper variable can make `suffix` act as
+        // a prefix.
+        if let Ty::KeyAffix(_, affix) = &key {
+            let constructor = match marker {
+                KeyMarker::Prefix => "KeyMapPrefix",
+                KeyMarker::Suffix => "KeyMapSuffix",
+                _ => "",
+            };
+            if !constructor.is_empty() {
+                key = Ty::KeyAffix(constructor, affix.clone());
+            }
+        }
+        let (input_fields, input_tail) = self.flatten(input);
+        let input = row_or_tail(input_fields, input_tail);
+        let mut output_ty = self.resolve(output);
+        if let Ty::MapKey(mapper, row) = output_ty.clone() {
+            if let Ty::KeyAffix(_, affix) = self.resolve(&mapper) {
+                let constructor = match marker {
+                    KeyMarker::Prefix => "KeyMapPrefix",
+                    KeyMarker::Suffix => "KeyMapSuffix",
+                    _ => "",
+                };
+                if !constructor.is_empty() {
+                    output_ty = Ty::MapKey(Box::new(Ty::KeyAffix(constructor, affix)), row);
+                }
+            }
+        }
+        if let Ty::MapKey(mapper, row) = output_ty.clone() {
+            self.unify(&mapper, &key)?;
+            self.unify(&row, &input)?;
+            output_ty = self.zonk(output);
+        }
+        match reduce_mapkey(&key, &input) {
+            Some(reduced) => {
+                let stage = match KeyMap::of_ty(&key) {
+                    Some(KeyMap::Suffix(_)) => "suffix",
+                    _ => "prefix",
+                };
+                self.unify(&reduced, &output_ty)
+                    .map_err(|m| format!("`{stage}` cannot map its input row: {m}"))?;
+                Ok(true)
+            }
+            // Not reducible *yet*: the mapper is still a helper's
+            // variable, or the row is still open. Stay pending rather
+            // than binding `output` to the symbolic term: once bound, it
+            // could never become the rewritten row, so the reduction
+            // above would never fire. Waiting costs nothing — `solve`
+            // re-runs this after every binding.
+            None => Ok(false),
+        }
+    }
+
+    /// `mapValue` wraps each field type.
+    /// If the tail is open (Var or Rigid), defer as a MapValue term.
+    fn step_map_value(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+        let Cons::MapValue {
+            wrapper,
+            input,
+            output,
+        } = c
+        else {
+            unreachable!("dispatched on Cons::MapValue")
+        };
+        let (ifs, itail) = self.flatten(input);
+
+        // Parse the wrapper
+        let vm = match wrapper.as_str() {
+            "nullable" => ValueMap::AsNullable,
+            "list" => ValueMap::AsList,
+            "id" => ValueMap::Id,
+            _ => return Err(format!("unknown wrapper `{}`", wrapper)),
+        };
+
+        // Handle Id early: no transformation needed
+        if matches!(vm, ValueMap::Id) {
+            self.unify(input, output)?;
+            return Ok(true);
+        }
+
+        let input_row = row_or_tail(ifs.clone(), itail.clone());
+
+        // Try to reduce at type level first
+        match reduce_mapvalue(&vm, &input_row) {
+            Some(reduced) => {
+                // Successful eager reduction - unify with output
+                self.unify(&reduced, output)?;
+                Ok(true)
+            }
+            None => {
+                // Cannot reduce yet (open row)
+                match itail {
+                    Ty::Empty => {
+                        // Closed row but reduction failed: should not happen
+                        // for ValueMap since it has no validation errors
+                        unreachable!("reduce_mapvalue should succeed on closed rows")
+                    }
+                    Ty::Var(_) => {
+                        // Open variable tail: wait for it to be bound
+                        Ok(false)
+                    }
+                    Ty::Rigid(..) => {
+                        // Open rigid tail: defer as a MapValue term
+                        let deferred = Ty::MapValue(vm, Box::new(input_row));
+                        self.unify(&deferred, output)?;
+                        Ok(true)
+                    }
+                    _ => unreachable!("flatten only returns Empty, Var, or Rigid tails"),
+                }
+            }
+        }
+    }
+
+    /// Merge combines two rows; wait if either is open
+    fn step_merge(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+        let Cons::Merge { left, right, out } = c else {
+            unreachable!("dispatched on Cons::Merge")
+        };
+        let (lf, lt) = self.flatten(left);
+        let (rf, rt) = self.flatten(right);
+        if !matches!(lt, Ty::Empty) || !matches!(rt, Ty::Empty) {
+            return Ok(false);
+        }
+        // Merge logic: right-wins, keeps left positions, appends right-only
+        let mut merged: Vec<(String, Ty)> = lf.clone();
+        for (rname, rty) in &rf {
+            if let Some(pos) = merged.iter().position(|(n, _)| n == rname) {
+                // Replace with right's type
+                merged[pos].1 = rty.clone();
+            } else {
+                // Append new field
+                merged.push((rname.clone(), rty.clone()));
+            }
+        }
+        self.unify(&row(merged, Ty::Empty), out)?;
+        Ok(true)
+    }
+
+    fn step_join_out(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+        let Cons::JoinOut {
+            left,
+            right,
+            out,
+            nullable,
+            left_only,
+        } = c
+        else {
+            unreachable!("dispatched on Cons::JoinOut")
+        };
+        let (lf, lt) = self.flatten(left);
+        let (rf, rt) = self.flatten(right);
+        if !matches!(lt, Ty::Empty) || !matches!(rt, Ty::Empty) {
+            // Wait for both inputs; with a rigid tail the output
+            // columns are not statically known.
+            return Ok(false);
+        }
+        // The far side of an outer join may be missing: its columns
+        // become `maybe` (once; `maybe (maybe a)` is `maybe a`). That
+        // needs to know which already are: wait for a column whose
+        // type may still turn out to be a `maybe`.
+        let open = |t: &Ty| match self.resolve(t) {
+            Ty::Var(v) => !self.vars[v as usize].nonnull,
+            _ => false,
+        };
+        if (nullable.0 && lf.iter().any(|(_, t)| open(t)))
+            || (nullable.1 && rf.iter().any(|(_, t)| open(t)))
+        {
+            return Ok(false);
+        }
+        if *left_only {
+            self.unify(&row(lf, Ty::Empty), out)?;
+            return Ok(true);
+        }
+        let wrap = |this: &Self, on: bool, (k, t): (String, Ty)| match this.resolve(&t) {
+            Ty::Con("maybe", _) => (k, t),
+            _ if on => (k, Ty::Con("maybe", vec![t])),
+            _ => (k, t),
+        };
+        let lf: Vec<_> = lf.into_iter().map(|c| wrap(self, nullable.0, c)).collect();
+        let rf: Vec<_> = rf.into_iter().map(|c| wrap(self, nullable.1, c)).collect();
+        let actual = row(rules::join_columns(&lf, &rf), Ty::Empty);
+        // An annotated join wrapper exposes `merge r s` in its result
+        // type. Bind those row operands from the actual inputs before
+        // comparing the computed output, so fields discovered by the
+        // predicate (`.<id`) cannot leave the public merge open.
+        let public_merge = matches!(self.resolve(out), Ty::Merge(..));
+        if let Ty::Merge(al, ar) = self.resolve(out) {
+            let bind_input = |this: &mut Self, input: &Ty, schema: &Ty| {
+                match this.resolve(schema) {
+                    // Outer-join signatures wrap the missing side in
+                    // `mapValue`; the join input itself still has the
+                    // unwrapped row.
+                    Ty::MapValue(_, row) => this.unify(input, &row),
+                    _ => this.unify(input, schema),
+                }
+            };
+            bind_input(self, left, &al)?;
+            bind_input(self, right, &ar)?;
+        }
+        if public_merge {
+            // Reduce the public row former after its operands have
+            // been tied to the concrete inputs. This keeps later
+            // projections from seeing an open `merge` term. The
+            // public type is right-biased; the runtime join retains
+            // its established left-column collision behavior.
+            let Ty::Merge(al, ar) = self.resolve(out) else {
+                unreachable!("join output changed while resolving its merge");
+            };
+            let (alf, alt) = self.flatten(&al);
+            let (arf, art) = self.flatten(&ar);
+            let al = row_or_tail(alf, alt);
+            let ar = row_or_tail(arf, art);
+            if let Some(public_row) = reduce_merge(&al, &ar) {
+                self.unify(&public_row, out)?;
+            }
+        } else {
+            self.unify(&actual, out)?;
+        }
+        Ok(true)
     }
 
     /// Phase rules for one `select` / `agg` field (messages follow the label).

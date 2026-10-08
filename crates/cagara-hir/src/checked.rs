@@ -184,7 +184,7 @@ impl CheckedQuery {
             .at(origin));
         }
         refs_columns(&pred, &input.row, "where", origin)?;
-        let row = input.row.clone();
+        let row = Arc::clone(&input.row);
         Ok(CheckedQuery {
             row,
             node: CheckedQueryNode::Where {
@@ -268,7 +268,7 @@ impl CheckedQuery {
             place(Place::Key, k, origin)?;
             refs_columns(k, &input.row, "order", origin)?;
         }
-        let row = input.row.clone();
+        let row = Arc::clone(&input.row);
         Ok(CheckedQuery {
             row,
             node: CheckedQueryNode::Order {
@@ -286,7 +286,7 @@ impl CheckedQuery {
                 Error::new(format!("`limit` needs a non-negative count, got {n}")).at(origin),
             );
         }
-        let row = input.row.clone();
+        let row = Arc::clone(&input.row);
         Ok(CheckedQuery {
             row,
             node: CheckedQueryNode::Limit {
@@ -304,7 +304,7 @@ impl CheckedQuery {
                 Error::new(format!("`offset` needs a non-negative count, got {n}")).at(origin),
             );
         }
-        let row = input.row.clone();
+        let row = Arc::clone(&input.row);
         Ok(CheckedQuery {
             row,
             node: CheckedQueryNode::Offset {
@@ -317,7 +317,7 @@ impl CheckedQuery {
 
     /// `distinct`.
     pub fn distinct(input: CheckedQuery, origin: Origin) -> Result<Self, Error> {
-        let row = input.row.clone();
+        let row = Arc::clone(&input.row);
         Ok(CheckedQuery {
             row,
             node: CheckedQueryNode::Distinct(Box::new(input)),

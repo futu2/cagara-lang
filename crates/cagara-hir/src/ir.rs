@@ -104,9 +104,7 @@ impl Expr {
                 Ok(Phase::Agg)
             }
             Expr::Win(..) => {
-                self.children()
-                    .into_iter()
-                    .try_for_each(|a| row_only(a, "a window argument"))?;
+                self.try_for_each_child(|child| row_only(child, "a window argument"))?;
                 Ok(Phase::Win)
             }
         }
@@ -129,7 +127,7 @@ impl Expr {
     }
 
     pub fn any(&self, p: &dyn Fn(&Expr) -> bool) -> bool {
-        p(self) || self.children().into_iter().any(|c| c.any(p))
+        p(self) || self.for_each_child_until(|child| child.any(p))
     }
 
     pub fn columns(&self) -> Vec<(Side, String)> {
@@ -142,8 +140,54 @@ impl Expr {
         if let Expr::Col(s, n) = self {
             out.push((*s, n.clone()));
         }
-        for c in self.children() {
-            c.collect_columns(out);
+        self.for_each_child(|child| child.collect_columns(out));
+    }
+
+    fn for_each_child(&self, mut f: impl FnMut(&Expr)) {
+        match self {
+            Expr::Col(..) | Expr::Lit(_) => {}
+            Expr::Tpl(_, args) | Expr::Agg(_, args) => args.iter().for_each(&mut f),
+            Expr::In(value, list, _) => {
+                list.iter().for_each(&mut f);
+                f(value);
+            }
+            Expr::Group(key) => f(key),
+            Expr::Win(_, args, spec) => {
+                args.iter().for_each(&mut f);
+                spec.partition.iter().for_each(&mut f);
+                spec.order.iter().for_each(|(expr, _)| f(expr));
+            }
+        }
+    }
+
+    fn try_for_each_child<E>(&self, mut f: impl FnMut(&Expr) -> Result<(), E>) -> Result<(), E> {
+        match self {
+            Expr::Col(..) | Expr::Lit(_) => Ok(()),
+            Expr::Tpl(_, args) | Expr::Agg(_, args) => args.iter().try_for_each(f),
+            Expr::In(value, list, _) => {
+                list.iter().try_for_each(&mut f)?;
+                f(value)
+            }
+            Expr::Group(key) => f(key),
+            Expr::Win(_, args, spec) => {
+                args.iter().try_for_each(&mut f)?;
+                spec.partition.iter().try_for_each(&mut f)?;
+                spec.order.iter().try_for_each(|(expr, _)| f(expr))
+            }
+        }
+    }
+
+    fn for_each_child_until(&self, mut predicate: impl FnMut(&Expr) -> bool) -> bool {
+        match self {
+            Expr::Col(..) | Expr::Lit(_) => false,
+            Expr::Tpl(_, args) | Expr::Agg(_, args) => args.iter().any(predicate),
+            Expr::In(value, list, _) => list.iter().any(&mut predicate) || predicate(value),
+            Expr::Group(key) => predicate(key),
+            Expr::Win(_, args, spec) => {
+                args.iter().any(&mut predicate)
+                    || spec.partition.iter().any(&mut predicate)
+                    || spec.order.iter().any(|(expr, _)| predicate(expr))
+            }
         }
     }
 }

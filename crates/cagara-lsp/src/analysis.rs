@@ -796,6 +796,37 @@ mod tests {
         Position { line, character }
     }
 
+    /// The position of `needle` in `src`, `within` characters in.
+    ///
+    /// Locating a marker keeps a cursor tied to the text it is about. A
+    /// hard-coded line and column silently points at a different token after
+    /// any edit, and `occ_at`'s "ends here" fallback can resolve it to one that
+    /// looks plausible, so the assertion would be about something else.
+    fn at_in(src: &str, needle: &str, within: usize) -> Position {
+        let start = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is not in the source"));
+        Positions::new(src).position(start + within)
+    }
+
+    /// [`at_in`] against the shared [`SRC`].
+    fn at(needle: &str, within: usize) -> Position {
+        at_in(SRC, needle, within)
+    }
+
+    /// The tests below address `SRC` by line and column. Pin its layout so an
+    /// edit to `SRC` fails this one obvious assertion instead of moving every
+    /// cursor onto a different token.
+    #[test]
+    fn the_test_source_layout_is_pinned() {
+        let lines: Vec<&str> = SRC.lines().collect();
+        assert_eq!(lines.len(), 6, "{lines:?}");
+        assert_eq!(lines[1], "adult = .age >= 18");
+        assert_eq!(lines[2], "q = users & where adult & agg { s = sum .age }");
+        assert_eq!(lines[4], "twice = x => x + x");
+        assert_eq!(lines[5], "shadow = users => users & where adult");
+    }
+
     fn range(line: u32, start: u32, end: u32) -> Range {
         Range {
             start: pos(line, start),
@@ -847,10 +878,10 @@ mod tests {
     fn hover_shows_types_and_overloads() {
         let ws = ws();
         // `adult` in `where adult` (line 2, column 18).
-        let h = hover(&ws, pos(2, 19)).unwrap();
+        let h = hover(&ws, at("where adult", 7)).unwrap();
         assert!(h.contains("adult : expr { age = a | b } bool"), "{h}");
         // `sum` is an overload set in the prelude.
-        let h = one_line(hover(&ws, pos(2, 37)).unwrap());
+        let h = one_line(hover(&ws, at("sum .age", 1)).unwrap());
         let (here, general) = h.split_once("defined as").unwrap();
         assert!(
             here.contains("sum : expr { age = int, id = int, name = string } int -> "),
@@ -858,13 +889,13 @@ mod tests {
         );
         assert_eq!(general.matches("sum : ").count(), 2, "{h}");
         // Operators hover at their symbol, under their definition name.
-        let h = hover(&ws, pos(4, 15)).unwrap();
+        let h = hover(&ws, at("x + x", 2)).unwrap();
         assert!(h.contains("_+_ : "), "{h}");
         // A column reference: its value type, open where `adult` is general.
-        let h = hover(&ws, pos(1, 10)).unwrap();
+        let h = hover(&ws, at("adult = .age", 9)).unwrap();
         assert!(h.contains(".age : "), "{h}");
         // A lambda parameter shadows the table.
-        let h = hover(&ws, pos(5, 19)).unwrap();
+        let h = hover(&ws, at("shadow = users", 10)).unwrap();
         assert!(h.contains("lambda parameter"), "{h}");
     }
 
@@ -875,7 +906,7 @@ mod tests {
                    twice = x => x + x\n";
         let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
         // `select` at its use: instantiated, then the general scheme.
-        let h = one_line(hover(&ws, pos(1, 14)).unwrap());
+        let h = one_line(hover(&ws, at_in(src, "& select", 3)).unwrap());
         let (here, general) = h.split_once("defined as").unwrap();
         assert!(
             here.contains(
@@ -888,13 +919,13 @@ mod tests {
             "{h}"
         );
         // A monomorphic use shows its type once.
-        let h = hover(&ws, pos(1, 5)).unwrap();
+        let h = hover(&ws, at_in(src, "q = users", 4)).unwrap();
         assert!(
             !h.contains("defined as") && h.contains("users : query { id = int, name = string }"),
             "{h}"
         );
         // A lambda parameter shows its inferred type.
-        let h = hover(&ws, pos(2, 13)).unwrap();
+        let h = hover(&ws, at_in(src, "=> x", 3)).unwrap();
         assert!(
             h.contains("x : expr ") && h.contains("lambda parameter"),
             "{h}"
@@ -906,15 +937,22 @@ mod tests {
         let src = "users : query { id = int, name = string, score = float } = table \"p\" \"users\"\n\
                    q = users & where (.score >= 18 && .name == \"a\") & select { s = .score, k = 1 }\n";
         let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
-        let at = |c| hover(&ws, pos(1, c)).unwrap_or_default();
+        let at = |needle: &str, within: usize| {
+            hover(&ws, at_in(src, needle, within)).unwrap_or_default()
+        };
         // `.score` and its value type from the table.
-        assert!(at(20).contains(".score : float"), "{}", at(20));
+        let h = at("where (.score", 8);
+        assert!(h.contains(".score : float"), "{h}");
         // `18` lifted to the column's type.
-        assert!(at(30).contains("18 : float"), "{}", at(30));
-        assert!(at(36).contains(".name : string"), "{}", at(36));
-        assert!(at(45).contains("\"a\" : string"), "{}", at(45));
+        let h = at(">= 18", 3);
+        assert!(h.contains("18 : float"), "{h}");
+        let h = at("&& .name", 3);
+        assert!(h.contains(".name : string"), "{h}");
+        let h = at("== \"a\"", 3);
+        assert!(h.contains("\"a\" : string"), "{h}");
         // A literal in a record keeps its own type.
-        assert!(at(76).contains("1 : int"), "{}", at(76));
+        let h = at("k = 1", 4);
+        assert!(h.contains("1 : int"), "{h}");
     }
 
     #[test]
@@ -922,24 +960,24 @@ mod tests {
         let src = "users : query { id = int, name = string, email = string, created = timestamp, score = float } = table \"p\" \"users\"\n\
                    q = users & where (.score >= 1)\n";
         let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
-        let h = hover(&ws, pos(1, 5)).unwrap();
+        let h = hover(&ws, at_in(src, "q = users", 4)).unwrap();
         assert!(h.lines().all(|l| l.chars().count() <= HOVER_WIDTH), "{h}");
         assert!(h.contains("users : query {\n  id = int,\n"), "{h}");
         // `where` at its use: one arrow per line.
-        let h = hover(&ws, pos(1, 12)).unwrap();
+        let h = hover(&ws, at_in(src, "& where", 3)).unwrap();
         assert!(h.contains("\n  -> query {"), "{h}");
     }
 
     #[test]
     fn definition_points_at_the_name() {
         let ws = ws();
-        let d = definition(&ws, pos(2, 19));
+        let d = definition(&ws, at("where adult", 7));
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].1, range(1, 0, 5));
         // Prelude definitions have no file.
-        assert!(definition(&ws, pos(2, 37)).is_empty());
+        assert!(definition(&ws, at("sum .age", 1)).is_empty());
         // A parameter use jumps to the parameter.
-        let d = definition(&ws, pos(5, 19));
+        let d = definition(&ws, at("shadow = users", 10));
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].1, range(5, 9, 14));
     }
@@ -949,12 +987,12 @@ mod tests {
         let ws = ws();
         // `users` from its use in `q`: the definition and two uses, not the
         // lambda parameter in `shadow`.
-        let rs = references(&ws, pos(2, 5), true);
+        let rs = references(&ws, at("q = users", 4), true);
         assert_eq!(rs, vec![range(0, 0, 5), range(2, 4, 9), range(3, 6, 11)]);
-        let rs = references(&ws, pos(2, 5), false);
+        let rs = references(&ws, at("q = users", 4), false);
         assert_eq!(rs, vec![range(2, 4, 9), range(3, 6, 11)]);
         // `x` in `twice`: the parameter and both uses.
-        let hs = highlights(&ws, pos(4, 13));
+        let hs = highlights(&ws, at("=> x", 3));
         let kinds: Vec<_> = hs.iter().map(|(_, k)| *k).collect();
         assert_eq!(
             hs.iter().map(|(r, _)| *r).collect::<Vec<_>>(),

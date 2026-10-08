@@ -2,6 +2,7 @@
 
 use crate::{compile, Dialect, Options};
 use cagara_hir::{root_queries, Workspace};
+use std::collections::HashMap;
 
 const USERS: &str = "users : query { id = int, name = string, age = int, active = bool } = table \"public\" \"users\"\n\
 orders : query { id = int, user_id = int, amount = float, status = string, created_at = date } = table \"public\" \"orders\"\n";
@@ -75,6 +76,78 @@ fn error(src: &str, name: &str) -> String {
         Ok(s) => panic!("`{name}` should fail but compiled to {s}"),
         Err(e) => e,
     }
+}
+
+/// The generated relation-alias prefix `word` is built from, if any.
+fn alias_prefix(word: &str) -> Option<&'static str> {
+    for prefix in ["cagara_cte", "t", "__k"] {
+        if let Some(rest) = word.strip_prefix(prefix) {
+            if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+                return Some(prefix);
+            }
+        }
+    }
+    None
+}
+
+/// Rename machine-chosen relation aliases to a stable scheme.
+///
+/// `Lowerer` numbers derived tables (`t1`, `t2`) and hidden window keys
+/// (`__k1`) in traversal order. Pinning those numbers makes any unrelated
+/// change to the walk break a dozen tests at once, while dropping them would
+/// stop the tests from noticing that two relations traded places. This maps
+/// each alias to `prefix#n` in order of first appearance, so which relation
+/// comes first and which references which are still compared; only the chosen
+/// numbers are ignored.
+fn normalize_aliases(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut seen: HashMap<String, String> = HashMap::new();
+    let mut next: HashMap<&'static str, usize> = HashMap::new();
+    let mut word = String::new();
+    let mut in_string = false;
+    for c in sql.chars() {
+        if c == '\'' {
+            in_string = !in_string;
+        }
+        if !in_string && (c.is_ascii_alphanumeric() || c == '_') {
+            word.push(c);
+            continue;
+        }
+        push_normalized(&mut out, &mut word, &mut seen, &mut next);
+        out.push(c);
+    }
+    push_normalized(&mut out, &mut word, &mut seen, &mut next);
+    out
+}
+
+fn push_normalized(
+    out: &mut String,
+    word: &mut String,
+    seen: &mut HashMap<String, String>,
+    next: &mut HashMap<&'static str, usize>,
+) {
+    if word.is_empty() {
+        return;
+    }
+    match alias_prefix(word) {
+        Some(prefix) => {
+            let name = seen.entry(word.clone()).or_insert_with(|| {
+                let n = next.entry(prefix).or_insert(0);
+                let name = format!("{prefix}#{n}");
+                *n += 1;
+                name
+            });
+            out.push_str(name);
+        }
+        None => out.push_str(word),
+    }
+    word.clear();
+}
+
+/// [`assert_eq!`] for generated SQL, ignoring the aliases `Lowerer` numbers.
+#[track_caller]
+fn assert_sql(actual: &str, expected: &str) {
+    assert_eq!(normalize_aliases(actual), normalize_aliases(expected));
 }
 
 #[test]
@@ -513,18 +586,21 @@ fn nulls_and_outer_joins() {
 fn join_inputs_are_inlined_when_safe() {
     // An update before a join needs no derived table.
     let s = sql("q = orders & select { order_id = .id, user_id = .user_id } & innerJoin users (.<user_id == .>id) & select { o = .order_id, n = .name }\n", "q");
-    assert_eq!(s, "SELECT t1.id AS o, t2.name AS n FROM public.orders AS t1 INNER JOIN public.users AS t2 ON t1.user_id = t2.id");
+    assert_sql(
+        &s,
+        "SELECT t1.id AS o, t2.name AS n FROM public.orders AS t1 INNER JOIN public.users AS t2 ON t1.user_id = t2.id",
+    );
     // An outer join's input is a relation, so a filter on either side stays
     // in that side's derived table. Hoisting the preserved side's filter to
     // WHERE would drop the unmatched rows the join keeps; hoisting the
     // null-extended side's into ON would widen the input back to the
     // unfiltered relation.
     let s = sql("q = orders & where (.amount > 10.0) & leftJoin (users & where .active) (.<user_id == .>id)\n", "q");
-    assert_eq!(
-        s,
+    assert_sql(
+        &s,
         "SELECT t1.id, t1.user_id, t1.amount, t1.status, t1.created_at, t2.name, t2.age, t2.active \
          FROM (SELECT id, user_id, amount, status, created_at FROM public.orders WHERE (amount > 10.0)) AS t1 \
-         LEFT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id"
+         LEFT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id",
     );
     // The null-extended side of a left join may still keep its filter in ON,
     // which is what lets `nasc`-style filters stay inline; but only when the
@@ -533,11 +609,11 @@ fn join_inputs_are_inlined_when_safe() {
         "q = orders & leftJoin (users & where .active) (.<user_id == .>id)\n",
         "q",
     );
-    assert_eq!(
-        s,
+    assert_sql(
+        &s,
         "SELECT t1.id, t1.user_id, t1.amount, t1.status, t1.created_at, t2.name, t2.age, t2.active \
          FROM public.orders AS t1 \
-         LEFT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id"
+         LEFT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id",
     );
     // Right / full join: every filtered side keeps a derived table.
     let s = sql(
@@ -560,11 +636,11 @@ fn join_inputs_are_inlined_when_safe() {
         "q = orders & rightJoin (users & where .active) (.<user_id == .>id)\n",
         "q",
     );
-    assert_eq!(
-        s,
+    assert_sql(
+        &s,
         "SELECT t1.id, t1.user_id, t1.amount, t1.status, t1.created_at, t2.name, t2.age, t2.active \
          FROM public.orders AS t1 \
-         RIGHT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id"
+         RIGHT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id",
     );
     // Chains of joins stay flat, including a self-join with an updated column.
     let s = sql("q = orders & innerJoin users (.<user_id == .>id) & leftJoin (users & select { uid = .id, name = .name, age = .age, active = .active }) (.<user_id == .>uid)\n", "q");
@@ -1061,9 +1137,9 @@ fn null_extended_join_inputs_compute_before_the_join() {
     );
     // Bare columns still inline, and so does anything on a preserved side.
     let b = "b = users & leftJoin (orders & select { user_id = .user_id }) (.<id == .>user_id) & select { u = .user_id }\n";
-    assert_eq!(
-        sql(b, "b"),
-        "SELECT t2.user_id AS u FROM public.users AS t1 LEFT JOIN public.orders AS t2 ON t1.id = t2.user_id"
+    assert_sql(
+        &sql(b, "b"),
+        "SELECT t2.user_id AS u FROM public.users AS t1 LEFT JOIN public.orders AS t2 ON t1.id = t2.user_id",
     );
 }
 
@@ -1164,17 +1240,17 @@ fn order_survives_a_derived_table() {
     // so the outer query sorts again, by a hidden column when the key is
     // not an output.
     let q = "q = users & order [desc .age] & select { id = .id, rn = rowNumber { order = [asc .id] } } & where (.rn <= 3)\n";
-    assert_eq!(
-        sql(q, "q"),
+    assert_sql(
+        &sql(q, "q"),
         "SELECT id, rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY id NULLS LAST) AS rn, age AS __k1 \
-         FROM public.users) AS t2 WHERE (rn <= 3) ORDER BY __k1 DESC NULLS LAST"
+         FROM public.users) AS t2 WHERE (rn <= 3) ORDER BY __k1 DESC NULLS LAST",
     );
     // With a LIMIT the inner query keeps it too.
     let p = "p = users & order [asc .name] & limit 3 & where (.age > 1) & select { n = .name }\n";
-    assert_eq!(
-        sql(p, "p"),
+    assert_sql(
+        &sql(p, "p"),
         "SELECT name AS n FROM (SELECT id, name, age, active FROM public.users ORDER BY name NULLS LAST LIMIT 3) AS t1 \
-         WHERE (age > 1) ORDER BY name NULLS LAST"
+         WHERE (age > 1) ORDER BY name NULLS LAST",
     );
     // A join does not keep its inputs' order: no ORDER BY in a join input.
     let j = "j = (users & order [asc .name] & select { id = .id, n = .name }) & innerJoin orders (.<id == .>user_id) & select { n = .n }\n";
@@ -1467,4 +1543,29 @@ fn the_two_set_operation_spellings_differ_in_operand_order() {
             "`users & {name} admins` must put `admins` (the argument) on the left: {piped}"
         );
     }
+}
+
+/// The alias normalizer must ignore the chosen numbers without ignoring the
+/// relations they name.
+#[test]
+fn alias_normalization_keeps_shape_but_not_numbers() {
+    // Same shape, different numbering.
+    assert_eq!(
+        normalize_aliases("FROM a AS t1 JOIN b AS t2 ON t1.x = t2.y"),
+        normalize_aliases("FROM a AS t3 JOIN b AS t4 ON t3.x = t4.y")
+    );
+    // The relations traded places, so the two are *not* the same text.
+    assert_ne!(
+        normalize_aliases("FROM a AS t1 JOIN b AS t2 ON t1.x = t2.y"),
+        normalize_aliases("FROM a AS t1 JOIN b AS t2 ON t2.x = t1.y")
+    );
+    // A relation named like an alias keeps its own identity, in first-appearance
+    // order; `__k` keys normalize too.
+    assert_eq!(normalize_aliases("t7 AS t1"), "t#0 AS t#1");
+    assert_eq!(
+        normalize_aliases("SELECT __k1 ORDER BY __k1"),
+        "SELECT __k#0 ORDER BY __k#0"
+    );
+    // String literals are not touched.
+    assert_eq!(normalize_aliases("WHERE s = 't1'"), "WHERE s = 't1'");
 }

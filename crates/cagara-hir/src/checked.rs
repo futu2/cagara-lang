@@ -112,8 +112,8 @@ impl CheckedQuery {
     /// `erase`) needs to take a `CheckedQuery` apart by value, and it lives in
     /// this crate. Keeping it `pub(crate)` means the *public* surface never
     /// hands out a `CheckedQueryNode` that a caller could reassemble.
-    pub(crate) fn into_parts(self) -> (Arc<RowType>, CheckedQueryNode, Origin) {
-        (self.row, self.node, self.origin)
+    pub(crate) fn into_parts(self) -> (CheckedQueryNode, Origin) {
+        (self.node, self.origin)
     }
 
     /// Which stage built this query, without exposing the node type.
@@ -1048,8 +1048,7 @@ fn update_place() -> Place {
 /// Each node is stamped with `Rel::At(origin)`, except where the node is
 /// already located, so nested source locations are preserved.
 pub fn erase(query: CheckedQuery) -> Result<Rel, Error> {
-    let (row, node, origin) = query.into_parts();
-    let _ = row;
+    let (node, origin) = query.into_parts();
     let loc = Loc {
         module: origin.module,
         span: origin.span,

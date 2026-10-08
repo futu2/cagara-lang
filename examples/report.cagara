@@ -12,7 +12,7 @@ adults = users
   & order [asc .label]
   & limit 10
 
-# Aggregation: filtering after `agg` becomes an outer query.
+# Aggregation: a filter over an aggregate becomes `HAVING`.
 revenue = orders
   & where (.status == "paid")
   & agg { user_id = group .user_id, revenue = sum .amount, n = count }

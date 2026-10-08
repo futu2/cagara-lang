@@ -554,16 +554,28 @@ a = orders & where (.status == "paid") & select {.id, .amount} & where (.amount 
 SELECT id, amount FROM public.orders WHERE (status = 'paid') AND (amount > 10.0);
 ```
 
-But after `agg` or `limit`, a `where` becomes an outer query, because SQL cannot
-filter on an aggregate or on a limited result in the same `SELECT`:
+But after `agg`, a `where` on the aggregated row becomes `HAVING` in the same
+`SELECT`. The predicate names an aggregate output, and the compiler inlines the
+aggregate expression behind that name (SQL does not let you use the output name
+there):
 
 ```haskell
 b = orders & agg { n = count } & where (.n > 5)
+```
+
+```sql
+SELECT COUNT(*) AS n FROM public.orders HAVING (COUNT(*) > 5);
+```
+
+After `limit` — or when an `order` or `limit` sits between the `agg` and the
+`where` — it has to become an outer query, because SQL cannot filter on a
+limited result in the same `SELECT`:
+
+```haskell
 c = orders & select {.id} & limit 5 & where (.id > 1)
 ```
 
 ```sql
-SELECT n FROM (SELECT COUNT(*) AS n FROM public.orders) AS t1 WHERE (n > 5);
 SELECT id FROM (SELECT id FROM public.orders LIMIT 5) AS t1 WHERE (id > 1);
 ```
 
@@ -1478,18 +1490,33 @@ t = orders & where (.status == "paid") & select {.id, .amount} & order [asc .id]
 SELECT id, amount FROM public.orders WHERE (status = 'paid') ORDER BY id NULLS LAST;
 ```
 
-**A derived table appears** after aggregation, after a window, and after
-`limit`/`offset`, because SQL must finish those before another stage can see
-their results:
+**A filter over an aggregate is `HAVING`.** The predicate is written against the
+aggregate outputs, and the aggregate expression is inlined into the clause, so
+the grouped `SELECT` needs no wrapper:
 
 ```haskell
-t = orders & agg { user_id = group .user_id, total = sum .amount } & where (.total > 100.0)
+t = orders & agg { user_id = group .user_id, total = coalesce 0.0 (sum .amount) } & where (.total > 100.0)
 ```
 
 ```sql
-SELECT user_id, total
-FROM (SELECT user_id, SUM(amount) AS total FROM public.orders GROUP BY user_id) AS t1
-WHERE (total > 100.0);
+SELECT user_id, COALESCE(SUM(amount), 0.0) AS total
+FROM public.orders
+GROUP BY user_id
+HAVING (COALESCE(SUM(amount), 0.0) > 100.0);
+```
+
+**A derived table appears** after a window, after `limit`/`offset`, and after an
+aggregate when a later stage still has to read the grouped rows — a second
+`agg`, or a filter that runs after an intervening `order` or `limit`:
+
+```haskell
+u = orders & select {.id, rn = rowNumber { order = [asc .id] }} & where (.rn <= 3)
+v = orders & agg { u = group .user_id, n = count } & order [desc .n] & where (.n > 5)
+```
+
+```sql
+SELECT id, rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY id NULLS LAST) AS rn FROM public.orders) AS t1 WHERE (rn <= 3);
+SELECT u, n FROM (SELECT user_id AS u, COUNT(*) AS n FROM public.orders GROUP BY user_id) AS t1 WHERE (n > 5) ORDER BY n DESC NULLS LAST;
 ```
 
 **Order is preserved across derived tables.** SQL does not guarantee a derived
@@ -1504,8 +1531,8 @@ into the `ON` clause.
 **Repeated relational subtrees become CTEs** automatically.
 
 `--optimize` additionally runs sqlglot's optimizer (constant folding, boolean
-simplification, pushdown). It is opt-in, and it preserves filters outside
-window, `LIMIT`, and aggregate boundaries.
+simplification, pushdown). It is opt-in, and it preserves filters outside window
+and `LIMIT` boundaries and keeps an aggregate filter in `HAVING`.
 
 ---
 

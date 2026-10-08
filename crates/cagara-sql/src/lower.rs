@@ -1,6 +1,8 @@
 //! Relational IR to a sqlglot SELECT. Each IR node either fuses into the
 //! current stage or wraps it in a derived table when fusing would change
-//! meaning (e.g. filtering after aggregation, windows, or LIMIT).
+//! meaning (e.g. filtering after windows or LIMIT). A filter over an aggregate
+//! fuses as `HAVING` instead, which is the same query without the derived
+//! table.
 
 use crate::stage::{and_all, col, ident_style, lower_expr, qualify, Fuse, Stage};
 use cagara_hir::ir::{Expr as IrExpr, JoinKind, Rel, SetKind, Side};
@@ -291,6 +293,26 @@ impl Lowerer {
                 }
             }
             let mut st = self.rel(base)?;
+            // A filter directly over an aggregate is a `HAVING`, not a `WHERE`
+            // on a derived table. `base` is the aggregate only when nothing
+            // intervenes between it and the filter (an `order` or `limit` would
+            // leave itself as `base`, and those must stay outside), and every
+            // output of an aggregate is either a grouping key or an aggregate
+            // expression — both legal in `HAVING`. `Stage::item` resolves an
+            // output name to the expression behind it, so no SELECT alias leaks
+            // into the clause (PostgreSQL rejects aliases there).
+            if matches!(base, Rel::Agg(..)) && st.has_agg && !stages.is_empty() {
+                let mut preds: Vec<Expr> = stages
+                    .into_iter()
+                    .rev()
+                    .map(|p| st.resolve(p))
+                    .collect::<Result<_, _>>()?;
+                if let Some(h) = st.having.take() {
+                    preds.insert(0, h);
+                }
+                st.having = and_all(preds);
+                return Ok(st);
+            }
             for p in stages.into_iter().rev() {
                 if st.needs_barrier(Fuse::Filter, false) {
                     st = self.wrap(st);

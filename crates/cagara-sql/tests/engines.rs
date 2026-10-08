@@ -98,6 +98,16 @@ const CASES: &[(&str, &[&str])] = &[
         "cg0 = empty & select { c = 2, x = .id } & agg { c = group .c, n = count }",
         &[],
     ),
+    // A filter over an aggregate is lowered to HAVING, still over the same
+    // group; both engines must return the filtered groups.
+    (
+        "hav = orders & agg { u = group .user_id, total = sum .amount, n = count } & where (.n >= 2) & order [asc .u]",
+        &["1|10.0|2"],
+    ),
+    (
+        "havconst = nums & agg { n = count } & where (.n > 0)",
+        &["4"],
+    ),
     // Strings: trailing spaces count, quotes and backslashes survive.
     (
         "str = users & select { id = .id, l = length .name, r = right 2 .name, p = strpos \"b\" .name, e = endsWith \" \" .name } & order [asc .id]",

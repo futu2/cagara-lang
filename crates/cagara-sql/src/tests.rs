@@ -197,17 +197,52 @@ fn filter_pipeline_over_ten_stages_compiles() {
 }
 
 #[test]
-fn filter_after_agg_wraps() {
+fn filter_after_agg_becomes_having() {
     let s = sql(
         "q = orders\n  & where (.status == \"paid\")\n  & agg { user_id = group .user_id, revenue = sum .amount, n = count }\n  & where (.n >= 5)\n",
         "q",
     );
     assert!(s.contains("GROUP BY user_id"), "{s}");
     assert!(s.contains("SUM(amount) AS revenue"), "{s}");
+    // The predicate is written against an aggregate output, so it folds into
+    // HAVING over the aggregate expression. No derived table, and no alias:
+    // PostgreSQL does not accept `HAVING n >= 5`.
     assert!(
-        s.contains("(SELECT"),
-        "must wrap before filtering aggregates: {s}"
+        s.contains("HAVING (COUNT(*) >= 5)"),
+        "aggregate filter must fold into HAVING: {s}"
     );
+    assert!(!s.contains("(SELECT"), "HAVING needs no derived table: {s}");
+}
+
+#[test]
+fn filter_after_agg_stays_outside_order_and_limit() {
+    // An intervening `order` or `limit` is not an aggregate-output filter: the
+    // predicate must run *after* paging, so it cannot become HAVING.
+    let ordered = sql(
+        "q = orders & agg { u = group .user_id, n = count } & order [desc .n] & where (.n > 3)\n",
+        "q",
+    );
+    assert!(ordered.contains("(SELECT"), "{ordered}");
+    assert!(ordered.contains(") AS t1 WHERE"), "{ordered}");
+
+    let paged = sql(
+        "q = orders & agg { u = group .user_id, n = count } & limit 5 & where (.n > 3)\n",
+        "q",
+    );
+    assert!(paged.contains(") AS t1 WHERE"), "{paged}");
+}
+
+#[test]
+fn consecutive_aggregate_filters_are_conjoined_having() {
+    let s = sql(
+        "q = orders & agg { u = group .user_id, n = count } & where (.n > 3) & where (.n < 9)\n",
+        "q",
+    );
+    assert!(
+        s.contains("HAVING (COUNT(*) > 3) AND (COUNT(*) < 9)"),
+        "{s}"
+    );
+    assert!(!s.contains("(SELECT"), "{s}");
 }
 
 #[test]
@@ -522,6 +557,19 @@ fn errors() {
     assert!(error("q = orders & innerJoin users (.user_id == .id)\n", "q").contains("which input"));
     assert!(error("q = users & select {.nope}\n", "q").contains("no column `nope`"));
     assert!(error("q : query { id = int } = q\n", "q").contains("refers to itself"));
+    // A recursive helper is caught during elaboration and named, whether it is
+    // a lambda that calls itself or two helpers that call each other. It must
+    // never reach the compiler budget as an internal/limit error. The failure
+    // is reported at the *use*, since a helper has no query of its own.
+    assert!(
+        error("f = x => f x\nq = users & select { a = f .age }\n", "q")
+            .contains("`f` refers to itself")
+    );
+    assert!(error(
+        "f = x => g x\ng = x => f x\nq = users & select { a = f .age }\n",
+        "q"
+    )
+    .contains("`f` refers to itself"));
     assert!(error(
         "q = users & agg { x = coalesce 0 (sum .age) + .age }\n",
         "q"
@@ -760,15 +808,26 @@ fn optimizer_keeps_stage_boundaries() {
         optimize: true,
         ..Options::default()
     };
-    // A filter after a window, LIMIT, or aggregate must stay outside it.
+    // A filter after a window or LIMIT must stay outside it.
     for q in [
         "q = orders & select { id = .id, amount = .amount, rn = rowNumber { order = [desc .amount] } } & where (.amount > 10.0)\n",
         "q = orders & order [desc .amount] & limit 5 & where (.amount > 10.0)\n",
-        "q = orders & agg { u = group .user_id, n = count } & where (.n > 3)\n",
     ] {
         let s = sql_with(q, "q", opts);
         assert!(s.contains(") AS t1 WHERE"), "filter moved across a boundary: {s}");
     }
+    // A filter over an aggregate is HAVING: still a boundary the optimizer must
+    // not push past, and still outside the aggregate's own WHERE.
+    let s = sql_with(
+        "q = orders & agg { u = group .user_id, n = count } & where (.n > 3)\n",
+        "q",
+        opts,
+    );
+    assert!(s.contains("HAVING"), "{s}");
+    assert!(
+        s.contains("COUNT(*) > 3"),
+        "filter left the HAVING boundary: {s}"
+    );
     let s = sql_with(
         "q = orders & where (1 + 1 == 2 && .amount > 1.0)\n",
         "q",

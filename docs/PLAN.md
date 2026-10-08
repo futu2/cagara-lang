@@ -34,6 +34,10 @@ the single source of validity rules.
 - Query stages are deferred constraints, so helpers can be reused with
   different rows. Aggregates and windows have explicit phases and cannot be
   placed where SQL would reject them.
+- A filter directly over an aggregate lowers to `HAVING` over the aggregate
+  expression (not the output alias), so it needs no outer `WHERE` on a derived
+  table. An intervening `order` or `limit` still wraps, because the filter must
+  run after them.
 - `select` replaces a row; `update` merges computed fields over it. Outer joins
   use `mapValue (AsNullable)` for the nullable side.
 - SQL is built as ANSI and rewritten across supported dialects. See
@@ -59,7 +63,13 @@ small and typed:
 
 - Generate checked-in table declarations from a database schema or catalog.
 - Add typed runtime parameters and prepared-query metadata to the compiler API.
-- Extend relational phases with `having`, filtered aggregates, `qualify`,
+  A parameter compiles to a bind placeholder in the emitted SQL; its value is
+  never spliced into the statement text, and never becomes an identifier. The
+  test for this must assert that no parameter value appears anywhere in the
+  emitted SQL, so the first implementation cannot quietly degrade into string
+  interpolation.
+- Extend relational phases with filtered aggregates (`FILTER (WHERE …)`),
+  `qualify` (a filter on a window output would no longer need a derived table),
   grouping sets, lateral/correlated subqueries, and richer window frames.
 
 Cagara is a typed query language, not a general-purpose functional language.

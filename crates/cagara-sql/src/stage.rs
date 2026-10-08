@@ -7,22 +7,29 @@ use sqlglot_rust::ast::{
     BinaryOperator, Expr, FromClause, JoinClause, OrderByItem, QuoteStyle, SelectItem,
     SelectStatement, TableSource,
 };
+use std::cell::RefCell;
 
 pub type Resolver<'a> = dyn Fn(Side, &str) -> Result<Expr, String> + 'a;
 
+/// A mutable SELECT under construction.
+///
+/// The fields are crate-visible rather than public: `Lowerer` is the only thing
+/// that builds one, and a caller outside the crate must not be able to leave a
+/// stage in a state the lowering rules do not expect (an aggregate without
+/// `has_agg`, a select list whose window flag was not set, …).
 pub struct Stage {
-    pub from: TableSource,
-    pub joins: Vec<JoinClause>,
-    pub wheres: Vec<Expr>,
-    pub items: Vec<(String, Expr)>,
-    pub group_by: Vec<Expr>,
-    pub having: Option<Expr>,
-    pub order_by: Vec<OrderByItem>,
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
-    pub distinct: bool,
-    pub has_agg: bool,
-    pub has_win: bool,
+    pub(crate) from: TableSource,
+    pub(crate) joins: Vec<JoinClause>,
+    pub(crate) wheres: Vec<Expr>,
+    pub(crate) items: Vec<(String, Expr)>,
+    pub(crate) group_by: Vec<Expr>,
+    pub(crate) having: Option<Expr>,
+    pub(crate) order_by: Vec<OrderByItem>,
+    pub(crate) limit: Option<i64>,
+    pub(crate) offset: Option<i64>,
+    pub(crate) distinct: bool,
+    pub(crate) has_agg: bool,
+    pub(crate) has_win: bool,
 }
 
 pub fn col(table: Option<&str>, name: &str) -> Expr {
@@ -238,6 +245,17 @@ impl Stage {
         }
     }
 
+    /// Install a projection's select list.
+    ///
+    /// `new_window` records that the projection added a window function, which
+    /// is what a *later* projection's [`Stage::needs_barrier`] consults. Setting
+    /// `items` and forgetting the flag would let two windows fold into one
+    /// stage, so the two are written together here.
+    pub fn set_items(&mut self, items: Vec<(String, Expr)>, new_window: bool) {
+        self.items = items;
+        self.has_win |= new_window;
+    }
+
     pub fn new(from: TableSource, items: Vec<(String, Expr)>) -> Self {
         Stage {
             from,
@@ -386,33 +404,29 @@ pub fn template(sql: &str, args: Vec<Expr>) -> Result<Expr, String> {
         .ok_or_else(|| format!("cannot parse SQL template `{sql}`"))?;
     // Every placeholder must be a whole term naming an argument: `x$1` or
     // `'$1'` would be left in the SQL instead of substituted.
-    let bad = std::cell::Cell::new(false);
     let n = args.len();
-    let _ = transform_deep(parsed.clone(), &|e| {
-        match &e {
+    try_transform_deep(parsed.clone(), &|e| {
+        let bad = match &e {
             Expr::Column {
                 table: None, name, ..
             } if name.to_ascii_lowercase().contains(ARG) => {
                 let k = name.to_ascii_lowercase()[..]
                     .strip_prefix(ARG)
                     .and_then(|k| k.parse::<usize>().ok());
-                if !k.is_some_and(|k| (1..=n).contains(&k)) {
-                    bad.set(true);
-                }
+                !k.is_some_and(|k| (1..=n).contains(&k))
             }
-            Expr::Column { .. } | Expr::StringLiteral(_) if format!("{e:?}").contains(ARG) => {
-                bad.set(true)
-            }
-            _ => {}
+            Expr::Column { .. } | Expr::StringLiteral(_) => format!("{e:?}").contains(ARG),
+            _ => false,
+        };
+        if bad {
+            Err(format!(
+                "SQL template `{sql}`: each `$n` must stand alone (not inside a name or string) \
+                 and name one of its {n} argument(s)"
+            ))
+        } else {
+            Ok(e)
         }
-        e
-    });
-    if bad.get() {
-        return Err(format!(
-            "SQL template `{sql}`: each `$n` must stand alone (not inside a name or string) \
-             and name one of its {n} argument(s)"
-        ));
-    }
+    })?;
     let args: Vec<Expr> = args.into_iter().map(atomic).collect();
     Ok(subst(parsed, &args))
 }
@@ -426,19 +440,52 @@ fn subst(e: Expr, args: &[Expr]) -> Expr {
 /// `Expr::transform` (bottom-up) that also rewrites the expressions of
 /// window specs, which `transform` skips.
 pub fn transform_deep(e: Expr, f: &dyn Fn(Expr) -> Expr) -> Expr {
-    let spec = |mut s: sqlglot_rust::ast::WindowSpec| {
-        s.partition_by = s
-            .partition_by
-            .into_iter()
-            .map(|p| transform_deep(p, f))
-            .collect();
+    let failed = RefCell::new(None);
+    transform_inner(e, &|e| Ok(f(e)), &failed)
+}
+
+/// [`transform_deep`] with a step that can fail.
+///
+/// `Expr::transform` takes an infallible closure, so a fallible walk has to
+/// stop some other way. That is kept inside this function: callers get a
+/// `Result` and use `?`, instead of each one opening its own cell to smuggle
+/// the message out and inventing a value for the failed node.
+pub fn try_transform_deep(
+    e: Expr,
+    f: &dyn Fn(Expr) -> Result<Expr, String>,
+) -> Result<Expr, String> {
+    let failed = RefCell::new(None);
+    let out = transform_inner(e, f, &failed);
+    match failed.take() {
+        Some(message) => Err(message),
+        None => Ok(out),
+    }
+}
+
+/// The shared walk. The first error is recorded in `failed`; the node it came
+/// from becomes `NULL` (the walk cannot stop early) and the rest of the tree is
+/// visited with the step short-circuited, so a caller that sees an error is
+/// never handed the partial result.
+fn transform_inner(
+    e: Expr,
+    f: &dyn Fn(Expr) -> Result<Expr, String>,
+    failed: &RefCell<Option<String>>,
+) -> Expr {
+    // Closures rather than free functions so the window-spec descent reuses the
+    // same step and error slot as the rest of the walk.
+    let deep = |e: Expr| transform_inner(e, f, failed);
+    let spec = move |mut s: sqlglot_rust::ast::WindowSpec| {
+        s.partition_by = s.partition_by.into_iter().map(deep).collect();
         for o in &mut s.order_by {
-            o.expr = transform_deep(std::mem::replace(&mut o.expr, Expr::Null), f);
+            o.expr = deep(std::mem::replace(&mut o.expr, Expr::Null));
         }
         s
     };
     e.transform(&|e| {
-        f(match e {
+        if failed.borrow().is_some() {
+            return Expr::Null;
+        }
+        let e = match e {
             Expr::Function {
                 name,
                 args,
@@ -466,7 +513,17 @@ pub fn transform_deep(e: Expr, f: &dyn Fn(Expr) -> Expr) -> Expr {
                 over: Some(spec(s)),
             },
             other => other,
-        })
+        };
+        match f(e) {
+            Ok(e) => e,
+            Err(message) => {
+                let mut slot = failed.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(message);
+                }
+                Expr::Null
+            }
+        }
     })
 }
 

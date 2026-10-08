@@ -346,8 +346,7 @@ impl Lowerer {
                     .iter()
                     .map(|(n, e)| Ok((n.clone(), st.resolve(e)?)))
                     .collect::<Result<_, String>>()?;
-                st.items = items;
-                st.has_win |= new_win;
+                st.set_items(items, new_win);
                 st
             }
             Rel::Update(r, fs) => {
@@ -372,8 +371,7 @@ impl Lowerer {
                     };
                     items.push((name, e));
                 }
-                st.items = items;
-                st.has_win |= new_win;
+                st.set_items(items, new_win);
                 st
             }
             Rel::Omit(r, key) => {
@@ -435,7 +433,7 @@ impl Lowerer {
                     .iter()
                     .map(|(n, e)| Ok((n.clone(), st.resolve(e)?)))
                     .collect::<Result<_, String>>()?;
-                st.items = items;
+                st.set_items(items, false);
                 st
             }
             Rel::Order(r, ks) => {

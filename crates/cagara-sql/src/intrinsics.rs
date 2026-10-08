@@ -28,25 +28,13 @@ use sqlglot_rust::ast::{
     BinaryOperator, DataType, DateTimeField, Expr, QuoteStyle, TypedFunction, UnaryOperator,
 };
 use sqlglot_rust::Dialect;
-use std::cell::Cell;
 
 /// Lower every intrinsic in `e` (bottom-up, so arguments are lowered first).
 /// A `CAGARA_*` call that is not a known intrinsic is an error rather than
 /// SQL that the target engine would reject.
 pub fn lower(e: Expr, to: Dialect) -> Result<Expr, String> {
     let f = fam(to);
-    let failed = Cell::new(None);
-    let out = crate::stage::transform_deep(e, &|e| match node(e, f) {
-        Ok(e) => e,
-        Err(m) => {
-            failed.set(failed.take().or(Some(m)));
-            Expr::Null
-        }
-    });
-    match failed.into_inner() {
-        Some(m) => Err(m),
-        None => Ok(out),
-    }
+    crate::stage::try_transform_deep(e, &|e| node(e, f))
 }
 
 fn node(e: Expr, f: Fam) -> Result<Expr, String> {

@@ -300,354 +300,395 @@ impl Lowerer {
             }
             return Ok(st);
         }
-        Ok(match rel {
-            // Unreachable by construction: the peel above takes every `Rel::At`
-            // at the root of this call, and the branch returns. Kept because the
+        match rel {
+            // `At` and `Where` are unreachable here: the peel above takes both
+            // at the root of this call and returns. They are kept because the
             // match must still be exhaustive.
-            Rel::At(_, r) => self.rel(r)?,
+            Rel::At(_, r) => self.lower_at(r),
             Rel::Table {
                 schema,
                 name,
                 columns,
-            } => {
-                let cols = columns.as_ref().ok_or("internal: table without columns")?;
-                let t = TableRef {
-                    catalog: None,
-                    schema: (!schema.is_empty()).then(|| schema.clone()),
-                    name: name.clone(),
-                    alias: None,
-                    temporal: None,
-                    name_quote_style: ident_style(name),
-                    alias_quote_style: QuoteStyle::None,
-                };
-                Stage::new(
-                    TableSource::Table(t),
-                    cols.iter().map(|c| (c.clone(), col(None, c))).collect(),
-                )
-            }
-            Rel::Where(r, p) => {
-                let mut st = self.rel(r)?;
-                if st.needs_barrier(Fuse::Filter, false) {
-                    st = self.wrap(st);
-                }
-                let e = st.resolve(p)?;
-                st.wheres.push(e);
-                st
-            }
-            Rel::Select(r, fs) => {
-                let mut st = self.rel(r)?;
-                let new_win = fs
-                    .iter()
-                    .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
-                if st.needs_barrier(Fuse::Project, new_win) {
-                    st = self.wrap(st);
-                }
-                let items = fs
-                    .iter()
-                    .map(|(n, e)| Ok((n.clone(), st.resolve(e)?)))
-                    .collect::<Result<_, String>>()?;
-                st.set_items(items, new_win);
-                st
-            }
-            Rel::Update(r, fs) => {
-                let mut st = self.rel(r)?;
-                // Like `select`, but the input's columns are kept in place:
-                // each updated name takes the new expression, and a name the
-                // input does not have is appended. An unlisted column is
-                // passed through as itself.
-                let new_win = fs
-                    .iter()
-                    .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
-                if st.needs_barrier(Fuse::Project, new_win) {
-                    st = self.wrap(st);
-                }
-                let input: Vec<(String, ())> = st.names().into_iter().map(|c| (c, ())).collect();
-                let out = cagara_hir::schema::merge_columns(&input, fs)?;
-                let mut items = Vec::with_capacity(out.len());
-                for name in out {
-                    let e = match fs.iter().find(|(n, _)| *n == name) {
-                        Some((_, e)) => st.resolve(e)?,
-                        None => st.item(&name)?,
-                    };
-                    items.push((name, e));
-                }
-                st.set_items(items, new_win);
-                st
-            }
-            Rel::Omit(r, key) => {
-                let mut st = self.rel(r)?;
-                if st.needs_barrier(Fuse::Omit, false) {
-                    st = self.wrap(st);
-                }
-                st.items.retain(|(n, _)| n != key);
-                st
-            }
-            Rel::Prefix(r, affix) => {
-                let st = self.rel(r)?;
-                self.rename_all(st, affix, true)
-            }
-            Rel::Suffix(r, affix) => {
-                let st = self.rel(r)?;
-                self.rename_all(st, affix, false)
-            }
-            Rel::Agg(r, fs) => {
-                let mut st = self.rel(r)?;
-                // `distinct` must dedupe the input rows before they are counted
-                // or grouped, so it cannot fold into this stage.
-                if st.needs_barrier(Fuse::Aggregate, false) {
-                    st = self.wrap(st);
-                }
-                st.order_by.clear();
-                let mut keys: Vec<&IrExpr> = Vec::new();
-                for (_, e) in fs {
-                    collect_groups(e, &mut keys);
-                }
-                let has_aggfn = fs
-                    .iter()
-                    .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Agg(..))));
-                if keys.is_empty() && !has_aggfn {
-                    // Only constants: force exactly one output row.
-                    st.items = vec![(
-                        "cagara_n".into(),
-                        crate::stage::template("COUNT(*)", vec![])?,
-                    )];
-                    st.has_agg = true;
-                    st = self.wrap(st);
-                } else {
-                    let keys: Vec<Expr> = keys
-                        .iter()
-                        .map(|k| st.resolve(k))
-                        .collect::<Result<_, _>>()?;
-                    // A constant key does not split groups, and SQL reads
-                    // `GROUP BY 2` as a position (and rejects `GROUP BY 'x'`).
-                    // Dropping every key would turn "no rows in, no rows out"
-                    // into one row, which HAVING keeps.
-                    let all = keys.len();
-                    st.group_by = keys.into_iter().filter(|k| !is_literal(k)).collect();
-                    if st.group_by.is_empty() && all > 0 {
-                        st.having = Some(crate::stage::template("COUNT(*) > 0", vec![])?);
-                    }
-                    st.has_agg = true;
-                }
-                let items = fs
-                    .iter()
-                    .map(|(n, e)| Ok((n.clone(), st.resolve(e)?)))
-                    .collect::<Result<_, String>>()?;
-                st.set_items(items, false);
-                st
-            }
-            Rel::Order(r, ks) => {
-                let mut st = self.rel(r)?;
-                // Sorting belongs outside the dedup: a DISTINCT query may
-                // order only by its own select list, and an emulated NULLS
-                // LAST key cannot appear there.
-                if st.needs_barrier(Fuse::Sort, false) {
-                    st = self.wrap(st);
-                }
-                let mut order = Vec::new();
-                for (k, asc) in ks {
-                    let expr = st.resolve(k)?;
-                    // A constant sorts nothing, and `ORDER BY 1` is a position.
-                    // NULLs sort last in either direction; `dialect` spells
-                    // that per target.
-                    if !is_literal(&expr) {
-                        order.push(OrderByItem {
-                            expr,
-                            ascending: *asc,
-                            nulls_first: Some(false),
-                        });
-                    }
-                }
-                st.order_by = order;
-                st
-            }
-            Rel::Limit(r, n) => {
-                let mut st = self.rel(r)?;
-                if st.needs_barrier(Fuse::Limit, false) {
-                    st = self.wrap(st);
-                }
-                st.limit = Some(*n);
-                st
-            }
-            Rel::Offset(r, n) => {
-                let mut st = self.rel(r)?;
-                if st.needs_barrier(Fuse::Offset, false) {
-                    st = self.wrap(st);
-                }
-                st.offset = Some(*n);
-                st
-            }
-            Rel::Distinct(r) => {
-                let mut st = self.rel(r)?;
-                if st.needs_barrier(Fuse::Distinct, false) {
-                    st = self.wrap(st);
-                }
-                st.distinct = true;
-                if !st.order_by.is_empty() {
-                    // `order` before `distinct`: dedupe inside the derived
-                    // table, sort outside it (see `Rel::Order`). This is not a
-                    // `Fuse` rule: the stage's own pending sort, not an incoming
-                    // clause, forces the wrap.
-                    st = self.wrap(st);
-                }
-                st
-            }
+            } => self.lower_table(schema, name, columns),
+            Rel::Where(r, p) => self.lower_where(r, p),
+            Rel::Select(r, fs) => self.lower_select(r, fs),
+            Rel::Update(r, fs) => self.lower_update(r, fs),
+            Rel::Omit(r, key) => self.lower_omit(r, key),
+            Rel::Prefix(r, affix) => self.lower_prefix(r, affix),
+            Rel::Suffix(r, affix) => self.lower_suffix(r, affix),
+            Rel::Agg(r, fs) => self.lower_agg(r, fs),
+            Rel::Order(r, ks) => self.lower_order(r, ks),
+            Rel::Limit(r, n) => self.lower_limit(r, n),
+            Rel::Offset(r, n) => self.lower_offset(r, n),
+            Rel::Distinct(r) => self.lower_distinct(r),
             Rel::Join {
                 kind,
                 left,
                 right,
                 on,
-            } => {
-                if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
-                    // A semi/anti join is an existence predicate: it keeps
-                    // the left relation's cardinality and columns while the
-                    // right relation only decides whether a matching row
-                    // exists.
-                    let left_stage = self.rel(left)?;
-                    let right_stage = self.rel(right)?;
-                    let left = self.derived(left_stage);
-                    let right = self.derived(right_stage);
-                    let predicate = lower_expr(on, &|side, n| match side {
-                        Side::Left => item(&left.items, n),
-                        Side::Right => item(&right.items, n),
-                        Side::Single => Err(format!("join predicates need `.<{n}` or `.>{n}`")),
-                    })?;
-                    let mut subquery = Stage::new(right.from, right.items);
-                    subquery.joins = right.joins;
-                    subquery.wheres.push(predicate);
-                    let exists = Expr::Exists {
-                        subquery: Box::new(sqlglot_rust::Statement::Select(
-                            subquery.into_statement(),
-                        )),
-                        negated: matches!(kind, JoinKind::Anti),
-                    };
-                    let mut st = Stage::new(left.from, left.items);
-                    st.joins = left.joins;
-                    st.wheres = left.wheres;
-                    st.wheres.push(exists);
-                    return Ok(st);
-                }
-                // `can_place` says a side's filters may leave its input and be
-                // placed by the caller. Only an inner join may do that: a
-                // filter there changes only which rows match, and both sides
-                // are discarded equally, so it does not matter which side of
-                // the join it sits on.
-                //
-                // Every other kind keeps each side's filters in that side's
-                // derived table, because a join input is a *relation* and its
-                // filter decides which rows it contributes. Hoisting is wrong
-                // in both directions:
-                //
-                //   * into ON widens the input back to the unfiltered
-                //     relation. `orders & rightJoin (users & where (.id > 1))`
-                //     would regain user 1 as an unmatched right row, and
-                //     `orders & fullJoin (users & where (.id > 2))` would
-                //     regain users 1 and 2.
-                //   * into WHERE drops the null-extended rows. For a right
-                //     join, `WHERE t1.amount > 4.5` removes not only the left
-                //     rows that fail it but also every row where the left side
-                //     is NULL — that is, the unmatched right rows the join
-                //     exists to keep.
-                //
-                //   kind   left_ok  right_ok
-                //   inner  true     true
-                //   left   false    false
-                //   right  false    false
-                //   full   false    false
-                let (left_ok, right_ok) = match kind {
-                    JoinKind::Inner => (true, true),
-                    JoinKind::Left | JoinKind::Right | JoinKind::Full => (false, false),
-                    JoinKind::Semi | JoinKind::Anti => unreachable!(),
-                };
-                // Sides whose unmatched rows are kept with NULLs for the other.
-                let (left_null, right_null) = match kind {
-                    JoinKind::Inner => (false, false),
-                    JoinKind::Left => (false, true),
-                    JoinKind::Right => (true, false),
-                    JoinKind::Full => (true, true),
-                    JoinKind::Semi | JoinKind::Anti => unreachable!(),
-                };
-                let l = self.rel(left)?;
-                let r = self.rel(right)?;
-                let l = self.join_input(l, left_ok, left_null);
-                // The right input must be a single table or derived table.
-                let r = match self.join_input(r, right_ok, right_null) {
-                    ji if ji.joins.is_empty() => ji,
-                    ji => self.rewrap(ji),
-                };
-                let pred = lower_expr(on, &|side, n| match side {
-                    Side::Left => item(&l.items, n),
-                    Side::Right => item(&r.items, n),
-                    Side::Single => Err(format!("join predicates need `.<{n}` or `.>{n}`")),
-                })?;
-                let items = cagara_hir::rules::join_columns(&l.items, &r.items);
-                let mut wheres = l.wheres;
-                // Only an inner join can have extracted filters to place, and
-                // there either side may go to WHERE. For every other kind both
-                // sides keep their filters in a derived table, so `r.wheres`
-                // is empty and the predicate stands alone.
-                let on = match kind {
-                    JoinKind::Inner => {
-                        wheres.extend(r.wheres);
-                        pred
-                    }
-                    _ if r.wheres.is_empty() => pred,
-                    _ => and_all(std::iter::once(pred).chain(r.wheres)).expect("non-empty"),
-                };
-                let mut st = Stage::new(l.from, items);
-                st.joins = l.joins;
-                st.wheres = wheres;
-                let join_type = match kind {
-                    JoinKind::Inner => JoinType::Inner,
-                    JoinKind::Left => JoinType::Left,
-                    JoinKind::Right => JoinType::Right,
-                    JoinKind::Full => JoinType::Full,
-                    JoinKind::Semi | JoinKind::Anti => unreachable!(),
-                };
-                st.joins.push(JoinClause {
-                    join_type,
-                    table: r.from,
-                    on: Some(on),
-                    using: vec![],
-                });
-                st
+            } => self.lower_join(kind, left, right, on),
+            Rel::Set { kind, left, right } => self.lower_set(kind, left, right),
+        }
+    }
+
+    fn lower_at(&mut self, r: &Rel) -> Result<Stage, String> {
+        self.rel(r)
+    }
+
+    fn lower_table(
+        &mut self,
+        schema: &str,
+        name: &str,
+        columns: &Option<Vec<String>>,
+    ) -> Result<Stage, String> {
+        let cols = columns.as_ref().ok_or("internal: table without columns")?;
+        let t = TableRef {
+            catalog: None,
+            schema: (!schema.is_empty()).then(|| schema.to_owned()),
+            name: name.to_owned(),
+            alias: None,
+            temporal: None,
+            name_quote_style: ident_style(name),
+            alias_quote_style: QuoteStyle::None,
+        };
+        Ok(Stage::new(
+            TableSource::Table(t),
+            cols.iter().map(|c| (c.clone(), col(None, c))).collect(),
+        ))
+    }
+
+    fn lower_where(&mut self, r: &Rel, p: &IrExpr) -> Result<Stage, String> {
+        let mut st = self.rel(r)?;
+        if st.needs_barrier(Fuse::Filter, false) {
+            st = self.wrap(st);
+        }
+        let e = st.resolve(p)?;
+        st.wheres.push(e);
+        Ok(st)
+    }
+
+    fn lower_select(&mut self, r: &Rel, fs: &[(String, IrExpr)]) -> Result<Stage, String> {
+        let mut st = self.rel(r)?;
+        let new_win = fs
+            .iter()
+            .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
+        if st.needs_barrier(Fuse::Project, new_win) {
+            st = self.wrap(st);
+        }
+        let items = fs
+            .iter()
+            .map(|(n, e)| Ok((n.clone(), st.resolve(e)?)))
+            .collect::<Result<_, String>>()?;
+        st.set_items(items, new_win);
+        Ok(st)
+    }
+
+    fn lower_update(&mut self, r: &Rel, fs: &[(String, IrExpr)]) -> Result<Stage, String> {
+        let mut st = self.rel(r)?;
+        // Like `select`, but the input's columns are kept in place:
+        // each updated name takes the new expression, and a name the
+        // input does not have is appended. An unlisted column is
+        // passed through as itself.
+        let new_win = fs
+            .iter()
+            .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
+        if st.needs_barrier(Fuse::Project, new_win) {
+            st = self.wrap(st);
+        }
+        let input: Vec<(String, ())> = st.names().into_iter().map(|c| (c, ())).collect();
+        let out = cagara_hir::schema::merge_columns(&input, fs)?;
+        let mut items = Vec::with_capacity(out.len());
+        for name in out {
+            let e = match fs.iter().find(|(n, _)| *n == name) {
+                Some((_, e)) => st.resolve(e)?,
+                None => st.item(&name)?,
+            };
+            items.push((name, e));
+        }
+        st.set_items(items, new_win);
+        Ok(st)
+    }
+
+    fn lower_omit(&mut self, r: &Rel, key: &str) -> Result<Stage, String> {
+        let mut st = self.rel(r)?;
+        if st.needs_barrier(Fuse::Omit, false) {
+            st = self.wrap(st);
+        }
+        st.items.retain(|(n, _)| n != key);
+        Ok(st)
+    }
+
+    fn lower_prefix(&mut self, r: &Rel, affix: &str) -> Result<Stage, String> {
+        let st = self.rel(r)?;
+        Ok(self.rename_all(st, affix, true))
+    }
+
+    fn lower_suffix(&mut self, r: &Rel, affix: &str) -> Result<Stage, String> {
+        let st = self.rel(r)?;
+        Ok(self.rename_all(st, affix, false))
+    }
+
+    fn lower_agg(&mut self, r: &Rel, fs: &[(String, IrExpr)]) -> Result<Stage, String> {
+        let mut st = self.rel(r)?;
+        // `distinct` must dedupe the input rows before they are counted
+        // or grouped, so it cannot fold into this stage.
+        if st.needs_barrier(Fuse::Aggregate, false) {
+            st = self.wrap(st);
+        }
+        st.order_by.clear();
+        let mut keys: Vec<&IrExpr> = Vec::new();
+        for (_, e) in fs {
+            collect_groups(e, &mut keys);
+        }
+        let has_aggfn = fs
+            .iter()
+            .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Agg(..))));
+        if keys.is_empty() && !has_aggfn {
+            // Only constants: force exactly one output row.
+            st.items = vec![(
+                "cagara_n".into(),
+                crate::stage::template("COUNT(*)", vec![])?,
+            )];
+            st.has_agg = true;
+            st = self.wrap(st);
+        } else {
+            let keys: Vec<Expr> = keys
+                .iter()
+                .map(|k| st.resolve(k))
+                .collect::<Result<_, _>>()?;
+            // A constant key does not split groups, and SQL reads
+            // `GROUP BY 2` as a position (and rejects `GROUP BY 'x'`).
+            // Dropping every key would turn "no rows in, no rows out"
+            // into one row, which HAVING keeps.
+            let all = keys.len();
+            st.group_by = keys.into_iter().filter(|k| !is_literal(k)).collect();
+            if st.group_by.is_empty() && all > 0 {
+                st.having = Some(crate::stage::template("COUNT(*) > 0", vec![])?);
             }
-            Rel::Set { kind, left, right } => {
-                let left = self.rel(left)?;
-                let right = self.rel(right)?;
-                let names = left.names();
-                let op = match kind {
-                    SetKind::Union => SetOperationType::Union,
-                    SetKind::UnionAll => SetOperationType::Union,
-                    SetKind::Intersect => SetOperationType::Intersect,
-                    SetKind::Except => SetOperationType::Except,
-                };
-                let all = matches!(kind, SetKind::UnionAll);
-                let stmt = Statement::SetOperation(SetOperationStatement {
-                    comments: vec![],
-                    op,
-                    all,
-                    left: Box::new(self.branch(left)),
-                    right: Box::new(self.branch(right)),
-                    order_by: vec![],
-                    limit: None,
-                    offset: None,
-                    query_options: None,
+            st.has_agg = true;
+        }
+        let items = fs
+            .iter()
+            .map(|(n, e)| Ok((n.clone(), st.resolve(e)?)))
+            .collect::<Result<_, String>>()?;
+        st.set_items(items, false);
+        Ok(st)
+    }
+
+    fn lower_order(&mut self, r: &Rel, ks: &[(IrExpr, bool)]) -> Result<Stage, String> {
+        let mut st = self.rel(r)?;
+        // Sorting belongs outside the dedup: a DISTINCT query may
+        // order only by its own select list, and an emulated NULLS
+        // LAST key cannot appear there.
+        if st.needs_barrier(Fuse::Sort, false) {
+            st = self.wrap(st);
+        }
+        let mut order = Vec::new();
+        for (k, asc) in ks {
+            let expr = st.resolve(k)?;
+            // A constant sorts nothing, and `ORDER BY 1` is a position.
+            // NULLs sort last in either direction; `dialect` spells
+            // that per target.
+            if !is_literal(&expr) {
+                order.push(OrderByItem {
+                    expr,
+                    ascending: *asc,
+                    nulls_first: Some(false),
                 });
-                let alias = self.alias();
-                Stage::new(
-                    TableSource::Subquery {
-                        query: Box::new(stmt),
-                        alias: Some(alias.clone()),
-                        alias_quote_style: QuoteStyle::None,
-                    },
-                    names
-                        .iter()
-                        .map(|n| (n.clone(), col(Some(&alias), n)))
-                        .collect(),
-                )
             }
-        })
+        }
+        st.order_by = order;
+        Ok(st)
+    }
+
+    fn lower_limit(&mut self, r: &Rel, n: &i64) -> Result<Stage, String> {
+        let mut st = self.rel(r)?;
+        if st.needs_barrier(Fuse::Limit, false) {
+            st = self.wrap(st);
+        }
+        st.limit = Some(*n);
+        Ok(st)
+    }
+
+    fn lower_offset(&mut self, r: &Rel, n: &i64) -> Result<Stage, String> {
+        let mut st = self.rel(r)?;
+        if st.needs_barrier(Fuse::Offset, false) {
+            st = self.wrap(st);
+        }
+        st.offset = Some(*n);
+        Ok(st)
+    }
+
+    fn lower_distinct(&mut self, r: &Rel) -> Result<Stage, String> {
+        let mut st = self.rel(r)?;
+        if st.needs_barrier(Fuse::Distinct, false) {
+            st = self.wrap(st);
+        }
+        st.distinct = true;
+        if !st.order_by.is_empty() {
+            // `order` before `distinct`: dedupe inside the derived
+            // table, sort outside it (see `Rel::Order`). This is not a
+            // `Fuse` rule: the stage's own pending sort, not an incoming
+            // clause, forces the wrap.
+            st = self.wrap(st);
+        }
+        Ok(st)
+    }
+
+    fn lower_join(
+        &mut self,
+        kind: &JoinKind,
+        left: &Rel,
+        right: &Rel,
+        on: &IrExpr,
+    ) -> Result<Stage, String> {
+        if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+            // A semi/anti join is an existence predicate: it keeps
+            // the left relation's cardinality and columns while the
+            // right relation only decides whether a matching row
+            // exists.
+            let left_stage = self.rel(left)?;
+            let right_stage = self.rel(right)?;
+            let left = self.derived(left_stage);
+            let right = self.derived(right_stage);
+            let predicate = lower_expr(on, &|side, n| match side {
+                Side::Left => item(&left.items, n),
+                Side::Right => item(&right.items, n),
+                Side::Single => Err(format!("join predicates need `.<{n}` or `.>{n}`")),
+            })?;
+            let mut subquery = Stage::new(right.from, right.items);
+            subquery.joins = right.joins;
+            subquery.wheres.push(predicate);
+            let exists = Expr::Exists {
+                subquery: Box::new(sqlglot_rust::Statement::Select(subquery.into_statement())),
+                negated: matches!(kind, JoinKind::Anti),
+            };
+            let mut st = Stage::new(left.from, left.items);
+            st.joins = left.joins;
+            st.wheres = left.wheres;
+            st.wheres.push(exists);
+            return Ok(st);
+        }
+        // `can_place` says a side's filters may leave its input and be
+        // placed by the caller. Only an inner join may do that: a
+        // filter there changes only which rows match, and both sides
+        // are discarded equally, so it does not matter which side of
+        // the join it sits on.
+        //
+        // Every other kind keeps each side's filters in that side's
+        // derived table, because a join input is a *relation* and its
+        // filter decides which rows it contributes. Hoisting is wrong
+        // in both directions:
+        //
+        //   * into ON widens the input back to the unfiltered
+        //     relation. `orders & rightJoin (users & where (.id > 1))`
+        //     would regain user 1 as an unmatched right row, and
+        //     `orders & fullJoin (users & where (.id > 2))` would
+        //     regain users 1 and 2.
+        //   * into WHERE drops the null-extended rows. For a right
+        //     join, `WHERE t1.amount > 4.5` removes not only the left
+        //     rows that fail it but also every row where the left side
+        //     is NULL — that is, the unmatched right rows the join
+        //     exists to keep.
+        //
+        //   kind   left_ok  right_ok
+        //   inner  true     true
+        //   left   false    false
+        //   right  false    false
+        //   full   false    false
+        let (left_ok, right_ok) = match kind {
+            JoinKind::Inner => (true, true),
+            JoinKind::Left | JoinKind::Right | JoinKind::Full => (false, false),
+            JoinKind::Semi | JoinKind::Anti => unreachable!(),
+        };
+        // Sides whose unmatched rows are kept with NULLs for the other.
+        let (left_null, right_null) = match kind {
+            JoinKind::Inner => (false, false),
+            JoinKind::Left => (false, true),
+            JoinKind::Right => (true, false),
+            JoinKind::Full => (true, true),
+            JoinKind::Semi | JoinKind::Anti => unreachable!(),
+        };
+        let l = self.rel(left)?;
+        let r = self.rel(right)?;
+        let l = self.join_input(l, left_ok, left_null);
+        // The right input must be a single table or derived table.
+        let r = match self.join_input(r, right_ok, right_null) {
+            ji if ji.joins.is_empty() => ji,
+            ji => self.rewrap(ji),
+        };
+        let pred = lower_expr(on, &|side, n| match side {
+            Side::Left => item(&l.items, n),
+            Side::Right => item(&r.items, n),
+            Side::Single => Err(format!("join predicates need `.<{n}` or `.>{n}`")),
+        })?;
+        let items = cagara_hir::rules::join_columns(&l.items, &r.items);
+        let mut wheres = l.wheres;
+        // Only an inner join can have extracted filters to place, and
+        // there either side may go to WHERE. For every other kind both
+        // sides keep their filters in a derived table, so `r.wheres`
+        // is empty and the predicate stands alone.
+        let on = match kind {
+            JoinKind::Inner => {
+                wheres.extend(r.wheres);
+                pred
+            }
+            _ if r.wheres.is_empty() => pred,
+            _ => and_all(std::iter::once(pred).chain(r.wheres)).expect("non-empty"),
+        };
+        let mut st = Stage::new(l.from, items);
+        st.joins = l.joins;
+        st.wheres = wheres;
+        let join_type = match kind {
+            JoinKind::Inner => JoinType::Inner,
+            JoinKind::Left => JoinType::Left,
+            JoinKind::Right => JoinType::Right,
+            JoinKind::Full => JoinType::Full,
+            JoinKind::Semi | JoinKind::Anti => unreachable!(),
+        };
+        st.joins.push(JoinClause {
+            join_type,
+            table: r.from,
+            on: Some(on),
+            using: vec![],
+        });
+        Ok(st)
+    }
+
+    fn lower_set(&mut self, kind: &SetKind, left: &Rel, right: &Rel) -> Result<Stage, String> {
+        let left = self.rel(left)?;
+        let right = self.rel(right)?;
+        let names = left.names();
+        let op = match kind {
+            SetKind::Union => SetOperationType::Union,
+            SetKind::UnionAll => SetOperationType::Union,
+            SetKind::Intersect => SetOperationType::Intersect,
+            SetKind::Except => SetOperationType::Except,
+        };
+        let all = matches!(kind, SetKind::UnionAll);
+        let stmt = Statement::SetOperation(SetOperationStatement {
+            comments: vec![],
+            op,
+            all,
+            left: Box::new(self.branch(left)),
+            right: Box::new(self.branch(right)),
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            query_options: None,
+        });
+        let alias = self.alias();
+        Ok(Stage::new(
+            TableSource::Subquery {
+                query: Box::new(stmt),
+                alias: Some(alias.clone()),
+                alias_quote_style: QuoteStyle::None,
+            },
+            names
+                .iter()
+                .map(|n| (n.clone(), col(Some(&alias), n)))
+                .collect(),
+        ))
     }
 
     /// One branch of a set operation. A branch with its own LIMIT / OFFSET

@@ -6,7 +6,7 @@ use crate::elaborate::{elaborate_definition, is_not_a_query};
 use crate::ir::Rel;
 use crate::workspace::{Binding, Diag, LoadedModule, Workspace};
 use cagara_syntax::ast::Module;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
@@ -190,8 +190,11 @@ pub(crate) fn compile_reusing(
         queries: Vec::new(),
         diagnostics: input.diagnostics().to_vec(),
     };
-    for error in &tc.errors {
-        push_unique(&mut out.diagnostics, error.diag.clone());
+    // Dedupe through a set, not `Vec::contains`: a file with many repeated
+    // diagnostics would otherwise be quadratic in the number of diagnostics.
+    let mut seen: HashSet<Diag> = out.diagnostics.iter().cloned().collect();
+    for error in tc.errors() {
+        push_unique(&mut out.diagnostics, &mut seen, error.diag.clone());
     }
 
     for (index, definition) in root.source().defs.iter().enumerate() {
@@ -225,7 +228,7 @@ pub(crate) fn compile_reusing(
             continue;
         };
         if let Err(diag) = &result {
-            push_unique(&mut out.diagnostics, diag.clone());
+            push_unique(&mut out.diagnostics, &mut seen, diag.clone());
         }
         out.queries.push(CompiledQuery {
             id,
@@ -290,8 +293,8 @@ pub fn root_queries(ws: &Workspace) -> Vec<(String, Result<Rel, Diag>)> {
         .collect()
 }
 
-fn push_unique(diags: &mut Vec<Diag>, diag: Diag) {
-    if !diags.contains(&diag) {
+fn push_unique(diags: &mut Vec<Diag>, seen: &mut HashSet<Diag>, diag: Diag) {
+    if seen.insert(diag.clone()) {
         diags.push(diag);
     }
 }

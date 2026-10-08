@@ -37,9 +37,13 @@ pub struct LoadedModule {
     pub scope: Arc<HashMap<String, Binding>>,
     /// This module's own definitions (what `import` and `alias.name` see).
     pub own: Arc<HashMap<String, Binding>>,
+    /// Byte offsets where each line of `text` starts. Built once per module so
+    /// rendering a diagnostic is O(log lines) instead of rescanning the whole
+    /// prefix, which made a file with many diagnostics quadratic.
+    line_starts: Vec<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Diag {
     pub path: String,
     pub line: usize,
@@ -251,6 +255,7 @@ impl Workspace {
         let scope = module_scope(&self.db, input).clone();
         self.file_diags
             .push(file_diags(&path, &text, &parsed, &own));
+        let starts = line_starts(&text);
         self.inputs.push(input);
         self.modules.push(LoadedModule {
             path,
@@ -258,6 +263,7 @@ impl Workspace {
             module: parsed.module,
             scope,
             own,
+            line_starts: starts,
         });
         m
     }
@@ -295,9 +301,11 @@ impl Workspace {
             self.modules[k].scope = module_scope(&self.db, input).clone();
         }
         self.file_diags[m] = file_diags(&path, &text, &parsed, &self.modules[m].own);
+        let starts = line_starts(&text);
         let md = &mut self.modules[m];
         md.text = text;
         md.module = parsed.module;
+        md.line_starts = starts;
         self.rebuild_diags();
         true
     }
@@ -370,13 +378,27 @@ impl Workspace {
 
     pub fn diag(&self, m: usize, offset: usize, message: impl Into<String>) -> Diag {
         let md = &self.modules[m];
-        make_diag_range(&md.path, &md.text, offset, offset, message.into())
+        make_diag_indexed(
+            &md.path,
+            &md.text,
+            &md.line_starts,
+            offset,
+            offset,
+            message.into(),
+        )
     }
 
     /// A diagnostic underlining `span` in module `m`.
     pub fn diag_span(&self, m: usize, span: Span, message: impl Into<String>) -> Diag {
         let md = &self.modules[m];
-        diag_in(&md.path, &md.text, span, message)
+        make_diag_indexed(
+            &md.path,
+            &md.text,
+            &md.line_starts,
+            span.start as usize,
+            span.end as usize,
+            message.into(),
+        )
     }
 }
 
@@ -406,10 +428,22 @@ fn file_diags(
     parsed: &ParsedModule,
     own: &HashMap<String, Binding>,
 ) -> Vec<Diag> {
+    // One line index for the whole file: a syntax-error-heavy file would
+    // otherwise rescan the text once per diagnostic.
+    let starts = line_starts(text);
     let mut out: Vec<Diag> = parsed
         .errors
         .iter()
-        .map(|e| make_diag(path, text, e.offset, format!("syntax error: {}", e.message)))
+        .map(|e| {
+            make_diag_indexed(
+                path,
+                text,
+                &starts,
+                e.offset,
+                e.offset,
+                format!("syntax error: {}", e.message),
+            )
+        })
         .collect();
     // An operator's fixity is a property of the language, not of one module:
     // the table is built once, from the prelude. A declaration anywhere else
@@ -417,9 +451,11 @@ fn file_diags(
     // the time it could be read), so say so instead.
     if path != Path::new(PRELUDE_PATH) {
         for d in &parsed.module.operators {
-            out.push(make_diag(
+            out.push(make_diag_indexed(
                 path,
                 text,
+                &starts,
+                d.span.start as usize,
                 d.span.start as usize,
                 format!(
                     "operator `{}` must be declared in `prelude.cagara`, where \
@@ -442,9 +478,11 @@ fn file_diags(
     missing.sort();
     for (i, name) in missing {
         let msg = format!("`{name}` is defined more than once, so each definition needs a type signature (overloading)");
-        out.push(make_diag(
+        out.push(make_diag_indexed(
             path,
             text,
+            &starts,
+            parsed.module.defs[i].span.start as usize,
             parsed.module.defs[i].span.start as usize,
             msg,
         ));
@@ -452,22 +490,33 @@ fn file_diags(
     out
 }
 
-/// A diagnostic underlining `span` in the file `path` with contents `text`.
-pub fn diag_in(path: &Path, text: &str, span: Span, message: impl Into<String>) -> Diag {
-    make_diag_range(
-        path,
-        text,
-        span.start as usize,
-        span.end as usize,
-        message.into(),
-    )
-}
-
 fn make_diag(path: &Path, text: &str, offset: usize, message: String) -> Diag {
     make_diag_range(path, text, offset, offset, message)
 }
 
-fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: String) -> Diag {
+/// Byte offsets where each line of `text` starts, always including `0`.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut out = Vec::with_capacity(text.len() / 32 + 1);
+    out.push(0);
+    out.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+    out
+}
+
+/// 1-based line number of `offset`, given the line starts.
+fn line_at(starts: &[usize], offset: usize) -> usize {
+    starts.partition_point(|&s| s <= offset).max(1)
+}
+
+/// Build a diagnostic from a precomputed line index. Prefer this over
+/// [`make_diag_range`] whenever several diagnostics share one text.
+fn make_diag_indexed(
+    path: &Path,
+    text: &str,
+    starts: &[usize],
+    start: usize,
+    end: usize,
+    message: String,
+) -> Diag {
     // An offset from a parse of a *different* text can land inside a
     // multi-byte character of this one. Snap to a boundary rather than
     // panicking: a diagnostic is not worth crashing over.
@@ -479,10 +528,9 @@ fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: S
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    let before = &text[..start];
-    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let line = line_at(starts, start);
+    let line_start = starts[line - 1];
     let line_end = text[start..].find('\n').map_or(text.len(), |i| start + i);
-    let line = before.matches('\n').count() + 1;
     let col = start - line_start + 1;
     // Underline up to the end of the span or of the line, whichever is first.
     let width = text[start..end.min(line_end)].chars().count();
@@ -494,6 +542,12 @@ fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: S
         source: text[line_start..line_end].trim_end().to_string(),
         width,
     }
+}
+
+/// [`make_diag_indexed`] for a caller with no line index: builds one per call,
+/// so it is linear in the text length. Use the indexed form for repeated calls.
+fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: String) -> Diag {
+    make_diag_indexed(path, text, &line_starts(text), start, end, message)
 }
 
 #[cfg(test)]
@@ -537,14 +591,14 @@ mod tests {
         assert!(ws.set_source(ws.root, source.replace("q = value", "q = value + 1")));
         assert!(Arc::ptr_eq(&exports, &ws.modules[imported].own));
         assert!(Arc::ptr_eq(&scope, &ws.modules[imported].scope));
-        assert!(crate::check::check(&ws).errors.is_empty());
+        assert!(crate::check::check(&ws).errors().is_empty());
 
         assert!(ws.set_source(imported, "other = 42\n".into()));
         assert!(exports.contains_key("value"));
         assert!(!exports.contains_key("other"));
         assert!(!ws.modules[ws.root].scope.contains_key("value"));
         assert!(ws.modules[ws.root].scope.contains_key("other"));
-        assert!(!crate::check::check(&ws).errors.is_empty());
+        assert!(!crate::check::check(&ws).errors().is_empty());
     }
 
     /// The db text and the workspace text must always be the same text:
@@ -614,6 +668,26 @@ mod tests {
         assert_eq!(diag.line, 1, "{diag:?}");
         let diag = ws.diag(ws.root, "q = \"héllo\"\n".len() - 1, "boom");
         assert_eq!(diag.line, 1, "{diag:?}");
+    }
+
+    /// The cached line index must give the same line and column as counting
+    /// newlines in the text directly, at every offset of a multi-line file
+    /// with multi-byte characters and no trailing newline.
+    #[test]
+    fn diagnostic_lines_match_a_direct_count_at_every_offset() {
+        let text = "a = 1\nb = \"héllo\"\nc = 3";
+        let ws = Workspace::from_source(text);
+        for offset in 0..=text.len() {
+            if !text.is_char_boundary(offset) {
+                continue;
+            }
+            let d = ws.diag(ws.root, offset, "x");
+            let before = &text[..offset];
+            let expected_line = before.matches('\n').count() + 1;
+            let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+            assert_eq!(d.line, expected_line, "line at offset {offset}");
+            assert_eq!(d.col, offset - line_start + 1, "col at offset {offset}");
+        }
     }
 
     /// An operator's fixity is a property of the language, read from the

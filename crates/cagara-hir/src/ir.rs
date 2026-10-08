@@ -7,13 +7,13 @@ use crate::rules;
 pub use cagara_syntax::ast::{Side, Span};
 
 /// Source location of a query stage in user code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Loc {
     pub module: usize,
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Lit {
     Int(i64),
     Float(String),
@@ -21,7 +21,7 @@ pub enum Lit {
     Bool(bool),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Bound {
     UnboundedPreceding,
     Preceding(i64),
@@ -44,13 +44,13 @@ impl Bound {
 }
 
 /// A `ROWS BETWEEN start AND end` frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Frame {
     pub start: Bound,
     pub end: Bound,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WinSpec {
     pub partition: Vec<Expr>,
     pub order: Vec<(Expr, bool)>,
@@ -58,7 +58,7 @@ pub struct WinSpec {
     pub frame: Option<Frame>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     Col(Side, String),
     Lit(Lit),
@@ -152,7 +152,7 @@ fn row_only(e: &Expr, what: &str) -> Result<(), String> {
     rules::nested(what, e.phase()?)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JoinKind {
     Inner,
     Left,
@@ -162,7 +162,7 @@ pub enum JoinKind {
     Anti,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SetKind {
     Union,
     UnionAll,
@@ -170,7 +170,13 @@ pub enum SetKind {
     Except,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Relational structure of one query stage.
+///
+/// `Eq`/`Hash` are structural, including the [`Loc`] of a [`Rel::At`], and the
+/// SQL lowerer uses them as the identity of a shareable sub-pipeline. They
+/// must stay consistent with each other, which a derive guarantees and a
+/// hand-written pair would not.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Rel {
     Table {
         schema: String,

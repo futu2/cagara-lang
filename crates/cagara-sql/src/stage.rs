@@ -182,7 +182,62 @@ pub fn ident_style(name: &str) -> QuoteStyle {
     }
 }
 
+/// The clause a lowerer arm is about to fold into a [`Stage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fuse {
+    /// `where`: appends to the stage's `WHERE`.
+    Filter,
+    /// `select` / `update`: replaces the select list.
+    Project,
+    /// `omit`: drops one name from the select list.
+    Omit,
+    /// `agg`: sets the grouping.
+    Aggregate,
+    /// `order`: sets the sort keys.
+    Sort,
+    Limit,
+    Offset,
+    Distinct,
+}
+
 impl Stage {
+    /// May `kind`'s clause be folded into this stage, or must the stage be
+    /// wrapped in a derived table first?
+    ///
+    /// Each clause is legal in the same `SELECT` as some others and not with
+    /// the rest, and folding the wrong one changes *which rows* the query
+    /// returns rather than producing invalid SQL — so the rule is stated once
+    /// here instead of being retyped at each arm:
+    ///
+    /// | consumer | blocked by |
+    /// |---|---|
+    /// | filter | aggregate, window, limit, offset |
+    /// | project / update | limit, offset, distinct, and (only when the projection adds a window) aggregate or window |
+    /// | omit | distinct |
+    /// | aggregate | aggregate, window, distinct, limit, offset |
+    /// | sort | limit, offset, distinct |
+    /// | limit | limit |
+    /// | offset | limit, offset |
+    /// | distinct | limit, offset |
+    ///
+    /// `new_window` is the "the projection adds a window" part of the project
+    /// rule; the other consumers ignore it.
+    pub fn needs_barrier(&self, kind: Fuse, new_window: bool) -> bool {
+        let paged = self.limit.is_some() || self.offset.is_some();
+        match kind {
+            Fuse::Filter => paged || self.has_agg || self.has_win,
+            Fuse::Project => {
+                paged || self.distinct || (new_window && (self.has_agg || self.has_win))
+            }
+            Fuse::Omit => self.distinct,
+            Fuse::Aggregate => paged || self.distinct || self.has_agg || self.has_win,
+            Fuse::Sort => paged || self.distinct,
+            Fuse::Limit => self.limit.is_some(),
+            Fuse::Offset => paged,
+            Fuse::Distinct => paged,
+        }
+    }
+
     pub fn new(from: TableSource, items: Vec<(String, Expr)>) -> Self {
         Stage {
             from,
@@ -429,7 +484,15 @@ fn subst_node(e: Expr, args: &[Expr]) -> Expr {
                 .and_then(|n| args.get(n))
             {
                 Some(a) => a.clone(),
-                None => e,
+                // `template` rejected every placeholder that is not a whole
+                // term naming one of its arguments before this runs, so an
+                // unresolvable index is unreachable. Asserting keeps it from
+                // silently emitting `cagara_arg_N` as SQL if that check ever
+                // loosens.
+                None => {
+                    debug_assert!(false, "unvalidated placeholder `{name}`");
+                    e
+                }
             }
         }
         Expr::Function {

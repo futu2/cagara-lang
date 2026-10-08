@@ -170,8 +170,12 @@ pub fn lex(input: &str) -> Vec<Lexeme<'_>> {
     while let Some(tok) = lexer.next() {
         let span = lexer.span();
         let kind = tok.unwrap_or(Token::Error);
-        let line_start =
-            !kind.is_trivia() && (span.start == 0 || input.as_bytes()[span.start - 1] == b'\n');
+        // The whitespace regex accepts a lone `\r`, so a line break is `\n`,
+        // `\r\n`, or a bare `\r`. Testing only for `\n` gave a CR-only file no
+        // line starts after the first, which silently merged its definitions
+        // under the parser's column-0 layout rule.
+        let line_start = !kind.is_trivia()
+            && (span.start == 0 || matches!(input.as_bytes()[span.start - 1], b'\n' | b'\r'));
         out.push(Lexeme {
             kind,
             text: &input[span.clone()],

@@ -44,8 +44,11 @@ pub const PRELUDE_SRC: &str = include_str!("../../../prelude.cagara");
 pub const MIN_LEVEL: u8 = 0;
 
 /// Tightest precedence a declaration may name. Binding powers are compared as
-/// `u8` and a right-associative operator at level `n` uses `n + 1`, so the
-/// level itself must leave room for that one.
+/// `u8` and an operator at level `n` spends `n + 1` on one of its two binding
+/// powers, so the level must leave room for that increment: the tightest
+/// binding power the language can produce is `MAX_LEVEL + 1` = 251, which still
+/// fits in `u8`. A declaration outside `MIN_LEVEL..=MAX_LEVEL` is rejected
+/// before a `Fixity` is built (`ast::lower` and the parser's declaration arm).
 pub const MAX_LEVEL: u8 = 250;
 
 /// Binding powers of one operator: the tightness required of its left and
@@ -386,6 +389,49 @@ mod tests {
             assert_eq!(first.text, *s, "`{s}` lexes as more than one token");
             assert!(lex.next().is_none(), "`{s}` lexes as more than one token");
         }
+    }
+
+    /// `SyntaxKind::is_op_symbol` is what makes the parser look up a fixity
+    /// instead of reporting an unexpected token, and it is a third list of the
+    /// operator spellings. Every spelling this table knows — including the ones
+    /// `prelude.cagara` declares — must lex to a token that answers `true`, or
+    /// the operator would be declared yet unusable.
+    #[test]
+    fn every_known_operator_spelling_lexes_to_an_op_symbol() {
+        for spelling in ops().spellings() {
+            let first = crate::lexer::lex(spelling)
+                .into_iter()
+                .find(|l| !l.kind.is_trivia())
+                .unwrap_or_else(|| panic!("`{spelling}` lexed to nothing"));
+            assert!(
+                first.kind.is_op_symbol(),
+                "`{spelling}` lexes to {:?}, which is not classified as an op symbol",
+                first.kind
+            );
+        }
+        // And the classification is not vacuously true.
+        for spelling in ["x", "1", "\"s\"", "(", "{", "]"] {
+            let first = crate::lexer::lex(spelling).into_iter().next().unwrap();
+            assert!(
+                !first.kind.is_op_symbol(),
+                "`{spelling}` must not be an op symbol"
+            );
+        }
+    }
+
+    /// The tightest operator the language allows still has room for the `+ 1`
+    /// that associativity spends. `MAX_LEVEL` bounds the *level*; the largest
+    /// binding power it can produce is `MAX_LEVEL + 1`.
+    #[test]
+    fn the_maximum_level_leaves_room_for_its_binding_power() {
+        assert_eq!(
+            Fixity::left(MAX_LEVEL).precedence(),
+            (MAX_LEVEL, MAX_LEVEL + 1)
+        );
+        assert_eq!(
+            Fixity::right(MAX_LEVEL).precedence(),
+            (MAX_LEVEL + 1, MAX_LEVEL)
+        );
     }
 
     /// A declaration the parser rejects must not take effect either: the

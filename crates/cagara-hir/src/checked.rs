@@ -154,11 +154,9 @@ impl CheckedQuery {
         let schema = schema.into();
         let name = name.into();
         let Some(row) = columns else {
-            return Err(Error::new(format!(
-                "the columns of table `{schema}.{name}` are unknown; give its definition a closed \
-                 type, e.g. `t : query {{ id = int }} = table \"{schema}\" \"{name}\"`"
-            ))
-            .at(origin));
+            return Err(
+                Error::new(crate::schema::unknown_table_columns(&schema, &name)).at(origin),
+            );
         };
         // Read the names before `row` is moved into the node.
         let names = row.names();

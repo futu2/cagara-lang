@@ -196,7 +196,6 @@ fn elaborate_def(
     ) {
         return Err(NOT_A_QUERY);
     }
-    let origin = Origin::new(module, d.span);
     let scope = input.module(module).scope();
     let active = [(module, def)];
     let env: [(String, CheckedValue); 0] = [];
@@ -213,7 +212,7 @@ fn elaborate_def(
         holes: &holes,
         active: &active,
     };
-    let value = elaborate_query(cx, &d.body, origin)?;
+    let value = elaborate_query(cx, &d.body)?;
     Ok(value)
 }
 
@@ -244,8 +243,8 @@ fn elaborate_primitive(
 ) -> R<CheckedQuery> {
     match (prim, args) {
         ("__table", [s, n]) => {
-            let schema = string_literal(s, "table")?;
-            let name = string_literal(n, "table")?;
+            let schema = string_literal(s, "table", cx.module)?;
+            let name = string_literal(n, "table", cx.module)?;
             // The columns come from the *defining* definition's declared
             // `query {..}` type — the same place the checker read them — which
             // `owner` identifies. Without them the table has no columns, and a
@@ -263,12 +262,9 @@ fn elaborate_primitive(
                     // lets the production boundary show it to the user instead of
                     // treating it as a compiler failure — with `schema` demoted to an
                     // assertion, the wrong classification made the compiler *panic*
-                    // here on a program that deserves a plain diagnostic.
-                    Error::new(format!(
-                    "the columns of table `{schema}.{name}` are unknown; give its definition a \
-                     closed type, e.g. `t : query {{ id = int }} = table \"{schema}\" \"{name}\"`"
-                ))
-                    .at(origin)
+                    // here on a program that deserves a plain diagnostic. The wording
+                    // is shared with `schema` so the three sites cannot drift.
+                    Error::new(crate::schema::unknown_table_columns(&schema, &name)).at(origin)
                 })?;
             CheckedQuery::table(schema, name, Some(crate::core::RowType::new(row)), origin)
         }
@@ -344,14 +340,19 @@ fn join_kind(cx: Ctx<'_>, name: &str) -> Option<crate::ir::JoinKind> {
 }
 
 /// A string literal's value.
-fn string_literal(e: &ast::Expr, what: &str) -> R<String> {
+///
+/// `module` is the module the literal was written in. It must not be a
+/// hardcoded index: a diagnostic's span is rendered against that module's
+/// text, so attributing a user's literal to module 0 (the prelude) printed the
+/// prelude's source line and pointed the caret at the wrong place.
+fn string_literal(e: &ast::Expr, what: &str, module: usize) -> R<String> {
     match &e.kind {
         ExprKind::Lit(ast::Lit::Str(s)) => Ok(s.clone()),
         other => Err(Error::new(format!(
             "`{what}` expects a string, found {}",
             describe(other)
         ))
-        .at(Origin::new(0, e.span))),
+        .at(Origin::new(module, e.span))),
     }
 }
 
@@ -361,9 +362,13 @@ fn string_literal(e: &ast::Expr, what: &str) -> R<String> {
 /// `owner` is the definition whose body `e` belongs to. Overload choices are
 /// recorded per *definition*, keyed by the use's `ExprId`, so resolving one
 /// needs the owner as well as the site — see [`choose`].
-fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery> {
+///
+/// Errors are located from `e`'s own span and `cx.module`. There is no
+/// caller-supplied origin: an earlier version took one and ignored it, and the
+/// call sites passed two different things (the expression sometimes, the
+/// enclosing definition's span others), so it was never a usable location.
+fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedQuery> {
     let at = |span: Span| Origin::new(cx.module, span);
-    let _ = origin;
     // A name bound by an enclosing application to a *query* argument: the `q`
     // of `f = q => users & leftJoin q (..)`. Now that the environment holds
     // values rather than expressions this is the same lookup an expression
@@ -388,7 +393,6 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
             match cx.scope.get(n) {
                 Some(Binding::Def(dm, di)) => {
                     let body = &cx.input.module(*dm).def(*di).body;
-                    let inner_origin = at(cx.input.module(*dm).def(*di).span);
                     // Descending into another definition runs in *its* module,
                     // owner and scope, so the context changes with it.
                     let active = enter(&cx, *dm, *di)?;
@@ -401,7 +405,7 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                         holes: cx.holes,
                         env: cx.env,
                     };
-                    elaborate_query(inner, body, inner_origin)
+                    elaborate_query(inner, body)
                 }
                 Some(Binding::Overloads(dm, is)) => {
                     let di = choose(
@@ -411,9 +415,9 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                         e.id,
                         is,
                         cx.holes,
+                        at(e.span),
                     )?;
                     let body = &cx.input.module(*dm).def(di).body;
-                    let inner_origin = at(cx.input.module(*dm).def(di).span);
                     let active = enter(&cx, *dm, di)?;
                     let inner = Ctx {
                         input: cx.input,
@@ -424,7 +428,7 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                         holes: cx.holes,
                         env: cx.env,
                     };
-                    elaborate_query(inner, body, inner_origin)
+                    elaborate_query(inner, body)
                 }
                 _ => Err(Error::new(format!("unknown query name `{n}`")).at(at(e.span))),
             }
@@ -455,6 +459,7 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                         e.id,
                         &is,
                         cx.holes,
+                        at(e.span),
                     )?,
                 ),
                 _ => return Err(Error::new(format!("`{alias}.{f}` is not a query")).at(at(e.span))),
@@ -472,7 +477,7 @@ fn elaborate_query(cx: Ctx<'_>, e: &ast::Expr, origin: Origin) -> R<CheckedQuery
                 holes: cx.holes,
                 env: cx.env,
             };
-            elaborate_query(inner, &body, at(e.span))
+            elaborate_query(inner, &body)
         }
         ExprKind::App(f, args) => elaborate_application(cx, e, f, args),
         other => {
@@ -516,6 +521,7 @@ fn elaborate_application(
                         f.id,
                         &is,
                         cx.holes,
+                        at(f.span),
                     )?,
                 )),
                 _ => None,
@@ -570,7 +576,7 @@ fn elaborate_application(
                         active: &active,
                         holes: &holes,
                     };
-                    return elaborate_query(callee, inner, at(e.span));
+                    return elaborate_query(callee, inner);
                 }
             }
         }
@@ -608,7 +614,7 @@ fn elaborate_application(
     let is_pipe = matches!(&f.kind, ExprKind::Name(n) if rules::is_pipe_name(n));
     if is_pipe && args.len() == 2 {
         let (input_e, stage_e) = (&args[0], &args[1]);
-        let input = elaborate_query(cx, input_e, at(input_e.span))?;
+        let input = elaborate_query(cx, input_e)?;
         // A stage arrives in one of two shapes, and both are ordinary:
         //
         // * `q & select {...}` desugars to `_&_ q (_&=_ (select {...}))`, so
@@ -734,11 +740,10 @@ fn elaborate_set_op(
     args: &[ast::Expr],
     origin: Origin,
 ) -> R<CheckedQuery> {
-    let at = |span: Span| Origin::new(cx.module, span);
     match args {
         [l, r] => {
-            let left = elaborate_query(cx, l, at(l.span))?;
-            let right = elaborate_query(cx, r, at(r.span))?;
+            let left = elaborate_query(cx, l)?;
+            let right = elaborate_query(cx, r)?;
             CheckedQuery::set(kind, left, right, origin)
         }
         _ => Err(Error::new("a set operation takes two queries").at(origin)),
@@ -809,7 +814,6 @@ fn apply_stage(
     input: CheckedQuery,
     origin: Origin,
 ) -> R<CheckedQuery> {
-    let at = |span: Span| Origin::new(cx.module, span);
     let one_arg = |what: &str| -> R<&ast::Expr> {
         match stage_args {
             [a] => Ok(a),
@@ -855,25 +859,25 @@ fn apply_stage(
         // `limit n`
         "_&-_" | "limit" => {
             let n_e = one_arg("limit")?;
-            let n = int_literal(n_e, "limit")?;
+            let n = int_literal(n_e, "limit", cx.module)?;
             CheckedQuery::limit(input, n, origin)
         }
         // `omit "k"` / `prefix "s"` / `suffix "s"`.
         "omit" => {
-            let k = string_literal(one_arg("omit")?, "omit")?;
+            let k = string_literal(one_arg("omit")?, "omit", cx.module)?;
             CheckedQuery::omit(input, k, origin)
         }
         "prefix" => {
-            let a = string_literal(one_arg("prefix")?, "prefix")?;
+            let a = string_literal(one_arg("prefix")?, "prefix", cx.module)?;
             CheckedQuery::prefix(input, a, origin)
         }
         "suffix" => {
-            let a = string_literal(one_arg("suffix")?, "suffix")?;
+            let a = string_literal(one_arg("suffix")?, "suffix", cx.module)?;
             CheckedQuery::suffix(input, a, origin)
         }
         // `offset n` and `distinct` are plain definitions as well.
         "offset" => {
-            let n = int_literal(one_arg("offset")?, "offset")?;
+            let n = int_literal(one_arg("offset")?, "offset", cx.module)?;
             CheckedQuery::offset(input, n, origin)
         }
         "distinct" => CheckedQuery::distinct(input, origin),
@@ -896,7 +900,7 @@ fn apply_stage(
                     .at(origin))
                 }
             };
-            let right = elaborate_query(cx, right_e, at(right_e.span))?;
+            let right = elaborate_query(cx, right_e)?;
             let on = elaborate_expr_inner(cx, pred_e)?;
             CheckedQuery::join(kind, input, right, on, origin)
         }
@@ -924,7 +928,7 @@ fn apply_stage(
         // both be served by one operand order.
         "_&|_" | "_&!_" | "_&^_" | "_&~_" => {
             let other_e = one_arg("a set operation")?;
-            let other = elaborate_query(cx, other_e, at(other_e.span))?;
+            let other = elaborate_query(cx, other_e)?;
             let kind = match stage_name {
                 "_&|_" => crate::ir::SetKind::Union,
                 "_&!_" => crate::ir::SetKind::UnionAll,
@@ -943,7 +947,7 @@ fn apply_stage(
             let kind = set_kind_of(stage_name).expect("matched by name just above");
             match stage_args {
                 [only] => {
-                    let other = elaborate_query(cx, only, at(only.span))?;
+                    let other = elaborate_query(cx, only)?;
                     CheckedQuery::set(kind, other, input, origin)
                 }
                 _ => elaborate_set_op(cx, kind, stage_args, origin),
@@ -1284,6 +1288,7 @@ fn elaborate_call(
                 f.id,
                 &is,
                 cx.holes,
+                origin,
             )?,
         ),
         _ => {
@@ -1806,8 +1811,6 @@ fn elaborate_lambda(
 ///
 /// A function that is already a value in the environment is returned as-is.
 fn elaborate_value(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedValue> {
-    let at = |span: Span| Origin::new(cx.module, span);
-
     // A name, or a bare call, may already be bound to a value.
     if let ExprKind::Name(n) = &e.kind {
         if let Some((_, v)) = cx.env.iter().rev().find(|(k, _)| k == n) {
@@ -1838,7 +1841,7 @@ fn elaborate_value(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedValue> {
     }
 
     // A query, when the expression denotes one.
-    if let Ok(q) = elaborate_query(cx, e, at(e.span)) {
+    if let Ok(q) = elaborate_query(cx, e) {
         return Ok(CheckedValue::Query(q));
     }
 
@@ -1870,6 +1873,7 @@ fn elaborate_callable(cx: Ctx<'_>, e: &ast::Expr) -> R<Option<Callable>> {
                 f.id,
                 &is,
                 cx.holes,
+                Origin::new(cx.module, f.span),
             ) {
                 Ok(di) => (dm, di),
                 Err(_) => return Ok(None),
@@ -2198,7 +2202,7 @@ fn elaborate_bound(cx: Ctx<'_>, e: &ast::Expr) -> R<crate::ir::Bound> {
             let [n_e] = &args[..] else {
                 return Err(Error::new(format!("`{n}` takes one argument")).at(origin));
             };
-            let count = int_literal(n_e, n)?;
+            let count = int_literal(n_e, n, cx.module)?;
             return match n.as_str() {
                 "preceding" => Ok(Bound::Preceding(count)),
                 "following" => Ok(Bound::Following(count)),
@@ -2233,6 +2237,7 @@ fn choose(
     site: u32,
     cands: &[usize],
     holes: &[(usize, usize)],
+    origin: Origin,
 ) -> R<usize> {
     if cands.len() == 1 {
         return Ok(cands[0]);
@@ -2255,7 +2260,8 @@ fn choose(
                 return Err(Error::new(format!(
                     "hole {k} of this use was not instantiated (definition {owner_def}, site \
                      {site}); the caller did not supply an assignment"
-                )));
+                ))
+                .at(origin));
             }
         }
     }
@@ -2263,7 +2269,8 @@ fn choose(
         "the checker recorded no overload choice for this use (definition {owner_def}, site \
          {site}); it has {} candidate(s)",
         cands.len()
-    )))
+    ))
+    .at(origin))
 }
 
 /// The core `Lit` for a syntax literal.
@@ -2276,19 +2283,22 @@ fn lit_of(l: &ast::Lit) -> Lit {
     }
 }
 
-/// A whole-number literal's value, for `limit`/`offset`.
-fn int_literal(e: &ast::Expr, what: &str) -> R<i64> {
+/// A whole-number literal's value, for `limit`/`offset` and frame bounds.
+///
+/// `module` is the module the literal was written in; see [`string_literal`]
+/// for why it may not be hardcoded.
+fn int_literal(e: &ast::Expr, what: &str, module: usize) -> R<i64> {
     match &e.kind {
         ExprKind::Lit(ast::Lit::Int(n)) if *n >= 0 => Ok(*n),
         ExprKind::Lit(ast::Lit::Int(n)) => Err(Error::new(format!(
             "`{what}` needs a non-negative count, got {n}"
         ))
-        .at(Origin::new(0, e.span))),
+        .at(Origin::new(module, e.span))),
         other => Err(Error::new(format!(
             "`{what}` expects an int, found {}",
             describe(other)
         ))
-        .at(Origin::new(0, e.span))),
+        .at(Origin::new(module, e.span))),
     }
 }
 

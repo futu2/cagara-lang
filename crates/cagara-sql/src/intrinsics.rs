@@ -22,39 +22,13 @@
 //! `kind` is `DATE` or `TIMESTAMP`. Dialects not named below get the ANSI /
 //! Postgres spelling.
 
+use crate::dialect::{fam, Fam};
 use crate::stage::atomic;
 use sqlglot_rust::ast::{
     BinaryOperator, DataType, DateTimeField, Expr, QuoteStyle, TypedFunction, UnaryOperator,
 };
 use sqlglot_rust::Dialect;
 use std::cell::Cell;
-
-#[derive(Clone, Copy, PartialEq)]
-enum Fam {
-    Ansi,
-    Mysql,
-    Sqlite,
-    Duck,
-    Tsql,
-    BigQuery,
-    Snowflake,
-    Trino,
-    Spark,
-}
-
-fn fam(d: Dialect) -> Fam {
-    match d {
-        Dialect::Mysql | Dialect::Doris | Dialect::SingleStore | Dialect::StarRocks => Fam::Mysql,
-        Dialect::Sqlite => Fam::Sqlite,
-        Dialect::DuckDb => Fam::Duck,
-        Dialect::Tsql | Dialect::Fabric => Fam::Tsql,
-        Dialect::BigQuery => Fam::BigQuery,
-        Dialect::Snowflake => Fam::Snowflake,
-        Dialect::Trino | Dialect::Presto | Dialect::Athena => Fam::Trino,
-        Dialect::Spark | Dialect::Databricks => Fam::Spark,
-        _ => Fam::Ansi,
-    }
-}
 
 /// Lower every intrinsic in `e` (bottom-up, so arguments are lowered first).
 /// A `CAGARA_*` call that is not a known intrinsic is an error rather than
@@ -103,7 +77,12 @@ fn node(e: Expr, f: Fam) -> Result<Expr, String> {
     let lowered = if over.is_none() {
         intrinsic(&upper, &args, f)
     } else {
-        None
+        // An intrinsic is a scalar date/string function; a windowed call is a
+        // different mistake from an unknown name or a wrong arity, so it gets
+        // its own message rather than "unknown ... with N argument(s)".
+        return Err(format!(
+            "the SQL intrinsic `{upper}` cannot be used as a window function"
+        ));
     };
     match lowered {
         // Non-atomic results are parenthesized so they keep precedence

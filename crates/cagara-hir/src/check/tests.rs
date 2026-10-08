@@ -11,7 +11,7 @@ fn types(src: &str) -> Vec<(String, Result<String, String>)> {
     let ws = Workspace::from_source(&format!("{TABLES}{src}"));
     assert!(ws.diags.is_empty(), "{:?}", ws.diags);
     let tc = check(&ws);
-    for e in &tc.errors {
+    for e in tc.errors() {
         assert_eq!(
             e.module, ws.root,
             "error outside the root module: {}",
@@ -560,7 +560,7 @@ fn aggregate_nullability_is_explicit() {
 #[test]
 fn editing_the_root_rechecks_only_the_root() {
     let mut ws = Workspace::from_source(&format!("{TABLES}q = users & where (.age > 1)\n"));
-    assert!(check(&ws).errors.is_empty());
+    assert!(check(&ws).errors().is_empty());
     let runs = super::check_runs();
     let _ = check(&ws);
     assert_eq!(
@@ -582,11 +582,11 @@ fn editing_the_root_rechecks_only_the_root() {
     );
     assert!(
         after
-            .errors
+            .errors()
             .iter()
             .any(|e| e.module == ws.root && e.diag.message.contains("type mismatch")),
         "{:?}",
-        after.errors
+        after.errors()
     );
 }
 
@@ -675,7 +675,7 @@ fn edits_update_names_checks_and_diagnostics() {
         root,
         format!("{TABLES}adult = .age >= 18\nq = users & where adult\n")
     ));
-    assert!(check(&ws).errors.is_empty(), "{:?}", check(&ws).errors);
+    assert!(check(&ws).errors().is_empty(), "{:?}", check(&ws).errors());
     let q = crate::root_queries(&ws)
         .into_iter()
         .find(|(n, _)| n == "q")
@@ -1011,7 +1011,7 @@ fn a_long_operator_chain_is_checked_or_reported_but_never_crashes() {
         // Either the parser rejected it (a diagnostic) or the checker ran.
         // The point is that neither panics or recurses until the stack ends.
         let tc = check(&ws);
-        let _ = tc.errors.len();
+        let _ = tc.errors().len();
     }
 }
 
@@ -1028,7 +1028,7 @@ fn the_parser_budget_leaves_the_checker_room() {
     // Well inside the budget: accepted and well-typed.
     let ws = Workspace::from_source(&chain(100));
     assert!(ws.diags.is_empty(), "{:?}", ws.diags);
-    assert!(check(&ws).errors.is_empty(), "{:?}", check(&ws).errors);
+    assert!(check(&ws).errors().is_empty(), "{:?}", check(&ws).errors());
     // Past it: a syntax diagnostic, not a crash.
     let ws = Workspace::from_source(&chain(300));
     assert!(

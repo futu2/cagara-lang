@@ -42,7 +42,8 @@ so the document is making a claim about discipline, not about types.
 `CheckedQuery` outside `checked.rs` finds only doc-comment mentions. So the
 checked layer has zero callers in `cargo-hir`, `cagara-cli`, or `cagara-lsp`,
 and the SQL golden outputs are produced without it. Confirmed independently by
-`verify/report-final.md` (the verifier's structural finding) before this review.
+the verifier's structural finding (its `report-final.md` was not retained in
+this tree) before this review.
 
 ## 3. CONFIRMED — `CheckedDef.terms` is always empty in practice
 

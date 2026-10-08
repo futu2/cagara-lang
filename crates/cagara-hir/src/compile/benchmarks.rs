@@ -61,7 +61,7 @@ fn large_definition_cache_benchmark() {
     assert!(ws.diags.is_empty(), "{:?}", ws.diags);
 
     let tc = timed("cold_check", || crate::check::check(&ws));
-    assert!(tc.errors.is_empty(), "{:?}", tc.errors);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
     drop(tc);
     let first = timed("cold_compile_owned", || compile(&ws));
     assert!(first.is_ok(), "{:?}", first.diagnostics);
@@ -75,7 +75,7 @@ fn large_definition_cache_benchmark() {
     let before = crate::elaborate::elaborated_defs().len();
     let start = Instant::now();
     for _ in 0..100 {
-        assert!(crate::check::check(&ws).errors.is_empty());
+        assert!(crate::check::check(&ws).errors().is_empty());
     }
     println!("warm_check_per_request: {:?}", start.elapsed() / 100);
     let start = Instant::now();
@@ -93,7 +93,7 @@ fn large_definition_cache_benchmark() {
     };
     assert!(timed("set_source", || ws.set_source(ws.root, edit)));
     let tc = timed("edited_check", || crate::check::check(&ws));
-    assert!(tc.errors.is_empty(), "{:?}", tc.errors);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
     drop(tc);
     let second = timed("edited_compile_owned", || compile(&ws));
     assert!(second.is_ok(), "{:?}", second.diagnostics);

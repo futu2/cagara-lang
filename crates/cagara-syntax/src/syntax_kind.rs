@@ -56,6 +56,10 @@ pub enum SyntaxKind {
     Int,
     Float,
     String,
+    /// A string literal that ran to the end of the line without closing.
+    /// Distinct from [`SyntaxKind::Error`] so a consumer can tell a real,
+    /// diagnosable token from an unlexable character.
+    UnterminatedString,
     Error,
 
     // ── nodes ────────────────────────────────────────────────
@@ -169,7 +173,7 @@ impl From<Token> for SyntaxKind {
             Token::Int => K::Int,
             Token::Float => K::Float,
             Token::String => K::String,
-            Token::UnterminatedString => K::Error,
+            Token::UnterminatedString => K::UnterminatedString,
             Token::Error => K::Error,
         }
     }

@@ -4,11 +4,17 @@ use lsp_types::Uri;
 use std::path::{Path, PathBuf};
 use url::Url;
 
+/// The path behind a `file://` URI, or `None` for another scheme or an
+/// unparseable URI.
 pub fn to_path(uri: &Uri) -> Option<PathBuf> {
     let url = Url::parse(uri.as_str()).ok()?;
-    (url.scheme() == "file").then(|| url.to_file_path().ok())?
+    if url.scheme() != "file" {
+        return None;
+    }
+    url.to_file_path().ok()
 }
 
+/// The `file://` URI for a path, or `None` if the path cannot be a file URL.
 pub fn from_path(path: &Path) -> Option<Uri> {
     Url::from_file_path(path).ok()?.as_str().parse().ok()
 }

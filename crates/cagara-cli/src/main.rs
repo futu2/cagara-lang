@@ -56,7 +56,29 @@ fn main_inner() -> std::io::Result<ExitCode> {
     compile(first.into_iter().chain(rest))
 }
 
-fn compile(mut args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
+/// `cagara FILE` options, parsed and validated.
+struct Options {
+    file: PathBuf,
+    dialect: cagara_sql::Dialect,
+    only: Option<String>,
+    pretty: bool,
+    types: bool,
+    optimize: bool,
+}
+
+/// What parsing `cagara FILE`'s arguments produced.
+///
+/// Parsing does not print: `compile` owns the output so an I/O error (a closed
+/// reader) is handled the same way as everywhere else.
+enum Parsed {
+    Options(Options),
+    /// `--help`: print the usage text and succeed.
+    Help,
+    /// A usage error: print the message and the usage text, exit 2.
+    Usage(String),
+}
+
+fn parse_args(mut args: impl Iterator<Item = OsString>) -> Parsed {
     let mut file: Option<PathBuf> = None;
     let mut dialect_name = String::from("ansi");
     let mut only: Option<String> = None;
@@ -70,47 +92,63 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode
                 Some(d) => match d.into_string() {
                     Ok(d) => dialect_name = d,
                     Err(d) => {
-                        return Ok(usage(&format!(
+                        return Parsed::Usage(format!(
                             "`--dialect` is not valid UTF-8: `{}`",
                             display(&d)
-                        )))
+                        ))
                     }
                 },
-                None => return Ok(usage("--dialect needs a value")),
+                None => return Parsed::Usage("--dialect needs a value".into()),
             },
             Some("--only") => match args.next() {
                 Some(d) => match d.into_string() {
                     Ok(d) => only = Some(d),
                     Err(d) => {
-                        return Ok(usage(&format!(
+                        return Parsed::Usage(format!(
                             "`--only` is not valid UTF-8: `{}`",
                             display(&d)
-                        )))
+                        ))
                     }
                 },
-                None => return Ok(usage("--only needs a definition name")),
+                None => return Parsed::Usage("--only needs a definition name".into()),
             },
             Some("--pretty") => pretty = true,
             Some("--types") => types = true,
             Some("--optimize") => optimize = true,
-            Some("-h") | Some("--help") => {
-                out(USAGE)?;
-                return Ok(ExitCode::SUCCESS);
-            }
+            Some("-h") | Some("--help") => return Parsed::Help,
             _ if file.is_none() && !a.to_string_lossy().starts_with("--") => {
                 file = Some(PathBuf::from(a))
             }
-            _ => return Ok(usage(&format!("unexpected argument `{}`", display(&a)))),
+            _ => return Parsed::Usage(format!("unexpected argument `{}`", display(&a))),
         }
     }
     let Some(file) = file else {
-        return Ok(usage("missing input file"));
+        return Parsed::Usage("missing input file".into());
     };
     let Some(dialect) = cagara_sql::dialect(&dialect_name) else {
-        return Ok(usage(&format!("unknown dialect `{dialect_name}`")));
+        return Parsed::Usage(format!("unknown dialect `{dialect_name}`"));
+    };
+    Parsed::Options(Options {
+        file,
+        dialect,
+        only,
+        pretty,
+        types,
+        optimize,
+    })
+}
+
+fn compile(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
+    let opts = match parse_args(args) {
+        Parsed::Options(opts) => opts,
+        Parsed::Help => {
+            out(USAGE)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Parsed::Usage(message) => return Ok(usage(&message)),
     };
 
-    let ws = Workspace::open(&file);
+    let ws = Workspace::open(&opts.file);
     if !ws.diags.is_empty() {
         for d in &ws.diags {
             eprintln!("{d}");
@@ -122,58 +160,78 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode
     // reported per definition below (so `--only` applies to them).
     let tc = check(&ws);
     let mut failed = false;
-    for e in tc.errors.iter().filter(|e| e.module != ws.root) {
+    for e in tc.errors().iter().filter(|e| e.module != ws.root) {
         eprintln!("{}", e.diag);
         failed = true;
     }
 
-    if types {
-        let mut selected = false;
-        for (i, d) in ws.modules[ws.root].module.defs.iter().enumerate() {
-            if only.as_deref().is_some_and(|o| o != d.name) {
-                continue;
-            }
-            selected = true;
-            match (tc.error_for(ws.root, i), tc.type_of(ws.root, i)) {
-                (Some(e), _) => {
-                    eprintln!("{e}");
-                    failed = true;
-                }
-                (None, Some(t)) => out(&format!("{} : {t}", d.name))?,
-                (None, None) => out(&format!("{} : ?", d.name))?,
-            }
-        }
-        if only.is_some() && !selected {
-            eprintln!(
-                "no definition named `{}`",
-                only.as_deref().unwrap_or_default()
-            );
-            failed = true;
-        }
-        return Ok(done(failed));
+    if opts.types {
+        report_types(&ws, &tc, &opts, failed)
+    } else {
+        report_sql(&ws, &tc, &opts, failed)
     }
+}
 
+/// `--types`: the inferred type of every selected root definition.
+fn report_types(
+    ws: &Workspace,
+    tc: &cagara_hir::TypeCheck,
+    opts: &Options,
+    mut failed: bool,
+) -> std::io::Result<ExitCode> {
+    let mut selected = false;
+    for (i, d) in ws.modules[ws.root].module.defs.iter().enumerate() {
+        if opts.only.as_deref().is_some_and(|o| o != d.name) {
+            continue;
+        }
+        selected = true;
+        match (tc.error_for(ws.root, i), tc.type_of(ws.root, i)) {
+            (Some(e), _) => {
+                eprintln!("{e}");
+                failed = true;
+            }
+            (None, Some(t)) => out(&format!("{} : {t}", d.name))?,
+            (None, None) => out(&format!("{} : ?", d.name))?,
+        }
+    }
+    if opts.only.is_some() && !selected {
+        eprintln!(
+            "no definition named `{}`",
+            opts.only.as_deref().unwrap_or_default()
+        );
+        failed = true;
+    }
+    Ok(done(failed))
+}
+
+/// The default mode: one SQL statement per selected root query.
+fn report_sql(
+    ws: &Workspace,
+    tc: &cagara_hir::TypeCheck,
+    opts: &Options,
+    mut failed: bool,
+) -> std::io::Result<ExitCode> {
     let mut printed = 0;
     // One failing helper is reported both as itself and through every query
     // that uses it, so the same diagnostic can arrive more than once. Print
     // each distinct one once, in the order it first appears.
     let mut seen: HashSet<String> = HashSet::new();
-    for query in compile_checked(&ws, &tc).queries {
+    for query in compile_checked(ws, tc).queries {
         let name = query.name;
         let result = query.result;
-        if only.as_deref().is_some_and(|o| o != name) {
+        if opts.only.as_deref().is_some_and(|o| o != name) {
             continue;
         }
         match result.map_err(|d| d.to_string()).and_then(|rel| {
             cagara_sql::compile(
                 &rel,
                 cagara_sql::Options {
-                    dialect,
-                    pretty,
-                    optimize,
+                    dialect: opts.dialect,
+                    pretty: opts.pretty,
+                    optimize: opts.optimize,
                 },
             )
-            .map_err(|m| format!("{}: error in `{name}`: {m}", file.display()))
+            .map_err(|m| format!("{}: error in `{name}`: {m}", opts.file.display()))
         }) {
             Ok(sql) => {
                 if printed > 0 {
@@ -190,7 +248,7 @@ fn compile(mut args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode
             }
         }
     }
-    if let (Some(o), 0, false) = (&only, printed, failed) {
+    if let (Some(o), 0, false) = (&opts.only, printed, failed) {
         eprintln!("no query definition named `{o}`");
         failed = true;
     }

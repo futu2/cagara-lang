@@ -364,3 +364,26 @@ fn editing_one_definition_reuses_unchanged_root_definitions() {
         "an unchanged definition should reuse its erased query"
     );
 }
+
+/// A stage argument that type-checks but is not the literal the elaborator
+/// needs (`limit (1 + 1)`) fails during source elaboration. Its diagnostic must
+/// describe the *user's* file: a hardcoded module index attributed it to the
+/// prelude, so it printed the prelude's first line and put the caret at the
+/// wrong column.
+#[test]
+fn an_elaboration_error_points_at_the_users_module_not_the_prelude() {
+    let ws = Workspace::from_source("q : query { a = int } = table \"s\" \"t\" & limit (1 + 1)\n");
+    let diags: Vec<Diag> = compile(&ws)
+        .queries
+        .iter()
+        .filter_map(|q| q.result.as_ref().err().cloned())
+        .collect();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.path, "<input>", "{d}");
+    assert!(d.message.contains("expects an int"), "{d}");
+    assert!(
+        !d.source.contains("Cagara prelude"),
+        "the diagnostic rendered the prelude's source: {d}"
+    );
+}

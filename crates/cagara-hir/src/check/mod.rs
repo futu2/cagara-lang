@@ -84,7 +84,7 @@ pub(crate) use crate::lower::parse_module;
 pub(crate) use crate::primitive::Prim;
 pub(crate) use crate::resolve::{module_own, module_scope};
 pub(crate) use crate::rules::{self};
-pub(crate) use crate::workspace::{diag_in, Binding, Diag, Workspace};
+pub(crate) use crate::workspace::{Binding, Diag, Workspace};
 pub(crate) use cagara_syntax::ast::{self, ExprKind, Side, Span, TypeExpr};
 pub(crate) use std::collections::{HashMap, HashSet};
 
@@ -105,7 +105,14 @@ pub(crate) struct RawTypeError {
 
 /// Result of checking every definition in a workspace.
 pub struct TypeCheck {
-    pub errors: Vec<TypeError>,
+    errors: Vec<TypeError>,
+    /// First index into `errors` for each `(module, def)`.
+    ///
+    /// Elaboration asks `error_for(module, def)` once per definition, so
+    /// scanning `errors` there made an error-heavy file quadratic in the
+    /// number of diagnostics. `errors()` is read-only, so this cannot fall out
+    /// of step with the vector.
+    by_def: HashMap<(usize, usize), usize>,
     /// Immutable Salsa results shared by compiler and editor requests.
     /// Indices match the workspace; their per-expression maps stay in place.
     modules: Vec<Arc<ModuleCheck>>,
@@ -117,6 +124,11 @@ pub struct TypeCheck {
 pub const PROBE_FIELD: &str = "__cagara_complete";
 
 impl TypeCheck {
+    /// Every diagnostic produced by checking, in module then definition order.
+    pub fn errors(&self) -> &[TypeError] {
+        &self.errors
+    }
+
     /// Columns (name, printed type) of the row seen by the `PROBE_FIELD`
     /// reference in `module`, if it has one and its definition got that far.
     pub fn probe_fields(&self, module: usize) -> Option<&[(String, String)]> {
@@ -307,10 +319,8 @@ impl TypeCheck {
     }
 
     pub fn error_for(&self, module: usize, def: usize) -> Option<&Diag> {
-        self.errors
-            .iter()
-            .find(|e| e.module == module && e.def == def)
-            .map(|e| &e.diag)
+        let index = *self.by_def.get(&(module, def))?;
+        self.errors.get(index).map(|e| &e.diag)
     }
 }
 
@@ -323,20 +333,25 @@ pub fn check(ws: &Workspace) -> TypeCheck {
     // edited module and the modules that (transitively) depend on it.
     let mut out = TypeCheck {
         errors: vec![],
+        by_def: HashMap::new(),
         modules: Vec::with_capacity(ws.inputs.len()),
     };
     for &input in &ws.inputs {
         let mc = module_check(&ws.db, input);
-        out.errors.extend(mc.errors.iter().map(|e| TypeError {
-            module: e.module,
-            def: e.def,
-            diag: diag_in(
-                &ws.modules[e.module].path,
-                &ws.modules[e.module].text,
-                e.span,
-                e.message.clone(),
-            ),
-        }));
+        for e in mc.errors.iter() {
+            // One entry per definition: the checker reports at most one error
+            // for a definition, and the first is the one elaboration should see.
+            out.by_def
+                .entry((e.module, e.def))
+                .or_insert(out.errors.len());
+            out.errors.push(TypeError {
+                module: e.module,
+                def: e.def,
+                // `diag_span` uses the module's cached line index; building the
+                // diagnostic from the text again per error would be quadratic.
+                diag: ws.diag_span(e.module, e.span, e.message.clone()),
+            });
+        }
         out.modules.push(Arc::clone(mc));
     }
     out

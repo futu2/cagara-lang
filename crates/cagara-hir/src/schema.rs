@@ -5,7 +5,38 @@ use crate::ir::{Expr, Loc, Rel, Side};
 use crate::rules::{self, Place};
 use std::collections::HashMap;
 
+/// One node's schema computation, or the location and message of the innermost
+/// node whose rule failed.
+type NodeSchema = Result<Vec<String>, (Option<Loc>, String)>;
+
+/// The one wording for "this table's columns are not known", shared by the
+/// checked constructor, source elaboration, and this validator.
+///
+/// Three copies of the sentence used to exist and had to be kept in step by
+/// hand; `CheckedQuery::table` documents that a user should see one
+/// explanation, not two.
+pub fn unknown_table_columns(schema: &str, name: &str) -> String {
+    format!(
+        "the columns of table `{schema}.{name}` are unknown; give its definition a closed type, \
+         e.g. `t : query {{ id = int }} = table \"{schema}\" \"{name}\"`"
+    )
+}
+
 pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
+    schema_walk(rel).map_err(|(_, message)| message)
+}
+
+/// Like [`schema`], but an error carries the location of the innermost failing
+/// stage (the nearest enclosing [`Rel::At`]).
+///
+/// One post-order walk computes the columns *and* that location. An earlier
+/// implementation ran the whole walk again for each child to find the blame
+/// node, which was quadratic on a deep failing pipeline.
+pub fn schema_located(rel: &Rel) -> Result<Vec<String>, (Option<Loc>, String)> {
+    schema_walk(rel)
+}
+
+fn schema_walk(rel: &Rel) -> Result<Vec<String>, (Option<Loc>, String)> {
     // An explicit post-order walk with a memo, not recursion. The IR is a
     // chain as deep as the program's pipeline (one node per stage), so a
     // recursive walk used one stack frame per stage; combined with a caller
@@ -14,37 +45,44 @@ pub fn schema(rel: &Rel) -> Result<Vec<String>, String> {
     // stack and aborted the process. The memo also makes the walk linear
     // rather than re-deriving shared subtrees.
     enum Step<'a> {
-        Visit(&'a Rel),
-        Finish(&'a Rel),
+        Visit(&'a Rel, Option<Loc>),
+        Finish(&'a Rel, Option<Loc>),
     }
-    let mut done: HashMap<usize, Result<Vec<String>, String>> = HashMap::new();
-    let mut stack = vec![Step::Visit(rel)];
+    let mut done: HashMap<usize, NodeSchema> = HashMap::new();
+    let mut stack = vec![Step::Visit(rel, None)];
     while let Some(step) = stack.pop() {
-        let r = match step {
-            Step::Visit(r) => {
+        let (r, loc) = match step {
+            Step::Visit(r, inherited) => {
                 let addr = r as *const Rel as usize;
                 if done.contains_key(&addr) {
                     continue;
                 }
+                // A stage's own location blames a failure at this node; a node
+                // without one inherits the nearest enclosing stage's location,
+                // which is the rule the recursive blame walk used to apply.
+                let loc = match r {
+                    Rel::At(l, _) => Some(*l),
+                    _ => inherited,
+                };
                 if let Some(c) = child_of(r) {
-                    stack.push(Step::Finish(r));
-                    stack.push(Step::Visit(c));
+                    stack.push(Step::Finish(r, loc));
+                    stack.push(Step::Visit(c, loc));
                     // A join or set operation has two inputs.
                     if let Some(c2) = second_child_of(r) {
-                        stack.push(Step::Visit(c2));
+                        stack.push(Step::Visit(c2, loc));
                     }
                 } else {
                     // A leaf: its schema needs no other node.
-                    stack.push(Step::Finish(r));
+                    stack.push(Step::Finish(r, loc));
                 }
                 continue;
             }
-            Step::Finish(r) => r,
+            Step::Finish(r, loc) => (r, loc),
         };
         // A node whose inputs failed fails the same way; recording it (rather
         // than returning here) keeps the walk and the memo consistent, and the
         // first error in post-order is the innermost one.
-        let cols = finish_schema(r, &done);
+        let cols = finish_schema(r, loc, &done);
         done.insert(r as *const Rel as usize, cols);
     }
     done.remove(&(rel as *const Rel as usize))
@@ -85,44 +123,50 @@ fn second_child_of(rel: &Rel) -> Option<&Rel> {
 /// The schema of one node, given that every input already has one. This is the
 /// body of the old recursive `schema`, with the recursive calls replaced by
 /// memo lookups.
+///
+/// `loc` is where a failure *at this node* is blamed. A failure propagated
+/// from an input already carries that input's location, so `?` is left alone.
 fn finish_schema(
     rel: &Rel,
-    done: &HashMap<usize, Result<Vec<String>, String>>,
-) -> Result<Vec<String>, String> {
-    let of = |r: &Rel| -> Result<Vec<String>, String> {
+    loc: Option<Loc>,
+    done: &HashMap<usize, NodeSchema>,
+) -> Result<Vec<String>, (Option<Loc>, String)> {
+    let of = |r: &Rel| -> Result<Vec<String>, (Option<Loc>, String)> {
         done.get(&(r as *const Rel as usize))
             .cloned()
-            .unwrap_or_else(|| Err("internal: input schema was not computed".to_string()))
+            .unwrap_or_else(|| Err((loc, "internal: input schema was not computed".to_string())))
     };
+    // A rule that fails at this node is blamed here; a rule that fails below it
+    // is propagated with the child's location already attached.
+    let blame = |message: String| Err((loc, message));
     match rel {
-        Rel::Table { columns: Some(c), .. } => Ok(c.clone()),
+        Rel::Table {
+            columns: Some(c), ..
+        } => Ok(c.clone()),
         Rel::Table {
             schema,
             name,
             columns: None,
-        } => Err(format!(
-            "the columns of table `{schema}.{name}` are unknown; give its definition a closed type, \
-             e.g. `t : query {{ id = int }} = table \"{schema}\" \"{name}\"`"
-        )),
+        } => blame(unknown_table_columns(schema, name)),
         Rel::Where(r, e) => {
             let c = of(r)?;
-            refs(e, &c, "where")?;
-            rules::place(Place::Where, e.phase()?)?;
+            refs(e, &c, "where").map_err(|m| (loc, m))?;
+            rules::place(Place::Where, e.phase().map_err(|m| (loc, m))?).map_err(|m| (loc, m))?;
             Ok(c)
         }
-        Rel::Select(r, fs) => projection(fs, &of(r)?, false),
-        Rel::Update(r, fs) => merge(fs, &of(r)?),
-        Rel::Omit(r, k) => omit_columns(&of(r)?, k),
+        Rel::Select(r, fs) => projection(fs, &of(r)?, false).map_err(|m| (loc, m)),
+        Rel::Update(r, fs) => merge(fs, &of(r)?).map_err(|m| (loc, m)),
+        Rel::Omit(r, k) => omit_columns(&of(r)?, k).map_err(|m| (loc, m)),
         // A rename preserves the columns' positions and types; only the labels
         // change. The checker computed the same thing with `keyMap (prefix s)`.
         Rel::Prefix(r, affix) => Ok(rename_columns(&of(r)?, affix, true)),
         Rel::Suffix(r, affix) => Ok(rename_columns(&of(r)?, affix, false)),
-        Rel::Agg(r, fs) => projection(fs, &of(r)?, true),
+        Rel::Agg(r, fs) => projection(fs, &of(r)?, true).map_err(|m| (loc, m)),
         Rel::Order(r, ks) => {
             let c = of(r)?;
             for (k, _) in ks {
-                refs(k, &c, "order")?;
-                rules::place(Place::Key, k.phase()?)?;
+                refs(k, &c, "order").map_err(|m| (loc, m))?;
+                rules::place(Place::Key, k.phase().map_err(|m| (loc, m))?).map_err(|m| (loc, m))?;
             }
             Ok(c)
         }
@@ -138,16 +182,16 @@ fn finish_schema(
                 let (cols, what) = match side {
                     Side::Left => (&lc, "left"),
                     Side::Right => (&rc, "right"),
-                    Side::Single => return Err(rules::needs_side(&n)),
+                    Side::Single => return blame(rules::needs_side(&n)),
                 };
                 if !cols.contains(&n) {
-                    return Err(format!(
+                    return blame(format!(
                         "the {what} join input has no column `{n}`; available: {}",
                         cols.join(", ")
                     ));
                 }
             }
-            rules::place(Place::JoinOn, on.phase()?)?;
+            rules::place(Place::JoinOn, on.phase().map_err(|m| (loc, m))?).map_err(|m| (loc, m))?;
             if matches!(kind, crate::ir::JoinKind::Semi | crate::ir::JoinKind::Anti) {
                 return Ok(lc);
             }
@@ -159,7 +203,7 @@ fn finish_schema(
             let lc = of(left)?;
             let rc = of(right)?;
             if lc != rc {
-                return Err(format!(
+                return blame(format!(
                     "set-operation inputs must have the same columns; left has [{}], right has [{}]",
                     lc.join(", "),
                     rc.join(", ")
@@ -168,25 +212,6 @@ fn finish_schema(
             Ok(lc)
         }
     }
-}
-
-/// Like [`schema`], but an error carries the location of the innermost
-/// failing stage (the nearest enclosing `Rel::At`).
-pub fn schema_located(rel: &Rel) -> Result<Vec<String>, (Option<Loc>, String)> {
-    schema(rel).map_err(|msg| blame(rel, None, msg))
-}
-
-fn blame(rel: &Rel, loc: Option<Loc>, msg: String) -> (Option<Loc>, String) {
-    let loc = match rel {
-        Rel::At(l, _) => Some(*l),
-        _ => loc,
-    };
-    for c in rel.children() {
-        if let Err(m) = schema(c) {
-            return blame(c, loc, m);
-        }
-    }
-    (loc, msg)
 }
 
 fn projection(fs: &[(String, Expr)], cols: &[String], agg: bool) -> Result<Vec<String>, String> {
@@ -279,4 +304,73 @@ fn refs(e: &Expr, cols: &[String], ctx: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::Span;
+
+    fn loc(module: usize, start: u32, end: u32) -> Loc {
+        Loc {
+            module,
+            span: Span { start, end },
+        }
+    }
+
+    fn table(columns: Option<Vec<String>>) -> Rel {
+        Rel::Table {
+            schema: "s".into(),
+            name: "t".into(),
+            columns,
+        }
+    }
+
+    fn missing_col() -> Expr {
+        Expr::Col(Side::Single, "missing".into())
+    }
+
+    #[test]
+    fn schema_reports_a_missing_column() {
+        let rel = Rel::Where(Box::new(table(Some(vec!["a".into()]))), missing_col());
+        assert!(
+            schema(&rel).unwrap_err().contains("no column `missing`"),
+            "{:?}",
+            schema(&rel)
+        );
+    }
+
+    /// `At(outer, Where(At(inner, table), missing))`: the `where` is the failing
+    /// node, and its nearest enclosing stage is the *outer* one. The inner `At`
+    /// sits below the failure and must not be blamed.
+    #[test]
+    fn a_local_failure_is_blamed_on_its_nearest_enclosing_stage() {
+        let inner = loc(1, 100, 120);
+        let outer = loc(1, 10, 200);
+        let rel = Rel::At(
+            outer,
+            Box::new(Rel::Where(
+                Box::new(Rel::At(inner, Box::new(table(Some(vec!["a".into()]))))),
+                missing_col(),
+            )),
+        );
+        assert_eq!(schema_located(&rel).unwrap_err().0, Some(outer));
+    }
+
+    /// `At(outer, At(inner, table-without-columns))`: the table fails, and the
+    /// innermost enclosing stage really is the inner one.
+    #[test]
+    fn a_failure_inside_the_inner_stage_is_blamed_on_it() {
+        let inner = loc(1, 100, 120);
+        let outer = loc(1, 10, 200);
+        let rel = Rel::At(outer, Box::new(Rel::At(inner, Box::new(table(None)))));
+        assert_eq!(schema_located(&rel).unwrap_err().0, Some(inner));
+    }
+
+    #[test]
+    fn schema_and_schema_located_agree_on_success() {
+        let rel = Rel::At(loc(1, 0, 1), Box::new(table(Some(vec!["a".into()]))));
+        assert_eq!(schema(&rel).unwrap(), vec!["a".to_string()]);
+        assert_eq!(schema_located(&rel).unwrap(), vec!["a".to_string()]);
+    }
 }

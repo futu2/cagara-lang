@@ -88,7 +88,12 @@ struct Walk<'a> {
     ws: &'a Workspace,
     out: Vec<Occ>,
     /// Lambda parameters in scope, innermost last: (name, binding offset).
-    env: Vec<(String, usize)>,
+    ///
+    /// The offset is `None` when the parameter is not spelled at the start of
+    /// its lambda's span: such a parameter still shadows outer names, but it has
+    /// no location to navigate to. A sentinel offset here used to reach
+    /// `definition`, where it overflowed (`usize::MAX + len`) in debug builds.
+    env: Vec<(String, Option<usize>)>,
 }
 
 impl Walk<'_> {
@@ -101,7 +106,10 @@ impl Walk<'_> {
                     return;
                 };
                 let target = match self.env.iter().rev().find(|(p, _)| p == n) {
-                    Some(&(_, at)) => Target::Local(at),
+                    // A use of an unspelled parameter has no site to point at,
+                    // so it is not recorded as an occurrence at all.
+                    Some(&(_, None)) => return,
+                    Some(&(_, Some(at))) => Target::Local(at),
                     None => match md.scope.get(n) {
                         Some(b) => Target::Global(b.clone()),
                         None => return,
@@ -157,11 +165,11 @@ impl Walk<'_> {
                     return;
                 };
                 let at = if md.text[start..].starts_with(p.as_str()) {
-                    start
+                    Some(start)
                 } else {
-                    usize::MAX
+                    None
                 };
-                if at != usize::MAX {
+                if let Some(at) = at {
                     let end = start + p.len();
                     self.out.push(Occ {
                         start,
@@ -482,6 +490,8 @@ pub fn completion(ws: &Workspace, pos: Position) -> Vec<CompletionItem> {
             items
         }
         Dot::None => name_completion(ws, offset),
+        // `(...)`.x` projects a value's field: nothing to complete.
+        Dot::Value => vec![],
     }
 }
 
@@ -491,6 +501,9 @@ enum Dot {
     Column(usize, usize),
     /// `name.x`: a module alias, or else a record projection.
     Member(String),
+    /// A dot after a closing bracket or string: a projection of a value that
+    /// has no named members to complete.
+    Value,
     None,
 }
 
@@ -520,7 +533,7 @@ fn dot_context(text: &str, offset: usize) -> Dot {
     }
     // A dot after a closing bracket or string projects a value.
     if a > 0 && matches!(b[a - 1], b')' | b'}' | b']' | b'"') {
-        return Dot::Member(String::new());
+        return Dot::Value;
     }
     Dot::Column(start, end)
 }
@@ -1110,6 +1123,12 @@ mod tests {
             assert_eq!(p.offset(p.position(off)), Some(off));
         }
         assert_eq!(p.position(6), pos(1, 2));
+        // A byte offset inside a multi-byte character floors to its start
+        // rather than panicking or landing on the next character.
+        assert_eq!(p.position(4), p.position(3));
+        assert_eq!(p.offset(p.position(4)), Some(3));
+        // Past the end clamps to the end of the text.
+        assert_eq!(p.offset(p.position(100)), Some(t.len()));
     }
 
     /// The probe is spliced into whichever definition holds the cursor, but

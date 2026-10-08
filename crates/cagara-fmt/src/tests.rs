@@ -601,3 +601,22 @@ fn token_soup_never_panics_and_stays_lossless() {
         assert_eq!(out, again, "seed {seed}: {src:?}");
     }
 }
+
+/// The shape guard is the formatter's last line of defence, and its failure
+/// path is what a bug report would show. It must name the difference and keep
+/// the output it refused to return.
+#[test]
+fn the_shape_guard_reports_a_changed_program() {
+    let src = "a = 1\n";
+    let root = parse(src).syntax();
+    // Deliberately wrong output: a different definition name.
+    let err = verify_shape(&root, "b = 1\n").expect_err("the guard must fire");
+    assert!(
+        err.difference.contains("first difference"),
+        "{}",
+        err.difference
+    );
+    assert_eq!(err.text, "b = 1\n");
+    // The correct output passes.
+    assert!(verify_shape(&root, src).is_ok());
+}

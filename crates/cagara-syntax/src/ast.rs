@@ -189,7 +189,10 @@ fn unescape(s: &str) -> String {
 
 /// The magnitude of `-9223372036854775808`, the one negative literal whose
 /// digits do not fit in an `i64`.
-const I64_MIN_MAGNITUDE: &str = "9223372036854775808";
+///
+/// Shared with the parser, which accepts these digits only directly under a
+/// `-`: the two must agree or `-9223372036854775808` becomes a syntax error.
+pub(crate) const I64_MIN_MAGNITUDE: &str = "9223372036854775808";
 
 impl Lower<'_> {
     fn mk(&mut self, span: Span, kind: ExprKind) -> Expr {

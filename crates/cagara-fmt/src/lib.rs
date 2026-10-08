@@ -36,12 +36,25 @@ pub struct Formatted {
 
 /// The formatter produced output that parses differently from the input.
 /// This is a formatter bug; the input should be left unchanged.
+///
+/// It carries the output it would have produced and where the two trees first
+/// differ, so a report of a tripped guard is reproducible rather than a bare
+/// "internal error".
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FmtError;
+pub struct FmtError {
+    /// The output that would have replaced the input.
+    pub text: String,
+    /// Where the input's and the output's trees first differ.
+    pub difference: String,
+}
 
 impl fmt::Display for FmtError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("internal formatter error: the output would change the program")
+        write!(
+            f,
+            "internal formatter error: the output would change the program ({})",
+            self.difference
+        )
     }
 }
 
@@ -55,12 +68,38 @@ pub fn format(src: &str) -> Result<Formatted, FmtError> {
         skip_leading: Cell::new(None),
     };
     let text = doc::print(&f.file(&root), WIDTH);
-    if skeleton(&root) != skeleton(&parse(&text).syntax()) {
-        return Err(FmtError);
-    }
+    verify_shape(&root, &text)?;
     Ok(Formatted {
         text,
         errors: parsed.errors,
+    })
+}
+
+/// The formatter's last line of defence: the output must parse to the same
+/// shape as the input. Separated from [`format`] so the failure path can be
+/// tested with a deliberately wrong text.
+fn verify_shape(input: &SyntaxNode, text: &str) -> Result<(), FmtError> {
+    let (before, before_comments) = skeleton(input);
+    let reparsed = parse(text);
+    let (after, after_comments) = skeleton(&reparsed.syntax());
+    if before == after && before_comments == after_comments {
+        return Ok(());
+    }
+    let at = before.iter().zip(&after).position(|(a, b)| a != b);
+    let difference = match at {
+        Some(i) => format!(
+            "first difference at token {i}: `{}` became `{}`",
+            before[i], after[i]
+        ),
+        None => format!(
+            "token count changed from {} to {}",
+            before.len(),
+            after.len()
+        ),
+    };
+    Err(FmtError {
+        text: text.to_string(),
+        difference,
     })
 }
 
@@ -81,10 +120,12 @@ pub fn format_type(name: &str, ty: &str, width: usize) -> String {
         skip_leading: Cell::new(None),
     };
     let root = parsed.syntax();
+    // The source has exactly one definition, whose type annotation is the one
+    // to lay out. Matching the `TypeAnn` node by kind rather than by position
+    // keeps this working if the definition's children are ever reordered.
     let ann = root
         .descendants()
-        .find(|n| n.kind() == K::Definition)
-        .and_then(|d| d.children().next())
+        .find(|n| n.kind() == K::TypeAnn)
         .and_then(|a| a.children().next());
     let Some(Ok(doc)) = ann.map(|t| f.ty(&t)) else {
         return flat;
@@ -127,9 +168,11 @@ fn skeleton(root: &SyntaxNode) -> (Vec<String>, Vec<String>) {
             WalkEvent::Enter(NodeOrToken::Token(t)) => match t.kind() {
                 K::Whitespace => {}
                 K::Comment => comments.push(t.text().trim_end().to_string()),
-                // An unlexable run (an unterminated string) takes in the
+                // An unlexable run or an unterminated string takes in the
                 // whitespace after it, which is the formatter's to change.
-                K::Error => shape.push(format!("Error {}", t.text().trim_end())),
+                K::Error | K::UnterminatedString => {
+                    shape.push(format!("{:?} {}", t.kind(), t.text().trim_end()))
+                }
                 k => shape.push(format!("{k:?} {}", t.text())),
             },
             WalkEvent::Leave(NodeOrToken::Token(_)) => {}
@@ -307,7 +350,7 @@ impl Fmt<'_> {
             let dirty = item.kind() == K::ErrorNode
                 || item
                     .descendants_with_tokens()
-                    .any(|e| matches!(e.kind(), K::ErrorNode | K::Error))
+                    .any(|e| matches!(e.kind(), K::ErrorNode | K::Error | K::UnterminatedString))
                 || self
                     .errors
                     .iter()

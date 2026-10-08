@@ -71,14 +71,14 @@ fn time_check(src: &str) -> (Duration, usize) {
     let tc = check(&ws);
     let d = t.elapsed();
     assert!(
-        tc.errors.is_empty(),
+        tc.errors().is_empty(),
         "benchmark program has type errors: {:?}",
-        tc.errors
+        tc.errors()
             .iter()
             .map(|e| &e.diag.message)
             .collect::<Vec<_>>()
     );
-    (d, tc.errors.len())
+    (d, tc.errors().len())
 }
 
 /// Time the checker, then lower the result to SQL, so a benchmark covers the

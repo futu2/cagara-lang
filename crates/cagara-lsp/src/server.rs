@@ -172,6 +172,15 @@ fn rebuild(state: &mut State) {
     let _ = catch_unwind(AssertUnwindSafe(|| state.rebuild()));
 }
 
+/// The key a document is stored under.
+///
+/// `didOpen` inserts with this and every request selects with it. Building the
+/// key in one place is what keeps the two conventions identical: a mismatch
+/// yields an empty result rather than an error.
+fn doc_key(uri: &Uri) -> String {
+    uri.as_str().to_string()
+}
+
 fn request(
     state: &mut State,
     method: &str,
@@ -181,7 +190,7 @@ fn request(
         HoverRequest::METHOD => {
             let p: HoverParams = serde_json::from_value(params).map_err(bad_params)?;
             let tp = p.text_document_position_params;
-            let key = tp.text_document.uri.as_str().to_string();
+            let key = doc_key(&tp.text_document.uri);
             let h = state
                 .select(&key)
                 .then(|| analysis::hover(&state.ws, tp.position))
@@ -197,7 +206,7 @@ fn request(
         GotoDefinition::METHOD => {
             let p: GotoDefinitionParams = serde_json::from_value(params).map_err(bad_params)?;
             let tp = p.text_document_position_params;
-            let key = tp.text_document.uri.as_str().to_string();
+            let key = doc_key(&tp.text_document.uri);
             let locs: Vec<Location> = if state.select(&key) {
                 analysis::definition(&state.ws, tp.position)
             } else {
@@ -218,7 +227,7 @@ fn request(
         References::METHOD => {
             let p: ReferenceParams = serde_json::from_value(params).map_err(bad_params)?;
             let tp = p.text_document_position;
-            let key = tp.text_document.uri.as_str().to_string();
+            let key = doc_key(&tp.text_document.uri);
             let uri = tp.text_document.uri;
             let locs: Option<Vec<Location>> = state.select(&key).then(|| {
                 analysis::references(&state.ws, tp.position, p.context.include_declaration)
@@ -234,7 +243,7 @@ fn request(
         DocumentHighlightRequest::METHOD => {
             let p: DocumentHighlightParams = serde_json::from_value(params).map_err(bad_params)?;
             let tp = p.text_document_position_params;
-            let key = tp.text_document.uri.as_str().to_string();
+            let key = doc_key(&tp.text_document.uri);
             let hs: Option<Vec<DocumentHighlight>> = state.select(&key).then(|| {
                 analysis::highlights(&state.ws, tp.position)
                     .into_iter()
@@ -248,14 +257,14 @@ fn request(
         }
         DocumentSymbolRequest::METHOD => {
             let p: DocumentSymbolParams = serde_json::from_value(params).map_err(bad_params)?;
-            let key = p.text_document.uri.as_str().to_string();
+            let key = doc_key(&p.text_document.uri);
             let ss = state.select(&key).then(|| analysis::symbols(&state.ws));
             json(serde_json::to_value(ss.map(DocumentSymbolResponse::Nested)))
         }
         Completion::METHOD => {
             let p: CompletionParams = serde_json::from_value(params).map_err(bad_params)?;
             let tp = p.text_document_position;
-            let key = tp.text_document.uri.as_str().to_string();
+            let key = doc_key(&tp.text_document.uri);
             let items = state
                 .select(&key)
                 .then(|| analysis::completion(&state.ws, tp.position));
@@ -263,7 +272,7 @@ fn request(
         }
         Formatting::METHOD => {
             let p: DocumentFormattingParams = serde_json::from_value(params).map_err(bad_params)?;
-            let key = p.text_document.uri.as_str().to_string();
+            let key = doc_key(&p.text_document.uri);
             match state.select(&key) {
                 false => Ok(serde_json::Value::Null),
                 true => match analysis::format(&state.ws) {
@@ -285,9 +294,8 @@ fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<()
             };
             let path = path.canonicalize().unwrap_or(path);
             let text = p.text_document.text;
-            state
-                .docs
-                .insert(p.text_document.uri.as_str().to_string(), Doc { path, text });
+            let key = doc_key(&p.text_document.uri);
+            state.docs.insert(key, Doc { path, text });
             state.rebuild();
             publish_all(conn, state)?;
         }

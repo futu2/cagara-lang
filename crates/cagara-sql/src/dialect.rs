@@ -17,6 +17,38 @@ use sqlglot_rust::ast::{
 };
 use sqlglot_rust::{Dialect, Statement};
 
+/// The dialect grouping shared by statement rewriting and intrinsic lowering.
+///
+/// Both phases need "which engine family is this", and they must agree: the
+/// MySQL family gets `CONCAT` *and* the MySQL intrinsic spellings. One map here
+/// is the single place a new dialect is classified.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fam {
+    Ansi,
+    Mysql,
+    Sqlite,
+    Duck,
+    Tsql,
+    BigQuery,
+    Snowflake,
+    Trino,
+    Spark,
+}
+
+pub(crate) fn fam(d: Dialect) -> Fam {
+    match d {
+        Dialect::Mysql | Dialect::Doris | Dialect::SingleStore | Dialect::StarRocks => Fam::Mysql,
+        Dialect::Sqlite => Fam::Sqlite,
+        Dialect::DuckDb => Fam::Duck,
+        Dialect::Tsql | Dialect::Fabric => Fam::Tsql,
+        Dialect::BigQuery => Fam::BigQuery,
+        Dialect::Snowflake => Fam::Snowflake,
+        Dialect::Trino | Dialect::Presto | Dialect::Athena => Fam::Trino,
+        Dialect::Spark | Dialect::Databricks => Fam::Spark,
+        _ => Fam::Ansi,
+    }
+}
+
 pub fn rewrite(stmt: Statement, to: Dialect) -> Result<Statement, String> {
     let Statement::Select(mut sel) = stmt else {
         return Ok(stmt);
@@ -26,22 +58,22 @@ pub fn rewrite(stmt: Statement, to: Dialect) -> Result<Statement, String> {
 }
 
 fn tsql(d: Dialect) -> bool {
-    matches!(d, Dialect::Tsql | Dialect::Fabric)
+    fam(d) == Fam::Tsql
 }
 
 fn mysql(d: Dialect) -> bool {
-    matches!(
-        d,
-        Dialect::Mysql | Dialect::Doris | Dialect::SingleStore | Dialect::StarRocks
-    )
+    fam(d) == Fam::Mysql
 }
 
 fn concat_as_function(d: Dialect) -> bool {
-    mysql(d) || tsql(d)
+    matches!(fam(d), Fam::Mysql | Fam::Tsql)
 }
 
 /// Dialects whose string literals treat `\` as an escape character, so a
 /// literal `\'` would end the string early.
+///
+/// This cuts across [`Fam`] (Hive has no family of its own), so it is its own
+/// list rather than a family test.
 fn backslash_escapes(d: Dialect) -> bool {
     mysql(d)
         || matches!(
@@ -259,12 +291,16 @@ fn expr(e: Expr, to: Dialect) -> Result<Expr, String> {
         alias: None,
         alias_quote_style: Default::default(),
     }];
+    // The same policy as `block`: sqlglot's transform is supposed to hand the
+    // SELECT back. Returning the untransformed expression instead would emit
+    // ANSI syntax for a dialect where it means something else (`||` is OR in
+    // MySQL), which is worse than failing.
     match sqlglot_rust::dialects::transform(&Statement::Select(sel), Dialect::Ansi, to) {
-        Statement::Select(s) => Ok(match s.columns.into_iter().next() {
-            Some(SelectItem::Expr { expr, .. }) => expr,
-            _ => e,
-        }),
-        _ => Ok(e),
+        Statement::Select(s) => match s.columns.into_iter().next() {
+            Some(SelectItem::Expr { expr, .. }) => Ok(expr),
+            _ => Err("internal: dialect transform dropped an expression".into()),
+        },
+        _ => Err("internal: dialect transform dropped a SELECT block".into()),
     }
 }
 

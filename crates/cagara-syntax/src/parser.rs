@@ -140,11 +140,19 @@ impl<'a> Parser<'a> {
         )
     }
 
-    /// Enter one level of nesting; `false` (after reporting it once) when the
-    /// limit is reached.
+    /// Enter one level of nesting; `false` when the limit is reached.
+    ///
+    /// The single gate for the expression/type budget. `expr`, `unary`, and the
+    /// type grammar all enter through here, so the limit and the "report once"
+    /// rule live in one place rather than in three copies that must stay in
+    /// step. Only [`bin`](Parser::bin)'s chain counter raises `depth` by any
+    /// other route, and it checks the same limit, so `depth` never exceeds
+    /// `MAX_DEPTH`; `bail` consumes to the next item boundary, which is why the
+    /// enclosing frames that unwind afterwards see `at_boundary()` and stay
+    /// quiet instead of reporting again or eating the next item.
     fn descend(&mut self) -> bool {
         if self.depth >= MAX_DEPTH {
-            if !self.at_boundary() && self.depth == MAX_DEPTH {
+            if !self.at_boundary() {
                 self.bail("expression is nested too deeply");
             }
             return false;
@@ -438,13 +446,9 @@ impl<'a> Parser<'a> {
     fn expr(&mut self) {
         // Bail out on runaway nesting: report once, then consume to the next
         // item boundary so the rest of the file still parses.
-        if self.depth >= MAX_DEPTH {
-            if !self.at_boundary() && self.depth == MAX_DEPTH {
-                self.bail("expression is nested too deeply");
-            }
+        if !self.descend() {
             return;
         }
-        self.depth += 1;
         if self.at_lambda() {
             self.start(K::Lambda);
             self.bump(); // param
@@ -504,20 +508,17 @@ impl<'a> Parser<'a> {
 
     fn unary(&mut self) {
         if self.at(Token::Minus) {
-            if self.depth >= MAX_DEPTH {
-                if !self.at_boundary() && self.depth == MAX_DEPTH {
-                    self.bail("expression is nested too deeply");
-                }
+            if !self.descend() {
                 return;
             }
-            self.depth += 1;
             self.start(K::NegExpr);
             self.bump();
             // `-9223372036854775808` is in range, though its digits alone
-            // are not.
+            // are not. The magnitude is shared with `ast`, which turns the
+            // resulting error node back into `i64::MIN`.
             if self
                 .peek_lex(0)
-                .is_some_and(|l| l.text == "9223372036854775808")
+                .is_some_and(|l| l.text == crate::ast::I64_MIN_MAGNITUDE)
             {
                 self.start(K::Literal);
                 self.bump();
@@ -681,10 +682,10 @@ impl<'a> Parser<'a> {
                      // without naming each one twice.
         while self.at_inner(Token::Ident) || self.at(Token::Field) {
             self.start(K::RecordField);
-            if self.at(Token::Field) {
-                self.bump();
-            } else {
-                self.bump();
+            // `.name` is the shorthand; `name = expr` is the long form.
+            let shorthand = self.at(Token::Field);
+            self.bump();
+            if !shorthand {
                 self.expect(Token::Eq, "`=` in record");
                 self.expr();
             }
@@ -785,6 +786,19 @@ mod tests {
         assert!(p.errors.is_empty(), "{:?}", p.errors);
         let defs: Vec<_> = p.syntax().children().collect();
         assert_eq!(defs.len(), 2);
+    }
+
+    /// A line break is `\n`, `\r\n`, or a bare `\r`: the whitespace regex
+    /// accepts all three, so the layout rule must recognise all three or a
+    /// CR-only file's definitions merge into one.
+    #[test]
+    fn every_line_break_spelling_ends_a_definition() {
+        for sep in ["\n", "\r\n", "\r"] {
+            let src = format!("a = 1{sep}b = 2{sep}");
+            let p = parse(&src);
+            let defs: Vec<_> = p.syntax().children().collect();
+            assert_eq!(defs.len(), 2, "{sep:?}: {:?}", p.errors);
+        }
     }
 
     #[test]

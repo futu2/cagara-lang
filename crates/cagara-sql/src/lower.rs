@@ -2,7 +2,7 @@
 //! current stage or wraps it in a derived table when fusing would change
 //! meaning (e.g. filtering after aggregation, windows, or LIMIT).
 
-use crate::stage::{and_all, col, ident_style, lower_expr, qualify, Stage};
+use crate::stage::{and_all, col, ident_style, lower_expr, qualify, Fuse, Stage};
 use cagara_hir::ir::{Expr as IrExpr, JoinKind, Rel, SetKind, Side};
 use sqlglot_rust::ast::{
     Expr, JoinClause, JoinType, OrderByItem, QuoteStyle, SetOperationStatement, SetOperationType,
@@ -19,7 +19,11 @@ pub struct Lowerer {
     next: usize,
     next_cte: usize,
     counts: Vec<Use>,
-    cte_names: HashMap<String, String>,
+    /// One CTE name per shared sub-pipeline, keyed by the same structural
+    /// identity `count_rel` uses. The two must agree: a node counted as shared
+    /// but not found here would be hoisted twice, and one found here but not
+    /// counted would be wrapped as a CTE reference without a definition.
+    cte_names: HashMap<Rel, String>,
     building: Vec<Rel>,
     ctes: Vec<sqlglot_rust::ast::Cte>,
     /// Table names in the query: a generated CTE hides a same-named table
@@ -214,8 +218,7 @@ impl Lowerer {
     /// none does.
     pub fn rel(&mut self, rel: &Rel) -> Result<Stage, String> {
         if self.building.is_empty() && self.is_cte_candidate(rel) {
-            let key = format!("{rel:?}");
-            if let Some(name) = self.cte_names.get(&key).cloned() {
+            if let Some(name) = self.cte_names.get(rel).cloned() {
                 return self.cte_stage(&name, rel);
             }
             self.next_cte += 1;
@@ -226,7 +229,7 @@ impl Lowerer {
                 self.next_cte += 1;
                 name = format!("cagara_cte{}", self.next_cte);
             }
-            self.cte_names.insert(key, name.clone());
+            self.cte_names.insert(rel.clone(), name.clone());
             self.building.push(rel.clone());
             let body = self.rel_inner(rel)?;
             self.building.pop();
@@ -262,8 +265,7 @@ impl Lowerer {
     }
 
     fn rel_peeled(&mut self, rel: &Rel) -> Result<Stage, String> {
-        // Peel a run of `where` / `limit` / `offset` / `distinct` / `at`
-        // stages iteratively.
+        // Peel a run of `where` / `at` stages iteratively.
         //
         // Every arm below starts with `self.rel(r)`, so a pipeline (one node
         // per stage) used one stack frame per stage. On the main thread's
@@ -273,8 +275,8 @@ impl Lowerer {
         // peeled stages are re-applied innermost-first, which is exactly the
         // order the recursion produced, so the result is unchanged.
         //
-        // Only `where` is peeled here; the remaining kinds still recurse and
-        // are bounded by `MAX_LOWER_DEPTH`.
+        // `where` and the transparent `at` are peeled here; the remaining kinds
+        // still recurse and are bounded by `MAX_LOWER_DEPTH`.
         if matches!(rel, Rel::Where(..) | Rel::At(_, _)) {
             let mut stages: Vec<&IrExpr> = Vec::new();
             let mut base = rel;
@@ -290,7 +292,7 @@ impl Lowerer {
             }
             let mut st = self.rel(base)?;
             for p in stages.into_iter().rev() {
-                if st.has_agg || st.has_win || st.limit.is_some() || st.offset.is_some() {
+                if st.needs_barrier(Fuse::Filter, false) {
                     st = self.wrap(st);
                 }
                 let e = st.resolve(p)?;
@@ -299,6 +301,9 @@ impl Lowerer {
             return Ok(st);
         }
         Ok(match rel {
+            // Unreachable by construction: the peel above takes every `Rel::At`
+            // at the root of this call, and the branch returns. Kept because the
+            // match must still be exhaustive.
             Rel::At(_, r) => self.rel(r)?,
             Rel::Table {
                 schema,
@@ -322,7 +327,7 @@ impl Lowerer {
             }
             Rel::Where(r, p) => {
                 let mut st = self.rel(r)?;
-                if st.has_agg || st.has_win || st.limit.is_some() || st.offset.is_some() {
+                if st.needs_barrier(Fuse::Filter, false) {
                     st = self.wrap(st);
                 }
                 let e = st.resolve(p)?;
@@ -334,13 +339,7 @@ impl Lowerer {
                 let new_win = fs
                     .iter()
                     .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
-                // A projection after `distinct` would dedupe on the projected
-                // columns instead of the input row; dedupe first.
-                if st.limit.is_some()
-                    || st.offset.is_some()
-                    || st.distinct
-                    || (new_win && (st.has_agg || st.has_win))
-                {
+                if st.needs_barrier(Fuse::Project, new_win) {
                     st = self.wrap(st);
                 }
                 let items = fs
@@ -360,14 +359,7 @@ impl Lowerer {
                 let new_win = fs
                     .iter()
                     .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
-                // As in `select`: a projection after `distinct` would dedupe
-                // on the projected columns instead of the input row, and a
-                // window must not fold into a stage that already has one.
-                if st.limit.is_some()
-                    || st.offset.is_some()
-                    || st.distinct
-                    || (new_win && (st.has_agg || st.has_win))
-                {
+                if st.needs_barrier(Fuse::Project, new_win) {
                     st = self.wrap(st);
                 }
                 let input: Vec<(String, ())> = st.names().into_iter().map(|c| (c, ())).collect();
@@ -386,9 +378,7 @@ impl Lowerer {
             }
             Rel::Omit(r, key) => {
                 let mut st = self.rel(r)?;
-                // As in `select`: a projection after `distinct` would dedupe on
-                // the projected columns instead of the input row.
-                if st.distinct {
+                if st.needs_barrier(Fuse::Omit, false) {
                     st = self.wrap(st);
                 }
                 st.items.retain(|(n, _)| n != key);
@@ -404,14 +394,9 @@ impl Lowerer {
             }
             Rel::Agg(r, fs) => {
                 let mut st = self.rel(r)?;
-                // `distinct` must dedupe the input rows before they are
-                // counted or grouped, so it cannot fold into this stage.
-                if st.has_agg
-                    || st.has_win
-                    || st.distinct
-                    || st.limit.is_some()
-                    || st.offset.is_some()
-                {
+                // `distinct` must dedupe the input rows before they are counted
+                // or grouped, so it cannot fold into this stage.
+                if st.needs_barrier(Fuse::Aggregate, false) {
                     st = self.wrap(st);
                 }
                 st.order_by.clear();
@@ -458,7 +443,7 @@ impl Lowerer {
                 // Sorting belongs outside the dedup: a DISTINCT query may
                 // order only by its own select list, and an emulated NULLS
                 // LAST key cannot appear there.
-                if st.limit.is_some() || st.offset.is_some() || st.distinct {
+                if st.needs_barrier(Fuse::Sort, false) {
                     st = self.wrap(st);
                 }
                 let mut order = Vec::new();
@@ -480,7 +465,7 @@ impl Lowerer {
             }
             Rel::Limit(r, n) => {
                 let mut st = self.rel(r)?;
-                if st.limit.is_some() {
+                if st.needs_barrier(Fuse::Limit, false) {
                     st = self.wrap(st);
                 }
                 st.limit = Some(*n);
@@ -488,7 +473,7 @@ impl Lowerer {
             }
             Rel::Offset(r, n) => {
                 let mut st = self.rel(r)?;
-                if st.limit.is_some() || st.offset.is_some() {
+                if st.needs_barrier(Fuse::Offset, false) {
                     st = self.wrap(st);
                 }
                 st.offset = Some(*n);
@@ -496,13 +481,15 @@ impl Lowerer {
             }
             Rel::Distinct(r) => {
                 let mut st = self.rel(r)?;
-                if st.limit.is_some() || st.offset.is_some() {
+                if st.needs_barrier(Fuse::Distinct, false) {
                     st = self.wrap(st);
                 }
                 st.distinct = true;
                 if !st.order_by.is_empty() {
                     // `order` before `distinct`: dedupe inside the derived
-                    // table, sort outside it (see `Rel::Order`).
+                    // table, sort outside it (see `Rel::Order`). This is not a
+                    // `Fuse` rule: the stage's own pending sort, not an incoming
+                    // clause, forces the wrap.
                     st = self.wrap(st);
                 }
                 st
@@ -746,7 +733,9 @@ struct Use {
 /// occurrence is used by a parent that fuses into it.
 ///
 /// Two separately written but identical sub-pipelines occur "twice" and may
-/// share one CTE, so the key is structural equality.
+/// share one CTE, so the key is [`Rel`]'s structural `PartialEq`. The CTE name
+/// map in [`Lowerer`] is keyed by the same relation and the same derived
+/// `Hash`/`Eq`, so the sharing decision and the cache cannot disagree.
 ///
 /// An explicit walk, not recursion: the IR is a chain as deep as the program's
 /// stage count, and nesting multiplies that past what the parser bounds, so a

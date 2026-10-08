@@ -23,7 +23,9 @@ CheckedQuery   relational structure plus checked rows, phases, and origins
 Rel            backend-facing relational structure without type metadata
 ```
 
-`CheckedQuery` and `CheckedExpr` are immutable owned trees. Their constructors
+`CheckedQuery` and `CheckedExpr` are immutable trees. Query nodes own their
+structure, while unchanged output rows are shared through `Arc`; computed rows
+remain immutable after construction. Their constructors
 enforce local rules: predicates must be boolean and row-phase, expressions must
 refer to available columns, projections compute their output rows, joins compute
 nullable sides, and set operations require compatible rows. The node enums are

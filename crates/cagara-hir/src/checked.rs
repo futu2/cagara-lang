@@ -25,6 +25,7 @@ use crate::core::{Error, Origin, RowType, ScalarType};
 use crate::ir::{Bound, Expr, Frame, JoinKind, Lit, Loc, Phase, Rel, SetKind, WinSpec};
 use crate::rules::{self, Place};
 use cagara_syntax::ast::Side;
+use std::sync::Arc;
 
 // ── the checked query ──────────────────────────────────────────────────────
 
@@ -89,7 +90,7 @@ pub enum ExprKind {
 /// only way" a fact rather than a convention.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckedQuery {
-    row: RowType,
+    row: Arc<RowType>,
     node: CheckedQueryNode,
     origin: Origin,
 }
@@ -111,7 +112,7 @@ impl CheckedQuery {
     /// `erase`) needs to take a `CheckedQuery` apart by value, and it lives in
     /// this crate. Keeping it `pub(crate)` means the *public* surface never
     /// hands out a `CheckedQueryNode` that a caller could reassemble.
-    pub(crate) fn into_parts(self) -> (RowType, CheckedQueryNode, Origin) {
+    pub(crate) fn into_parts(self) -> (Arc<RowType>, CheckedQueryNode, Origin) {
         (self.row, self.node, self.origin)
     }
 
@@ -161,7 +162,7 @@ impl CheckedQuery {
         // Read the names before `row` is moved into the node.
         let names = row.names();
         Ok(CheckedQuery {
-            row,
+            row: Arc::new(row),
             node: CheckedQueryNode::Table {
                 schema,
                 name,
@@ -203,7 +204,7 @@ impl CheckedQuery {
     ) -> Result<Self, Error> {
         let row = project_row("select", &input.row, &fields, Place::Select, origin)?;
         Ok(CheckedQuery {
-            row,
+            row: Arc::new(row),
             node: CheckedQueryNode::Select {
                 input: Box::new(input),
                 fields,
@@ -228,7 +229,7 @@ impl CheckedQuery {
         let updated = project_row("update", &input.row, &fields, update_place(), origin)?;
         let row = input.row.overwrite(&updated);
         Ok(CheckedQuery {
-            row,
+            row: Arc::new(row),
             node: CheckedQueryNode::Update {
                 input: Box::new(input),
                 fields,
@@ -247,7 +248,7 @@ impl CheckedQuery {
     ) -> Result<Self, Error> {
         let row = project_row("agg", &input.row, &fields, Place::Agg, origin)?;
         Ok(CheckedQuery {
-            row,
+            row: Arc::new(row),
             node: CheckedQueryNode::Agg {
                 input: Box::new(input),
                 fields,
@@ -344,7 +345,7 @@ impl CheckedQuery {
         }
         let row = input.row.omit(&key);
         Ok(CheckedQuery {
-            row,
+            row: Arc::new(row),
             node: CheckedQueryNode::Omit {
                 input: Box::new(input),
                 key,
@@ -382,7 +383,7 @@ impl CheckedQuery {
         let affix = affix.into();
         let row = input.row.rename_all(&affix, prefix);
         Ok(CheckedQuery {
-            row,
+            row: Arc::new(row),
             node: CheckedQueryNode::Rename {
                 input: Box::new(input),
                 affix,
@@ -432,7 +433,7 @@ impl CheckedQuery {
         }
         let row = join_row(kind, &left.row, &right.row);
         Ok(CheckedQuery {
-            row,
+            row: Arc::new(row),
             node: CheckedQueryNode::Join {
                 kind,
                 left: Box::new(left),
@@ -478,7 +479,7 @@ impl CheckedQuery {
             ))
             .at(origin));
         }
-        let row = left.row.clone();
+        let row = Arc::clone(&left.row);
         Ok(CheckedQuery {
             row,
             node: CheckedQueryNode::Set {

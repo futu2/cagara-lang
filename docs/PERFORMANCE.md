@@ -31,12 +31,15 @@ results across dependency changes, overloads, errors, and shifted source spans.
 Phases are measured separately. Compilation follows an already completed
 check and includes returning an owned `Compilation`, which clones the cached
 relation trees. Warm diagnostics use `compile_diagnostics`, avoiding that
-clone. Returned checks and compilations are dropped before editing; a client
-retaining older results would use additional memory. Source generation, edit
-string construction, test assertions, and result destruction are outside the
-listed phase timings. Workspace destruction is reported separately by the
-harness. Linux `VmHWM` records process peak resident memory, including the
-harness, across both cold compilation and editing.
+clone. A module's diagnostics are rendered inside its memoized check, so a
+`check()` on an unchanged module clones the rendered messages rather than
+re-rendering each one against the text. Returned checks and compilations are
+dropped before editing; a client retaining older results would use additional
+memory. Source generation, edit string construction, test assertions, and
+result destruction are outside the listed phase timings. Workspace destruction
+is reported separately by the harness. Linux `VmHWM` records process peak
+resident memory, including the harness, across both cold compilation and
+editing.
 
 ## Measurements
 

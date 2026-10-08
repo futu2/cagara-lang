@@ -344,13 +344,7 @@ pub fn check(ws: &Workspace) -> TypeCheck {
             out.by_def
                 .entry((e.module, e.def))
                 .or_insert(out.errors.len());
-            out.errors.push(TypeError {
-                module: e.module,
-                def: e.def,
-                // `diag_span` uses the module's cached line index; building the
-                // diagnostic from the text again per error would be quadratic.
-                diag: ws.diag_span(e.module, e.span, e.message.clone()),
-            });
+            out.errors.push(e.clone());
         }
         out.modules.push(Arc::clone(mc));
     }
@@ -384,7 +378,41 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
             .map(|t| (*t.index(db), &module_check(db, *t).schemes))
             .collect(),
     };
-    Arc::new(check_module(env))
+    let out = check_module(env);
+    // Render the diagnostics here, once per module text, rather than in every
+    // `check()`: an editor calls `check()` on each request, and re-rendering
+    // every message against the text each time was the cost of a request on an
+    // error-heavy file. The salsa query already depends on the text, so a
+    // rendered diagnostic is invalidated exactly when its span would be.
+    let path = input.path(db);
+    let text = file.text(db);
+    let starts = crate::workspace::line_starts(text);
+    let errors = out
+        .errors
+        .iter()
+        .map(|e| TypeError {
+            module: e.module,
+            def: e.def,
+            diag: crate::workspace::make_diag_indexed(
+                path,
+                text,
+                &starts,
+                e.span.start as usize,
+                e.span.end as usize,
+                e.message.clone(),
+            ),
+        })
+        .collect();
+    Arc::new(ModuleCheck {
+        schemes: out.schemes,
+        errors,
+        types: out.types,
+        holes: out.holes,
+        choices: out.choices,
+        probe_fields: out.probe_fields,
+        use_tys: out.use_tys,
+        use_types: out.use_types,
+    })
 }
 
 #[cfg(test)]
@@ -398,11 +426,30 @@ fn check_runs() -> usize {
     CHECK_RUNS.with(|c| c.get())
 }
 
-/// Result of checking one module.
+/// What one module's check produced, before its diagnostics are rendered.
+///
+/// Rendering needs the module's path and text, which the pure checker does not
+/// have; [`module_check`] converts this into a [`ModuleCheck`].
+#[derive(Debug, Clone, PartialEq)]
+struct ModuleOutput {
+    schemes: HashMap<(usize, usize), Scheme>,
+    errors: Vec<RawTypeError>,
+    types: HashMap<(usize, usize), String>,
+    holes: HashMap<(usize, usize), usize>,
+    choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
+    probe_fields: Option<(usize, Vec<(String, String)>)>,
+    use_tys: HashMap<(usize, u32), Ty>,
+    use_types: HashMap<(usize, u32, u32), String>,
+}
+
+/// A checked module with its diagnostics already rendered.
+///
+/// Rendered once per module text, inside the salsa query, so a request that
+/// only needs the diagnostics does not re-render them.
 #[derive(Debug, Clone, PartialEq)]
 struct ModuleCheck {
     schemes: HashMap<(usize, usize), Scheme>,
-    errors: Vec<RawTypeError>,
+    errors: Vec<TypeError>,
     types: HashMap<(usize, usize), String>,
     holes: HashMap<(usize, usize), usize>,
     choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
@@ -425,7 +472,7 @@ pub(crate) struct ModuleEnv<'w> {
 }
 
 /// Check one module against the schemes of the modules it may use.
-fn check_module(env: ModuleEnv<'_>) -> ModuleCheck {
+fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
     let m = env.module;
     let mut c = Checker {
         env,
@@ -464,7 +511,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleCheck {
     let probe_fields = c.probe_fields.map(|fs| (m, fs));
     let use_types = c.use_types;
     let use_tys = c.use_tys;
-    ModuleCheck {
+    ModuleOutput {
         schemes: c.schemes,
         errors: c.errors,
         types,

@@ -1539,3 +1539,29 @@ fn merge_basic() {
     // in the right are appended.
     let _ = ty("q = users & merge orders\n", "q");
 }
+
+/// Diagnostics are rendered once per module text, inside the memoized check, so
+/// a rendered message must still follow an edit to that text.
+#[test]
+fn a_rendered_diagnostic_follows_an_edit() {
+    let src = "q : query { a = int } = table \"s\" \"t\" & where \"x\"\n";
+    let mut ws = Workspace::from_source(src);
+    let before = check(&ws);
+    assert_eq!(before.errors().len(), 1, "{:?}", before.errors());
+    assert_eq!(before.errors()[0].diag.line, 1);
+    assert!(
+        before.errors()[0].diag.source.contains("where \"x\""),
+        "{:?}",
+        before.errors()[0]
+    );
+
+    assert!(ws.set_source(ws.root, format!("# a comment line\n{src}")));
+    let after = check(&ws);
+    assert_eq!(after.errors().len(), 1, "{:?}", after.errors());
+    assert_eq!(after.errors()[0].diag.line, 2, "{:?}", after.errors()[0]);
+    assert!(
+        after.errors()[0].diag.source.contains("where \"x\""),
+        "{:?}",
+        after.errors()[0]
+    );
+}

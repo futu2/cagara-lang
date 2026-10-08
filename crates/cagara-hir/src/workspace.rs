@@ -495,7 +495,10 @@ fn make_diag(path: &Path, text: &str, offset: usize, message: String) -> Diag {
 }
 
 /// Byte offsets where each line of `text` starts, always including `0`.
-fn line_starts(text: &str) -> Vec<usize> {
+///
+/// `pub(crate)` because the memoized module check renders a module's
+/// diagnostics once, when its text changes, instead of on every `check()`.
+pub(crate) fn line_starts(text: &str) -> Vec<usize> {
     let mut out = Vec::with_capacity(text.len() / 32 + 1);
     out.push(0);
     out.extend(text.match_indices('\n').map(|(i, _)| i + 1));
@@ -509,7 +512,7 @@ fn line_at(starts: &[usize], offset: usize) -> usize {
 
 /// Build a diagnostic from a precomputed line index. Prefer this over
 /// [`make_diag_range`] whenever several diagnostics share one text.
-fn make_diag_indexed(
+pub(crate) fn make_diag_indexed(
     path: &Path,
     text: &str,
     starts: &[usize],

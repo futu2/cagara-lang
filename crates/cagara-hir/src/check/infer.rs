@@ -956,267 +956,334 @@ impl<'w> Checker<'w> {
     // ── inference ──────────────────────────────────────────────────────────
 
     pub(crate) fn infer(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
-        let sp = e.span;
         match &e.kind {
-            ExprKind::Name(n) => {
-                let t = match env.iter().rev().find(|(k, _)| k == n) {
-                    Some((_, t)) => t.clone(),
-                    None => self.lookup(n, e.id, sp).map_err(at(sp))?,
-                };
-                self.uses.push((e.id, sp, t.clone(), None));
-                Ok(t)
-            }
-            ExprKind::Lit(l) => {
-                let t = con(lit_name(l));
-                self.uses.push((e.id, sp, t.clone(), None));
-                Ok(t)
-            }
-            ExprKind::Field(side, n) => {
-                let phase = self.fresh_col_phase();
-                let (tail, a) = (self.fresh_row(), self.fresh());
-                let r = if n == PROBE_FIELD {
-                    // Completion probe: adds no column, remembers the row and
-                    // which definition asked, so a later definition's empty
-                    // probe cannot overwrite this one.
-                    let owner = self.active.last().map(|(_, d)| *d).unwrap_or(usize::MAX);
-                    self.probe = Some((owner, tail.clone()));
-                    tail
-                } else {
-                    row(vec![(n.clone(), a.clone())], tail)
-                };
-                let input = match side {
-                    Side::Single => r,
-                    Side::Left => Ty::Con("join", vec![r, self.fresh_row()]),
-                    Side::Right => Ty::Con("join", vec![self.fresh_row(), r]),
-                };
-                // Hover shows the column's value type, not the whole row.
-                self.uses.push((e.id, sp, a.clone(), None));
-                Ok(expr(phase, input, a))
-            }
-            ExprKind::Proj(base, f) => {
-                if let ExprKind::Name(n) = &base.kind {
-                    let scope = self.env.scope;
-                    if !env.iter().any(|(k, _)| k == n) {
-                        if let Some(Binding::Module(t)) = scope.get(n) {
-                            let own = self.env.owns[t];
-                            let t = match own.get(f).cloned() {
-                                Some(Binding::Def(dm, i)) => {
-                                    self.def_type(dm, i, e.id, sp).map_err(at(sp))?
-                                }
-                                Some(Binding::Overloads(om, is)) => {
-                                    self.overload_type(f, om, &is, e.id, sp)
-                                }
-                                _ => {
-                                    return Err(TyErr {
-                                        span: sp,
-                                        msg: format!("module `{n}` has no definition `{f}`"),
-                                    })
-                                }
-                            };
-                            self.uses.push((e.id, sp, t.clone(), None));
-                            return Ok(t);
+            ExprKind::Name(..) => self.infer_name(env, e),
+            ExprKind::Lit(..) => self.infer_lit(env, e),
+            ExprKind::Field(..) => self.infer_field(env, e),
+            ExprKind::Proj(..) => self.infer_proj(env, e),
+            ExprKind::App(..) => self.infer_app(env, e),
+            ExprKind::Lambda(..) => self.infer_lambda(env, e),
+            ExprKind::Record(..) => self.infer_record(env, e),
+            ExprKind::List(..) => self.infer_list(env, e),
+            ExprKind::Sql(..) => self.infer_sql(env, e),
+            ExprKind::Primitive(..) => self.infer_primitive(env, e),
+            ExprKind::Error => self.infer_error(env, e),
+        }
+    }
+
+    fn infer_name(&mut self, env: &mut [(String, Ty)], e: &ast::Expr) -> R<Ty> {
+        let sp = e.span;
+        let ExprKind::Name(n) = &e.kind else {
+            unreachable!("dispatched on ExprKind::Name")
+        };
+        let t = match env.iter().rev().find(|(k, _)| k == n) {
+            Some((_, t)) => t.clone(),
+            None => self.lookup(n, e.id, sp).map_err(at(sp))?,
+        };
+        self.uses.push((e.id, sp, t.clone(), None));
+        Ok(t)
+    }
+
+    fn infer_lit(&mut self, _env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
+        let sp = e.span;
+        let ExprKind::Lit(l) = &e.kind else {
+            unreachable!("dispatched on ExprKind::Lit")
+        };
+        let t = con(lit_name(l));
+        self.uses.push((e.id, sp, t.clone(), None));
+        Ok(t)
+    }
+
+    fn infer_field(&mut self, _env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
+        let sp = e.span;
+        let ExprKind::Field(side, n) = &e.kind else {
+            unreachable!("dispatched on ExprKind::Field")
+        };
+        let phase = self.fresh_col_phase();
+        let (tail, a) = (self.fresh_row(), self.fresh());
+        let r = if n == PROBE_FIELD {
+            // Completion probe: adds no column, remembers the row and
+            // which definition asked, so a later definition's empty
+            // probe cannot overwrite this one.
+            let owner = self.active.last().map(|(_, d)| *d).unwrap_or(usize::MAX);
+            self.probe = Some((owner, tail.clone()));
+            tail
+        } else {
+            row(vec![(n.clone(), a.clone())], tail)
+        };
+        let input = match side {
+            Side::Single => r,
+            Side::Left => Ty::Con("join", vec![r, self.fresh_row()]),
+            Side::Right => Ty::Con("join", vec![self.fresh_row(), r]),
+        };
+        // Hover shows the column's value type, not the whole row.
+        self.uses.push((e.id, sp, a.clone(), None));
+        Ok(expr(phase, input, a))
+    }
+
+    fn infer_proj(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
+        let sp = e.span;
+        let ExprKind::Proj(base, f) = &e.kind else {
+            unreachable!("dispatched on ExprKind::Proj")
+        };
+        if let ExprKind::Name(n) = &base.kind {
+            let scope = self.env.scope;
+            if !env.iter().any(|(k, _)| k == n) {
+                if let Some(Binding::Module(t)) = scope.get(n) {
+                    let own = self.env.owns[t];
+                    let t = match own.get(f).cloned() {
+                        Some(Binding::Def(dm, i)) => {
+                            self.def_type(dm, i, e.id, sp).map_err(at(sp))?
                         }
-                    }
-                }
-                let bt = self.infer(env, base)?;
-                let (a, tail) = (self.fresh(), self.fresh());
-                let want = row(vec![(f.clone(), a.clone())], tail);
-                self.unify(&bt, &want)
-                    .map_err(|msg| format!("cannot take `.{f}`: {msg}"))
-                    .map_err(at(sp))?;
-                Ok(a)
-            }
-            ExprKind::App(f, args) => {
-                let mut ft = self.infer(env, f)?;
-                // The key arguments of the key stages, read below.
-                let mut keys: Vec<(&'static str, String)> = Vec::new();
-                for arg in args {
-                    // A key argument (`omit "k"`, `prefix "p"`, or `suffix "s"`)
-                    // names a column, so its value has to be known when the
-                    // query is checked. It is read here, where the syntax still is, and
-                    // recorded in the stage's constraint — which keeps column
-                    // names out of the type language entirely. A computed key
-                    // cannot name a column, so it is refused rather than
-                    // deferred. See docs/ROW-TYPES.md.
-                    if let Ty::Fun(p, r) = self.resolve(&ft) {
-                        // A directional affix parameter is a string that names
-                        // the mapper `m`, which the result type uses
-                        // (`query (keyMap m r)`). Carrying the mapper is what
-                        // lets `prefix p` stay tied to the row it produces —
-                        // the argument's type is what binds `m`.
-                        let marker = match (&*p, KeyMarker::of(&p)) {
-                            (Ty::Con("prefixAffix", args), _) if args.is_empty() => {
-                                Some((KeyMarker::Prefix, None))
-                            }
-                            (Ty::Con("suffixAffix", args), _) if args.is_empty() => {
-                                Some((KeyMarker::Suffix, None))
-                            }
-                            (Ty::Con("prefixAffix", args), _) if args.len() == 1 => {
-                                Some((KeyMarker::Prefix, Some(args[0].clone())))
-                            }
-                            (Ty::Con("suffixAffix", args), _) if args.len() == 1 => {
-                                Some((KeyMarker::Suffix, Some(args[0].clone())))
-                            }
-                            (_, Some(m)) => Some((m, None)),
-                            _ => None,
-                        };
-                        if let Some((marker, carried)) = marker {
-                            // A key argument names a column or supplies a label
-                            // fragment. When it is a literal, read it here where
-                            // the syntax still is and record it in the stage's
-                            // witness. When it is *not* a literal the mapping
-                            // cannot be applied yet, so the stage is deferred
-                            // and the argument's type is what carries the mapper
-                            // — which is what types `addPrefix = p => q => q &
-                            // prefix p`.
-                            let affix = match &arg.kind {
-                                ExprKind::Lit(ast::Lit::Str(s)) => Some(s.clone()),
-                                _ => None,
-                            };
-                            self.span = arg.span;
-                            match (marker, affix) {
-                                // `omit` needs the column name now: it is a row
-                                // equation, and there is no deferring away the
-                                // fact that the equation names a column.
-                                (KeyMarker::Omit, None) => {
-                                    return Err(TyErr {
-                                        span: arg.span,
-                                        msg: marker.literal_msg(),
-                                    });
-                                }
-                                (KeyMarker::Prefix | KeyMarker::Suffix, None) => {
-                                    // Deferred affix: the argument's type is a
-                                    // string naming the mapper, so the stage
-                                    // stays symbolic until that string is
-                                    // known.
-                                    let at_ = self.infer(env, arg)?;
-                                    let m = carried.unwrap_or_else(|| {
-                                        Ty::Var(self.fresh_with(false, true, Kind::KeyMap))
-                                    });
-                                    self.unify(&at_, &directional_string_kind(marker, m.clone()))
-                                        .map_err(|msg| TyErr {
-                                            span: arg.span,
-                                            msg: format!("{}: {msg}", marker.literal_msg()),
-                                        })?;
-                                    // Remember which mapper this stage's affix
-                                    // names, so the constraint built next uses
-                                    // it instead of inventing a fresh one.
-                                    self.affix_mappers.push((marker, m));
-                                    keys.push((marker.tag(), String::new()));
-                                    self.deferred_keys.push(marker);
-                                }
-                                (_, Some(s)) => {
-                                    if let Some(m) = carried {
-                                        self.affix_mappers.push((marker, m));
-                                    }
-                                    keys.push((marker.tag(), s));
-                                }
-                                (_, None) => {
-                                    let at_ = self.infer(env, arg)?;
-                                    self.coerce(&at_, &con("string")).map_err(|m| TyErr {
-                                        span: arg.span,
-                                        msg: format!("{}: {m}", marker.literal_msg()),
-                                    })?;
-                                    keys.push((marker.tag(), String::new()));
-                                    self.deferred_keys.push(marker);
-                                }
-                            }
-                            ft = *r;
-                            self.key_stage(&keys, &ft)?;
-                            self.solve()?;
-                            continue;
+                        Some(Binding::Overloads(om, is)) => {
+                            self.overload_type(f, om, &is, e.id, sp)
                         }
-                    }
-                    let at_ = self.infer(env, arg)?;
-                    self.span = arg.span;
-                    ft = match self.resolve(&ft) {
-                        Ty::Fun(p, r) => {
-                            self.coerce(&at_, &p).map_err(at(arg.span))?;
-                            if let ExprKind::Lit(l) = &arg.kind {
-                                // A lifted literal (`18` in `.age >= 18`) has
-                                // the value type it was lifted to.
-                                let v = match self.resolve(&p) {
-                                    Ty::Con("expr", a) => a[2].clone(),
-                                    o => o,
-                                };
-                                self.uses.push((arg.id, arg.span, v, Some(lit_name(l))));
-                            }
-                            *r
-                        }
-                        Ty::Var(_) => {
-                            let r = self.fresh();
-                            self.unify(&ft, &fun(at_, r.clone()))
-                                .map_err(at(arg.span))?;
-                            r
-                        }
-                        o => {
-                            let msg = format!(
-                                "cannot apply a value of type {} to an argument",
-                                self.show(&o)
-                            );
+                        _ => {
                             return Err(TyErr {
-                                span: arg.span,
-                                msg,
-                            });
+                                span: sp,
+                                msg: format!("module `{n}` has no definition `{f}`"),
+                            })
                         }
                     };
-                    self.solve()?;
+                    self.uses.push((e.id, sp, t.clone(), None));
+                    return Ok(t);
                 }
-                Ok(ft)
             }
-            ExprKind::Lambda(p, body) => {
-                let pt = self.fresh();
-                env.push((p.clone(), pt.clone()));
-                let bt = self.infer(env, body);
-                env.pop();
-                Ok(fun(pt, bt?))
-            }
-            ExprKind::Record(fs) => {
-                let mut out: Vec<(String, Ty)> = Vec::new();
-                for (k, v) in fs {
-                    if out.iter().any(|(o, _)| o == k) {
-                        return Err(TyErr {
-                            span: sp,
-                            msg: format!("field `{k}` appears twice"),
-                        });
-                    }
-                    let t = self.infer(env, v)?;
-                    out.push((k.clone(), t));
-                }
-                Ok(row(out, Ty::Empty))
-            }
-            ExprKind::List(xs) => {
-                let mut ts = Vec::new();
-                for x in xs {
-                    ts.push((self.infer(env, x)?, x.span));
-                }
-                let Some((first, _)) = ts.first() else {
-                    // An empty list has no element to go on; it fits any.
-                    return Ok(list(self.fresh()));
-                };
-                // A list of column expressions is a list of sort / partition
-                // keys, so `[asc .x, .y]` has one element type.
-                let elem = match self.resolve(first) {
-                    Ty::Con("expr" | "sortkey", _) => sortkey(self.fresh()),
-                    _ => first.clone(),
-                };
-                for (t, s) in &ts {
-                    self.coerce(t, &elem).map_err(at(*s))?;
-                }
-                Ok(list(elem))
-            }
-            ExprKind::Sql(_) => Err(TyErr {
-                span: sp,
-                msg: "`sql \"...\"` must be the whole body of a definition with a type signature"
-                    .into(),
-            }),
-            ExprKind::Primitive(_) => Err(TyErr {
-                span: sp,
-                msg: "`primitive \"...\"` must be the whole body of a definition with a type signature"
-                    .into(),
-            }),
-            ExprKind::Error => Ok(self.fresh()),
         }
+        let bt = self.infer(env, base)?;
+        let (a, tail) = (self.fresh(), self.fresh());
+        let want = row(vec![(f.clone(), a.clone())], tail);
+        self.unify(&bt, &want)
+            .map_err(|msg| format!("cannot take `.{f}`: {msg}"))
+            .map_err(at(sp))?;
+        Ok(a)
+    }
+
+    fn infer_app(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
+        let ExprKind::App(f, args) = &e.kind else {
+            unreachable!("dispatched on ExprKind::App")
+        };
+        let mut ft = self.infer(env, f)?;
+        // The key arguments of the key stages, read below.
+        let mut keys: Vec<(&'static str, String)> = Vec::new();
+        for arg in args {
+            // A key argument (`omit "k"`, `prefix "p"`, or `suffix "s"`)
+            // names a column, so its value has to be known when the
+            // query is checked. It is read here, where the syntax still is, and
+            // recorded in the stage's constraint — which keeps column
+            // names out of the type language entirely. A computed key
+            // cannot name a column, so it is refused rather than
+            // deferred. See docs/ROW-TYPES.md.
+            if let Ty::Fun(p, r) = self.resolve(&ft) {
+                // A directional affix parameter is a string that names
+                // the mapper `m`, which the result type uses
+                // (`query (keyMap m r)`). Carrying the mapper is what
+                // lets `prefix p` stay tied to the row it produces —
+                // the argument's type is what binds `m`.
+                let marker = match (&*p, KeyMarker::of(&p)) {
+                    (Ty::Con("prefixAffix", args), _) if args.is_empty() => {
+                        Some((KeyMarker::Prefix, None))
+                    }
+                    (Ty::Con("suffixAffix", args), _) if args.is_empty() => {
+                        Some((KeyMarker::Suffix, None))
+                    }
+                    (Ty::Con("prefixAffix", args), _) if args.len() == 1 => {
+                        Some((KeyMarker::Prefix, Some(args[0].clone())))
+                    }
+                    (Ty::Con("suffixAffix", args), _) if args.len() == 1 => {
+                        Some((KeyMarker::Suffix, Some(args[0].clone())))
+                    }
+                    (_, Some(m)) => Some((m, None)),
+                    _ => None,
+                };
+                if let Some((marker, carried)) = marker {
+                    // A key argument names a column or supplies a label
+                    // fragment. When it is a literal, read it here where
+                    // the syntax still is and record it in the stage's
+                    // witness. When it is *not* a literal the mapping
+                    // cannot be applied yet, so the stage is deferred
+                    // and the argument's type is what carries the mapper
+                    // — which is what types `addPrefix = p => q => q &
+                    // prefix p`.
+                    let affix = match &arg.kind {
+                        ExprKind::Lit(ast::Lit::Str(s)) => Some(s.clone()),
+                        _ => None,
+                    };
+                    self.span = arg.span;
+                    match (marker, affix) {
+                        // `omit` needs the column name now: it is a row
+                        // equation, and there is no deferring away the
+                        // fact that the equation names a column.
+                        (KeyMarker::Omit, None) => {
+                            return Err(TyErr {
+                                span: arg.span,
+                                msg: marker.literal_msg(),
+                            });
+                        }
+                        (KeyMarker::Prefix | KeyMarker::Suffix, None) => {
+                            // Deferred affix: the argument's type is a
+                            // string naming the mapper, so the stage
+                            // stays symbolic until that string is
+                            // known.
+                            let at_ = self.infer(env, arg)?;
+                            let m = carried.unwrap_or_else(|| {
+                                Ty::Var(self.fresh_with(false, true, Kind::KeyMap))
+                            });
+                            self.unify(&at_, &directional_string_kind(marker, m.clone()))
+                                .map_err(|msg| TyErr {
+                                    span: arg.span,
+                                    msg: format!("{}: {msg}", marker.literal_msg()),
+                                })?;
+                            // Remember which mapper this stage's affix
+                            // names, so the constraint built next uses
+                            // it instead of inventing a fresh one.
+                            self.affix_mappers.push((marker, m));
+                            keys.push((marker.tag(), String::new()));
+                            self.deferred_keys.push(marker);
+                        }
+                        (_, Some(s)) => {
+                            if let Some(m) = carried {
+                                self.affix_mappers.push((marker, m));
+                            }
+                            keys.push((marker.tag(), s));
+                        }
+                        (_, None) => {
+                            let at_ = self.infer(env, arg)?;
+                            self.coerce(&at_, &con("string")).map_err(|m| TyErr {
+                                span: arg.span,
+                                msg: format!("{}: {m}", marker.literal_msg()),
+                            })?;
+                            keys.push((marker.tag(), String::new()));
+                            self.deferred_keys.push(marker);
+                        }
+                    }
+                    ft = *r;
+                    self.key_stage(&keys, &ft)?;
+                    self.solve()?;
+                    continue;
+                }
+            }
+            let at_ = self.infer(env, arg)?;
+            self.span = arg.span;
+            ft = match self.resolve(&ft) {
+                Ty::Fun(p, r) => {
+                    self.coerce(&at_, &p).map_err(at(arg.span))?;
+                    if let ExprKind::Lit(l) = &arg.kind {
+                        // A lifted literal (`18` in `.age >= 18`) has
+                        // the value type it was lifted to.
+                        let v = match self.resolve(&p) {
+                            Ty::Con("expr", a) => a[2].clone(),
+                            o => o,
+                        };
+                        self.uses.push((arg.id, arg.span, v, Some(lit_name(l))));
+                    }
+                    *r
+                }
+                Ty::Var(_) => {
+                    let r = self.fresh();
+                    self.unify(&ft, &fun(at_, r.clone()))
+                        .map_err(at(arg.span))?;
+                    r
+                }
+                o => {
+                    let msg = format!(
+                        "cannot apply a value of type {} to an argument",
+                        self.show(&o)
+                    );
+                    return Err(TyErr {
+                        span: arg.span,
+                        msg,
+                    });
+                }
+            };
+            self.solve()?;
+        }
+        Ok(ft)
+    }
+
+    fn infer_lambda(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
+        let ExprKind::Lambda(p, body) = &e.kind else {
+            unreachable!("dispatched on ExprKind::Lambda")
+        };
+        let pt = self.fresh();
+        env.push((p.clone(), pt.clone()));
+        let bt = self.infer(env, body);
+        env.pop();
+        Ok(fun(pt, bt?))
+    }
+
+    fn infer_record(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
+        let sp = e.span;
+        let ExprKind::Record(fs) = &e.kind else {
+            unreachable!("dispatched on ExprKind::Record")
+        };
+        let mut out: Vec<(String, Ty)> = Vec::new();
+        for (k, v) in fs {
+            if out.iter().any(|(o, _)| o == k) {
+                return Err(TyErr {
+                    span: sp,
+                    msg: format!("field `{k}` appears twice"),
+                });
+            }
+            let t = self.infer(env, v)?;
+            out.push((k.clone(), t));
+        }
+        Ok(row(out, Ty::Empty))
+    }
+
+    fn infer_list(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
+        let ExprKind::List(xs) = &e.kind else {
+            unreachable!("dispatched on ExprKind::List")
+        };
+        let mut ts = Vec::new();
+        for x in xs {
+            ts.push((self.infer(env, x)?, x.span));
+        }
+        let Some((first, _)) = ts.first() else {
+            // An empty list has no element to go on; it fits any.
+            return Ok(list(self.fresh()));
+        };
+        // A list of column expressions is a list of sort / partition
+        // keys, so `[asc .x, .y]` has one element type.
+        let elem = match self.resolve(first) {
+            Ty::Con("expr" | "sortkey", _) => sortkey(self.fresh()),
+            _ => first.clone(),
+        };
+        for (t, s) in &ts {
+            self.coerce(t, &elem).map_err(at(*s))?;
+        }
+        Ok(list(elem))
+    }
+
+    fn infer_sql(&mut self, _env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
+        let sp = e.span;
+        let ExprKind::Sql(_) = &e.kind else {
+            unreachable!("dispatched on ExprKind::Sql")
+        };
+        Err(TyErr {
+            span: sp,
+            msg: "`sql \"...\"` must be the whole body of a definition with a type signature"
+                .into(),
+        })
+    }
+
+    fn infer_primitive(&mut self, _env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
+        let sp = e.span;
+        let ExprKind::Primitive(_) = &e.kind else {
+            unreachable!("dispatched on ExprKind::Primitive")
+        };
+        Err(TyErr {
+            span: sp,
+            msg: "`primitive \"...\"` must be the whole body of a definition with a type signature"
+                .into(),
+        })
+    }
+
+    fn infer_error(&mut self, _env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
+        let ExprKind::Error = &e.kind else {
+            unreachable!("dispatched on ExprKind::Error")
+        };
+        Ok(self.fresh())
     }
 
     pub(crate) fn lookup(&mut self, n: &str, site: u32, sp: Span) -> Result<Ty, String> {

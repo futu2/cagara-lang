@@ -431,9 +431,12 @@ impl CheckedQuery {
                 .at(origin));
             }
         }
-        let row = join_row(kind, &left.row, &right.row);
+        let row = match kind {
+            JoinKind::Semi | JoinKind::Anti => Arc::clone(&left.row),
+            _ => Arc::new(join_row(kind, &left.row, &right.row)),
+        };
         Ok(CheckedQuery {
-            row: Arc::new(row),
+            row,
             node: CheckedQueryNode::Join {
                 kind,
                 left: Box::new(left),

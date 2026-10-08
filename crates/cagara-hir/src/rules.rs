@@ -3,6 +3,7 @@
 //! and report them the same way.
 
 use crate::ir::Phase;
+use std::collections::HashSet;
 
 /// A join-side column (`.<x`, `.>x`) outside a join predicate.
 pub const JOIN_ONLY: &str =
@@ -135,10 +136,11 @@ pub fn nested(what: &str, p: Phase) -> Result<(), String> {
 /// the left does not have (the left one wins on a name collision).
 pub fn join_columns<T: Clone>(left: &[(String, T)], right: &[(String, T)]) -> Vec<(String, T)> {
     let mut out = left.to_vec();
+    let left_names: HashSet<_> = left.iter().map(|(name, _)| name.as_str()).collect();
     out.extend(
         right
             .iter()
-            .filter(|(n, _)| !left.iter().any(|(l, _)| l == n))
+            .filter(|(name, _)| !left_names.contains(name.as_str()))
             .cloned(),
     );
     out

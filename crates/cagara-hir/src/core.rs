@@ -13,6 +13,7 @@ use crate::rules;
 use crate::schema;
 use crate::workspace::Diag;
 use cagara_syntax::ast::Span;
+use std::collections::{HashMap, HashSet};
 
 /// Where a checked node was written.
 ///
@@ -205,12 +206,11 @@ impl RowType {
     /// record's field rule, and [`CheckedQuery::select`](crate::checked) rejects
     /// it again so a hand-built row cannot slip through.
     pub fn duplicate(&self) -> Option<&str> {
-        let mut seen: Vec<&str> = Vec::with_capacity(self.columns.len());
+        let mut seen = HashSet::with_capacity(self.columns.len());
         for (n, _) in &self.columns {
-            if seen.contains(&n.as_str()) {
+            if !seen.insert(n.as_str()) {
                 return Some(n);
             }
-            seen.push(n);
         }
         None
     }
@@ -276,11 +276,18 @@ impl RowType {
     /// Contrast [`RowType::merge`], which is left-wins and belongs to joins.
     pub fn overwrite(&self, right: &RowType) -> RowType {
         let mut out = self.columns.clone();
+        let mut positions = HashMap::with_capacity(out.len() + right.columns.len());
+        for (index, (name, _)) in self.columns.iter().enumerate() {
+            positions.entry(name.as_str()).or_insert(index);
+        }
         for (n, t) in &right.columns {
-            match out.iter_mut().find(|(o, _)| o == n) {
+            match positions.get(n.as_str()).copied() {
                 // The position is the left row's; the type is the right's.
-                Some(slot) => slot.1 = t.clone(),
-                None => out.push((n.clone(), t.clone())),
+                Some(index) => out[index].1 = t.clone(),
+                None => {
+                    positions.insert(n.as_str(), out.len());
+                    out.push((n.clone(), t.clone()));
+                }
             }
         }
         RowType::new(out)

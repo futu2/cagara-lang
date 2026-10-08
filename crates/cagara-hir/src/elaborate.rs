@@ -1250,30 +1250,81 @@ fn elaborate_call(
         );
     };
 
+    if let Some(result) = elaborate_call_env(cx, name, args, origin) {
+        return result;
+    }
+
+    let (dm, di) = resolve_callable(cx, name, f, origin)?;
+
+    let body = &cx.input.module(dm).def(di).body;
+    // `group .x` and the other expression primitives are prelude definitions
+    // whose body is a `primitive` reference, exactly like `table`. The prelude
+    // names them, so read it rather than listing them here.
+    if let ExprKind::Primitive(prim) = &body.kind {
+        return elaborate_expr_primitive(cx, prim, args, origin);
+    }
+    // An **ordinary function body**: `f : expr r int -> expr r int = x => ...`.
+    // Bind each parameter to the elaborated argument and elaborate the body
+    // under that environment. Nothing is re-derived: the
+    // argument's type came from the checker and the body's structure is the
+    // user's.
+    if matches!(body.kind, ExprKind::Lambda(..)) {
+        return elaborate_lambda(cx, (dm, di), name, body, args, f.id, origin);
+    }
+    if matches!(body.kind, ExprKind::App(..)) {
+        return elaborate_call_composed(cx, (dm, di), name, body, args, f.id, origin);
+    }
+    let ExprKind::Sql(sql) = &body.kind else {
+        return Err(Error::unsupported(format!(
+            "`{name}` is neither a `sql` template nor a function; this layer cannot elaborate \
+             its body"
+        ))
+        .at(origin));
+    };
+
+    elaborate_template_call(cx, name, sql, dm, di, args, origin)
+}
+
+/// Apply a name bound by an enclosing application through the value it holds.
+///
+/// Returns `None` when the name is not bound in the environment, so the caller
+/// goes on to resolve it as a definition.
+fn elaborate_call_env(
+    cx: Ctx<'_>,
+    name: &str,
+    args: &[ast::Expr],
+    origin: Origin,
+) -> Option<R<CheckedExpr>> {
     // A name bound by an enclosing application is applied through the value it
     // holds, before any definition of the same name is considered. This is what
     // makes `g (f x)` inside `_>>>_`'s body work: `g` and `f` are not definitions
     // there, they are the composition's parameters.
-    if let Some((_, v)) = cx.env.iter().rev().find(|(k, _)| k == name).cloned() {
-        let mut value = v;
-        for a in args {
-            let arg = elaborate_value(cx, a)?;
-            value = match apply_value(cx, value, arg, origin)? {
-                Applied::Done(v) | Applied::Partial(v) => v,
-            };
-        }
-        return match value {
-            CheckedValue::Expr(e) => Ok(e),
-            CheckedValue::Callable(_) => {
-                Err(Error::new(format!("`{name}` is applied to too few arguments")).at(origin))
-            }
-            CheckedValue::Query(_) | CheckedValue::Stage(_) => Err(Error::unsupported(format!(
-                "`{name}` does not denote an expression"
-            ))
-            .at(origin)),
+    let (_, v) = cx.env.iter().rev().find(|(k, _)| k == name).cloned()?;
+    let mut value = v;
+    for a in args {
+        let arg = match elaborate_value(cx, a) {
+            Ok(arg) => arg,
+            Err(err) => return Some(Err(err)),
+        };
+        value = match apply_value(cx, value, arg, origin) {
+            Ok(Applied::Done(v) | Applied::Partial(v)) => v,
+            Err(err) => return Some(Err(err)),
         };
     }
+    Some(match value {
+        CheckedValue::Expr(e) => Ok(e),
+        CheckedValue::Callable(_) => {
+            Err(Error::new(format!("`{name}` is applied to too few arguments")).at(origin))
+        }
+        CheckedValue::Query(_) | CheckedValue::Stage(_) => {
+            Err(Error::unsupported(format!("`{name}` does not denote an expression")).at(origin))
+        }
+    })
+}
 
+/// Resolve the definition a call's name denotes, choosing among overloads at
+/// the use site.
+fn resolve_callable(cx: Ctx<'_>, name: &str, f: &ast::Expr, origin: Origin) -> R<(usize, usize)> {
     // A `sql "..."` template definition: its body is the template and its
     // argument count comes from its signature.
     let binding = cx.scope.get(name).cloned();
@@ -1298,22 +1349,22 @@ fn elaborate_call(
             .at(origin))
         }
     };
+    Ok((dm, di))
+}
 
-    let body = &cx.input.module(dm).def(di).body;
-    // `group .x` and the other expression primitives are prelude definitions
-    // whose body is a `primitive` reference, exactly like `table`. The prelude
-    // names them, so read it rather than listing them here.
-    if let ExprKind::Primitive(prim) = &body.kind {
-        return elaborate_expr_primitive(cx, prim, args, origin);
-    }
-    // An **ordinary function body**: `f : expr r int -> expr r int = x => ...`.
-    // Bind each parameter to the elaborated argument and elaborate the body
-    // under that environment. Nothing is re-derived: the
-    // argument's type came from the checker and the body's structure is the
-    // user's.
-    if matches!(body.kind, ExprKind::Lambda(..)) {
-        return elaborate_lambda(cx, (dm, di), name, body, args, f.id, origin);
-    }
+/// Apply a callee whose body is itself an application.
+///
+/// `callee` is the definition's `(module, index)`, as in [`elaborate_lambda`].
+fn elaborate_call_composed(
+    cx: Ctx<'_>,
+    callee: (usize, usize),
+    name: &str,
+    body: &ast::Expr,
+    args: &[ast::Expr],
+    f_id: u32,
+    origin: Origin,
+) -> R<CheckedExpr> {
+    let (dm, di) = callee;
     // A body that is an **application**: `nextWeek = addDays 7 >>> truncWeek`,
     // which desugars to `_>>>_ (addDays 7) truncWeek`.
     //
@@ -1325,48 +1376,50 @@ fn elaborate_call(
     // No case for `>>>` or `<<<` appears here and none is needed: nothing in
     // this path looks at the operator's name, so a user's own composition
     // operator goes through it unchanged.
-    if matches!(body.kind, ExprKind::App(..)) {
-        let body = body.clone();
-        let inner_scope = cx.input.module(dm).scope();
-        let active = enter(&cx, dm, di)?;
-        let holes = holes_at(cx, dm, di, f.id)?;
-        let callee = Ctx {
-            input: cx.input,
-            module: dm,
-            owner: di,
-            scope: inner_scope,
-            env: cx.env,
-            holes: &holes,
-            active: &active,
-        };
-        let mut value = elaborate_value(callee, &body)?;
-        for a in args {
-            let arg = elaborate_value(cx, a)?;
-            value = match apply_value(cx, value, arg, origin)? {
-                Applied::Done(v) | Applied::Partial(v) => v,
-            };
-        }
-        return match value {
-            CheckedValue::Expr(e) => Ok(e),
-            CheckedValue::Callable(_) => Err(Error::new(format!(
-                "`{name}` is applied to too few arguments; a partially applied function is not \
-                 an expression"
-            ))
-            .at(origin)),
-            CheckedValue::Query(_) | CheckedValue::Stage(_) => Err(Error::unsupported(format!(
-                "`{name}` does not denote an expression"
-            ))
-            .at(origin)),
+    let body = body.clone();
+    let inner_scope = cx.input.module(dm).scope();
+    let active = enter(&cx, dm, di)?;
+    let holes = holes_at(cx, dm, di, f_id)?;
+    let callee = Ctx {
+        input: cx.input,
+        module: dm,
+        owner: di,
+        scope: inner_scope,
+        env: cx.env,
+        holes: &holes,
+        active: &active,
+    };
+    let mut value = elaborate_value(callee, &body)?;
+    for a in args {
+        let arg = elaborate_value(cx, a)?;
+        value = match apply_value(cx, value, arg, origin)? {
+            Applied::Done(v) | Applied::Partial(v) => v,
         };
     }
-    let ExprKind::Sql(sql) = &body.kind else {
-        return Err(Error::unsupported(format!(
-            "`{name}` is neither a `sql` template nor a function; this layer cannot elaborate \
-             its body"
+    match value {
+        CheckedValue::Expr(e) => Ok(e),
+        CheckedValue::Callable(_) => Err(Error::new(format!(
+            "`{name}` is applied to too few arguments; a partially applied function is not \
+             an expression"
         ))
-        .at(origin));
-    };
+        .at(origin)),
+        CheckedValue::Query(_) | CheckedValue::Stage(_) => {
+            Err(Error::unsupported(format!("`{name}` does not denote an expression")).at(origin))
+        }
+    }
+}
 
+/// Elaborate a call to a `sql` template definition, choosing its constructor
+/// from how the definition's result is declared.
+fn elaborate_template_call(
+    cx: Ctx<'_>,
+    name: &str,
+    sql: &str,
+    dm: usize,
+    di: usize,
+    args: &[ast::Expr],
+    origin: Origin,
+) -> R<CheckedExpr> {
     // Which constructor builds this is a property of the definition's
     // *signature*: `expr r a -> expr r bool` is a scalar template, while
     // `sum : expr r int -> agg (expr r (maybe int))` returns an aggregate, so
@@ -1411,7 +1464,7 @@ fn elaborate_call(
         // result.
         DeclaredKind::Scalar => {
             let inner = elaborate_exprs(cx, args)?;
-            CheckedExpr::template(sql.clone(), inner, ty, origin)
+            CheckedExpr::template(sql.to_owned(), inner, ty, origin)
         }
         // Declared `agg (..)`: an aggregate template. `sum` is this shape, and
         // its arguments must be row phase — the depth-1 rule, which
@@ -1420,7 +1473,7 @@ fn elaborate_call(
         // as ungrouped.
         DeclaredKind::Agg => {
             let inner = elaborate_exprs(cx, args)?;
-            CheckedExpr::agg_template(sql.clone(), inner, ty, origin)
+            CheckedExpr::agg_template(sql.to_owned(), inner, ty, origin)
         }
         // A window template's *first* argument is its spec (`winspec r ->
         // expr r a -> win (expr r a)`); the rest are its value arguments. The
@@ -1431,7 +1484,7 @@ fn elaborate_call(
             })?;
             let spec = elaborate_winspec(cx, spec_e)?;
             let values = elaborate_exprs(cx, value_args)?;
-            CheckedExpr::win_template(sql.clone(), values, spec, ty, origin)
+            CheckedExpr::win_template(sql.to_owned(), values, spec, ty, origin)
         }
     }
 }

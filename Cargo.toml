@@ -8,7 +8,6 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-regex = "1"
 rowan = "=0.17.0"
 salsa = "=0.28.5"
 sqlglot-rust = "=0.10.30"

@@ -165,7 +165,7 @@ impl<'a> Parser<'a> {
     fn at_boundary(&self) -> bool {
         match self.peek_lex(0) {
             None => true,
-            Some(l) => l.line_start && matches!(l.kind, Token::Ident | Token::Import),
+            Some(l) => l.line_start && matches!(l.kind, Token::Ident | Token::ImportKw),
         }
     }
 
@@ -245,7 +245,7 @@ impl<'a> Parser<'a> {
         loop {
             match self.peek() {
                 None => break,
-                Some(Token::Import) => self.import(),
+                Some(Token::ImportKw) => self.import(),
                 Some(Token::Ident) if self.at_op_decl() => self.op_decl(),
                 Some(Token::Ident) => self.def(),
                 Some(_) => self.recover("expected a definition or import"),
@@ -309,7 +309,7 @@ impl<'a> Parser<'a> {
         self.start(K::ImportDecl);
         self.bump();
         self.expect(Token::String, "import path string");
-        if self.at(Token::As) {
+        if self.at(Token::AsKw) {
             self.bump();
             if self.at_inner(Token::Ident) {
                 self.bump();
@@ -550,8 +550,8 @@ impl<'a> Parser<'a> {
                         | Token::LParen
                         | Token::LBrace
                         | Token::LBracket
-                        | Token::Sql
-                        | Token::Primitive
+                        | Token::SqlKw
+                        | Token::PrimitiveKw
                 )
             )
     }
@@ -633,13 +633,13 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.finish();
             }
-            Some(Token::Sql) => {
+            Some(Token::SqlKw) => {
                 self.start(K::SqlExpr);
                 self.bump();
                 self.expect(Token::String, "SQL template string after `sql`");
                 self.finish();
             }
-            Some(Token::Primitive) => {
+            Some(Token::PrimitiveKw) => {
                 self.start(K::PrimitiveExpr);
                 self.bump();
                 self.expect(Token::String, "primitive name after `primitive`");

@@ -1630,6 +1630,73 @@ fn an_alias_is_a_value_where_a_function_is_expected() {
     );
 }
 
+/// A **computed function value** in application-head position — not a name, but
+/// an expression that evaluates to a function — must apply its arguments like
+/// any other call. The checker types all of these; the elaborator used to
+/// refuse them with "only a named definition can be applied in an expression".
+#[test]
+fn a_computed_function_value_applies_its_arguments() {
+    // Composition, matching the direct spelling.
+    assert_eq!(
+        sql(
+            "p = trim >>> upper\nq = users & select { x = p .name }\n",
+            "q"
+        ),
+        sql("q = users & select { x = (trim >>> upper) .name }\n", "q")
+    );
+    // An inline lambda, which has no definition to look up at all.
+    assert_eq!(
+        sql("q = users & select { x = upper .name }\n", "q"),
+        sql("q = users & select { x = (f => upper f) .name }\n", "q")
+    );
+    assert_eq!(
+        sql("q = users & select { x = .age + 1 }\n", "q"),
+        sql("q = users & select { x = (f => f + 1) .age }\n", "q")
+    );
+    // A partially applied function as the head.
+    assert_eq!(
+        sql("q = users & select { x = .name <> .name }\n", "q"),
+        sql("q = users & select { x = (concat .name) .name }\n", "q")
+    );
+    // A parameter holding a function, applied through a composition.
+    assert_eq!(
+        sql("q = users & select { x = upper .name }\n", "q"),
+        sql(
+            "app = g => (g .name)\nq = users & select { x = app upper }\n",
+            "q"
+        )
+    );
+}
+
+/// A lambda's body is checked where the lambda is *written*, so one lambda
+/// shape used at two column types must select its overloads per use, exactly as
+/// a named helper does.
+#[test]
+fn a_lambda_head_selects_overloads_per_use() {
+    let inline = "q = users & select { x = (f => f * 2) .age }\n";
+    let named = "twice = f => f * 2\nq = users & select { x = twice .age }\n";
+    assert_eq!(sql(named, "q"), sql(inline, "q"));
+    // The same shape at another type must not reuse the first choice.
+    let float = "q = orders & select { x = (f => f * 2) .amount }\n";
+    let float_named = "twice = f => f * 2\nq = orders & select { x = twice .amount }\n";
+    assert_eq!(sql(float_named, "q"), sql(float, "q"));
+    assert!(
+        sql(float, "q").contains("amount * 2"),
+        "{}",
+        sql(float, "q")
+    );
+}
+
+/// A non-function head is the checker's error, not the elaborator's: `(1 + 2)`
+/// is an `expr`, so applying it to an argument is a type error and must be
+/// reported as one rather than as a compiler limitation.
+#[test]
+fn a_non_function_head_is_a_type_error() {
+    let e = error("q = users & select { x = (1 + 2) .name }\n", "q");
+    assert!(!e.contains("internal error"), "{e}");
+    assert!(e.contains("cannot apply"), "{e}");
+}
+
 /// An alias cycle is a program error the compiler understands, so it reports
 /// recursion rather than its own limitation.
 #[test]

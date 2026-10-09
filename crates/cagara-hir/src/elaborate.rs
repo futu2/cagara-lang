@@ -1554,9 +1554,19 @@ fn elaborate_call(
     origin: Origin,
 ) -> R<CheckedExpr> {
     let ExprKind::Name(name) = &f.kind else {
-        return Err(
-            Error::new("only a named definition can be applied in an expression").at(origin),
-        );
+        // A **computed function value** in head position rather than a name:
+        // `(trim >>> upper) .name`, `(x => upper x) .name`, or the same with a
+        // parameter holding a function (`app = g => (g >>> upper) .name`). The
+        // head is an application or a lambda, so there is no definition to look
+        // up and no name to dispatch on.
+        //
+        // The checker types these like any other application — `(trim >>> upper)
+        // .name` has type `string` — and the value layer already applies a
+        // callable to arguments, which is what `>>>`'s own body does (`g (f x)`).
+        // So the head is elaborated into whatever value it denotes and the
+        // arguments go through that same path, instead of being reported as a
+        // limitation the compiler does not actually have.
+        return apply_to_computed_head(cx, f, args, origin);
     };
 
     if let Some(result) = elaborate_call_env(cx, name, args, origin) {
@@ -1741,6 +1751,47 @@ fn follow_alias(cx: Ctx<'_>, dm: usize, di: usize, site: u32, origin: Origin) ->
             }
             // A primitive, a module, or something unbound: not an alias.
             _ => return Ok(current),
+        }
+    }
+}
+
+/// Apply a **computed function value** to arguments: `(trim >>> upper) .name`,
+/// `(x => upper x) .name`, `(concat .name) .name`.
+///
+/// The head of such an application is not a name, so there is nothing to look
+/// up: the value is whatever the head *evaluates to*. That is exactly what
+/// [`elaborate_value`] produces and [`apply_value`] consumes, so both are used
+/// here rather than re-deriving the application from the head's syntax. It is
+/// the same path a lambda body takes when it applies one of its parameters, and
+/// the same path [`elaborate_call_composed`] takes for a definition whose body
+/// is an application.
+///
+/// A head that is neither a function nor callable — `(1 + 2) .name`, which is
+/// an `expr` and not a function — is rejected by the checker before elaboration
+/// runs, so the failure returned here is for a value the checker accepted but
+/// this layer cannot apply.
+fn apply_to_computed_head(
+    cx: Ctx<'_>,
+    f: &ast::Expr,
+    args: &[ast::Expr],
+    origin: Origin,
+) -> R<CheckedExpr> {
+    let mut value = elaborate_value(cx, f)?;
+    for a in args {
+        let arg = elaborate_value(cx, a)?;
+        value = match apply_value(cx, value, arg, origin)? {
+            Applied::Done(v) | Applied::Partial(v) => v,
+        };
+    }
+    match value {
+        CheckedValue::Expr(e) => Ok(e),
+        CheckedValue::Callable(_) => Err(Error::new(
+            "this function is applied to too few arguments; a partially applied function is \
+             not an expression",
+        )
+        .at(origin)),
+        CheckedValue::Query(_) | CheckedValue::Stage(_) => {
+            Err(Error::new(format!("cannot apply {} to an argument", describe(&f.kind))).at(origin))
         }
     }
 }
@@ -2374,6 +2425,34 @@ fn stage_of_definition(cx: Ctx<'_>, name: &str) -> Option<CheckedStage> {
 /// Elaborate an expression that denotes a *function* into a callable, if it is
 /// one. `Ok(None)` when it is not, so the caller can try other readings.
 fn elaborate_callable(cx: Ctx<'_>, e: &ast::Expr) -> R<Option<Callable>> {
+    // A bare **lambda** used as a value. It has no definition to look up — the
+    // body is right here — so the closure is built in place: `(f => upper f)
+    // .name` applies it, and `h (x => upper x)` passes it along.
+    //
+    // Its home is the module and definition being elaborated, because that is
+    // where the checker recorded the body's column types and overload choices,
+    // and `site` is this expression's own id for the same reason. An inline
+    // lambda is checked as part of the definition containing it, unlike a
+    // named function, whose body belongs to its own definition.
+    if matches!(e.kind, ExprKind::Lambda(..)) {
+        let (mut params, mut inner) = (Vec::new(), e);
+        while let ExprKind::Lambda(p, b) = &inner.kind {
+            params.push(p.clone());
+            inner = b;
+        }
+        let body = inner.clone();
+        return Ok(Some(Callable::Closure {
+            def: (cx.module, cx.owner),
+            params,
+            body,
+            // The language has no syntax for naming an anonymous function, so
+            // diagnostics about it describe what it is rather than inventing a
+            // name the user never wrote.
+            name: "this function".to_string(),
+            site: e.id,
+            env: Vec::new(),
+        }));
+    }
     let (f, args): (&ast::Expr, &[ast::Expr]) = match &e.kind {
         ExprKind::App(f, args) => (f, args),
         ExprKind::Name(_) => (e, &[]),

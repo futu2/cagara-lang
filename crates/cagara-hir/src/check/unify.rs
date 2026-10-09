@@ -84,6 +84,28 @@ impl<'w> Checker<'w> {
         }
     }
 
+    /// Whether a row's field list is still **incomplete**, so a stage that
+    /// reads its columns has to wait for it (`Ok(false)` from a constraint
+    /// step) instead of comparing against a row that may still grow.
+    ///
+    /// A variable is the plain case. The one that matters is an *unreduced row
+    /// term* — `keyMap`, `merge`, `mapValue` — whose operands are not known
+    /// yet, so its fields have not been computed. Reading such a row as final
+    /// reports the columns it is about to contribute as missing:
+    /// `q & update { a = … } & update { b = .a }` hands the second stage
+    /// `merge α { a = int }`, whose left operand only becomes known once the
+    /// helper is applied to a query, so `a` looked absent.
+    ///
+    /// This is the predicate `step_project` has always used; the other stages
+    /// that read their input's columns ask the same question, so they now ask
+    /// it the same way.
+    pub(crate) fn row_open(&self, t: &Ty) -> bool {
+        matches!(
+            self.flatten(t).1,
+            Ty::Var(_) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..)
+        )
+    }
+
     /// Row fields and the tail after following bound variables.
     pub(crate) fn flatten(&self, t: &Ty) -> (Vec<(String, Ty)>, Ty) {
         let mut fs = Vec::new();
@@ -513,7 +535,7 @@ impl<'w> Checker<'w> {
             .filter(|(l, _)| !fa.iter().any(|(k, _)| k == l))
             .cloned()
             .collect();
-        let closed = |t: &Ty| !matches!(t, Ty::Var(_));
+        let closed = |t: &Ty| !self.row_open(t);
         if let Some((l, _)) = only_a.first() {
             if closed(&te) {
                 return if self.probe.is_some() {
@@ -532,11 +554,21 @@ impl<'w> Checker<'w> {
                 };
             }
         }
+        // The tails decide where leftover fields go, and only a *variable* tail
+        // can take them: binding `τ` to `{ fields | τ }` is the row equation
+        // for a stage whose input row is not known yet. A tail that is still an
+        // unreduced row term cannot absorb fields here, and deciding now would
+        // be reading an unfinished row as final — the mistake `closed` above
+        // refuses to make. Leaving the comparison satisfied-and-pending is safe
+        // for the same reason the `keyMap` arm above does: the stage registered
+        // a constraint over this row, so `solve` re-runs the comparison once the
+        // term reduces, and any genuine mismatch is reported then.
+        let absorb = |t: &Ty| matches!(t, Ty::Var(_));
         match (only_a.is_empty(), only_e.is_empty()) {
             (true, true) => self.unify(&ta, &te),
-            (false, true) => self.unify(&te, &row(only_a, ta)),
-            (true, false) => self.unify(&ta, &row(only_e, te)),
-            (false, false) => {
+            (false, true) if absorb(&te) => self.unify(&te, &row(only_a, ta)),
+            (true, false) if absorb(&ta) => self.unify(&ta, &row(only_e, te)),
+            (false, false) if absorb(&ta) && absorb(&te) => {
                 if ta == te {
                     return Err("incompatible row types".into());
                 }
@@ -544,6 +576,7 @@ impl<'w> Checker<'w> {
                 self.unify(&ta, &row(only_e, tail.clone()))?;
                 self.unify(&te, &row(only_a, tail))
             }
+            _ => Ok(()),
         }
     }
 

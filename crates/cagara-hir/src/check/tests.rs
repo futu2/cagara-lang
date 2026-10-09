@@ -76,6 +76,20 @@ fn err(src: &str, name: &str) -> String {
     }
 }
 
+/// The checker's rejection of `name`, or `None` if the checker accepted it.
+///
+/// The counterpart to [`ty`] for a program that may be stopped later in the
+/// pipeline instead: a definition the checker takes can still fail to compile,
+/// and the message there is the honest one to assert on.
+fn ty_err(src: &str, name: &str) -> Option<String> {
+    types(src)
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .expect("no such definition")
+        .1
+        .err()
+}
+
 #[test]
 fn prelude_and_tables_check() {
     assert_eq!(
@@ -1538,6 +1552,127 @@ fn merge_basic() {
     // merge combines two rows: names in both take the right's type, names only
     // in the right are appended.
     let _ = ty("q = users & merge orders\n", "q");
+}
+
+/// Whether `name` is a program the whole pipeline accepts: the checker takes
+/// it and it compiles. `Err` is whatever rejected it.
+fn compiles(src: &str, name: &str) -> Result<(), String> {
+    let ws = Workspace::from_source(&format!("{TABLES}{src}"));
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let tc = check(&ws);
+    match crate::root_queries_checked(&ws, &tc)
+        .into_iter()
+        .find(|(n, _)| n == name)
+    {
+        Some((_, Ok(_))) => Ok(()),
+        Some((_, Err(e))) => Err(e.message.clone()),
+        None => Err(format!("`{name}` was not compiled")),
+    }
+}
+
+/// A stage that *adds* a column is visible to the next stage of the same
+/// helper.
+///
+/// Each stage of a helper is deferred: the helper's parameter is an open row
+/// until the definition is applied to a query, so `q & update { up1 = … }`
+/// types its result as the symbolic row `merge α { up1 = int }`. The next
+/// stage's input is that term, and its columns have not been computed yet.
+///
+/// Every stage that reads its input's columns used to ask only "is this a bare
+/// variable?", so an unreduced `merge` was read as a *finished* row and the
+/// column the merge was about to contribute was reported missing. Only
+/// `select` asked the right question, which is why the same pipeline worked
+/// with `&=` and failed with `&+`, `&?`, `&.`, joins and `omit`. Every case
+/// below was a rejection before the fix.
+#[test]
+fn a_stage_sees_the_column_the_previous_stage_added() {
+    for (helper, expected) in [
+        // The added column is read by the next `update`.
+        (
+            "h = q => q & update { up1 = .id } & update { up2 = .up1 }\n",
+            "query { id = int, name = string, age = int, active = bool, up1 = int, up2 = int }",
+        ),
+        // ... by a `where`, and by an `order`.
+        (
+            "h = q => q & update { up1 = .id } & where (.up1 > 0)\n",
+            "query { up1 = int | a }",
+        ),
+        (
+            "h = q => q & update { up1 = .id } & order [asc .up1]\n",
+            "query { up1 = a | b }",
+        ),
+        // ... and as a join's left key.
+        (
+            "h = q => q & update { up1 = .id } & leftJoin orders (.<up1 == .>user_id)\n",
+            "query { id = int, name = string, age = int, active = bool, up1 = int, \
+             user_id = maybe int, amount = maybe float, status = maybe string }",
+        ),
+        // `omit` names the added column — a row equation, so before the fix the
+        // equation met the unfinished `merge` term and the key looked absent.
+        (
+            "h = q => q & update { up1 = .id } & omit \"up1\"\n",
+            "query { id = int, name = string, age = int, active = bool }",
+        ),
+        // A following `select` reads it too. This spelling worked before, and
+        // must keep working.
+        (
+            "h = q => q & update { up1 = .id } & select {.up1}\n",
+            "query { up1 = int }",
+        ),
+    ] {
+        let src = format!("{helper}q = users & h\n");
+        assert_eq!(ty(&src, "q"), expected, "{helper}");
+        assert!(
+            compiles(&src, "q").is_ok(),
+            "{helper}: {:?}",
+            compiles(&src, "q")
+        );
+    }
+
+    // A helper whose row is still open ends its type in an open tail (`| a`),
+    // exactly as the pre-existing `keyMap` helper
+    // `suffix \"_a\" & where (.id_a > 0)` does. That is the honest general
+    // form: the row the helper is handed is what completes it.
+    assert_eq!(
+        ty(
+            "h = q => q & suffix \"_a\" & where (.id_a > 0)\nq = users & h\n",
+            "q"
+        ),
+        "query { id_a = int | a }"
+    );
+}
+
+/// The fix must not *accept* a column that no stage produces.
+///
+/// The deferral above is only sound because the equation stays pending: once
+/// the helper is applied, the row is closed and a name nothing contributes is
+/// still rejected. Reading the unfinished `merge` as final was wrong; so would
+/// be skipping the comparison entirely.
+///
+/// Which phase reports it depends on the stage. An `update` field, an `omit`
+/// key, a join predicate and a `select` field are checked against the row the
+/// helper closes to, so the checker rejects them. A `where` condition and an
+/// `order` key keep their `Within`/`Filter` equation pending with an open tail
+/// — the same shape the `keyMap` helper above has — so the *compiler* is what
+/// reports the absent column, and the message still names it.
+#[test]
+fn a_stage_still_rejects_a_column_no_stage_adds() {
+    for helper in [
+        "h = q => q & update { up1 = .id } & update { up2 = .nope }\n",
+        "h = q => q & update { up1 = .id } & where (.nope > 0)\n",
+        "h = q => q & update { up1 = .id } & order [asc .nope]\n",
+        "h = q => q & update { up1 = .id } & leftJoin orders (.<nope == .>user_id)\n",
+        "h = q => q & update { up1 = .id } & omit \"nope\"\n",
+        "h = q => q & update { up1 = .id } & select {.nope}\n",
+    ] {
+        let src = format!("{helper}q = users & h\n");
+        // However the program is stopped — by the checker or by the compiler —
+        // it is stopped, and the message names the column.
+        let why = ty_err(&src, "q").unwrap_or_else(|| {
+            compiles(&src, "q").expect_err("a column no stage adds must not compile")
+        });
+        assert!(why.contains("no column `nope`"), "{helper}: {why}");
+    }
 }
 
 /// Diagnostics are rendered once per module text, inside the memoized check, so

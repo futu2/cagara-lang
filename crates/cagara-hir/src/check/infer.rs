@@ -1855,7 +1855,7 @@ impl<'w> Checker<'w> {
                     return Err(rules::JOIN_ONLY.into());
                 }
                 self.place(Place::Where, &p)?;
-                if matches!(self.resolve(row), Ty::Var(_)) {
+                if self.row_open(row) {
                     return Ok(false);
                 }
                 self.unify(row, &r)?;
@@ -1882,15 +1882,11 @@ impl<'w> Checker<'w> {
             unreachable!("dispatched on Cons::Project")
         };
         let stage = if *agg { "agg" } else { "select" };
-        // A mapped row with an open inner row cannot yet tell us the
-        // value type of a projected mapped label. Keep the projection
-        // pending until the `keyMap` term reduces; consuming it here
-        // would leave those values as unconstrained variables.
-        let (_, input_tail) = self.flatten(input);
-        if matches!(
-            input_tail,
-            Ty::Var(_) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..)
-        ) {
+        // A row that is still open cannot yet tell us the value type of a
+        // projected label. Keep the projection pending until it closes;
+        // consuming it here would leave those values as unconstrained
+        // variables.
+        if self.row_open(input) {
             return Ok(false);
         }
         let (fs, tail) = self.flatten(fields);
@@ -1957,10 +1953,7 @@ impl<'w> Checker<'w> {
         self.place(Place::JoinOn, &p)?;
         match self.resolve(&r) {
             Ty::Con("join", sides) => {
-                if [left, right]
-                    .iter()
-                    .any(|t| matches!(self.resolve(t), Ty::Var(_)))
-                {
+                if [left, right].iter().any(|t| self.row_open(t)) {
                     return Ok(false);
                 }
                 let (sl, sr) = (sides[0].clone(), sides[1].clone());
@@ -2006,10 +1999,10 @@ impl<'w> Checker<'w> {
         let Cons::Within { req, row } = c else {
             unreachable!("dispatched on Cons::Within")
         };
-        match self.resolve(row) {
-            Ty::Var(_) => Ok(false),
-            _ => self.unify(row, req).map(|_| true),
+        if self.row_open(row) {
+            return Ok(false);
         }
+        self.unify(row, req).map(|_| true)
     }
 
     /// The record of new values must be known, and so must the
@@ -2061,7 +2054,7 @@ impl<'w> Checker<'w> {
                     }
                     self.stage_phase(&p, false)
                         .map_err(|m| format!("field `{l}` {m}"))?;
-                    if matches!(self.resolve(input), Ty::Var(_)) {
+                    if self.row_open(input) {
                         return Ok(false);
                     }
                     self.unify(input, &r)
@@ -2078,10 +2071,7 @@ impl<'w> Checker<'w> {
             }
         }
         let (ifs, itail) = self.flatten(input);
-        if matches!(
-            itail,
-            Ty::Var(_) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..)
-        ) {
+        if self.row_open(input) {
             return Ok(false);
         }
         let named = ifs.iter().map(|(k, _)| (k.clone(), ())).collect::<Vec<_>>();
@@ -2118,7 +2108,7 @@ impl<'w> Checker<'w> {
         let Cons::Omit { key, input, output } = c else {
             unreachable!("dispatched on Cons::Omit")
         };
-        if matches!(self.resolve(input), Ty::Var(_)) {
+        if self.row_open(input) {
             return Ok(false);
         }
         let t = self.fresh();

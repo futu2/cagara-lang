@@ -9,7 +9,7 @@ use sqlglot_rust::ast::{
 };
 use std::cell::RefCell;
 
-pub type Resolver<'a> = dyn Fn(Side, &str) -> Result<Expr, String> + 'a;
+pub(crate) type Resolver<'a> = dyn Fn(Side, &str) -> Result<Expr, String> + 'a;
 
 /// A mutable SELECT under construction.
 ///

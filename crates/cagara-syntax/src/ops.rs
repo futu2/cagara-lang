@@ -116,7 +116,7 @@ const BUILTIN: &[(&str, Fixity)] = &[
 /// level, and an operator declared at that same fixity is a pipeline link like
 /// it. This is the one name the core has to know, in the same way it knows
 /// that `sql` introduces a template: `&` is the pipeline.
-pub const PIPE: &str = "&";
+pub(crate) const PIPE: &str = "&";
 
 /// Spelling to fixity.
 #[derive(Debug, Clone)]
@@ -126,7 +126,7 @@ pub struct Ops {
 
 impl Ops {
     /// The built-in operators alone.
-    pub fn builtin() -> Self {
+    pub(crate) fn builtin() -> Self {
         Ops {
             map: BUILTIN.iter().map(|(s, f)| (s.to_string(), *f)).collect(),
         }
@@ -221,7 +221,7 @@ pub fn op_name(spelling: &str) -> String {
 }
 
 /// The spelling an operator name stands for, when it is one.
-pub fn op_spelling(name: &str) -> Option<&str> {
+pub(crate) fn op_spelling(name: &str) -> Option<&str> {
     name.strip_prefix('_')?
         .strip_suffix('_')
         .filter(|s| !s.is_empty())

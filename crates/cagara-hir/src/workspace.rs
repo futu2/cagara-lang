@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub const PRELUDE_SRC: &str = include_str!("../../../prelude.cagara");
-pub const PRELUDE_PATH: &str = "<prelude>";
+pub(crate) const PRELUDE_PATH: &str = "<prelude>";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Binding {

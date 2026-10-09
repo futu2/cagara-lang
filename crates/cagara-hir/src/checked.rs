@@ -525,7 +525,7 @@ impl CheckedQuery {
 /// is the same left-wins rule `schema` uses, and the nullable side's types go
 /// through `map_value_nullable`, the `mapValue (AsNullable)` term the checker
 /// builds.
-pub fn join_row(kind: JoinKind, left: &RowType, right: &RowType) -> RowType {
+pub(crate) fn join_row(kind: JoinKind, left: &RowType, right: &RowType) -> RowType {
     match kind {
         JoinKind::Semi | JoinKind::Anti => left.clone(),
         JoinKind::Inner => left.merge(right),
@@ -1140,7 +1140,7 @@ fn erase_fields(fields: Vec<(String, CheckedExpr)>) -> Result<Vec<(String, Expr)
 /// emit a `/* unresolved call */` template — a *valid* SQL expression that
 /// therefore reached the backend as though it meant something. An unresolved
 /// call is a compiler bug; a `Result` is how the caller finds out.
-pub fn erase_expr(e: CheckedExpr) -> Result<Expr, Error> {
+pub(crate) fn erase_expr(e: CheckedExpr) -> Result<Expr, Error> {
     let (_phase, _ty, node, _origin) = e.into_parts();
     let expr = match node {
         CheckedExprNode::Column { side, name } => Expr::Col(side, name),

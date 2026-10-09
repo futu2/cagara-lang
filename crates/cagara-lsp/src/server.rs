@@ -26,7 +26,7 @@ use std::error::Error;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
-pub type Res<T> = Result<T, Box<dyn Error + Send + Sync>>;
+pub(crate) type Res<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 struct Doc {
     path: PathBuf,

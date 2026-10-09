@@ -1451,6 +1451,138 @@ fn omit_drops_a_column_in_place() {
     assert!(!s.contains("age"), "{s}");
 }
 
+/// A definition that is a function from a query to a query is a *stage*, however
+/// its body spells the function. All four spellings here must lower to the same
+/// SQL, which is what pins that they are one thing rather than four features.
+#[test]
+fn a_query_function_is_a_stage_in_every_spelling() {
+    const EXPECTED: &str = "SELECT id, name, age, active FROM public.users WHERE (age > 18)";
+
+    // The pipe's own stage, for reference.
+    assert_eq!(sql("q = users & where (.age > 18)\n", "q"), EXPECTED);
+
+    // A named helper, point-free.
+    assert_eq!(
+        sql("big = where (.age > 18)\nq = users & big\n", "q"),
+        EXPECTED
+    );
+
+    // A named helper written as a lambda — the form the guide documents, and
+    // the one the elaborator used to reject with "found a function".
+    assert_eq!(
+        sql("big = q => where (.age > 18) q\nq = users & big\n", "q"),
+        EXPECTED
+    );
+
+    // The same lambda written inline as the stage.
+    assert_eq!(
+        sql("q = users & (r => where (.age > 18) r)\n", "q"),
+        EXPECTED
+    );
+}
+
+#[test]
+fn a_stage_helper_may_take_parameters_before_the_query() {
+    // The subject is last, so `byAge 21` binds `n` and the piped query binds `q`.
+    assert_eq!(
+        sql(
+            "byAge = n => q => where (.age > n) q\nq = users & byAge 21\n",
+            "q"
+        ),
+        "SELECT id, name, age, active FROM public.users WHERE (age > 21)"
+    );
+}
+
+#[test]
+fn a_stage_helper_body_may_apply_stages_in_sequence() {
+    // A nested application, not just one stage: the inner query is threaded
+    // into the outer one, and both see the row the previous stage produced.
+    assert_eq!(
+        sql(
+            "adults = q => where (.name != \"\") (where (.age > 18) q)\nq = users & adults\n",
+            "q"
+        ),
+        "SELECT id, name, age, active FROM public.users WHERE (age > 18) AND (name <> '')"
+    );
+}
+
+/// A helper used as a stage and a helper called directly must not diverge: both
+/// go through the same elaboration of the definition's body.
+#[test]
+fn a_stage_helper_and_a_direct_call_agree() {
+    let body = "big = q => where (.age > 18) q\n";
+    assert_eq!(
+        sql(&format!("{body}q = users & big\n"), "q"),
+        sql(&format!("{body}q = big users\n"), "q")
+    );
+}
+
+/// Point-free composition of stages is a stage: `>>>` and `<<<` are ordinary
+/// functions from a query to a query, so every spelling must lower alike.
+///
+/// Composition is also the case that proved a deferred stage must carry the
+/// module its argument was written in — it is applied from *prelude* source,
+/// where the user's `.id` has no recorded type.
+#[test]
+fn composed_stages_are_stages() {
+    const EXPECTED: &str = "SELECT id FROM public.users WHERE (id > 1)";
+
+    // Composed inline in the pipeline.
+    assert_eq!(
+        sql("q = users & (select {.id} >>> where (.id > 1))\n", "q"),
+        EXPECTED
+    );
+    // Composed from named stages.
+    assert_eq!(
+        sql(
+            "s1 = select {.id}\ns2 = where (.id > 1)\nq = users & (s1 >>> s2)\n",
+            "q"
+        ),
+        EXPECTED
+    );
+    // A named composition used as a stage.
+    assert_eq!(
+        sql(
+            "clean = select {.id} >>> where (.id > 1)\nq = users & clean\n",
+            "q"
+        ),
+        EXPECTED
+    );
+    // `<<<` is the mirror: `g <<< f` is `f` then `g`, so this is the same query.
+    assert_eq!(
+        sql("q = users & (where (.id > 1) <<< select {.id})\n", "q"),
+        EXPECTED
+    );
+    // A user-written combinator is a stage by the same rule, so composing
+    // stages needs no case of its own in the elaborator.
+    assert_eq!(
+        sql(
+            "myComp = f => g => x => g (f x)\ns1 = select {.id}\ns2 = where (.id > 1)\n\
+             q = users & (myComp s1 s2)\n",
+            "q"
+        ),
+        EXPECTED
+    );
+    // Right-associative, so this chains: `a >>> (b >>> c)`.
+    assert_eq!(
+        sql(
+            "q = users & (select {.id} >>> where (.id > 1) >>> select {.id})\n",
+            "q"
+        ),
+        EXPECTED
+    );
+}
+
+/// A composition written point-free and the same stages written as a lambda
+/// must agree: they denote the same function.
+#[test]
+fn a_composed_stage_agrees_with_its_lambda_spelling() {
+    assert_eq!(
+        sql("q = users & (select {.id} >>> where (.id > 1))\n", "q"),
+        sql("q = users & (r => select {.id} (where (.id > 1) r))\n", "q")
+    );
+}
+
 #[test]
 fn key_stages_rename_columns() {
     // Prefix and suffix are separate stages with type-level keyMap witnesses.

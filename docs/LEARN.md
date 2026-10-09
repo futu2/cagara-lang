@@ -1382,6 +1382,49 @@ Only `clean` is a query, so it is the only one that emits SQL:
 SELECT id, LOWER(TRIM(email)) AS email FROM public.orders;
 ```
 
+### Naming a reusable stage
+
+Because a stage is just a function from a query to a query, a definition that
+is *any* such function can be used as a stage. The body may apply a single
+stage, or thread the query through several:
+
+```haskell
+no_id  = omit "id"                        # point-free: the body is the stage
+big    = q => where (.age > 18) q         # a lambda naming its parameter
+adults = q => where (.name != "") (where (.age > 18) q)   # stages in sequence
+
+a = users & no_id
+b = users & big
+```
+
+A stage's own parameters come **before** the query, following subject-last, so
+a helper may be partly configured at the use:
+
+```haskell
+byAge = n => q => where (.age > n) q
+grown = users & byAge 21
+```
+
+An inline lambda works the same way, wherever a stage is expected:
+
+```haskell
+users & (q => where (.age > 18) q)
+```
+
+Because a stage is any function from a query to a query, stages also **compose**
+with `>>>` (and its mirror `<<<`) like any other function:
+
+```haskell
+public_ids = select {.id} >>> where (.id > 1)
+t = users & public_ids
+u = users & (select {.id} >>> where (.id > 1) >>> select {.id})   # chains
+```
+
+`>>>` binds tighter than everything, so a composed stage is one operand of `&`.
+`f >>> g` applies `f` first, then `g`; `f <<< g` applies `g` first. A
+composition may be given a name and used as a stage, composed again, or passed
+to a helper — it is an ordinary value, so nothing special applies to it.
+
 ### Why these are not plain SQL
 
 Every date and string operation above calls a `CAGARA_*` intrinsic rather than

@@ -533,10 +533,8 @@ fn elaborate_application(
                     params.push(p.clone());
                     inner = b;
                 }
-                // Only when every parameter is supplied: a partially applied
-                // query function has no query to return yet, and inventing one
-                // would be worse than reporting. A `sql`/`primitive` body has
-                // no parameters and falls through to the handling below.
+                // Every parameter supplied: elaborate the body, which is the
+                // whole call.
                 if !params.is_empty() && params.len() == args.len() {
                     // Each parameter is bound to whichever kind its argument
                     // actually is. A lambda may take a query
@@ -577,6 +575,125 @@ fn elaborate_application(
                         holes: &holes,
                     };
                     return elaborate_query(callee, inner);
+                }
+                // A partial application (fewer arguments than parameters) is a
+                // *value*, and this function returns a query, so it is not built
+                // here: `elaborate_callable`, consulted by `elaborate_value`
+                // before any query reading, builds it as an ordinary closure
+                // over the remaining parameter. That is what makes `s1 >>> s2`
+                // — `_>>>_ s1 s2`, two of its three parameters — a stage, since
+                // a stage is just a function from a query to a query.
+            }
+        }
+    }
+
+    if let ExprKind::Name(n) = &f.kind {
+        // A **parameter bound to a callable or stage**, applied directly: the
+        // `g` of the composition body `g (f x)` when `g` is itself a composed
+        // value rather than a named stage — `a >>> b >>> c` is
+        // `a >>> (b >>> c)`, so the inner composition binds `g` to a *value*.
+        //
+        // The application is evaluated through the value layer, and a query
+        // result is returned as such. Reading only named stages here left the
+        // inner composition to the scalar path, which reports that a query
+        // "does not denote an expression" — true of a scalar, but this position
+        // wants a query.
+        if !args.is_empty() {
+            if let Some(v) = cx
+                .env
+                .iter()
+                .rev()
+                .find(|(k, _)| k == n)
+                .map(|(_, v)| v.clone())
+            {
+                if !matches!(v, CheckedValue::Query(_) | CheckedValue::Expr(_)) {
+                    // Subject last: the trailing argument is the query the
+                    // callable is applied to; earlier ones configure it.
+                    let mut value = v;
+                    let (leading, subject) = args.split_at(args.len() - 1);
+                    for a in leading {
+                        let arg = elaborate_value(cx, a)?;
+                        value = match apply_value(cx, value, arg, at(e.span))? {
+                            Applied::Done(v) | Applied::Partial(v) => v,
+                        };
+                    }
+                    // The subject is a query when the callable is a stage, and
+                    // an expression when it is an ordinary function; try the
+                    // query reading first, as everywhere else.
+                    let subject = match elaborate_query(cx, &subject[0]) {
+                        Ok(q) => CheckedValue::Query(q),
+                        Err(_) => elaborate_value(cx, &subject[0])?,
+                    };
+                    value = match apply_value(cx, value, subject, at(e.span))? {
+                        Applied::Done(v) | Applied::Partial(v) => v,
+                    };
+                    if let CheckedValue::Query(q) = value {
+                        return Ok(q);
+                    }
+                }
+            }
+        }
+    }
+
+    // A **stage applied to a query by direct call** rather than through the
+    // pipe: `where (.age > 18) q`. This is the spelling a lambda body uses when
+    // the stage is written around its parameter (`q0 => where p q0`), and it is
+    // the same operation as the piped form: `q & where p` desugars to
+    // `_&_ q (where p)`, which supplies the same argument last.
+    //
+    // This must be read *before* the primitive dispatch below. The prelude's
+    // `where` is a definition whose body is `primitive "__where"`, so the
+    // primitive path claims `where p q` as a direct call and reports a compiler
+    // gap; here the trailing argument is recognised as the piped input instead.
+    //
+    // Set operations are excluded: their pipe spelling puts the piped query on
+    // the **left** (`users &| admins` is `users UNION admins`), so the trailing
+    // argument is not the subject and `apply_stage`'s own operand-order rule
+    // must decide. Reading them here reversed the operands.
+    if let ExprKind::Name(n) = &f.kind {
+        // A **parameter bound to a stage**, applied directly: the `g` of the
+        // composition body `g (f x)`, where `g` arrived as `where (.id > 1)`.
+        // The binding holds the stage in the form it was written, so applying
+        // it re-runs the ordinary dispatch on that form, exactly as the pipe
+        // does — this is the same bridge `apply_value` uses, reached from a
+        // direct call instead of from `apply_value`.
+        if !args.is_empty() {
+            if let Some((_, CheckedValue::Stage(s))) =
+                cx.env.iter().rev().find(|(k, _)| k == n).cloned()
+            {
+                // Subject last: the trailing argument is the query.
+                let (extra, input_e) = args.split_at(args.len() - 1);
+                // The subject is written *here*, so it elaborates in the
+                // ambient context; only the stage's own argument belongs to the
+                // stage's module.
+                if let Ok(input) = elaborate_query(cx, &input_e[0]) {
+                    // The stage's own written arguments first, then any this
+                    // call adds, matching the order it was written in.
+                    let mut written = s.arg.clone();
+                    written.extend_from_slice(extra);
+                    let scx = stage_ctx(&cx, s.site, cx.input);
+                    return apply_stage(scx, &s.op, &written, input, at(e.span));
+                }
+            }
+        }
+        let is_set_op = matches!(n.as_str(), "_&|_" | "_&!_" | "_&^_" | "_&~_");
+        if !args.is_empty() && !is_set_op && (is_stage_form(n) || cx.scope.contains_key(n)) {
+            // Subject last: the trailing argument is the query, and everything
+            // before it is the stage's own arguments.
+            let (stage_args, input_e) = args.split_at(args.len() - 1);
+            // Only take this reading when the trailing argument really is a
+            // query. A scalar function that happens to share a stage's name
+            // must still fall through to the ordinary call path, so the query
+            // reading is tried and discarded rather than assumed.
+            if let Ok(input) = elaborate_query(cx, &input_e[0]) {
+                // A stage the prelude names (`where`, `select`, …) dispatches by
+                // name. A user definition goes through the stage-definition
+                // path, so a helper used directly and as a stage cannot diverge.
+                if is_stage_form(n) {
+                    return apply_stage(cx, n, stage_args, input, at(e.span));
+                }
+                if let Some(Binding::Def(dm, di)) = cx.scope.get(n).cloned() {
+                    return elaborate_user_stage(cx, dm, di, stage_args, input, at(e.span));
                 }
             }
         }
@@ -637,14 +754,32 @@ fn elaborate_application(
             match &stage_e.kind {
                 // `_&_ q (_&=_ (select {...}))`: the operator is the stage.
                 ExprKind::App(sf, sargs) => match &sf.kind {
-                    ExprKind::Name(n) => (n.as_str(), &sargs[..]),
+                    // The head is a *stage operator*, so this application is the
+                    // stage and its arguments.
+                    ExprKind::Name(n) if is_stage_form(n) => (n.as_str(), &sargs[..]),
+                    // The head is anything else — a composition (`_>>>_ s1 s2`),
+                    // a user combinator — so the whole application is an
+                    // ordinary *function value*, not a stage name. It is applied
+                    // to the piped input through the value layer, the same path
+                    // a lambda body takes, so composing stages needs no special
+                    // case and a user's own combinator works identically.
                     _ => {
-                        return Err(Error::new("a pipeline stage must be a named operator")
-                            .at(at(stage_e.span)))
+                        return apply_point_free_stage(
+                            cx,
+                            stage_e,
+                            "this stage",
+                            input,
+                            at(input_e.span),
+                        )
                     }
                 },
                 // `_&_ q stageName` with no argument, e.g. `& distinct`.
                 ExprKind::Name(n) => (n.as_str(), &[][..]),
+                // `_&_ q (q0 => ...)`: an inline lambda written straight into
+                // the pipeline, so the whole stage is spelled out in place.
+                ExprKind::Lambda(..) => {
+                    return apply_lambda_stage(cx, stage_e, &[], input, at(input_e.span))
+                }
                 _ => {
                     return Err(Error::new("a pipeline stage must be a named operator")
                         .at(at(stage_e.span)))
@@ -663,7 +798,9 @@ fn elaborate_application(
             cx.env.iter().rev().find(|(k, _)| k == stage_name)
         {
             let s = s.clone();
-            return apply_stage(cx, &s.op, &s.arg, input, at(input_e.span));
+            // A bound stage carries the module its argument was written in.
+            let scx = stage_ctx(&cx, s.site, cx.input);
+            return apply_stage(scx, &s.op, &s.arg, input, at(input_e.span));
         }
         return apply_stage(cx, stage_name, stage_args, input, at(input_e.span));
     }
@@ -803,10 +940,37 @@ fn is_stage_form(name: &str) -> bool {
     )
 }
 
+/// Build the context a **deferred stage's** argument must be elaborated in.
+///
+/// A stage is written in one place and applied in another. Its argument's
+/// syntax therefore belongs to its *defining* module and definition, and every
+/// fact the elaborator reads — column types by `use_ty(module, ExprId)`,
+/// overload choices by `choice(module, owner, site)` — is keyed that way. Using
+/// the ambient context instead looked those up in whatever module happened to
+/// be applying the stage, which for a composition is the prelude.
+///
+/// `cx` is kept for the fields that are genuinely ambient — the compiler input,
+/// the hole assignment in flight, the expansion stack — because the stage is
+/// still being *evaluated* here; only the syntax's home changes.
+fn stage_ctx<'a>(cx: &Ctx<'a>, site: StageSite, input: CompilerInput<'a>) -> Ctx<'a> {
+    Ctx {
+        input,
+        module: site.module,
+        owner: site.owner,
+        scope: input.module(site.module).scope(),
+        env: cx.env,
+        holes: cx.holes,
+        active: cx.active,
+    }
+}
+
 /// Dispatch one stage operator to its checked constructor.
 ///
 /// The operator names come from `cagara_syntax::op_name`, so `&?` is `_&?_` —
 /// the spelling the prelude defines — rather than a list maintained here.
+///
+/// `cx` must be the context the stage's **argument** was written in; a deferred
+/// stage passes [`stage_ctx`]. See `CheckedStage::site`.
 fn apply_stage(
     cx: Ctx<'_>,
     stage_name: &str,
@@ -973,13 +1137,27 @@ fn apply_stage(
     }
 }
 
-/// Elaborate a user-defined stage: a definition whose body is a query function
-/// applied to its argument, e.g. `no_id = omit "id"`.
+/// Elaborate a user-defined stage: a definition that is a function from a query
+/// to a query, e.g. `no_id = omit "id"` or `big = q => where (.age > 18) q`.
 ///
-/// The body is an application (`omit "id"`) whose *last* argument is the query
-/// it takes, so the piped input is bound there. Only supported source shapes
-/// are handled; anything else is reported rather than given a
-/// guessed tree.
+/// Every such definition is the *same thing* at the type level, and the checker
+/// already accepts all of them: `no_id` is `query r -> query k` and `big` is
+/// `query r -> query r`. What differs is only how the body spells the function.
+/// So rather than pattern-matching the body's syntax — which is what rejected
+/// the lambda form with a misleading "found a function" — this elaborates the
+/// definition's body as a **value** and applies the definition's arguments to
+/// it, exactly as a direct call would.
+///
+/// A definition used as a stage supplies its arguments in one of two ways, and
+/// both are handled here:
+///
+/// * `q & helper` passes the piped query as the function's last parameter;
+/// * `q & helper a b` supplies `a`/`b` from the source (`q & byAge 21`), with
+///   the piped query still last.
+///
+/// The shape rules are the checker's, not this function's: a body whose last
+/// parameter is a query elaborates as a stage, and one that is not a query
+/// function is reported by [`apply_value`] rather than given a guessed tree.
 fn elaborate_user_stage(
     cx: Ctx<'_>,
     dm: usize,
@@ -992,48 +1170,179 @@ fn elaborate_user_stage(
     let name = cx.input.module(dm).def(di).name.clone();
     let inner_scope = cx.input.module(dm).scope();
     let active = enter(&cx, dm, di)?;
+    // The callee's open overloads are resolved by *this* use site, exactly as
+    // in the lambda-application path: `cx.holes` at entry addresses the
+    // caller's holes, not the callee's.
+    let holes = holes_at(cx, dm, di, /* site */ body.id)?;
     let inner = Ctx {
         input: cx.input,
         module: dm,
         owner: di,
         scope: inner_scope,
         active: &active,
-        holes: cx.holes,
         env: cx.env,
+        holes: &holes,
     };
-    // A stage name applied to no further argument: the body already *is* the
-    // function, so the input is its only argument. `no_id = omit "id"` reaches
-    // here, and so does `vips = except vips`-style composition.
-    if stage_args.is_empty() {
-        return apply_stage_body(inner, &body, input, origin);
-    }
-    Err(Error::new(format!(
-        "the user-defined stage `{name}` takes {} argument(s); only a stage applied directly to \
-         the piped query is elaborated",
-        stage_args.len()
-    ))
-    .at(origin))
+    apply_stage_body(inner, &body, &name, stage_args, input, origin)
 }
 
-/// Apply a definition's body to a query, treating the body as a one-argument
-/// query function.
-fn apply_stage_body(
+/// Apply an **inline lambda** used as a pipeline stage.
+///
+/// `users & (q => where (.age > 18) q)` writes the stage out in place instead of
+/// naming it in a definition. The value is the same as a named helper's body, so
+/// it is applied the same way: the piped input binds the lambda's last
+/// parameter, and the body is elaborated as a query. A lambda supplied with its
+/// own arguments (`& ((n => q => where (.age > n) q) 21)`) binds those first.
+fn apply_lambda_stage(
     cx: Ctx<'_>,
-    body: &ast::Expr,
+    lambda: &ast::Expr,
+    stage_args: &[ast::Expr],
     input: CheckedQuery,
     origin: Origin,
 ) -> R<CheckedQuery> {
-    let ExprKind::App(f, args) = &body.kind else {
+    apply_stage_body(cx, lambda, "an inline stage", stage_args, input, origin)
+}
+
+/// Apply a **point-free** stage body: an expression that denotes a function of
+/// one query, written without naming its parameter.
+///
+/// `clean = select {.id} >>> where (.id > 1)` is the case this is for. The body
+/// is elaborated as a *value* — a callable, since `>>>` is a lambda applied to
+/// two stages — and the piped input is applied to it through the same
+/// `apply_value` every other application uses. Nothing here inspects the
+/// operator, so `>>>`, `<<<` and a user's own combinator are all served by one
+/// path.
+fn apply_point_free_stage(
+    cx: Ctx<'_>,
+    body: &ast::Expr,
+    name: &str,
+    input: CheckedQuery,
+    origin: Origin,
+) -> R<CheckedQuery> {
+    // The body as a value. A composition reads as a partially applied closure
+    // (`elaborate_callable` builds it), and a stage value reads as a stage;
+    // applying the input to either is `apply_value`'s job.
+    let value = elaborate_value(cx, body)?;
+    let applied = apply_value(cx, value, CheckedValue::Query(input), origin)?;
+    match applied {
+        Applied::Done(CheckedValue::Query(q)) => Ok(q),
+        // Still a function after the input was supplied, or not a query at all.
+        // Both are reported rather than coerced: the language's rule is that a
+        // stage is a function from a query to a query, and a body that is not
+        // one has no query to produce.
+        _ => Err(Error::new(format!(
+            "`{name}` is not a function from a query to a query, so it cannot be used as a stage"
+        ))
+        .at(origin)),
+    }
+}
+
+/// Apply a definition's body to the piped query, treating the body as a query
+/// function of however many parameters it declares.
+///
+/// The piped input is the function's **last** argument (subject-last, as
+/// everywhere in the prelude), so any arguments written after the stage name in
+/// the source are bound first.
+fn apply_stage_body(
+    cx: Ctx<'_>,
+    body: &ast::Expr,
+    name: &str,
+    stage_args: &[ast::Expr],
+    input: CheckedQuery,
+    origin: Origin,
+) -> R<CheckedQuery> {
+    // Peel the binders so the remaining form can be read as a value.
+    let (params, inner) = lambda_parts(body);
+
+    // A body with no lambda at all is the **point-free** spelling: the body
+    // already *is* the stage function, written as an application of a stage
+    // operator to its own argument (`no_id = omit "id"`, `adults = where p`).
+    // Applying it means dispatching that operator against the piped input, so
+    // the input takes the place of the missing parameter. This is the original
+    // path and stays a distinct reading rather than flowing through
+    // `elaborate_value`, which would treat `omit "id"` as a *stage value* and
+    // rebind it rather than dispatch it on this input.
+    if params.is_empty() {
+        if !stage_args.is_empty() {
+            return Err(Error::new(format!(
+                "the user-defined stage `{name}` takes {} argument(s), but its body is a stage \
+                 applied directly to the piped query",
+                stage_args.len()
+            ))
+            .at(origin));
+        }
+        let ExprKind::App(f, args) = &inner.kind else {
+            return Err(Error::new(format!(
+                "expected a stage's body to apply a stage to its argument, found {}",
+                describe(&inner.kind)
+            ))
+            .at(origin));
+        };
+        // A plain `stage arg` body dispatches that stage on the piped input.
+        // `no_id = omit "id"` is the common case, and going through
+        // `apply_stage` keeps the operator's own rules (a join's two arguments,
+        // a set operation's operand order) exactly as written.
+        //
+        // Only a *stage* operator takes this path. A composition head (`>>>`)
+        // is an ordinary function applied to stages, not a stage itself, so it
+        // falls through to the point-free reading below.
+        if let ExprKind::Name(stage) = &f.kind {
+            if is_stage_form(stage) {
+                return apply_stage(cx, stage, args, input, origin);
+            }
+        }
+        // A point-free body built from anything else — a composition
+        // (`clean = select {.id} >>> where (.id > 1)`), or a user helper
+        // applied to further arguments — is an ordinary *function value* of one
+        // query. Elaborating it as a value and applying the input is the same
+        // reading a lambda body takes, so the two spellings cannot disagree.
+        return apply_point_free_stage(cx, inner, name, input, origin);
+    }
+
+    // The piped input is the last parameter; the source's own arguments bind
+    // the parameters *before* it, in order. So `byAge 21` binds `n`, and the
+    // piped query binds `q`.
+    //
+    // A stage may also be spelled entirely point-free with its arguments
+    // supplied after the name (`q & helper a b`), which is the same count: all
+    // of `params` except the trailing input.
+    let trailing = params.len() - 1;
+    if stage_args.len() > trailing {
         return Err(Error::new(format!(
-            "expected a stage definition's body to apply a stage to its argument, found {}",
-            describe(&body.kind)
+            "the user-defined stage `{name}` takes {trailing} argument(s) before the piped \
+             query, but {} were supplied",
+            stage_args.len()
         ))
         .at(origin));
-    };
-    let ExprKind::Name(stage) = &f.kind else {
-        return Err(Error::new("a stage definition must apply a named stage").at(origin));
-    };
-    apply_stage(cx, stage, args, input, origin)
+    }
+    let mut env: Vec<(String, CheckedValue)> = cx.env.to_vec();
+    for (p, a) in params[..stage_args.len()].iter().zip(stage_args) {
+        env.push((p.clone(), elaborate_value(cx, a)?));
+    }
+    // Any parameter the source did not supply is not bound, and the body will
+    // report it as an unknown name rather than being given a guessed value.
+    // The innermost parameter is the query the stage is piped into.
+    let input_param = params[params.len() - 1].clone();
+    env.push((input_param, CheckedValue::Query(input)));
+
+    let callee = Ctx { env: &env, ..cx };
+    // The body is elaborated as a query. If it is not one — an expression
+    // function that happens to be applied to a query — the ordinary "expected a
+    // query" diagnostic names what was found instead of a guessed tree.
+    elaborate_query(callee, inner)
+}
+
+/// The binders of a lambda body, outermost first, and the body beneath them.
+///
+/// A non-lambda expression yields no binders and itself, so a caller can treat
+/// both spellings uniformly.
+fn lambda_parts(e: &ast::Expr) -> (Vec<String>, &ast::Expr) {
+    let (mut params, mut inner) = (Vec::new(), e);
+    while let ExprKind::Lambda(p, b) = &inner.kind {
+        params.push(p.clone());
+        inner = b;
+    }
+    (params, inner)
 }
 
 /// Elaborate a record of fields (`{ a = .., b = .. }`).
@@ -1560,6 +1869,31 @@ pub(crate) struct CheckedStage {
     /// The stage's own argument, as written. Elaborated against the input row
     /// when the stage is applied.
     pub arg: Vec<ast::Expr>,
+    /// The definition the argument's syntax belongs to: `(module, definition)`.
+    ///
+    /// A stage is **deferred**: it is built where it is *written* and applied
+    /// wherever it is *used*, and those are different definitions — often
+    /// different modules. `s1 = select {.id}` in a user file, composed by the
+    /// prelude's `_>>>_`, is applied while the elaborator is walking **prelude**
+    /// source, so resolving `arg` against the ambient context looked up `.id`'s
+    /// type in the prelude and found none.
+    ///
+    /// Every fact the elaborator reads is keyed by where the syntax came from —
+    /// `use_ty(module, ExprId)` for column types, `choice(module, owner, site)`
+    /// for overload resolutions — so a deferred value must carry that key with
+    /// it. This is the same discipline as `Origin`, which pairs a module with a
+    /// span for exactly this reason.
+    pub site: StageSite,
+}
+
+/// Where a [`CheckedStage`]'s argument syntax came from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StageSite {
+    /// The module the argument was written in.
+    pub module: usize,
+    /// The definition whose body it is part of. Overload resolutions are
+    /// recorded per definition, so this is needed alongside the module.
+    pub owner: usize,
 }
 
 /// How a `sql` template's result is *declared* to behave, read from its type
@@ -1877,14 +2211,29 @@ fn elaborate_value(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedValue> {
 
     // A stage: an operator of the pipeline's level supplied with fewer
     // arguments than it takes.
+    //
+    // A **bare name** whose body is such an application is a stage too:
+    // `s1 = select {.id}` then `s1 >>> s2` passes `s1` as a value, and what it
+    // denotes is the stage `select {.id}`, not a query. Recognising only the
+    // application form left the name to fall through to the query reading,
+    // which tried to build `select {.id}` with no input and failed.
     if let ExprKind::App(sf, sargs) = &e.kind {
         if let ExprKind::Name(op) = &sf.kind {
             if is_stage_form(op) && stage_wants_more(cx, op, sargs.len()) {
                 return Ok(CheckedValue::Stage(Box::new(CheckedStage {
                     op: op.clone(),
                     arg: sargs.to_vec(),
+                    site: StageSite {
+                        module: cx.module,
+                        owner: cx.owner,
+                    },
                 })));
             }
+        }
+    }
+    if let ExprKind::Name(n) = &e.kind {
+        if let Some(stage) = stage_of_definition(cx, n) {
+            return Ok(CheckedValue::Stage(Box::new(stage)));
         }
     }
 
@@ -1900,6 +2249,42 @@ fn elaborate_value(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedValue> {
 
     // Otherwise an expression.
     Ok(CheckedValue::Expr(elaborate_expr_inner(cx, e)?))
+}
+
+/// The stage a bare definition **name** denotes, when it denotes one.
+///
+/// `s1 = select {.id}` is a definition, but as a value it is a *stage*: an
+/// operator waiting for the query it will be applied to. Used where a name
+/// appears in a position that takes a stage, so passing stages around
+/// (`s1 >>> s2`, `h s1`) works the same as naming one inline.
+///
+/// `None` for anything else — an ordinary query, a function, a scalar — so the
+/// caller's other readings still apply.
+fn stage_of_definition(cx: Ctx<'_>, name: &str) -> Option<CheckedStage> {
+    let Some(Binding::Def(dm, di)) = cx.scope.get(name).cloned() else {
+        return None;
+    };
+    let body = &cx.input.module(dm).def(di).body;
+    // The body must be `stage arg` with the stage still awaiting its input.
+    let ExprKind::App(f, args) = &body.kind else {
+        return None;
+    };
+    let ExprKind::Name(op) = &f.kind else {
+        return None;
+    };
+    if !is_stage_form(op) || !stage_wants_more(cx, op, args.len()) {
+        return None;
+    }
+    Some(CheckedStage {
+        op: op.clone(),
+        arg: args.to_vec(),
+        // The syntax belongs to the definition it was written in, not to
+        // whoever applies it later. That is the whole point of recording it.
+        site: StageSite {
+            module: dm,
+            owner: di,
+        },
+    })
 }
 
 /// Elaborate an expression that denotes a *function* into a callable, if it is
@@ -2000,6 +2385,33 @@ enum Applied {
 
 /// Apply one argument to a value, completing it or staying deferred.
 fn apply_value(cx: Ctx<'_>, f: CheckedValue, arg: CheckedValue, origin: Origin) -> R<Applied> {
+    // A **stage applied to a query**: `f x` where `f` holds `select {.id}`.
+    //
+    // This is the bridge the pipe already uses, reached from the other
+    // direction. `q & select {..}` desugars to `_&_ q (select {..})` and
+    // dispatches through `apply_stage`; here the same dispatch happens because
+    // the stage is an ordinary *value* being applied — which is what
+    // composition (`>>>`, `<<<`) does, and why it needs no separate mechanism.
+    //
+    // `CheckedStage` is the deferred form: it carries the operator and its
+    // argument with no row attached, which is exactly right, because the row a
+    // stage reads comes from the query it is applied to. Nothing has to be
+    // guessed here — `apply_stage` consumes the input and resolves the stage
+    // against the row it actually has.
+    if let CheckedValue::Stage(s) = &f {
+        let CheckedValue::Query(input) = arg else {
+            return Err(Error::new(format!(
+                "the stage `{}` takes a query, but an expression was supplied",
+                s.op
+            ))
+            .at(origin));
+        };
+        // The stage's argument belongs to the module it was *written* in, which
+        // need not be the one applying it — that is the point of `site`.
+        let scx = stage_ctx(&cx, s.site, cx.input);
+        let applied = apply_stage(scx, &s.op, &s.arg, input, origin)?;
+        return Ok(Applied::Done(CheckedValue::Query(applied)));
+    }
     let CheckedValue::Callable(c) = f else {
         return Err(Error::unsupported("cannot apply this to an argument").at(origin));
     };
@@ -2069,6 +2481,18 @@ fn apply_value(cx: Ctx<'_>, f: CheckedValue, arg: CheckedValue, origin: Origin) 
                     holes: &holes,
                     active: &active,
                 };
+                // The body may denote a **query** rather than a scalar: a
+                // closure that is a function of a query (`f => g => x => g (f x)`
+                // completing, or `q => q & where p`) is a stage, and applying it
+                // must produce a query. Try the query reading first, then fall
+                // back to the expression reading — the same order
+                // `elaborate_value` uses, and for the same reason: a column
+                // reference cannot be a query, while a body that denotes a query
+                // would elaborate either way, so the more specific reading must
+                // win.
+                if let Ok(q) = elaborate_query(callee, &body) {
+                    return Ok(Applied::Done(CheckedValue::Query(q)));
+                }
                 let v = elaborate_expr_inner(callee, &body)?;
                 return Ok(Applied::Done(CheckedValue::Expr(v)));
             }

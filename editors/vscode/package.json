@@ -45,7 +45,7 @@
           "type": "string",
           "default": "",
           "scope": "machine-overridable",
-          "description": "Path to the cagara executable; the extension runs `cagara lsp`. When empty in a trusted workspace, target/release or target/debug is tried, then cagara on PATH."
+          "description": "Path to the cagara executable; the extension runs `cagara lsp`. When empty, the server bundled in the extension is used if this build carries one, then target/release or target/debug in a trusted workspace, then cagara on PATH."
         },
         "cagara.trace.server": {
           "type": "string",
@@ -68,6 +68,9 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "compile:tests": "tsc -p ./tsconfig.test.json",
+    "test": "npm run compile:tests && node --test out-test/test/",
+    "stage:server": "npm run compile && node scripts/stage-server.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package --skip-license"

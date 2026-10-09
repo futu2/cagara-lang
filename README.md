@@ -49,8 +49,15 @@ language: its types are built in, and users cannot declare new types.
 
 ## Install
 
-Download a static Linux binary (amd64 / arm64) and the VS Code extension from
-[Releases](https://github.com/futu2/cagara-lang/releases), or build from source:
+The [VS Code extension](editors/vscode) bundles the language server, so
+installing it needs no separate binary and nothing on `PATH` — download the
+VSIX for your platform from
+[Releases](https://github.com/futu2/cagara-lang/releases) and
+`code --install-extension` it.
+
+For the command line, download a static Linux binary (amd64 / arm64) from
+[Releases](https://github.com/futu2/cagara-lang/releases), or build from
+source:
 
 ```sh
 cargo build --release    # -> target/release/cagara

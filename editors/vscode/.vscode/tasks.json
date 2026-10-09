@@ -1,0 +1,15 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cagara: stage server",
+      "type": "shell",
+      "command": "node scripts/stage-server.mjs",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "npm: compile",
+      "problemMatcher": []
+    }
+  ]
+}

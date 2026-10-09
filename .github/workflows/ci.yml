@@ -52,4 +52,5 @@ jobs:
           cache-dependency-path: editors/vscode/package-lock.json
       - run: npm ci
       - run: npm run compile
+      - run: npm test
       - run: npx vsce package --skip-license -o cagara.vsix

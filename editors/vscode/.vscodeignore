@@ -1,6 +1,11 @@
 src/**
+scripts/**
 .vscode/**
 tsconfig.json
+tsconfig.test.json
 **/*.map
 **/*.ts
 .gitignore
+*.vsix
+# Compiled from src/test by `npm test`; the released extension does not run tests.
+out-test/**

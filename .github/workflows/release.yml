@@ -35,16 +35,39 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: [ci, version]
     runs-on: ${{ matrix.runner }}
+    # One shell for every platform, so the packaging script is the same
+    # everywhere (Windows runners provide bash).
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
-            arch: amd64
+            asset: linux-amd64
+            vsix: linux-x64
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
-            arch: arm64
+            asset: linux-arm64
+            vsix: linux-arm64
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            asset: darwin-amd64
+            vsix: darwin-x64
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            asset: darwin-arm64
+            vsix: darwin-arm64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            asset: windows-amd64
+            vsix: win32-x64
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            asset: windows-arm64
+            vsix: win32-arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -54,31 +77,60 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Install musl tools
+        if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
         run: cargo build --release --locked -p cagara-cli --target ${{ matrix.target }}
       - name: Package
         run: |
-          name="cagara-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}"
-          mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/cagara" "dist/$name/"
+          set -eu
+          exe=cagara
+          if [ "$RUNNER_OS" = Windows ]; then exe=cagara.exe; fi
+          cp "target/${{ matrix.target }}/release/$exe" /tmp/
+          name="cagara-${GITHUB_REF_NAME}-${{ matrix.asset }}"
+          mkdir -p "dist/$name" "dist/bin-${{ matrix.vsix }}"
+          cp "/tmp/$exe" "dist/$name/"
+          # Staged for the VS Code extension, one directory per VS Code target.
+          cp "/tmp/$exe" "dist/bin-${{ matrix.vsix }}/"
           cp README* LICENSE* "dist/$name/" 2>/dev/null || true
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
       - uses: actions/upload-artifact@v4
         with:
-          name: cagara-linux-${{ matrix.arch }}
+          name: cagara-${{ matrix.asset }}
           path: |
             dist/*.tar.gz
             dist/*.sha256
+      # A separate artifact per VS Code target, so the packaging job can fetch
+      # exactly the server that belongs in that target's VSIX.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cagara-bin-${{ matrix.vsix }}
+          path: dist/bin-${{ matrix.vsix }}/*
 
   vscode:
-    name: Package VS Code extension
-    needs: [ci, version]
+    name: Package VS Code extension (${{ matrix.target || 'fallback' }})
+    needs: [ci, version, build]
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: editors/vscode
+    strategy:
+      fail-fast: false
+      matrix:
+        # One platform-specific VSIX per target, plus a target-less fallback:
+        # VS Code picks the package matching the current platform, and falls
+        # back to the target-less one where there is none (`linux-armhf`,
+        # alpine). The fallback carries no server, so it looks one up on PATH
+        # exactly as the extension did before servers were bundled.
+        include:
+          - target: linux-x64
+          - target: linux-arm64
+          - target: darwin-x64
+          - target: darwin-arm64
+          - target: win32-x64
+          - target: win32-arm64
+          - target: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -87,14 +139,75 @@ jobs:
           cache: npm
           cache-dependency-path: editors/vscode/package-lock.json
       - run: npm ci
+      - uses: actions/download-artifact@v4
+        if: matrix.target != ''
+        with:
+          name: cagara-bin-${{ matrix.target }}
+          path: editors/vscode/bin/${{ matrix.target }}
+      - name: Make the bundled server executable
+        if: matrix.target != ''
+        env:
+          TARGET: ${{ matrix.target }}
+        # Artifact archives do not carry file modes, so set this explicitly
+        # rather than trusting the upload to preserve it.
+        run: chmod +x "bin/$TARGET/"cagara*
       - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
-          out="cagara-vscode-${GITHUB_REF_NAME}.vsix"
-          npx vsce package --skip-license -o "$out"
+          set -eu
+          if [ -n "$TARGET" ]; then
+            out="cagara-vscode-${GITHUB_REF_NAME}-$TARGET.vsix"
+            npx vsce package --skip-license --target "$TARGET" -o "$out"
+          else
+            out="cagara-vscode-${GITHUB_REF_NAME}.vsix"
+            npx vsce package --skip-license -o "$out"
+          fi
           sha256sum "$out" > "$out.sha256"
+      - name: Check the VSIX carries an executable server
+        env:
+          TARGET: ${{ matrix.target }}
+        # A target-specific VSIX must ship a runnable server, and the
+        # target-less one must ship none: `vsce` includes `bin/` whatever it
+        # holds, so a stray staged binary here (an F5 run, say) would put a
+        # server for one platform into the package documented as carrying no
+        # server. `vsce` writes each file's mode into the zip and VS Code
+        # restores it on install, so a server that lost its mode would ship
+        # useless. Fail the release rather than publish either.
+        run: |
+          # The exact name the packaging step wrote, rather than a glob: a
+          # pattern also matches the other platform packages.
+          if [ -n "$TARGET" ]; then
+            vsix="cagara-vscode-${GITHUB_REF_NAME}-$TARGET.vsix"
+          else
+            vsix="cagara-vscode-${GITHUB_REF_NAME}.vsix"
+          fi
+          python3 - "$TARGET" "$vsix" <<'PY'
+          import sys, zipfile
+
+          target, vsix = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(vsix) as archive:
+              names = archive.namelist()
+          bundled = [n for n in names if n.startswith("extension/bin/")]
+
+          if not target:
+              if bundled:
+                  sys.exit(f"{vsix}: expected no bundled server, found {bundled}")
+              print(f"{vsix}: no bundled server, as intended")
+          else:
+              exe = "cagara.exe" if target.startswith("win32") else "cagara"
+              entry = f"extension/bin/{target}/{exe}"
+              if entry not in names:
+                  sys.exit(f"{vsix}: missing {entry} (found {bundled})")
+              info = archive.getinfo(entry)
+              mode = (info.external_attr >> 16) & 0o777
+              if not mode & 0o111:
+                  sys.exit(f"{vsix}: {entry} is not executable (mode {mode:o})")
+              print(f"{vsix}: {entry} mode {mode:o}, {info.file_size} bytes")
+          PY
       - uses: actions/upload-artifact@v4
         with:
-          name: cagara-vscode
+          name: cagara-vscode-${{ matrix.target || 'fallback' }}
           path: |
             editors/vscode/*.vsix
             editors/vscode/*.sha256

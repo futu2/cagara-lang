@@ -207,12 +207,11 @@ impl RowType {
     /// it again so a hand-built row cannot slip through.
     pub fn duplicate(&self) -> Option<&str> {
         let mut seen = HashSet::with_capacity(self.columns.len());
-        for (n, _) in &self.columns {
-            if !seen.insert(n.as_str()) {
-                return Some(n);
-            }
-        }
-        None
+        self.columns
+            .iter()
+            .map(|(name, _)| name)
+            .find(|name| !seen.insert(name.as_str()))
+            .map(String::as_str)
     }
 
     /// `omit "k"`: the row without column `k`.

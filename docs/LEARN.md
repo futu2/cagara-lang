@@ -1028,6 +1028,22 @@ a whole expression — the same as in Haskell, where `&` is `infixl 1` and `==` 
 is_five = users & select { ok = (.a & toInt) == 5 }
 ```
 
+A function name can be bound to another definition, and calling that alias is
+the same as calling what it names:
+
+```haskell
+up = upper                    # an alias for a template
+myCase = caseWhen             # `caseWhen` is itself an alias of `ifThenElse`
+s = sum                       # an alias of an overload set
+q = users & select { x = up .name }
+```
+
+An alias carries overloading with it: `s = sum` still chooses per use, so
+`s .amount` and `s .user_id` pick the `float` and `int` candidates respectively,
+exactly as `sum` would. Chains work too (`g = up`). A definition whose whole
+body is another name has no body of its own to run, so it is the *target* that
+provides one — which is why `up`, `s` and `myCase` can be called at all.
+
 ### Overloading
 
 A name defined more than once, each with a type signature, is an **overload

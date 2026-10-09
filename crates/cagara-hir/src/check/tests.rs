@@ -814,8 +814,8 @@ fn consistent(ws: &Workspace) -> Vec<(String, Result<String, String>)> {
                     // construct takes this whole suite down, hiding the gaps
                     // rather than surfacing them. They are surfaced elsewhere:
                     // the message says "internal error", and
-                    // `the_examples_have_no_elaboration_gaps` in
-                    // `checked/tests.rs` pins the set for shipping programs.
+                    // `examples_are_consistent` fails on it, so a gap in a
+                    // shipped example cannot pass unnoticed.
                     if e.message.contains("internal error in") {
                         Err(e.message.clone())
                     } else {

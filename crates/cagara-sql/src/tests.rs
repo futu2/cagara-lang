@@ -1506,6 +1506,143 @@ fn a_stage_helper_body_may_apply_stages_in_sequence() {
     );
 }
 
+/// An alias — a definition whose whole body is another name — must lower
+/// exactly like the name it forwards to, at every call shape and through a
+/// chain. `f = upper` is not a `sql` template and not a lambda, so following
+/// the name to the definition that *has* the body is the only thing that makes
+/// it callable; missing that step reported a compiler limitation instead.
+#[test]
+fn an_alias_calls_like_its_target() {
+    // A scalar template, reached directly and through one and two aliases.
+    let scalar = "q = users & select { x = upper .name }\n";
+    assert_eq!(
+        sql(scalar, "q"),
+        sql("f = upper\nq = users & select { x = f .name }\n", "q")
+    );
+    assert_eq!(
+        sql(scalar, "q"),
+        sql(
+            "f = upper\ng = f\nq = users & select { x = g .name }\n",
+            "q"
+        )
+    );
+    // The prelude's own aliases: `caseWhen` forwards to `ifThenElse`, and `in`
+    // to `inList`.
+    assert_eq!(
+        sql(
+            "q = users & select { x = ifThenElse .active \"y\" \"n\" }\n",
+            "q"
+        ),
+        sql(
+            "q = users & select { x = caseWhen .active \"y\" \"n\" }\n",
+            "q"
+        )
+    );
+    assert_eq!(
+        sql("q = users & where (inList [1, 2] .age)\n", "q"),
+        sql("q = users & where (in [1, 2] .age)\n", "q")
+    );
+    // A user's own template, and an alias of an alias of a lambda.
+    let user = "myUp : expr r string -> expr r string = sql \"UPPER($1)\"\n";
+    assert_eq!(
+        sql(
+            &format!("{user}q = users & select {{ x = myUp .name }}\n"),
+            "q"
+        ),
+        sql(
+            &format!("{user}f = myUp\nq = users & select {{ x = f .name }}\n"),
+            "q"
+        )
+    );
+    assert_eq!(
+        sql("q = users & where (.age > 18)\n", "q"),
+        sql(
+            "p = x => .age > x\nf = p\ng = f\nq = users & where (g 18)\n",
+            "q"
+        )
+    );
+    // An aggregate template and a window template behind an alias.
+    assert_eq!(
+        sql("q = orders & agg { t = sum .amount }\n", "q"),
+        sql("s = sum\nq = orders & agg { t = s .amount }\n", "q")
+    );
+    assert_eq!(
+        sql("q = orders & select { r = rowNumber {} }\n", "q"),
+        sql("r = rowNumber\nq = orders & select { r = r {} }\n", "q")
+    );
+}
+
+/// One alias of an overload set must still choose per use, exactly as the
+/// overloaded name does: `sum` over `amount` and over `user_id` are different
+/// candidates, and the alias must not freeze the first choice.
+#[test]
+fn an_alias_of_an_overload_chooses_per_use() {
+    assert_eq!(
+        sql("q = orders & agg { t = sum .amount }\n", "q"),
+        sql("s = sum\nq = orders & agg { t = s .amount }\n", "q")
+    );
+    assert_eq!(
+        sql("q = orders & agg { t = sum .user_id }\n", "q"),
+        sql("s = sum\nq = orders & agg { t = s .user_id }\n", "q")
+    );
+}
+
+/// An alias used as a *value* rather than applied to arguments directly — passed
+/// to another function, or composed with `>>>` — must also resolve to the
+/// definition it names. This is a different code path from a direct call, and it
+/// failed differently: the alias matched no body kind and fell through to the
+/// expression reading, producing a callable that then refused its argument.
+#[test]
+fn an_alias_is_a_value_where_a_function_is_expected() {
+    // Composed with `>>>` inside a named definition, which is where an alias is
+    // passed around as a *value* rather than applied to arguments directly.
+    assert_eq!(
+        sql(
+            "p = trim >>> upper\nq = users & select { x = p .name }\n",
+            "q"
+        ),
+        sql(
+            "up = upper\np = trim >>> up\nq = users & select { x = p .name }\n",
+            "q"
+        )
+    );
+    assert_eq!(
+        sql(
+            "p = upper >>> trim\nq = users & select { x = p .name }\n",
+            "q"
+        ),
+        sql(
+            "up = upper\np = up >>> trim\nq = users & select { x = p .name }\n",
+            "q"
+        )
+    );
+    // And an alias of that composed value, so the chain is followed through a
+    // non-alias body too.
+    assert_eq!(
+        sql(
+            "p = trim >>> upper\nq = users & select { x = p .name }\n",
+            "q"
+        ),
+        sql(
+            "up = upper\np0 = trim >>> up\np = p0\nq = users & select { x = p .name }\n",
+            "q"
+        )
+    );
+}
+
+/// An alias cycle is a program error the compiler understands, so it reports
+/// recursion rather than its own limitation.
+#[test]
+fn an_alias_cycle_is_reported_as_recursion() {
+    for src in [
+        "f = f\nq = users & select { x = f .name }\n",
+        "f = g\ng = f\nq = users & select { x = f .name }\n",
+    ] {
+        let e = error(src, "q");
+        assert!(e.contains("refers to itself"), "{src}: {e}");
+    }
+}
+
 /// A helper used as a stage and a helper called directly must not diverge: both
 /// go through the same elaboration of the definition's body.
 #[test]

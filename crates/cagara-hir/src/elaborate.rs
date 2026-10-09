@@ -1564,6 +1564,12 @@ fn elaborate_call(
     }
 
     let (dm, di) = resolve_callable(cx, name, f, origin)?;
+    // `f = upper`, `in = inList`, `caseWhen = ifThenElse`: an alias has no body
+    // of its own, so the call is answered by the definition it forwards to.
+    // Following the chain *before* dispatching on the body kind matters,
+    // because the interesting body may be a `primitive` (`inList`), which only
+    // the primitive arm below knows how to build.
+    let (dm, di) = follow_alias(cx, dm, di, f.id, origin)?;
 
     let body = &cx.input.module(dm).def(di).body;
     // `group .x` and the other expression primitives are prelude definitions
@@ -1580,6 +1586,11 @@ fn elaborate_call(
     if matches!(body.kind, ExprKind::Lambda(..)) {
         return elaborate_lambda(cx, (dm, di), name, body, args, f.id, origin);
     }
+    // A body that is an **application**: `nextWeek = addDays 7 >>> truncWeek`,
+    // which desugars to `_>>>_ (addDays 7) truncWeek`. The body *is* the
+    // callable, so it is elaborated as a value and this call's arguments are
+    // applied to it. A bare-name body never reaches here — `follow_alias` has
+    // already resolved it to the definition that has the real body.
     if matches!(body.kind, ExprKind::App(..)) {
         return elaborate_call_composed(cx, (dm, di), name, body, args, f.id, origin);
     }
@@ -1659,6 +1670,79 @@ fn resolve_callable(cx: Ctx<'_>, name: &str, f: &ast::Expr, origin: Origin) -> R
         }
     };
     Ok((dm, di))
+}
+
+/// The definition a **bare-name alias** forwards to, followed to the end.
+///
+/// `f = upper`, `caseWhen = ifThenElse`, `in = inList`, and chains such as
+/// `g = f` are all definitions with no body of their own: each names another
+/// definition, and *that* one holds the body. Following the chain here means an
+/// alias is dispatched exactly like the name it forwards to, so an alias of a
+/// `sql` template, of a lambda, and of a `primitive` all work without a special
+/// case per body kind — and `in = inList` needs `inList`'s `primitive` body to
+/// reach the primitive arm, which is why the whole chain is resolved *before*
+/// the body is dispatched on.
+///
+/// `(dm, di)` is what [`resolve_callable`] chose and `site` is the
+/// application's [`ExprId`](cagara_syntax::ast::ExprId). A target that is an
+/// *overload set* (`s = sum`) is resolved to the candidate this use selected:
+/// overloads are chosen per use, and the alias's own choice is recorded as a
+/// hole, so it is read out of the caller's assignment for this site the same
+/// way [`holes_at`] reads any callee's.
+///
+/// [`ExprId`]: cagara_syntax::ast::ExprId
+fn follow_alias(cx: Ctx<'_>, dm: usize, di: usize, site: u32, origin: Origin) -> R<(usize, usize)> {
+    let mut current = (dm, di);
+    let mut seen: Vec<(usize, usize)> = Vec::new();
+    loop {
+        if seen.contains(&current) {
+            // A cycle through aliases (`f = f`, `f = g` / `g = f`). `enter`
+            // reports recursion when elaboration descends into a definition,
+            // but an alias chain is walked here before that, so this is where
+            // the same program error has to be raised. Left to fall through, the
+            // walk would stop on a definition whose body is a bare name and the
+            // user would get a compiler-limitation message about a mistake the
+            // compiler understands perfectly well.
+            let (m, i) = current;
+            let definition = cx.input.module(m).def(i);
+            return Err(Error::new(format!(
+                "`{}` refers to itself; recursion is not supported",
+                definition.name
+            ))
+            .at(Origin::new(m, definition.span)));
+        }
+        seen.push(current);
+        let (m, i) = current;
+        let body = &cx.input.module(m).def(i).body;
+        let ExprKind::Name(target) = &body.kind else {
+            // A real body — `sql`, a lambda, an application, a primitive.
+            return Ok(current);
+        };
+        // The target resolves in the module the alias body was *written* in,
+        // which for a chain is the module of the previous hop, not the caller's.
+        let scope = cx.input.module(m).scope();
+        match scope.get(target.as_str()).cloned() {
+            Some(Binding::Def(tm, ti)) => current = (tm, ti),
+            // An alias of an **overload set**: `s = sum`. The alias's own use of
+            // `sum` is an open hole, resolved at each use of the alias, so the
+            // answer for this call comes from the caller's assignment for this
+            // site — the same place [`resolve_callable`] reads any other use.
+            Some(Binding::Overloads(tm, cands)) => {
+                let chosen = choose(
+                    cx.input.type_check(),
+                    cx.module,
+                    cx.owner,
+                    site,
+                    &cands,
+                    cx.holes,
+                    origin,
+                )?;
+                return Ok((tm, chosen));
+            }
+            // A primitive, a module, or something unbound: not an alias.
+            _ => return Ok(current),
+        }
+    }
 }
 
 /// Apply a callee whose body is itself an application.
@@ -2319,6 +2403,14 @@ fn elaborate_callable(cx: Ctx<'_>, e: &ast::Expr) -> R<Option<Callable>> {
         }
         _ => return Ok(None),
     };
+    // An alias (`up = upper`) has no body of its own; the definition it names
+    // does. Followed here as well as in `elaborate_call`, because this is the
+    // path an alias takes when used as a *value* — passed to another function
+    // or composed with `>>>` — rather than applied to arguments directly.
+    // Without it the alias matched neither `Sql` nor `Lambda` below and fell
+    // through to the expression reading, which built a zero-argument template:
+    // a plausible-but-wrong value that then failed to accept an argument.
+    let (dm, di) = follow_alias(cx, dm, di, f.id, Origin::new(cx.module, f.span))?;
     let body = cx.input.module(dm).def(di).body.clone();
     match &body.kind {
         // A `sql` template still short of arguments.

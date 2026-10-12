@@ -98,8 +98,8 @@ const CASES: &[(&str, &[&str])] = &[
         "cg0 = empty & select { c = 2, x = .id } & agg { c = group .c, n = count }",
         &[],
     ),
-    // A filter over an aggregate is lowered to HAVING, still over the same
-    // group; both engines must return the filtered groups.
+    // A filter over an aggregate wraps the grouped `SELECT`, still over the
+    // same group; both engines must return the filtered groups.
     (
         "hav = orders & agg { u = group .user_id, total = sum .amount, n = count } & where (.n >= 2) & order [asc .u]",
         &["1|10.0|2"],

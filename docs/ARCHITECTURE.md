@@ -3,25 +3,36 @@
 Cagara's semantic pipeline is a compiler, not an interpreter:
 
 ```text
-source -> syntax -> type checking -> source elaboration -> CheckedQuery
+source -> syntax -> type checking -> normalization -> CheckedQuery
        -> erasure -> Rel -> SQL AST -> dialect SQL
 ```
 
 The relational IR is untyped. Type checking establishes scalar types, rows,
-phases, and overload choices. Source elaboration consumes those facts and uses
-checked constructors to build a relational tree whose invariants are already
-known. Erasure drops the checked metadata at the SQL boundary.
+phases, and overload choices. Normalization consumes those facts and reduces an
+expression to a normal form — resolving names, inlining definitions, and
+discharging applications through one reduction relation — before that normal
+form is lowered through checked constructors into a relational tree whose
+invariants are already known. Erasure drops the checked metadata at the SQL
+boundary.
 
 ## Semantic layers
 
-The implementation has four semantic representations:
+The implementation has five semantic representations:
 
 ```text
 AST            names, source spans, and user syntax
 TypeCheck      inferred schemes, use types, rows, and overload choices
+Term           an expression's normal form, built from TypeCheck's facts
 CheckedQuery   relational structure plus checked rows, phases, and origins
 Rel            backend-facing relational structure without type metadata
 ```
+
+`Term` is what makes the rest compositional. It is a small calculus — local
+binders, columns, literals, templates, lambdas, applications, `case`, records,
+lists — with an application reduction that substitutes arguments for parameters.
+A term carries no AST node and no name waiting to be looked up, so it cannot
+silently depend on where it was written. Names resolve and applications reduce
+once, in the normal form, instead of being rediscovered by each consumer.
 
 `CheckedQuery` and `CheckedExpr` are immutable trees. Query nodes own their
 structure, while unchanged output rows are shared through `Arc`; computed rows
@@ -31,15 +42,30 @@ refer to available columns, projections compute their output rows, joins compute
 nullable sides, and set operations require compatible rows. The node enums are
 private so callers cannot bypass those constructors.
 
-Ordinary functions are substituted during source elaboration. The elaborator's
+Ordinary functions are inlined by the reduction, not called. A definition that
+names itself is reported as recursion rather than expanded without end: the
+elaborator tracks which definitions it is expanding, and the normal form applies
+the same rule, so the two layers agree on what recursion is. The elaborator's
 small `CheckedValue` enum represents expressions, queries, stages, and
 partially-applied callables only while a source expression is being expanded.
 It produces no runtime values. Once a definition is elaborated, its result is a
 `CheckedQuery`; SQL lowering never sees this temporary representation.
 
-The type checker currently records facts in `TypeCheck` and uses mutable
-inference state internally. A paper formulation can describe the same rules
-with immutable substitutions and a result value:
+The type checker records facts in `TypeCheck` and uses mutable inference state
+internally. Checking is bidirectional: `infer` synthesizes a type, and `check`
+pushes an expected type down. That direction is what lets a lambda's parameter
+type come from a known function type rather than being guessed from the body.
+
+How much that direction buys is measured rather than assumed. With the checking
+overrides for records, lambdas, and lists disabled so that every expression took
+the synthesize-then-coerce path, the checker's test suite still passed: the
+constraint solver's worklist defers a comparison and re-runs it, recovering by
+scheduling what checking recovers by direction. The direction becomes
+load-bearing once that deferral is removed, because an expectation that now
+arrives up front would have nowhere to wait.
+
+A paper formulation can describe the same rules with immutable substitutions and
+a result value:
 
 ```text
 infer : Env -> Subst -> Expr -> Result (Subst, Type, TypedExpr)
@@ -109,6 +135,9 @@ The current checked layer supports local, testable claims:
 - Outer-join nullability and set-operation compatibility are represented in
   output rows.
 - Erasure is structural and leaves no type-checking work to SQL lowering.
+- Normalization is total over the language: every expression form reduces to a
+  term, and a form without a rule is reported as a compiler gap rather than
+  silently lowered by a second path. There is no fallback route.
 
 The compiler uses an explicit immutable input view and produces an owned
 compilation result. The shell still owns Salsa state and the checker uses

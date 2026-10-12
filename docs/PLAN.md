@@ -2,13 +2,13 @@
 
 Cagara is a typed query language that compiles queries to SQL. The
 prelude is written in Cagara; Rust supplies name resolution, type checking,
-source elaboration, relational IR, language server, and SQL backend.
+normalization, relational IR, language server, and SQL backend.
 
 ## Pipeline
 
 ```text
-source -> syntax/AST -> type checker -> checked relational tree -> erasure
-        -> schema validation -> SQL lowering -> dialect rewrite -> SQL
+source -> syntax/AST -> type checker -> normalization -> checked relational tree
+        -> erasure -> schema validation -> SQL lowering -> dialect rewrite -> SQL
 ```
 
 The intended simplification of this pipeline is described in

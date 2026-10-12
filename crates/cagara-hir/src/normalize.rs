@@ -1952,6 +1952,17 @@ impl<'a> InputFacts<'a> {
 }
 
 impl Facts for InputFacts<'_> {
+    /// The assignment resolved for the callee at this use site.
+    ///
+    /// **Kept in the checker's order, with open holes dropped**, which is what
+    /// makes the *position* of an entry equal to its hole index — the read
+    /// [`Normalizer::hole`] documents. Dropping an entry shifts every later
+    /// position, so that equality holds only while no site mixes a resolved
+    /// choice with an open one. `compile::tests::every_use_site_records_contiguous_choices`
+    /// states that invariant, because nothing in the checker does.
+    ///
+    /// An open hole is deliberately left out: it is answered by the *enclosing*
+    /// assignment sitting on the normalizer's stack, not by this one.
     fn holes_at(&self, (module, owner): (usize, usize), site: u32) -> Vec<(usize, usize)> {
         self.input
             .type_check()
@@ -1960,8 +1971,6 @@ impl Facts for InputFacts<'_> {
             .filter(|(recorded, _, _)| *recorded == site)
             .filter_map(|(_, hole, choice)| match choice {
                 Choice::Def(_, chosen) => Some((hole, chosen)),
-                // A hole that is itself open in the caller: the enclosing
-                // assignment on the stack answers for it.
                 Choice::Hole(_) => None,
             })
             .collect()

@@ -783,6 +783,93 @@ fn every_corpus_program_compiles_without_a_fallback() {
     assert!(checked > 0, "no corpus files were found");
 }
 
+/// Every use site's recorded overload choices are contiguous from zero, and no
+/// site mixes a resolved choice with an open one.
+///
+/// `normalize::InputFacts::holes_at` keeps a site's resolved choices, drops the
+/// open ones, and hands them to a normalizer that reads them **positionally**:
+/// `Normalizer::hole(k)` is `assignment.get(k)`, documented as
+/// `holes[k] = (callee_module, chosen_def)`. Dropping an entry shifts every later
+/// position, so that read means what it says only under the two conditions this
+/// asserts.
+///
+/// Both were measured rather than assumed, because the shapes have different
+/// correct answers. A site of *open* holes is answered by the enclosing
+/// assignment on the stack, and the source path that used to do this read it as
+/// `cx.holes.get(h)` — translating the callee's hole number `h` into the
+/// caller's — while a dropped entry simply falls through to whatever sits at
+/// that index. The two agree only while the numbers line up, which is the
+/// contiguity this pins.
+///
+/// Measured over the widest corpus available — the prelude, which uses almost
+/// every construct, plus every shipped example — and it holds: no site mixes,
+/// and none is sparse. So this is not a bug report; it is the invariant the
+/// adapter silently relies on, stated where a change to it would fail loudly
+/// rather than appear as a wrong overload candidate.
+#[test]
+fn every_use_site_records_contiguous_choices() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // The prelude always loads, and it is the hardest of the two corpora.
+    let mut workspaces = vec![("the prelude".to_string(), Workspace::from_source("q = 1\n"))];
+    for entry in [
+        "examples/report.cagara",
+        "examples/public.cagara",
+        "examples/schema.cagara",
+        "examples/errors.cagara",
+    ] {
+        if let Ok(text) = std::fs::read_to_string(root.join(entry)) {
+            workspaces.push((entry.to_string(), Workspace::from_source(&text)));
+        }
+    }
+
+    let mut sites = 0usize;
+    for (label, ws) in &workspaces {
+        let tc = crate::check::check(ws);
+        for m in 0..ws.modules.len() {
+            for d in 0..ws.modules[m].module.defs.len() {
+                let mut by_site: std::collections::BTreeMap<
+                    u32,
+                    Vec<(usize, crate::check::Choice)>,
+                > = std::collections::BTreeMap::new();
+                for (site, hole, choice) in tc.choices_of(m, d) {
+                    by_site.entry(site).or_default().push((hole, choice));
+                }
+                for (site, entries) in by_site {
+                    sites += 1;
+                    let mut holes: Vec<usize> = entries.iter().map(|(h, _)| *h).collect();
+                    holes.sort_unstable();
+                    assert_eq!(
+                        holes,
+                        (0..entries.len()).collect::<Vec<_>>(),
+                        "{label}: definition {d} of module {m} records holes \
+                         {holes:?} at site {site}; a gap makes `holes_at`'s \
+                         positional read address the wrong hole"
+                    );
+                    let open = entries
+                        .iter()
+                        .any(|(_, c)| matches!(c, crate::check::Choice::Hole(_)));
+                    let resolved = entries
+                        .iter()
+                        .any(|(_, c)| matches!(c, crate::check::Choice::Def(..)));
+                    assert!(
+                        !(open && resolved),
+                        "{label}: definition {d} of module {m} records both a \
+                         resolved and an open choice at site {site}: {entries:?} \
+                         — dropping the open one shifts every later hole, so the \
+                         assignment `holes_at` returns no longer matches its \
+                         documented indexing"
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        sites > 0,
+        "no use site with a recorded choice was found; the scan is not looking \
+         where it thinks it is"
+    );
+}
+
 /// The construct that blocked this migration for six attempts, now migrated.
 ///
 /// Kept as a regression test because it is the one case the corpus does not

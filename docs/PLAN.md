@@ -34,16 +34,53 @@ the single source of validity rules.
 - Query stages are deferred constraints, so helpers can be reused with
   different rows. Aggregates and windows have explicit phases and cannot be
   placed where SQL would reject them.
-- A filter directly over an aggregate lowers to `HAVING` over the aggregate
-  expression (not the output alias), so it needs no outer `WHERE` on a derived
-  table. An intervening `order` or `limit` still wraps, because the filter must
-  run after them.
+- A filter over an aggregate **wraps a derived table**: it lowers to a `WHERE`
+  outside the aggregate's subquery, like any other filter that cannot fold into
+  its input. See "Aggregate filters and `HAVING`" under *Deliberately absent*
+  for why the fold was removed and what reinstating it would take.
 - `select` replaces a row; `update` merges computed fields over it. Outer joins
   use `mapValue (AsNullable)` for the nullable side.
 - SQL is built as ANSI and rewritten across supported dialects. See
   [`SQL-DIALECTS.md`](SQL-DIALECTS.md).
 - `cagara lsp` and both editor clients use one workspace model with unsaved
   buffer overlays.
+
+## Deliberately absent
+
+### Aggregate filters and `HAVING`
+
+A filter written after an `agg` stage currently wraps a derived table:
+
+```sql
+SELECT user_id, revenue, n
+FROM (SELECT user_id, SUM(amount) AS revenue, COUNT(*) AS n
+      FROM orders GROUP BY user_id) AS t1
+WHERE (n >= 5)
+```
+
+It used to fold into a `HAVING` on the aggregate, avoiding the subquery:
+
+```sql
+SELECT user_id, SUM(amount) AS revenue, COUNT(*) AS n
+FROM orders GROUP BY user_id HAVING (COUNT(*) >= 5)
+```
+
+The fold was removed, not lost. It was the one decision in
+`crates/cagara-sql/src/lower.rs` that read **two levels of the tree** to answer
+one question — whether a predicate could fold depended on the relation beneath
+the stage as well as the stage itself. Every other decision there is local to the
+stage (`Stage::needs_barrier`). Removing it leaves a lowering pass whose rules
+can each be read from one place, at the cost of a derived table per
+aggregate-filtered query. The corpus snapshot in
+`crates/cagara-hir/tests/corpus/` is where the current shape is pinned.
+
+Reinstating it properly means giving `Rel` or the lowering pass an explicit
+notion of a stage's phase, so "this predicate may run inside the aggregate's own
+clause" is a property of the predicate's position rather than a fact recovered by
+matching the relation underneath it. The `HAVING` field on `Stage` and the
+`COUNT(*) > 0` use in the constant-key aggregate case remain, because those do
+not involve the fold: a constant-key `agg` needs `HAVING COUNT(*) > 0` for
+correctness, not as an optimization.
 
 ## Known gaps
 

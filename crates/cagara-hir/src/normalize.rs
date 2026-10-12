@@ -212,6 +212,14 @@ pub enum Term {
     Case {
         arms: Vec<(Term, Term)>,
         default: Box<Term>,
+        /// The scalar type the checker gave the whole `case`.
+        ///
+        /// Carried rather than inferred from an arm: a `case`'s arms are all
+        /// checked at one type, and reading that type off whichever arm happens
+        /// to come first would be a second guess at a fact the checker already
+        /// settled. Its absence made a `case` used as a `where` predicate fail
+        /// with "must be bool, found ?".
+        ty: crate::core::ScalarType,
         origin: Origin,
     },
     /// A record literal, fields in source order.
@@ -565,6 +573,7 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
         Term::Case {
             arms,
             default,
+            ty,
             origin,
         } => Term::Case {
             arms: arms
@@ -572,6 +581,7 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
                 .map(|(c, v)| (substitute(c, name, arg), substitute(v, name, arg)))
                 .collect(),
             default: Box::new(substitute(*default, name, arg)),
+            ty,
             origin,
         },
         Term::Record { fields, origin } => Term::Record {
@@ -673,6 +683,11 @@ pub struct Normalizer<'a> {
     /// A stack because the walk nests and a hole index is **local to the
     /// definition that owns it**.
     hole_stack: Vec<Vec<(usize, usize)>>,
+    /// The definitions currently being inlined, outermost first.
+    ///
+    /// Mirrors `Ctx::active` in the elaborator. The term layer inlines rather
+    /// than calls, so it needs its own record of what is already being expanded.
+    active: Vec<DefId>,
 }
 
 impl<'a> Normalizer<'a> {
@@ -684,6 +699,7 @@ impl<'a> Normalizer<'a> {
             binders: Vec::new(),
             current_module: 0,
             hole_stack: Vec::new(),
+            active: Vec::new(),
         }
     }
 
@@ -760,6 +776,29 @@ impl<'a> Normalizer<'a> {
         let out = f(self);
         self.current_module = previous;
         out
+    }
+
+    /// Inline a definition's body, recording that it is being walked.
+    ///
+    /// The term layer **inlines** a definition rather than calling it, so a
+    /// definition that names itself — `f = f`, or a cycle through two — inlines
+    /// forever. The elaborator guards this in `enter`, with the `active` stack on
+    /// `Ctx`; a walk that builds terms has to apply the same rule, because it is
+    /// the same recursion and the term route is now the only one.
+    ///
+    /// Measured: without this, `f = f` overflows the stack rather than reporting
+    /// "refers to itself".
+    ///
+    /// `None` means a cycle, and the caller reports it — the same verdict
+    /// `enter` produces, so both routes agree on what recursion is.
+    pub fn inlining<T>(&mut self, id: DefId, f: impl FnOnce(&mut Self) -> T) -> Option<T> {
+        if self.active.contains(&id) {
+            return None;
+        }
+        self.active.push(id);
+        let out = f(self);
+        self.active.pop();
+        Some(out)
     }
 
     /// The normal form of a definition, reduced once and shared.
@@ -985,11 +1024,17 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                 let inner = facts
                     .def_body(dm, dd)
                     .ok_or_else(|| Gap::new(origin, format!("`{n}` has no body to normalize")))?;
+                // A definition that names itself would inline forever, so the
+                // walk carries what it is already expanding and reports the
+                // cycle the way the elaborator does.
                 // The callee's names were recorded under the **callee's**
                 // module, so the walk moves there. This is what makes a user
                 // definition that calls a prelude helper resolve the helper's
                 // own names correctly.
-                cx.in_module(dm, |cx| expression(facts, cx, &inner))
+                cx.in_module(dm, |cx| {
+                    cx.inlining((dm, dd), |cx| expression(facts, cx, &inner))
+                        .unwrap_or_else(|| Err(recursion_gap(origin, n)))
+                })
             }
             // An overloaded name: the checker picked one candidate **for this
             // use**, and that choice is recorded per use site rather than being
@@ -1055,7 +1100,10 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                 let inner = facts.def_body(om, chosen).ok_or_else(|| {
                     Gap::new(origin, format!("the chosen candidate of `{n}` has no body"))
                 })?;
-                cx.in_module(om, |cx| expression(facts, cx, &inner))
+                cx.in_module(om, |cx| {
+                    cx.inlining((om, chosen), |cx| expression(facts, cx, &inner))
+                        .unwrap_or_else(|| Err(recursion_gap(origin, n)))
+                })
             }
             Some(Resolved::Primitive) => Ok(Term::Primitive {
                 name: std::sync::Arc::from(n.as_str()),
@@ -1205,6 +1253,7 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
             Ok(Term::Case {
                 arms: out,
                 default: Box::new(default),
+                ty: facts.use_ty(module, e.id),
                 origin,
             })
         }
@@ -1736,12 +1785,21 @@ pub fn lower_expr_with(
         Term::Case {
             arms,
             default,
+            ty,
             origin,
         } => {
             // The searched `CASE` the prelude's `ifThenElse` emits. Built here
             // rather than reached through a name because the arity depends on
             // how many arms were written, which no fixed-arity definition can
             // express.
+            // A `case` whose only arm is the default **is** that default.
+            // Emitting it as a `CASE` would need a `WHEN`, and there is no
+            // condition to test — `CASE ELSE $1 END` is not SQL. The source path
+            // had this rule; dropping it in the migration turned `case { true =>
+            // x }` into a parse error.
+            if arms.is_empty() {
+                return lower_expr_with(default, spec);
+            }
             let mut sql = String::from("CASE");
             let mut lowered: Vec<crate::checked::CheckedExpr> = Vec::new();
             for (cond, value) in arms {
@@ -1756,8 +1814,7 @@ pub fn lower_expr_with(
             sql.push_str(&(lowered.len() + 1).to_string());
             lowered.push(lower_expr_with(default, spec)?);
             sql.push_str(" END");
-            C::template(sql, lowered, crate::core::ScalarType::Unknown, *origin)
-                .map_err(|e| Gap::new(*origin, e.message))
+            C::template(sql, lowered, ty.clone(), *origin).map_err(|e| Gap::new(*origin, e.message))
         }
         // A function value reaching expression position is the caller's error,
         // and the checker already refused to type it. Reported as a gap so it
@@ -1849,6 +1906,18 @@ fn other_origin(t: &Term) -> Origin {
         | Term::Record { origin, .. }
         | Term::List { origin, .. } => *origin,
     }
+}
+
+/// The gap a cyclic definition produces.
+///
+/// One constructor for both inlining sites so the two cannot drift: a cycle must
+/// read the same way whichever route reached it, and the wording matches the
+/// elaborator's `enter`, so both layers agree on what recursion is.
+fn recursion_gap(origin: Origin, name: &str) -> Gap {
+    Gap::new(
+        origin,
+        format!("`{name}` refers to itself; recursion is not supported"),
+    )
 }
 
 /// A short human name for an expression form, for a gap message.
@@ -2516,12 +2585,15 @@ mod bridge_tests {
                 source,
                 origin: blank,
             },
-            Term::Case { arms, default, .. } => Term::Case {
+            Term::Case {
+                arms, default, ty, ..
+            } => Term::Case {
                 arms: arms
                     .iter()
                     .map(|(c, v)| (strip_origins(c), strip_origins(v)))
                     .collect(),
                 default: Box::new(strip_origins(&default)),
+                ty,
                 origin: blank,
             },
             Term::Record { fields, .. } => Term::Record {
@@ -2556,6 +2628,48 @@ mod bridge_tests {
                 assert!(args.is_empty(), "a bare template has no arguments yet");
             }
             other => panic!("expected a template, got {other:?}"),
+        }
+    }
+
+    /// A self-naming definition reports recursion rather than inlining forever.
+    ///
+    /// The term layer **inlines** a definition instead of calling it, so
+    /// `f = f` would expand without end. The elaborator guards this in `enter`
+    /// with `Ctx::active`; a walk that builds terms needs the same rule, and
+    /// when it was missing the failure was a stack **overflow** — an abort, not
+    /// a diagnostic, which is why it went unnoticed until a SQL test happened to
+    /// exercise it.
+    #[test]
+    fn a_self_reference_is_reported_not_inlined_forever() {
+        // `f = f` is a value-level alias cycle; `g`/`h` is a two-step one.
+        for (src, name) in [
+            ("c = .name\nf = f\nq = users & select { x = f }\n", "f"),
+            (
+                "c = .name\nf = g\ng = f\nq = users & select { x = f }\n",
+                "f",
+            ),
+        ] {
+            let ws = Workspace::from_source(&format!("{TABLES}{src}"));
+            let tc = check(&ws);
+            let facts = WorkspaceFacts::new(&ws, &tc);
+            let defs = &ws.modules[ws.root].module.defs;
+            let index = defs.iter().position(|d| d.name == name).expect("the alias");
+            let body = Body {
+                module: ws.root,
+                def: index,
+                expr: defs[index].body.clone(),
+            };
+            let resolved = |module: usize, id: u32| facts.resolution(module, id);
+            let mut cx = Normalizer::new(Box::new(resolved));
+            let out = cx.in_module(ws.root, |cx| expression(&facts, cx, &body));
+            match out {
+                Err(gap) => assert!(
+                    gap.message.contains("refers to itself"),
+                    "a cycle should be named as recursion, got: {}",
+                    gap.message
+                ),
+                Ok(t) => panic!("a cyclic definition should not normalize, got {t:?}"),
+            }
         }
     }
 

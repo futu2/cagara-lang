@@ -293,26 +293,24 @@ impl Lowerer {
                 }
             }
             let mut st = self.rel(base)?;
-            // A filter directly over an aggregate is a `HAVING`, not a `WHERE`
-            // on a derived table. `base` is the aggregate only when nothing
-            // intervenes between it and the filter (an `order` or `limit` would
-            // leave itself as `base`, and those must stay outside), and every
-            // output of an aggregate is either a grouping key or an aggregate
-            // expression — both legal in `HAVING`. `Stage::item` resolves an
-            // output name to the expression behind it, so no SELECT alias leaks
-            // into the clause (PostgreSQL rejects aliases there).
-            if matches!(base, Rel::Agg(..)) && st.has_agg && !stages.is_empty() {
-                let mut preds: Vec<Expr> = stages
-                    .into_iter()
-                    .rev()
-                    .map(|p| st.resolve(p))
-                    .collect::<Result<_, _>>()?;
-                if let Some(h) = st.having.take() {
-                    preds.insert(0, h);
-                }
-                st.having = and_all(preds);
-                return Ok(st);
-            }
+            // A filter whose input is an aggregate is **not** folded into
+            // `HAVING` here; it wraps a derived table and becomes an ordinary
+            // `WHERE` outside it, like any other filter that cannot fold into
+            // its input.
+            //
+            // The fold is deliberately absent rather than forgotten. It is a
+            // query-shape optimization — it removes one derived table when the
+            // filter directly follows an `agg` — and it is the only place in
+            // this file that decided a predicate's *clause* from the shape of
+            // the relation beneath it. Everything else here decides whether a
+            // stage can absorb an input, which is a local question about the
+            // stage; the fold needed `base` and `stages` together, so it read
+            // two levels of the tree to answer one.
+            //
+            // Leaving it out costs a derived table per aggregate-filtered query
+            // and buys a lowering pass whose every decision is local. It is
+            // tracked in `docs/PLAN.md` for reinstatement with the phase
+            // normalization it should have been built on.
             for p in stages.into_iter().rev() {
                 if st.needs_barrier(Fuse::Filter, false) {
                     st = self.wrap(st);

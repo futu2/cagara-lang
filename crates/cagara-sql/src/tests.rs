@@ -197,21 +197,22 @@ fn filter_pipeline_over_ten_stages_compiles() {
 }
 
 #[test]
-fn filter_after_agg_becomes_having() {
+fn a_filter_over_an_aggregate_wraps_a_derived_table() {
+    // The predicate is written against an aggregate output. It no longer folds
+    // into `HAVING`: lowering treats it as any other filter that cannot fold
+    // into its input, so it wraps. See `docs/PLAN.md` for why the fold was
+    // removed and what reinstating it properly would take.
     let s = sql(
         "q = orders\n  & where (.status == \"paid\")\n  & agg { user_id = group .user_id, revenue = sum .amount, n = count }\n  & where (.n >= 5)\n",
         "q",
     );
     assert!(s.contains("GROUP BY user_id"), "{s}");
     assert!(s.contains("SUM(amount) AS revenue"), "{s}");
-    // The predicate is written against an aggregate output, so it folds into
-    // HAVING over the aggregate expression. No derived table, and no alias:
-    // PostgreSQL does not accept `HAVING n >= 5`.
     assert!(
-        s.contains("HAVING (COUNT(*) >= 5)"),
-        "aggregate filter must fold into HAVING: {s}"
+        s.contains(") AS t1 WHERE"),
+        "an aggregate filter should wrap a derived table: {s}"
     );
-    assert!(!s.contains("(SELECT"), "HAVING needs no derived table: {s}");
+    assert!(!s.contains("HAVING"), "{s}");
 }
 
 #[test]
@@ -233,16 +234,18 @@ fn filter_after_agg_stays_outside_order_and_limit() {
 }
 
 #[test]
-fn consecutive_aggregate_filters_are_conjoined_having() {
+fn consecutive_aggregate_filters_stay_conjoined_outside() {
+    // Conjunction is a property of consecutive filters on the *same* stage,
+    // which still holds when they sit outside the aggregate's derived table.
     let s = sql(
         "q = orders & agg { u = group .user_id, n = count } & where (.n > 3) & where (.n < 9)\n",
         "q",
     );
     assert!(
-        s.contains("HAVING (COUNT(*) > 3) AND (COUNT(*) < 9)"),
-        "{s}"
+        s.contains("WHERE (n > 3) AND (n < 9)"),
+        "consecutive filters should conjoin: {s}"
     );
-    assert!(!s.contains("(SELECT"), "{s}");
+    assert!(!s.contains("HAVING"), "{s}");
 }
 
 #[test]
@@ -883,11 +886,13 @@ fn optimizer_keeps_stage_boundaries() {
         "q",
         opts,
     );
-    assert!(s.contains("HAVING"), "{s}");
+    // The boundary is the derived table now, not a `HAVING` clause.
+    assert!(s.contains(") AS t1 WHERE"), "{s}");
     assert!(
-        s.contains("COUNT(*) > 3"),
-        "filter left the HAVING boundary: {s}"
+        s.contains("(n > 3)"),
+        "the filter should sit outside the aggregate's derived table: {s}"
     );
+    assert!(!s.contains("HAVING"), "{s}");
     let s = sql_with(
         "q = orders & where (1 + 1 == 2 && .amount > 1.0)\n",
         "q",

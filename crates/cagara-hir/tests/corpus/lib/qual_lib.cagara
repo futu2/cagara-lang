@@ -1,0 +1,10 @@
+# A helper module for `qual.cagara`: the definitions a qualified name reaches
+# through the alias.
+#
+# `bind` is polymorphic on purpose. Its body is `a + b`, so `+` is an *open
+# overload* that each use of `bind` has to resolve; reaching it as `lib.bind`
+# must therefore carry the use's overload choice across the module boundary
+# exactly as a local `bind` does.
+
+shout = s => upper s
+bind = a => b => a + b

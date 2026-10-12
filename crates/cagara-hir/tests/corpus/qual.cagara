@@ -1,0 +1,21 @@
+# A definition reached through a module alias, used in *expression* position.
+#
+# `lib.shout` is a qualified name, and the language documents an alias as the
+# only way to reach an imported definition (docs/LEARN.md, "Modules"). So the
+# alias spelling has to elaborate exactly as the same definitions written
+# locally do, and the two must lower to identical SQL — which is why both are
+# here and why the snapshot records them next to each other.
+#
+# This file exists because that was not true. Both halves were missing: the
+# checker recorded no resolution for a *projection* (only for a bare name), and
+# the term layer had no rule for the projection form, so `lib.shout .name` was
+# reported as a compiler gap in the middle of a legal program.
+import "lib/qual_lib.cagara" as lib
+
+t : query { id = int, name = string } = table "s" "t"
+
+shout2 = s => upper s
+bind2 = a => b => a + b
+
+via_alias = t & select { s = lib.shout .name, i = lib.bind .id 1 }
+via_local = t & select { s = shout2 .name, i = bind2 .id 1 }

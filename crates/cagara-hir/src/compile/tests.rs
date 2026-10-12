@@ -633,10 +633,11 @@ fn equivalent_spellings_all_compile() {
 
 /// The normalized route is actually **taken**, not silently bypassed.
 ///
-/// Every other test would still pass if `elaborate_via_term` always failed and
-/// the source path handled everything — the two are held equivalent on purpose.
-/// That is exactly why this needs its own assertion: without it, deleting the
-/// old path could be "safe" because nothing ever used the new one.
+/// There is no second path to bypass it with any more, so what this guards is
+/// the weaker but still real fact that elaboration goes through the term bridge
+/// at all. Everything else here would pass if these expressions were served some
+/// other way — from a cache, or by a constructor that skipped the bridge — and
+/// the gap gate would then report zero gaps for the wrong reason.
 #[test]
 fn elaboration_uses_the_normalized_route() {
     let ws = Workspace::from_source(
@@ -653,24 +654,25 @@ fn elaboration_uses_the_normalized_route() {
     );
     assert!(
         crate::elaborate::term_hits() > before,
-        "no expression took the normalized route; the source path handled them all"
+        "no expression took the normalized route; elaboration never reached the term bridge"
     );
 }
 
 /// The normalized route must handle **everything**, not just the examples.
 ///
-/// This is the gate that makes deleting the source path a checked step. The
-/// earlier report measured `examples/` alone and came out at zero gaps, which is
-/// a much weaker claim than it looks: the examples are two files. This runs the
-/// route over every program the workspace has — the prelude, which uses the
-/// widest range of constructs, plus every shape the test suite exercises — and
-/// asserts that nothing falls back.
+/// This is the gate that makes the normalized route a checked step. The earlier
+/// report measured `examples/` alone and came out at zero gaps, which is a much
+/// weaker claim than it looks: the examples are two files. This runs the route
+/// over every program shape the suite exercises and asserts that none needs a
+/// fallback that no longer exists.
 ///
-/// It also asserts that nothing *silently* falls back. A gap is not an error to
-/// a caller: `elaborate_expr_inner` tries the term route and falls through to
-/// the source path on `Err`. So a construct the term layer cannot express is
-/// invisible from the outside — the program still compiles, just by the other
-/// route. Counting the fallbacks is the only way to see it.
+/// A gap is now a hard compiler error rather than a silent revert to a second
+/// implementation, so a construct the term layer cannot express cannot pass this
+/// test quietly. The counter is what names it: without it, a failure would only
+/// say that some program stopped compiling, not which rule is missing. The
+/// counter is wired into the term bridge (`normalize::note_gap`), so this zero
+/// is a claim about expressions; a capability gap raised on the query path is
+/// reported to the caller but is not counted here.
 #[test]
 fn the_normalized_route_handles_every_construct() {
     const TABLES: &str = "users : query { id = int, name = string, age = int, active = bool } = \

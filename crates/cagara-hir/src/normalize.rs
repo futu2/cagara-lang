@@ -1,24 +1,30 @@
 //! Normalization: reduce a resolved term to a form that no longer depends on
 //! how it was *spelled*.
 //!
-//! # The problem this exists to solve
+//! # What this replaced
 //!
-//! Elaboration currently doubles as the normalization step, and it does so by
-//! re-walking **source**. Applying a function builds an environment and walks
-//! the callee's body again, from the AST ([`crate::elaborate`]'s
-//! `elaborate_lambda`, whose comment says outright that "the body is held as
-//! source so applying it re-runs `elaborate_lambda`'s binding logic"). That one
-//! decision is the root of a family of workarounds, each of which exists only
-//! because there is no separate normalization pass:
+//! Elaboration used to double as the normalization step, and it did so by
+//! re-walking **source**: applying a function built an environment and walked
+//! the callee's body again, from the AST. That one decision was the root of a
+//! family of workarounds, each of which existed only because there was no
+//! separate normalization pass:
 //!
-//! * a bare alias has no body to re-walk, so `follow_alias` walks the chain by
+//! * a bare alias has no body to re-walk, so `follow_alias` walked the chain by
 //!   hand;
 //! * a composed function value has no body either, so
 //!   `apply_to_computed_head` had to be added for `(trim >>> upper) .name`;
-//! * a callee is classified by its *syntax shape* (`elaborate_callable`),
-//!   because there is no normalized function value to inspect;
-//! * a polymorphic definition must be re-elaborated once per hole assignment,
-//!   because substitution bakes the choice in at expansion time.
+//! * a callee was classified by its *syntax shape* (`elaborate_callable`),
+//!   because there was no normalized function value to inspect;
+//! * a polymorphic definition was re-elaborated once per hole assignment,
+//!   because substitution baked the choice in at expansion time.
+//!
+//! The source path for **scalar expressions** is gone, and with it
+//! `apply_to_computed_head` and the parallel window, frame and order helpers it
+//! had grown. Two of the workarounds above are still live on the *query* path,
+//! which still walks source: `follow_alias` follows an alias used as a value,
+//! and `elaborate_callable` still classifies a callee by shape. They stay in
+//! this list because the list is a record rather than a wish; a version that
+//! called them gone would be wrong in the direction that costs a reader most.
 //!
 //! # What normalization is
 //!
@@ -33,19 +39,27 @@
 //!
 //! Two spellings of one program — `p = trim >>> upper` applied as `p .name`,
 //! the same written inline as `(trim >>> upper) .name`, and a lambda
-//! `(f => upper f) .name` — normalize to the *same term*. That property is what
-//! the compiler currently has to assert by comparing generated SQL
-//! (`cagara-sql`'s spelling-equivalence tests); under normalization it holds by
-//! construction, at the term level, before any SQL exists.
+//! `(f => upper f) .name` — normalize to the *same term*. That property used to
+//! be assertable only by comparing generated SQL (`cagara-sql`'s
+//! spelling-equivalence tests); under normalization it holds by construction, at
+//! the term level, before any SQL exists. Those tests remain, as the end-to-end
+//! statement of the same thing.
 //!
 //! # Scope
 //!
-//! This module is deliberately **inert for now**: it defines the normal form
-//! and the reduction relation, and is exercised by tests, but nothing in the
-//! production path calls it yet. Migrating elaboration onto it is a separate
-//! step, and doing it in one commit would be a rewrite with no way to tell a
-//! fix from a regression — which is the failure mode the gate in
-//! [`crate::compile`] exists to prevent.
+//! This module **is** the production path for a scalar expression: every one is
+//! normalized to a term and lowered through the checked constructors, and a form
+//! with no rule is a compiler gap rather than a second implementation of the
+//! language. The gate for that is [`crate::compile`]'s
+//! `the_normalized_route_handles_every_construct`, which counts the gaps over
+//! every program shape the suite exercises and asserts the count is zero.
+//!
+//! It covers **expressions**, not yet relational construction. A definition whose
+//! body is a query — the stages, joins and set operations themselves — is still
+//! elaborated by walking source in [`crate::elaborate`], which is where
+//! `follow_alias` and `elaborate_callable` are still needed; that is the
+//! remaining half of the migration. The gap counter is wired into the term
+//! bridge, so that gate's zero is a statement about this layer.
 //!
 //! # Why the normal form is data, not syntax
 //!
@@ -194,7 +208,7 @@ pub enum Term {
     /// argument is its *spec* — a query-level record of partition, order and
     /// frame — not a scalar expression. Keeping it separate is what lets the
     /// spec be lowered by the code that already knows how
-    /// (`elaborate_winspec`) rather than by a second implementation here.
+    /// (`lower_winspec` below) rather than by a second implementation here.
     Window {
         sql: Arc<str>,
         /// The window specification, as written.
@@ -999,123 +1013,30 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
         // A name that is not a local: resolve it, and *inline* what it denotes.
         // This is where aliases disappear — following the chain is not a step,
         // it is the absence of a step.
-        ExprKind::Name(n) => match cx.resolve(module, e.id) {
-            Some(Resolved::Def((dm, dd))) => {
-                // A `sql` template is a value in its own right: inlining it
-                // means building the template, not forcing it to a scalar.
-                if let Some(t) = facts.def_template(dm, dd) {
-                    return Ok(Term::Template {
-                        sql: std::sync::Arc::from(t.sql.as_str()),
-                        args: Vec::new(),
-                        kind: t.kind,
-                        // The template's **declared result**, not this node's
-                        // type. A bare name referring to a template has the
-                        // template's *function* type at its use site
-                        // (`expr r string -> expr r string`), and reading that
-                        // would record a function where the applied result —
-                        // `string` — belongs. The same rule as the overload
-                        // path below, for the same reason.
-                        ty: facts
-                            .def_result_ty(dm, dd)
-                            .unwrap_or(crate::core::ScalarType::Unknown),
-                        origin,
-                    });
-                }
-                let inner = facts
-                    .def_body(dm, dd)
-                    .ok_or_else(|| Gap::new(origin, format!("`{n}` has no body to normalize")))?;
-                // A definition that names itself would inline forever, so the
-                // walk carries what it is already expanding and reports the
-                // cycle the way the elaborator does.
-                // The callee's names were recorded under the **callee's**
-                // module, so the walk moves there. This is what makes a user
-                // definition that calls a prelude helper resolve the helper's
-                // own names correctly.
-                cx.in_module(dm, |cx| {
-                    cx.inlining((dm, dd), |cx| expression(facts, cx, &inner))
-                        .unwrap_or_else(|| Err(recursion_gap(origin, n)))
-                })
-            }
-            // An overloaded name: the checker picked one candidate **for this
-            // use**, and that choice is recorded per use site rather than being
-            // a property of the name. Consulting it is what makes `+` resolve
-            // to the int or the float definition at each occurrence.
-            Some(Resolved::Overloads { module: om, defs }) => {
-                let chosen = match facts.choice(module, body.def, e.id) {
-                    Some(Choice::Def(_, di)) => di,
-                    // The use sits at an open hole of the definition being
-                    // elaborated, so the answer is not recorded at this module
-                    // and site — it belongs to whoever applied the definition,
-                    // and travels in the assignment the walk pushed on entry.
-                    Some(Choice::Hole(k)) => match cx.hole(k) {
-                        Some(chosen) => chosen,
-                        None => {
-                            return Err(Gap::new(
-                                origin,
-                                format!(
-                                    "`{n}` is an open overload (hole {k}) and no assignment \
-                                     for it was supplied"
-                                ),
-                            ))
-                        }
-                    },
-                    // Nothing recorded: the use is open inside its own
-                    // definition. Reported rather than defaulted, because
-                    // taking candidate zero would silently pick one of several
-                    // valid readings.
-                    None => {
-                        return Err(Gap::new(
-                            origin,
-                            format!("the checker recorded no candidate for the overloaded `{n}`"),
-                        ))
-                    }
-                };
-                // A candidate that is not among the recorded ones is a
-                // contradiction between two checker facts; reporting it is
-                // better than elaborating a definition the use did not choose.
-                if !defs.contains(&chosen) {
+        ExprKind::Name(n) => inline_resolved(facts, cx, module, body.def, e.id, n, origin),
+        // `alias.name`: a definition reached through an imported module.
+        //
+        // The checker records the *projection's* resolution exactly as it
+        // records a bare name's — `infer_proj` writes the field's binding at the
+        // projection node's own `ExprId` — so resolving and inlining are the
+        // same steps here rather than a second set of rules for the qualified
+        // spelling. That record is what this arm was missing: without it the
+        // form had no rule at all and was reported as a compiler gap.
+        //
+        // A module alias shadowed by an enclosing binder is not a module; the
+        // checker refuses that use, so it is reported rather than resolved
+        // through the top-level alias that happens to share the name.
+        ExprKind::Proj(base, f) => {
+            if let ExprKind::Name(alias) = &base.kind {
+                if cx.is_local(alias) {
                     return Err(Gap::new(
                         origin,
-                        format!("`{n}` resolved to a definition that is not one of its candidates"),
+                        format!("`{alias}` is a local binding here, not a module"),
                     ));
                 }
-                if let Some(t) = facts.def_template(om, chosen) {
-                    return Ok(Term::Template {
-                        sql: std::sync::Arc::from(t.sql.as_str()),
-                        args: Vec::new(),
-                        kind: t.kind,
-                        // The **candidate's declared result type**, not this
-                        // use site's. An overloaded operator is instantiated
-                        // fresh per use, so the use's own type may still hold an
-                        // unsolved variable — measured on `.age + 1`, whose
-                        // application type is `expr r a` with `a` never solved —
-                        // while the signature of the candidate the checker chose
-                        // says plainly that it returns an int.
-                        ty: facts
-                            .def_result_ty(om, chosen)
-                            .unwrap_or(crate::core::ScalarType::Unknown),
-                        origin,
-                    });
-                }
-                let inner = facts.def_body(om, chosen).ok_or_else(|| {
-                    Gap::new(origin, format!("the chosen candidate of `{n}` has no body"))
-                })?;
-                cx.in_module(om, |cx| {
-                    cx.inlining((om, chosen), |cx| expression(facts, cx, &inner))
-                        .unwrap_or_else(|| Err(recursion_gap(origin, n)))
-                })
             }
-            Some(Resolved::Primitive) => Ok(Term::Primitive {
-                name: std::sync::Arc::from(n.as_str()),
-                args: Vec::new(),
-                ty: facts.use_ty(module, e.id),
-                origin,
-            }),
-            None => Err(Gap::new(
-                origin,
-                format!("the checker recorded no resolution for `{n}`"),
-            )),
-        },
+            inline_resolved(facts, cx, module, body.def, e.id, f, origin)
+        }
         // A lambda: record the binders, normalize the body under them.
         ExprKind::Lambda(param, body_expr) => {
             let inner = cx.with_binder(param, |cx| {
@@ -1146,7 +1067,14 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
             // `Name`: flattening an application discards that node, and a walk
             // that has lost it cannot find the assignment however well it looks.
             let pushed = match &head.kind {
-                ExprKind::Name(_) => {
+                // A qualified callee (`lib.bind`) is the same question asked
+                // through an import: the checker records its choices at the
+                // projection node's own `ExprId`, exactly as it does for a bare
+                // name, so the assignment is read from the same place. Leaving
+                // the qualified spelling out is what made `lib.bind .id 1` an
+                // unanswerable hole — the callee inlined, but with nothing on
+                // the stack to answer its open overload.
+                ExprKind::Name(_) | ExprKind::Proj(..) => {
                     let h = facts.holes_at((module, body.def), head.id);
                     Some(h)
                 }
@@ -1322,59 +1250,148 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
     }
 }
 
-/// Normalize and lower one expression, the way the production path does it.
+/// Inline what one resolved name occurrence denotes.
 ///
-/// The single entry point that runs the whole new route: build a term from the
-/// checker's facts, then lower it into the checked layer. A caller that has a
-/// `CompilerInput` needs nothing else.
+/// Shared by the bare-name arm and the qualified (`alias.name`) arm, because the
+/// checker records the same kind of resolution for both and the rules that turn
+/// one into a term are the same rules: a `sql` template is a value in its own
+/// right, an overloaded name uses the candidate the checker picked **for this
+/// use**, a definition is inlined under its own module, and a definition that
+/// names itself is reported as recursion. A second copy for the qualified
+/// spelling is exactly the duplication this module exists to remove.
 ///
-/// `owner` is the definition whose body the expression belongs to; overload
-/// choices are recorded per definition, so resolving one needs it alongside the
-/// use site.
-pub fn elaborate_via_term(
-    input: crate::compile::CompilerInput<'_>,
+/// `display` is the name as the program wrote it, for messages. `id` is the
+/// occurrence's `ExprId`, which is what the resolution and the overload choice
+/// are keyed by; for a qualified name it is the *field* (`shout` in
+/// `lib.shout`), because that is the node the checker recorded facts for.
+fn inline_resolved(
+    facts: &dyn Facts,
+    cx: &mut Normalizer<'_>,
     module: usize,
     owner: usize,
-    e: &cagara_syntax::ast::Expr,
-) -> Result<crate::checked::CheckedExpr, Gap> {
-    elaborate_via_term_with(input, module, owner, e, &|_| {
-        Err(Gap::new(
-            Origin::new(module, cagara_syntax::ast::Span::default()),
-            "a window specification has no lowering here",
-        ))
-    })
-}
-
-/// Normalize and lower one expression, completing window specs with `spec`.
-///
-/// The window-spec hook is what lets this layer carry a spec's *structure*
-/// without owning its *rules*: partition, order and frame have an existing
-/// implementation, and a second one here would be the duplication this module
-/// exists to remove.
-pub fn elaborate_via_term_with(
-    input: crate::compile::CompilerInput<'_>,
-    module: usize,
-    owner: usize,
-    e: &cagara_syntax::ast::Expr,
-    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
-) -> Result<crate::checked::CheckedExpr, Gap> {
-    elaborate_with_env(input, module, owner, e, &[], spec)
-}
-
-/// Normalize and lower one expression, with the elaboration environment.
-///
-/// `env` is the one thing the checker cannot supply: names bound by an enclosing
-/// application live in the elaborator, and a term is built from the checker's
-/// records plus this.
-pub fn elaborate_with_env(
-    input: crate::compile::CompilerInput<'_>,
-    module: usize,
-    owner: usize,
-    e: &cagara_syntax::ast::Expr,
-    env: &[(String, crate::checked::CheckedExpr)],
-    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
-) -> Result<crate::checked::CheckedExpr, Gap> {
-    elaborate_with_holes(input, module, owner, e, env, &[], spec)
+    id: u32,
+    display: &str,
+    origin: Origin,
+) -> Result<Term, Gap> {
+    match cx.resolve(module, id) {
+        Some(Resolved::Def((dm, dd))) => {
+            // A `sql` template is a value in its own right: inlining it
+            // means building the template, not forcing it to a scalar.
+            if let Some(t) = facts.def_template(dm, dd) {
+                return Ok(Term::Template {
+                    sql: std::sync::Arc::from(t.sql.as_str()),
+                    args: Vec::new(),
+                    kind: t.kind,
+                    // The template's **declared result**, not this node's type.
+                    // A bare name referring to a template has the template's
+                    // *function* type at its use site (`expr r string ->
+                    // expr r string`), and reading that would record a function
+                    // where the applied result — `string` — belongs. The same
+                    // rule as the overload path below, for the same reason.
+                    ty: facts
+                        .def_result_ty(dm, dd)
+                        .unwrap_or(crate::core::ScalarType::Unknown),
+                    origin,
+                });
+            }
+            let inner = facts
+                .def_body(dm, dd)
+                .ok_or_else(|| Gap::new(origin, format!("`{display}` has no body to normalize")))?;
+            // A definition that names itself would inline forever, so the walk
+            // carries what it is already expanding and reports the cycle the way
+            // the elaborator does.
+            // The callee's names were recorded under the **callee's** module, so
+            // the walk moves there. This is what makes a user definition that
+            // calls a prelude helper resolve the helper's own names correctly.
+            cx.in_module(dm, |cx| {
+                cx.inlining((dm, dd), |cx| expression(facts, cx, &inner))
+                    .unwrap_or_else(|| Err(recursion_gap(origin, display)))
+            })
+        }
+        // An overloaded name: the checker picked one candidate **for this use**,
+        // and that choice is recorded per use site rather than being a property
+        // of the name. Consulting it is what makes `+` resolve to the int or the
+        // float definition at each occurrence.
+        Some(Resolved::Overloads { module: om, defs }) => {
+            let chosen = match facts.choice(module, owner, id) {
+                Some(Choice::Def(_, di)) => di,
+                // The use sits at an open hole of the definition being
+                // elaborated, so the answer is not recorded at this module and
+                // site — it belongs to whoever applied the definition, and
+                // travels in the assignment the walk pushed on entry.
+                Some(Choice::Hole(k)) => match cx.hole(k) {
+                    Some(chosen) => chosen,
+                    None => {
+                        return Err(Gap::new(
+                            origin,
+                            format!(
+                                "`{display}` is an open overload (hole {k}) and no assignment \
+                                 for it was supplied"
+                            ),
+                        ))
+                    }
+                },
+                // Nothing recorded: the use is open inside its own definition.
+                // Reported rather than defaulted, because taking candidate zero
+                // would silently pick one of several valid readings.
+                None => {
+                    return Err(Gap::new(
+                        origin,
+                        format!("the checker recorded no candidate for the overloaded `{display}`"),
+                    ))
+                }
+            };
+            // A candidate that is not among the recorded ones is a contradiction
+            // between two checker facts; reporting it is better than elaborating
+            // a definition the use did not choose.
+            if !defs.contains(&chosen) {
+                return Err(Gap::new(
+                    origin,
+                    format!(
+                        "`{display}` resolved to a definition that is not one of its candidates"
+                    ),
+                ));
+            }
+            if let Some(t) = facts.def_template(om, chosen) {
+                return Ok(Term::Template {
+                    sql: std::sync::Arc::from(t.sql.as_str()),
+                    args: Vec::new(),
+                    kind: t.kind,
+                    // The **candidate's declared result type**, not this use
+                    // site's. An overloaded operator is instantiated fresh per
+                    // use, so the use's own type may still hold an unsolved
+                    // variable — measured on `.age + 1`, whose application type
+                    // is `expr r a` with `a` never solved — while the signature
+                    // of the candidate the checker chose says plainly that it
+                    // returns an int.
+                    ty: facts
+                        .def_result_ty(om, chosen)
+                        .unwrap_or(crate::core::ScalarType::Unknown),
+                    origin,
+                });
+            }
+            let inner = facts.def_body(om, chosen).ok_or_else(|| {
+                Gap::new(
+                    origin,
+                    format!("the chosen candidate of `{display}` has no body"),
+                )
+            })?;
+            cx.in_module(om, |cx| {
+                cx.inlining((om, chosen), |cx| expression(facts, cx, &inner))
+                    .unwrap_or_else(|| Err(recursion_gap(origin, display)))
+            })
+        }
+        Some(Resolved::Primitive) => Ok(Term::Primitive {
+            name: std::sync::Arc::from(display),
+            args: Vec::new(),
+            ty: facts.use_ty(module, id),
+            origin,
+        }),
+        None => Err(Gap::new(
+            origin,
+            format!("the checker recorded no resolution for `{display}`"),
+        )),
+    }
 }
 
 /// Normalize and lower, with the environment **and** the definition's hole
@@ -1581,100 +1598,6 @@ fn frame_offset(t: &Term) -> Result<i64, Gap> {
     }
 }
 
-/// Recover the source expression a term was built from, where one exists.
-///
-/// A narrow, deliberate escape hatch for concepts the term layer carries but
-/// does not own the rules for — today only a window specification. The term
-/// keeps the spec's *structure* so that aliases inside it are already resolved;
-/// the rules for interpreting a partition, an order key, or a frame bound live
-/// in `elaborate::elaborate_winspec`, and handing the structure back is how those
-/// rules keep one implementation instead of growing a second one here.
-///
-/// `None` for a term with no source form — a lambda, an unreduced application —
-/// which a caller reports rather than guesses at.
-pub fn term_to_expr(t: &Term) -> Option<cagara_syntax::ast::Expr> {
-    use cagara_syntax::ast::{Expr, ExprKind, Side};
-    let mk = |span: cagara_syntax::ast::Span, kind: ExprKind| Expr { id: 0, span, kind };
-    match t {
-        Term::Column { side, name, .. } => {
-            // The span is recovered from the checker's record by the caller;
-            // here it is empty because the spec is re-read by *name*, not by
-            // position, and no diagnostic is rendered from this syntax.
-            let span = cagara_syntax::ast::Span::default();
-            let _ = side;
-            Some(mk(span, ExprKind::Field(Side::Single, name.clone())))
-        }
-        Term::Local { label, .. } => {
-            let span = cagara_syntax::ast::Span::default();
-            Some(mk(span, ExprKind::Name(label.clone())))
-        }
-        Term::Lit { lit, .. } => {
-            use crate::ir::Lit;
-            let l = match lit {
-                Lit::Int(i) => cagara_syntax::ast::Lit::Int(*i),
-                Lit::Float(s) => cagara_syntax::ast::Lit::Float(s.clone()),
-                Lit::Str(s) => cagara_syntax::ast::Lit::Str(s.clone()),
-                Lit::Bool(b) => cagara_syntax::ast::Lit::Bool(*b),
-            };
-            Some(mk(cagara_syntax::ast::Span::default(), ExprKind::Lit(l)))
-        }
-        Term::Record { fields, .. } => {
-            let mut out = Vec::with_capacity(fields.len());
-            for (name, value) in fields {
-                out.push((name.clone(), term_to_expr(value)?));
-            }
-            Some(mk(
-                cagara_syntax::ast::Span::default(),
-                ExprKind::Record(out),
-            ))
-        }
-        Term::List { items, .. } => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                out.push(term_to_expr(item)?);
-            }
-            Some(mk(cagara_syntax::ast::Span::default(), ExprKind::List(out)))
-        }
-        // A primitive, bare or applied. A primitive **with arguments** is an
-        // application whose head is the primitive — `__desc .created_at`,
-        // `__rows a b` — and reading only the bare form is why the order and
-        // frame of a window specification came back unreadable.
-        Term::Primitive { name, args, .. } => {
-            let head = mk(
-                cagara_syntax::ast::Span::default(),
-                ExprKind::Primitive(name.to_string()),
-            );
-            if args.is_empty() {
-                return Some(head);
-            }
-            let mut out = Vec::with_capacity(args.len());
-            for a in args {
-                out.push(term_to_expr(a)?);
-            }
-            Some(mk(
-                cagara_syntax::ast::Span::default(),
-                ExprKind::App(Box::new(head), out.into()),
-            ))
-        }
-        // An application whose head is a binder. Nothing in a window spec is
-        // written that way, so it is reported rather than guessed at.
-        Term::Apply { head, args, .. } => {
-            let f = term_to_expr(head)?;
-            let mut out = Vec::with_capacity(args.len());
-            for a in args {
-                out.push(term_to_expr(a)?);
-            }
-            Some(mk(
-                cagara_syntax::ast::Span::default(),
-                ExprKind::App(Box::new(f), out.into()),
-            ))
-        }
-        Term::Elaborated(_) => None,
-        Term::Template { .. } | Term::Window { .. } => None,
-        Term::Lambda { .. } | Term::Case { .. } => None,
-    }
-}
-
 /// Lower a normalized term into the **checked expression** layer.
 ///
 /// This is the consumer side of the bridge. Doing it from a [`Term`] rather
@@ -1701,10 +1624,10 @@ pub fn lower_expr(t: &Term) -> Result<crate::checked::CheckedExpr, Gap> {
 ///
 /// The hook exists because a window's spec is a **query-level** record with its
 /// own rules — which fields exist, that an order key must name a column, what a
-/// frame bound may be — and those rules already have an implementation
-/// (`elaborate::elaborate_winspec`). Reimplementing them here would be exactly
-/// the second-source-of-truth duplication this module exists to remove, so the
-/// term layer carries the spec's *structure* and hands it back for lowering.
+/// frame bound may be — and those rules are a separate lowering
+/// ([`lower_winspec`]) rather than part of this walk. Handing the spec's term
+/// back is what keeps them in one place: the term layer carries the spec's
+/// *structure*, and this walk never reads it a second way.
 ///
 /// A caller with no window support passes a hook that refuses, which is what
 /// [`lower_expr`] does: an expression-only consumer gets a clear gap rather than
@@ -2687,236 +2610,6 @@ mod bridge_tests {
                 );
             }
             other => panic!("expected a lambda, got {other:?}"),
-        }
-    }
-}
-
-/// The new path must agree with the old one, definition for definition.
-///
-/// This is the migration's safety net and it is temporary by design: while both
-/// paths exist, every scalar expression the old elaborator can build must come
-/// out **structurally identical** from a term. When the old path is deleted this
-/// test goes with it — its value is entirely in comparing the two.
-///
-/// It compares `CheckedExpr` values rather than generated SQL because the two
-/// are different claims. SQL equality would pass if both paths produced the same
-/// string by different trees; `CheckedExpr` equality is the stronger statement
-/// that the *trees* agree, which is what makes deleting the old one safe.
-#[cfg(test)]
-mod migration_agreement {
-    use super::*;
-    use crate::check::check;
-    use crate::compile::CompilerInput;
-    use crate::workspace::Workspace;
-
-    /// Elaborate `expr` the old way.
-    fn old_way(
-        ws: &Workspace,
-        module: usize,
-        owner: usize,
-        e: &cagara_syntax::ast::Expr,
-    ) -> Result<crate::checked::CheckedExpr, String> {
-        let tc = check(ws);
-        let input = CompilerInput::new(ws, &tc);
-        let scope = &ws.modules[module].scope;
-        crate::elaborate::elaborate_expr(input, module, owner, scope, e)
-            .map_err(|err| err.message.clone())
-    }
-
-    /// Elaborate `expr` the new way, through a term.
-    fn new_way(
-        ws: &Workspace,
-        module: usize,
-        owner: usize,
-        e: &cagara_syntax::ast::Expr,
-    ) -> Result<crate::checked::CheckedExpr, String> {
-        let tc = check(ws);
-        let facts = WorkspaceFacts::new(ws, &tc);
-        let body = Body {
-            module,
-            def: owner,
-            expr: e.clone(),
-        };
-        let resolved = |m: usize, id: u32| facts.resolution(m, id);
-        let mut cx = Normalizer::new(Box::new(resolved));
-        let term = cx
-            .in_module(module, |cx| expression(&facts, cx, &body))
-            .map_err(|g| g.message)?;
-        lower_expr(&term).map_err(|g| g.message)
-    }
-
-    /// Every *column-shaped* expression in the corpus elaborates identically.
-    ///
-    /// Columns, literals and template applications are the family the new path
-    /// covers today, so the comparison is restricted to expressions that
-    /// produce a `CheckedExpr` — which is also the honest scope of the claim.
-    #[test]
-    fn column_and_template_expressions_agree() {
-        let cases = [
-            "q = users & select { x = .name }\n",
-            "q = users & select { x = upper .name }\n",
-            "q = users & select { x = trim (upper .name) }\n",
-            "q = users & select { x = .age + 1 }\n",
-            "q = users & select { x = 1 }\n",
-            "q = users & select { x = \"a\" }\n",
-            "q = users & select { x = true }\n",
-            // An alias resolved through the checker's record.
-            "f = upper\nq = users & select { x = f .name }\n",
-            // A computed function value, the `07a7e12` case.
-            "q = users & select { x = (trim >>> upper) .name }\n",
-            // An inline lambda, the case that had no definition to look up.
-            "q = users & select { x = (f => upper f) .name }\n",
-        ];
-        const TABLES: &str =
-            "users : query { id = int, name = string, age = int, active = bool } = \
-             table \"public\" \"users\"\n";
-        let mut compared = 0usize;
-        for src in cases {
-            let ws = Workspace::from_source(&format!("{TABLES}{src}"));
-            let tc = check(&ws);
-            assert!(tc.errors().is_empty(), "{src}: {:?}", tc.errors());
-            // Find every projection value: the second field expression of a
-            // `select { x = … }`. Walking the AST here is fine — this is a test
-            // harness locating expressions to compare, not a compiler phase
-            // deciding what they mean.
-            for (def_index, def) in ws.modules[ws.root].module.defs.iter().enumerate() {
-                let mut found = Vec::new();
-                collect_projection_values(&def.body, &mut found);
-                for e in found {
-                    let old = old_way(&ws, ws.root, def_index, e);
-                    let new = new_way(&ws, ws.root, def_index, e);
-                    match (&old, &new) {
-                        (Ok(a), Ok(b)) => {
-                            // Compared **up to origin**. The two paths
-                            // legitimately differ there, and the difference is
-                            // not a defect in either: elaborated through a
-                            // helper, the inner template is built while walking
-                            // the *prelude's* `_>>>_` body, so the old path
-                            // records the prelude's span; the new path keeps the
-                            // span of the user's own expression. Both are
-                            // truthful, user-facing diagnostics come from the
-                            // checker rather than from these origins (verified
-                            // against the CLI), and the new one points at text
-                            // the user can actually edit.
-                            //
-                            // What must agree is *shape and type*, which is what
-                            // makes deleting the old path safe.
-                            assert_eq!(
-                                strip_expr_origins(a),
-                                strip_expr_origins(b),
-                                "{}: the two paths disagree on `{}`",
-                                src.trim(),
-                                span_text(&ws, ws.root, e)
-                            );
-                            compared += 1;
-                        }
-                        // Both failing is agreement too: the claim is that the
-                        // new path is not *narrower* than the old one.
-                        (Err(_), Err(_)) => compared += 1,
-                        (a, b) => panic!(
-                            "{}: paths disagree on `{}`:\n old: {a:?}\n new: {b:?}",
-                            src.trim(),
-                            span_text(&ws, ws.root, e)
-                        ),
-                    }
-                }
-            }
-        }
-        // A floor, so a change that silently stops finding expressions to
-        // compare fails instead of passing vacuously. Deliberately well below
-        // the current count rather than equal to it: the number of projection
-        // values a case yields is an implementation detail of the walk, while
-        // "the comparison actually ran" is the property worth asserting.
-        assert!(compared >= 8, "only {compared} expressions were compared");
-    }
-
-    /// A `CheckedExpr` with its origins replaced by a canonical one.
-    ///
-    /// `CheckedExpr` exposes `phase()`, `ty()`, `origin()` and `kind()` but no
-    /// constructor that rebuilds one from parts, so this compares the two
-    /// observable halves that matter — the type and the printed structure with
-    /// spans removed — rather than claiming to compare whole values.
-    fn strip_expr_origins(e: &crate::checked::CheckedExpr) -> String {
-        let debug = format!("{e:?}");
-        // Remove `origin: Origin { .. }` groups. The printed form nests, so a
-        // simple scan for balanced braces is enough and does not need the
-        // checked layer to grow a test-only API.
-        let mut out = String::with_capacity(debug.len());
-        let bytes = debug.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if debug[i..].starts_with("origin: Origin {") {
-                let mut depth = 0usize;
-                let mut j = i + "origin: Origin ".len();
-                loop {
-                    match bytes.get(j) {
-                        Some(b'{') => depth += 1,
-                        Some(b'}') => {
-                            depth -= 1;
-                            if depth == 0 {
-                                j += 1;
-                                break;
-                            }
-                        }
-                        None => break,
-                        _ => {}
-                    }
-                    j += 1;
-                }
-                out.push_str("origin: _");
-                j = j.max(i + 1);
-                while j < bytes.len() && bytes[j] == b',' {
-                    j += 1;
-                }
-                i = j;
-                continue;
-            }
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-        out
-    }
-
-    fn span_text(ws: &Workspace, module: usize, e: &cagara_syntax::ast::Expr) -> String {
-        ws.modules[module]
-            .text
-            .get(e.span.start as usize..e.span.end as usize)
-            .unwrap_or("?")
-            .to_string()
-    }
-
-    /// Collect the value expressions of every `select { … }` in a body.
-    fn collect_projection_values<'a>(
-        e: &'a cagara_syntax::ast::Expr,
-        out: &mut Vec<&'a cagara_syntax::ast::Expr>,
-    ) {
-        use cagara_syntax::ast::ExprKind as K;
-        match &e.kind {
-            K::Record(fields) => {
-                for (_, v) in fields {
-                    out.push(v);
-                }
-            }
-            K::App(f, args) => {
-                collect_projection_values(f, out);
-                for a in args.iter() {
-                    collect_projection_values(a, out);
-                }
-            }
-            K::Lambda(_, b) => collect_projection_values(b, out),
-            K::Case(arms) => {
-                for (c, v) in arms {
-                    collect_projection_values(c, out);
-                    collect_projection_values(v, out);
-                }
-            }
-            K::Proj(b, _) => collect_projection_values(b, out),
-            K::List(xs) => {
-                for x in xs {
-                    collect_projection_values(x, out);
-                }
-            }
-            _ => {}
         }
     }
 }

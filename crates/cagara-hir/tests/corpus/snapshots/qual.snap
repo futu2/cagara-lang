@@ -1,0 +1,6 @@
+# qual.cagara
+t: query { id = int, name = string } => SELECT id, name FROM s.t
+shout2: expr a string -> expr a string
+bind2: expr a b -> expr a b -> expr a b
+via_alias: query { s = string, i = int } => SELECT UPPER(name) AS s, id + 1 AS i FROM s.t
+via_local: query { s = string, i = int } => SELECT UPPER(name) AS s, id + 1 AS i FROM s.t

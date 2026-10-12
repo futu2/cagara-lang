@@ -69,8 +69,20 @@ fn corpus_files() -> Vec<PathBuf> {
 /// same name cannot collide.
 fn snapshot_path(source: &Path) -> PathBuf {
     let root = repo_root();
-    let relative = source.strip_prefix(&root).unwrap_or(source);
-    let mut snap = corpus_dir().join("snapshots").join(relative);
+    let corpus = corpus_dir();
+    // An example strips against the repository root, so it keeps its `examples/`
+    // component. A corpus case comes from `corpus_dir()` itself, which is not
+    // below the root in path-component terms — the root reaches it through a
+    // `..`, and `strip_prefix` is lexical — so it is stripped against the corpus
+    // directory instead and lands at `snapshots/<name>.snap`. Without that
+    // second attempt the strip fails, `join` sees an absolute path and discards
+    // its base, and a case's snapshot is written beside the case rather than
+    // under `snapshots/`, where this function's documentation says it goes.
+    let relative = source
+        .strip_prefix(&root)
+        .or_else(|_| source.strip_prefix(&corpus))
+        .unwrap_or(source);
+    let mut snap = corpus.join("snapshots").join(relative);
     snap.set_extension("snap");
     snap
 }

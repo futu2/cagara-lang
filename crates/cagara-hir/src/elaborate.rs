@@ -1101,7 +1101,7 @@ fn apply_stage(
         // (`omit` is `string -> query r -> query k`), so applying it to the
         // piped input follows its declared function shape. Recognising it here means
         // elaborating the body with the input bound to whatever the body's
-        // argument is, which is what `elaborate_stage_body` does.
+        // argument is, which is what `elaborate_user_stage` below does.
         _ => {
             if let Some(Binding::Def(dm, di)) = cx.scope.get(stage_name).cloned() {
                 return elaborate_user_stage(cx, dm, di, stage_args, input, origin);
@@ -1371,38 +1371,6 @@ fn elaborate_order(cx: Ctx<'_>, e: &ast::Expr) -> R<Vec<(CheckedExpr, bool)>> {
 
 /// Elaborate a scalar expression to a `CheckedExpr`.
 ///
-/// This is the module's public entry point for scalar elaboration.
-pub fn elaborate_expr(
-    input: CompilerInput<'_>,
-    module: usize,
-    owner: usize,
-    scope: &std::collections::HashMap<String, Binding>,
-    e: &ast::Expr,
-) -> R<CheckedExpr> {
-    // No enclosing definition, so the cycle guard starts empty: a definition
-    // that names itself is caught when *it* is descended into, which keeps this
-    // the same caller-facing signature it has always had.
-    let active: [(usize, usize); 0] = [];
-    // No enclosing lambda either, so the environment starts empty; this is the
-    // caller-facing entry point and keeps the signature it has always had.
-    let env: [(String, CheckedValue); 0] = [];
-    let holes: [(usize, usize); 0] = [];
-    elaborate_expr_inner(
-        Ctx {
-            input,
-            module,
-            owner,
-            scope,
-            env: &env,
-            holes: &holes,
-            active: &active,
-        },
-        e,
-    )
-}
-
-/// Elaborate a scalar expression to a `CheckedExpr`.
-///
 /// The type comes from the checker ([`TypeCheck::use_ty`]); this function never
 /// invents one. When the checker recorded no scalar for the node, that is
 /// reported rather than guessed — a `CheckedExpr` with a made-up `ScalarType`
@@ -1442,11 +1410,13 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
             TERM_HITS.with(|c| c.set(c.get() + 1));
             Ok(lowered)
         }
-        // No fallback: the normalized route handles every construct, held by
-        // `compile::tests::the_source_path_is_unreachable`. A `Gap` here means a
-        // construct was added to the language without a term rule, and reporting
-        // it as a compiler gap is better than silently reverting to a second
-        // implementation of the language that no longer exists.
+        // No fallback: the source path this could revert to is gone, so a `Gap`
+        // here means a construct was added to the language without a term rule.
+        // It is reported rather than handled by a second implementation of the
+        // language that no longer exists. What keeps that honest is
+        // `compile::tests::the_normalized_route_handles_every_construct`, which
+        // counts these gaps across every program shape the suite exercises and
+        // asserts the count is zero.
         Err(gap) => Err(Error::unsupported(gap.message).at(gap.origin)),
     }
 }
@@ -1462,7 +1432,7 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
 /// reach the primitive arm, which is why the whole chain is resolved *before*
 /// the body is dispatched on.
 ///
-/// `(dm, di)` is what [`resolve_callable`] chose and `site` is the
+/// `(dm, di)` is the definition the caller resolved and `site` is the
 /// application's [`ExprId`](cagara_syntax::ast::ExprId). A target that is an
 /// *overload set* (`s = sum`) is resolved to the candidate this use selected:
 /// overloads are chosen per use, and the alias's own choice is recorded as a
@@ -1505,7 +1475,7 @@ fn follow_alias(cx: Ctx<'_>, dm: usize, di: usize, site: u32, origin: Origin) ->
             // An alias of an **overload set**: `s = sum`. The alias's own use of
             // `sum` is an open hole, resolved at each use of the alias, so the
             // answer for this call comes from the caller's assignment for this
-            // site — the same place [`resolve_callable`] reads any other use.
+            // site — the same place `choose` reads any other use.
             Some(Binding::Overloads(tm, cands)) => {
                 let chosen = choose(
                     cx.input.type_check(),
@@ -1562,8 +1532,8 @@ pub(crate) enum Callable {
     },
     /// A user-written function: a lambda body plus the binders still unbound.
     ///
-    /// The body is held as source so applying it re-runs `elaborate_lambda`'s
-    /// binding logic, which is what keeps closures, shadowing and the hole
+    /// The body is held as source so applying it re-enters elaboration with the
+    /// binders bound, which is what keeps closures, shadowing and the hole
     /// assignment behaving exactly as they do on a direct call.
     Closure {
         /// Where the body lives: the module and definition it belongs to.
@@ -1981,9 +1951,10 @@ fn elaborate_callable(cx: Ctx<'_>, e: &ast::Expr) -> R<Option<Callable>> {
         _ => return Ok(None),
     };
     // An alias (`up = upper`) has no body of its own; the definition it names
-    // does. Followed here as well as in `elaborate_call`, because this is the
-    // path an alias takes when used as a *value* — passed to another function
-    // or composed with `>>>` — rather than applied to arguments directly.
+    // does. Followed here, because this is the path an alias takes when used as
+    // a *value* — passed to another function or composed with `>>>` — rather
+    // than applied to arguments directly; a direct call is inlined by the term
+    // layer, where following a chain is not a step at all.
     // Without it the alias matched neither `Sql` nor `Lambda` below and fell
     // through to the expression reading, which built a zero-argument template:
     // a plausible-but-wrong value that then failed to accept an argument.
@@ -2201,10 +2172,10 @@ fn complete_template(
         // reported "uses a column that is not grouped" where a direct
         // `sum .amount` produced `SUM(amount)`.
         //
-        // These are the same two constructors the direct call in
-        // `elaborate_call` uses, so a deferred call and a written-out one cannot
-        // disagree about phase — which is what the parity check would otherwise
-        // report, or worse, not report.
+        // These are the same two constructors the term layer's lowering uses
+        // (`normalize::lower_expr_with`), so a deferred call and a written-out
+        // one cannot disagree about phase — which is what the parity check would
+        // otherwise report, or worse, not report.
         DeclaredKind::Agg => CheckedExpr::agg_template(sql, args, ty, origin),
         DeclaredKind::Win => {
             // A window template's first argument is its spec, which was

@@ -135,9 +135,13 @@ The current checked layer supports local, testable claims:
 - Outer-join nullability and set-operation compatibility are represented in
   output rows.
 - Erasure is structural and leaves no type-checking work to SQL lowering.
-- Normalization is total over the language: every expression form reduces to a
-  term, and a form without a rule is reported as a compiler gap rather than
-  silently lowered by a second path. There is no fallback route.
+- Normalization is total over scalar expressions: every expression form reduces
+  to a term, and a form without a rule is reported as a compiler gap rather than
+  silently lowered by a second path. There is no fallback route for an
+  expression. Relational construction is not normalized yet: a definition whose
+  body is a query is still elaborated from source, and that layer both reports a
+  capability gap and, in places, tries its next reading of an expression, so the
+  claim is scoped to expressions rather than to both layers.
 
 The compiler uses an explicit immutable input view and produces an owned
 compilation result. The shell still owns Salsa state and the checker uses

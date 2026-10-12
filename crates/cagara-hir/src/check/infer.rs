@@ -1217,8 +1217,18 @@ impl<'w> Checker<'w> {
             let scope = self.env.scope;
             if !env.iter().any(|(k, _)| k == n) {
                 if let Some(Binding::Module(t)) = scope.get(n) {
-                    let own = self.env.owns[t];
-                    let t = match own.get(f).cloned() {
+                    let binding = self.env.owns[t].get(f).cloned();
+                    // Record **what this projection resolved to**, exactly as
+                    // `lookup` does for a bare name. A module-scope name becomes
+                    // a binding in two places, and leaving this one unrecorded
+                    // is what made `lib.shout .name` a construct with no term
+                    // rule: the fact the bridge reads was never written for a
+                    // qualified name. One place records, so the two cannot
+                    // disagree.
+                    if let Some(resolved) = binding.as_ref().and_then(Resolved::of_binding) {
+                        self.resolutions.insert((self.module, e.id), resolved);
+                    }
+                    let t = match binding {
                         Some(Binding::Def(dm, i)) => {
                             self.def_type(dm, i, e.id, sp).map_err(at(sp))?
                         }

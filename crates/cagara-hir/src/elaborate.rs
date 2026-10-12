@@ -41,6 +41,29 @@ thread_local! {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// How many expressions took the normalized route.
+    static TERM_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times the alias-following walk ran. Should reach zero once
+    /// normalization resolves aliases, which is what makes deleting it safe.
+    static FOLLOW_ALIAS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn follow_alias_calls() -> usize {
+    FOLLOW_ALIAS_CALLS.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn term_hits() -> usize {
+    TERM_HITS.with(|c| c.get())
+}
+
+#[cfg(test)]
 pub(crate) fn elaborate_runs() -> usize {
     ELABORATE_RUNS.with(|runs| runs.get())
 }
@@ -1430,6 +1453,50 @@ pub fn elaborate_expr(
 /// reported rather than guessed — a `CheckedExpr` with a made-up `ScalarType`
 /// would be worse than an error, because everything downstream trusts it.
 fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
+    // The normalized route first: build a term from the checker's recorded
+    // facts and lower it, so name resolution and application happen once,
+    // through the reduction relation, instead of by re-walking source here.
+    //
+    // A `Gap` means this term layer has no rule for the form yet — a stage, a
+    // record, a list in a position it does not cover — and those still go
+    // through the code below. The two paths are held to be equivalent by
+    // `normalize::migration_agreement`, which compares their `CheckedExpr`s
+    // expression for expression on a corpus; when the remaining families are
+    // migrated that test and this fallback both go.
+    //
+    // A local binder is the one case that must *not* take this route: a
+    // parameter bound by an enclosing application is a `CheckedValue` here, not
+    // something the checker recorded a resolution for, and the term layer has no
+    // access to the elaboration environment. Those are handled below.
+    if !is_locally_bound(cx, e) {
+        if let Ok(lowered) = crate::normalize::elaborate_via_term(cx.input, cx.module, cx.owner, e)
+        {
+            #[cfg(test)]
+            TERM_HITS.with(|c| c.set(c.get() + 1));
+            return Ok(lowered);
+        }
+    }
+    elaborate_expr_source(cx, e)
+}
+
+/// Whether `e` is a name bound by an enclosing application rather than the
+/// module scope.
+///
+/// Such a binding lives in the elaboration environment, which the term layer
+/// deliberately cannot see: it works from the checker's records, and a lambda
+/// parameter is not one.
+fn is_locally_bound(cx: Ctx<'_>, e: &ast::Expr) -> bool {
+    match &e.kind {
+        ExprKind::Name(n) => cx.env.iter().any(|(k, _)| k == n),
+        _ => false,
+    }
+}
+
+/// Elaborate a scalar expression straight from source.
+///
+/// The original path, still used for the forms the term layer does not cover
+/// and for locally bound names.
+fn elaborate_expr_source(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
     let _at = |span: Span| Origin::new(cx.module, span);
     let origin = Origin::new(cx.module, e.span);
     let ty = |what: &str| -> R<ScalarType> {
@@ -1760,6 +1827,8 @@ fn resolve_callable(cx: Ctx<'_>, name: &str, f: &ast::Expr, origin: Origin) -> R
 ///
 /// [`ExprId`]: cagara_syntax::ast::ExprId
 fn follow_alias(cx: Ctx<'_>, dm: usize, di: usize, site: u32, origin: Origin) -> R<(usize, usize)> {
+    #[cfg(test)]
+    FOLLOW_ALIAS_CALLS.with(|c| c.set(c.get() + 1));
     let mut current = (dm, di);
     let mut seen: Vec<(usize, usize)> = Vec::new();
     loop {

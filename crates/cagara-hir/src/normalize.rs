@@ -101,6 +101,19 @@ pub enum Term {
         ty: crate::core::ScalarType,
         origin: Origin,
     },
+    /// A **column reference**: `.x`, `.<x` (left of a join) or `.>x` (right).
+    ///
+    /// Distinct from [`Term::Local`] because the side is part of the meaning,
+    /// not part of the spelling. Folding it into the label as a prefix lost it:
+    /// a join predicate's `.<up1` became a `Single`-sided column, and the
+    /// checked layer correctly refused it — "join predicates must say which
+    /// input a column comes from" — for a program the checker had accepted.
+    Column {
+        side: cagara_syntax::ast::Side,
+        name: String,
+        ty: crate::core::ScalarType,
+        origin: Origin,
+    },
     /// A literal, already at the type the checker gave it.
     Lit {
         lit: crate::ir::Lit,
@@ -421,7 +434,7 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
         // this is the binder's own name, recorded by the checker, not a name to
         // be looked up.
         Term::Local { label, .. } if label == name => arg.clone(),
-        Term::Local { .. } | Term::Lit { .. } => term,
+        Term::Local { .. } | Term::Column { .. } | Term::Lit { .. } => term,
         Term::Template {
             sql,
             args,
@@ -559,7 +572,14 @@ impl Resolved {
 /// A caller supplies one of these per unresolved name. Returning `None` means
 /// "this occurrence is a local", which is the only case where the term keeps a
 /// name at all.
-pub type Resolver<'a> = dyn Fn(u32) -> Option<Resolved> + 'a;
+/// Resolves one name occurrence, **given the module it was written in**.
+///
+/// The module is a parameter rather than captured because the walk crosses
+/// module boundaries: a user definition that calls a prelude helper descends
+/// into the prelude's body, and that body's names are recorded under the
+/// *prelude's* index. A resolver that captured the caller's module asked the
+/// wrong module and reported a resolved name as unrecorded.
+pub type Resolver<'a> = dyn Fn(usize, u32) -> Option<Resolved> + 'a;
 
 /// The environment normalization runs in.
 ///
@@ -575,6 +595,9 @@ pub struct Normalizer<'a> {
     cache: HashMap<DefId, Arc<Term>>,
     /// Bindings introduced by enclosing lambdas, innermost last.
     binders: Vec<String>,
+    /// The module whose body is being walked, so a name is resolved against the
+    /// records of the module it was *written in* rather than the caller's.
+    current_module: usize,
 }
 
 impl<'a> Normalizer<'a> {
@@ -584,6 +607,7 @@ impl<'a> Normalizer<'a> {
             owner: None,
             cache: HashMap::new(),
             binders: Vec::new(),
+            current_module: 0,
         }
     }
 
@@ -596,9 +620,18 @@ impl<'a> Normalizer<'a> {
         self.binders.iter().any(|b| b == name)
     }
 
-    /// Resolve one occurrence through the caller's resolver.
-    pub fn resolve(&self, id: u32) -> Option<Resolved> {
-        (self.resolver)(id)
+    /// Resolve one occurrence, in the module currently being walked.
+    ///
+    /// `module` comes from [`Self::current_module`], which
+    /// [`Self::define`] moves as the walk descends, so a prelude body resolves
+    /// against the prelude's own records.
+    pub fn resolve(&self, module: usize, id: u32) -> Option<Resolved> {
+        (self.resolver)(module, id)
+    }
+
+    /// The module whose body is being walked right now.
+    pub fn current_module(&self) -> usize {
+        self.current_module
     }
 
     /// Push a binder for the duration of `f`.
@@ -606,6 +639,18 @@ impl<'a> Normalizer<'a> {
         self.binders.push(name.to_string());
         let out = f(self);
         self.binders.pop();
+        out
+    }
+
+    /// Walk a definition of `module`, restoring the previous module after.
+    ///
+    /// The module moves with the walk rather than being fixed at the entry
+    /// point: descending into a prelude helper means the names inside it were
+    /// recorded under the prelude's index.
+    pub fn in_module<T>(&mut self, module: usize, f: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = std::mem::replace(&mut self.current_module, module);
+        let out = f(self);
+        self.current_module = previous;
         out
     }
 
@@ -772,16 +817,16 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
         // predicate; it is part of the term rather than a later re-reading of
         // the syntax, because a join's sides are a property of the query, not
         // of the expression.
-        ExprKind::Field(_, n) => Ok(Term::Local {
-            id: e.id,
-            label: format!(".{n}"),
+        ExprKind::Field(side, n) => Ok(Term::Column {
+            side: *side,
+            name: n.clone(),
             ty: facts.use_ty(module, e.id),
             origin,
         }),
         // A name that is not a local: resolve it, and *inline* what it denotes.
         // This is where aliases disappear — following the chain is not a step,
         // it is the absence of a step.
-        ExprKind::Name(n) => match cx.resolve(e.id) {
+        ExprKind::Name(n) => match cx.resolve(module, e.id) {
             Some(Resolved::Def((dm, dd))) => {
                 // A `sql` template is a value in its own right: inlining it
                 // means building the template, not forcing it to a scalar.
@@ -806,7 +851,11 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                 let inner = facts
                     .def_body(dm, dd)
                     .ok_or_else(|| Gap::new(origin, format!("`{n}` has no body to normalize")))?;
-                expression(facts, cx, &inner)
+                // The callee's names were recorded under the **callee's**
+                // module, so the walk moves there. This is what makes a user
+                // definition that calls a prelude helper resolve the helper's
+                // own names correctly.
+                cx.in_module(dm, |cx| expression(facts, cx, &inner))
             }
             // An overloaded name: the checker picked one candidate **for this
             // use**, and that choice is recorded per use site rather than being
@@ -865,7 +914,7 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                 let inner = facts.def_body(om, chosen).ok_or_else(|| {
                     Gap::new(origin, format!("the chosen candidate of `{n}` has no body"))
                 })?;
-                expression(facts, cx, &inner)
+                cx.in_module(om, |cx| expression(facts, cx, &inner))
             }
             Some(Resolved::Primitive) => Ok(Term::Primitive {
                 name: std::sync::Arc::from(n.as_str()),
@@ -942,6 +991,48 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                 origin,
             ))
         }
+        // A list literal: `inList [..] .x`. Kept in source order; the checked
+        // layer takes the elements positionally.
+        ExprKind::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(expression(
+                    facts,
+                    cx,
+                    &Body {
+                        module,
+                        def: body.def,
+                        expr: item.clone(),
+                    },
+                )?);
+            }
+            Ok(Term::List { items: out, origin })
+        }
+        // A record literal: `select { x = … }`, `update { … }`, a window spec.
+        // Each field is normalized, and the record keeps its **source order**,
+        // because a projection's output row is ordered by it and the checked
+        // layer builds the row from the order it is given.
+        ExprKind::Record(fields) => {
+            let mut out = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                out.push((
+                    name.clone(),
+                    expression(
+                        facts,
+                        cx,
+                        &Body {
+                            module,
+                            def: body.def,
+                            expr: value.clone(),
+                        },
+                    )?,
+                ));
+            }
+            Ok(Term::Record {
+                fields: out,
+                origin,
+            })
+        }
         // A `primitive "__name"` reference. Arguments, when there are any,
         // arrive as an enclosing `App` and are reduced by the application arm
         // above; a bare primitive is a value awaiting them, exactly as a `sql`
@@ -963,6 +1054,43 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
             ),
         )),
     }
+}
+
+/// Normalize and lower one expression, the way the production path does it.
+///
+/// The single entry point that runs the whole new route: build a term from the
+/// checker's facts, then lower it into the checked layer. A caller that has a
+/// `CompilerInput` needs nothing else.
+///
+/// `owner` is the definition whose body the expression belongs to; overload
+/// choices are recorded per definition, so resolving one needs it alongside the
+/// use site.
+pub fn elaborate_via_term(
+    input: crate::compile::CompilerInput<'_>,
+    module: usize,
+    owner: usize,
+    e: &cagara_syntax::ast::Expr,
+) -> Result<crate::checked::CheckedExpr, Gap> {
+    let facts = InputFacts::new(input);
+    let body = Body {
+        module,
+        def: owner,
+        expr: e.clone(),
+    };
+    // The resolver reads the checker's record for this module. `Normalizer`
+    // calls it per name occurrence, so the borrow of `facts` must outlive the
+    // walk — hence the closure borrowing `facts` rather than `input`.
+    let resolve = |module: usize, id: u32| facts.resolution(module, id);
+    let mut cx = Normalizer::new(Box::new(resolve));
+    let term = match cx.in_module(module, |cx| expression(&facts, cx, &body)) {
+        Ok(t) => t,
+        Err(g) => {
+            note_gap(&g.message);
+            return Err(g);
+        }
+    };
+    let _ = &facts;
+    lower_expr(&term)
 }
 
 /// Lower a normalized term into the **checked expression** layer.
@@ -996,6 +1124,12 @@ pub fn lower_expr(t: &Term) -> Result<crate::checked::CheckedExpr, Gap> {
                 *origin,
             ))
         }
+        Term::Column {
+            side,
+            name,
+            ty,
+            origin,
+        } => Ok(C::column(*side, name.clone(), ty.clone(), *origin)),
         Term::Lit { lit, origin, .. } => Ok(C::lit(lit.clone(), *origin)),
         Term::Template {
             sql,
@@ -1120,6 +1254,7 @@ fn lower_primitive(
 fn other_origin(t: &Term) -> Origin {
     match t {
         Term::Local { origin, .. }
+        | Term::Column { origin, .. }
         | Term::Lit { origin, .. }
         | Term::Template { origin, .. }
         | Term::Primitive { origin, .. }
@@ -1209,6 +1344,74 @@ impl<'a> WorkspaceFacts<'a> {
     }
 }
 
+/// [`Facts`] backed by a [`CompilerInput`], which is what the production
+/// elaboration path has.
+///
+/// A second adapter rather than reusing [`WorkspaceFacts`] because the two see
+/// different things and neither should be widened to match the other: the
+/// workspace adapter is for tests that hold a `Workspace`, and this one is for
+/// the compiler, which deliberately holds only a read-only input view.
+pub struct InputFacts<'a> {
+    pub input: crate::compile::CompilerInput<'a>,
+}
+
+impl<'a> InputFacts<'a> {
+    pub fn new(input: crate::compile::CompilerInput<'a>) -> Self {
+        Self { input }
+    }
+}
+
+impl Facts for InputFacts<'_> {
+    fn resolution(&self, module: usize, id: u32) -> Option<Resolved> {
+        self.input.type_check().resolution(module, id).cloned()
+    }
+
+    fn def_body(&self, module: usize, def: usize) -> Option<Body> {
+        let d = self.input.module(module).source().defs.get(def)?;
+        Some(Body {
+            module,
+            def,
+            expr: d.body.clone(),
+        })
+    }
+
+    fn def_template(&self, module: usize, def: usize) -> Option<Template> {
+        use cagara_syntax::ast::ExprKind;
+        let d = self.input.module(module).def(def);
+        match &d.body.kind {
+            ExprKind::Sql(sql) => Some(Template {
+                sql: sql.clone(),
+                kind: declared_template_kind(d),
+            }),
+            _ => None,
+        }
+    }
+
+    fn choice(&self, module: usize, owner: usize, site: u32) -> Option<Choice> {
+        let tc = self.input.type_check();
+        let mut found = tc
+            .choices_of(module, owner)
+            .into_iter()
+            .filter(|(s, _, _)| *s == site);
+        let first = found.next()?;
+        if found.next().is_some() {
+            return None;
+        }
+        Some(first.2)
+    }
+
+    fn def_result_ty(&self, module: usize, def: usize) -> Option<crate::core::ScalarType> {
+        self.input.type_check().result_scalar(module, def)
+    }
+
+    fn use_ty(&self, module: usize, id: u32) -> crate::core::ScalarType {
+        self.input
+            .type_check()
+            .use_ty(module, id)
+            .unwrap_or(crate::core::ScalarType::Unknown)
+    }
+}
+
 impl Facts for WorkspaceFacts<'_> {
     fn resolution(&self, module: usize, id: u32) -> Option<Resolved> {
         self.tc.resolution(module, id).cloned()
@@ -1262,6 +1465,27 @@ impl Facts for WorkspaceFacts<'_> {
             .use_ty(module, id)
             .unwrap_or(crate::core::ScalarType::Unknown)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Why terms fell back to the source path, counted for the migration report.
+    static GAP_REASONS: std::cell::RefCell<std::collections::BTreeMap<String, usize>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// Record a gap, for the migration's progress report.
+pub fn note_gap(reason: &str) {
+    #[cfg(test)]
+    GAP_REASONS.with(|m| *m.borrow_mut().entry(reason.to_string()).or_default() += 1);
+    #[cfg(not(test))]
+    let _ = reason;
+}
+
+/// The reasons terms fell back, most frequent first.
+#[cfg(test)]
+pub fn gap_reasons() -> Vec<(String, usize)> {
+    GAP_REASONS.with(|m| m.borrow().iter().map(|(k, v)| (k.clone(), *v)).collect())
 }
 
 #[cfg(test)]
@@ -1498,12 +1722,18 @@ mod bridge_tests {
             def,
             expr: ws.modules[ws.root].module.defs[def].body.clone(),
         };
-        let resolved = |id: u32| facts.resolution(ws.root, id);
+        let resolved = |module: usize, id: u32| facts.resolution(module, id);
         let mut cx = Normalizer::new(Box::new(resolved));
-        expression(&facts, &mut cx, &body)
+        cx.in_module(ws.root, |cx| expression(&facts, cx, &body))
     }
 
-    /// A definition whose body is a column reference normalizes to that column.
+    /// A definition whose body is a column reference normalizes to that column,
+    /// **with its side preserved**.
+    ///
+    /// The side is meaning, not spelling: folding `.x` and `.<x` into one node
+    /// with a label prefix made a join predicate read as a `Single`-sided
+    /// column, and the checked layer refused a program the checker had accepted.
+    /// One variant per side, so the distinction cannot be lost again.
     #[test]
     fn a_bare_column_definition_normalizes() {
         let t = term_of("c = .name\nq = users & select { x = c }\n", "c").unwrap();
@@ -1511,7 +1741,13 @@ mod bridge_tests {
             t,
             term_of("c = .name\nq = users & select { x = c }\n", "c").unwrap()
         );
-        assert!(matches!(t, Term::Local { .. }), "got {t:?}");
+        match t {
+            Term::Column { side, ref name, .. } => {
+                assert_eq!(name, "name");
+                assert_eq!(side, cagara_syntax::ast::Side::Single);
+            }
+            other => panic!("expected a column, got {other:?}"),
+        }
     }
 
     /// A literal normalizes to a literal.
@@ -1584,6 +1820,12 @@ mod bridge_tests {
             Term::Local { id, label, ty, .. } => Term::Local {
                 id,
                 label,
+                ty,
+                origin: blank,
+            },
+            Term::Column { side, name, ty, .. } => Term::Column {
+                side,
+                name,
                 ty,
                 origin: blank,
             },
@@ -1734,9 +1976,11 @@ mod migration_agreement {
             def: owner,
             expr: e.clone(),
         };
-        let resolved = |id: u32| facts.resolution(module, id);
+        let resolved = |m: usize, id: u32| facts.resolution(m, id);
         let mut cx = Normalizer::new(Box::new(resolved));
-        let term = expression(&facts, &mut cx, &body).map_err(|g| g.message)?;
+        let term = cx
+            .in_module(module, |cx| expression(&facts, cx, &body))
+            .map_err(|g| g.message)?;
         lower_expr(&term).map_err(|g| g.message)
     }
 
@@ -1953,9 +2197,9 @@ mod prelude_covers_the_bridge {
                     def: i,
                     expr: d.body.clone(),
                 };
-                let resolved = |id: u32| facts.resolution(m, id);
+                let resolved = |mm: usize, id: u32| facts.resolution(mm, id);
                 let mut cx = Normalizer::new(Box::new(resolved));
-                if let Err(g) = expression(&facts, &mut cx, &body) {
+                if let Err(g) = cx.in_module(m, |cx| expression(&facts, cx, &body)) {
                     gaps.push(format!("`{}`: {}", d.name, g.message));
                 }
             }
@@ -1990,9 +2234,10 @@ mod prelude_covers_the_bridge {
                     def: i,
                     expr: d.body.clone(),
                 };
-                let resolved = |id: u32| facts.resolution(m, id);
+                let resolved = |mm: usize, id: u32| facts.resolution(mm, id);
                 let mut cx = Normalizer::new(Box::new(resolved));
-                let term = expression(&facts, &mut cx, &body)
+                let term = cx
+                    .in_module(m, |cx| expression(&facts, cx, &body))
                     .unwrap_or_else(|g| panic!("`{}` did not normalize: {}", d.name, g.message));
                 assert!(
                     term.is_function(),

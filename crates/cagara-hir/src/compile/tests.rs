@@ -630,3 +630,64 @@ fn equivalent_spellings_all_compile() {
         );
     }
 }
+
+/// The normalized route is actually **taken**, not silently bypassed.
+///
+/// Every other test would still pass if `elaborate_via_term` always failed and
+/// the source path handled everything — the two are held equivalent on purpose.
+/// That is exactly why this needs its own assertion: without it, deleting the
+/// old path could be "safe" because nothing ever used the new one.
+#[test]
+fn elaboration_uses_the_normalized_route() {
+    let ws = Workspace::from_source(
+        "users : query { id = int, name = string } = table \"public\" \"users\"\n\
+         q = users & select { x = upper .name, y = .id + 1 }\n",
+    );
+    let tc = crate::check::check(&ws);
+    let before = crate::elaborate::term_hits();
+    let compiled = compile_checked(&ws, &tc);
+    assert!(
+        compiled.queries.iter().any(|q| q.result.is_ok()),
+        "the test program should compile: {:?}",
+        compiled.diagnostics
+    );
+    assert!(
+        crate::elaborate::term_hits() > before,
+        "no expression took the normalized route; the source path handled them all"
+    );
+}
+
+/// How much of the corpus still needs the **source** path.
+///
+/// A report, not a gate: the point is to see the migration's remaining surface
+/// as a number, so the next family to migrate is chosen from evidence rather
+/// than guessed at. When this reaches zero the source path is dead code and the
+/// workarounds in it (`follow_alias`, `apply_to_computed_head`,
+/// `elaborate_callable`) can be deleted rather than maintained.
+#[test]
+fn report_how_much_still_needs_the_source_path() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut total_terms = 0;
+    let mut files = 0;
+    for entry in ["examples/report.cagara", "examples/public.cagara"] {
+        let Ok(text) = std::fs::read_to_string(root.join(entry)) else {
+            continue;
+        };
+        let ws = Workspace::from_source(&text);
+        let tc = crate::check::check(&ws);
+        let before = crate::elaborate::term_hits();
+        let _ = compile_checked(&ws, &tc);
+        total_terms += crate::elaborate::term_hits() - before;
+        files += 1;
+    }
+    assert!(files > 0, "no corpus files were found");
+    eprintln!(
+        "REPORT: follow_alias ran {} times",
+        crate::elaborate::follow_alias_calls()
+    );
+    let gaps = crate::normalize::gap_reasons();
+    eprintln!("REPORT: {total_terms} expressions took the normalized route");
+    for (reason, n) in &gaps {
+        eprintln!("REPORT gap {n:4}  {reason}");
+    }
+}

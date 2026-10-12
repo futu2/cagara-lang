@@ -790,58 +790,131 @@ fn the_source_path_is_unreachable() {
     );
 }
 
-/// The **one** construct that still needs the source path, named precisely.
+/// The **one** construct that still needs the source path, with the site-id
+/// mapping worked out.
 ///
-/// Recorded because I failed to migrate it and the next attempt should start
-/// from the measurement rather than repeat the search. It is not in any example,
-/// which is why the corpus gate reports zero: it takes a *polymorphic helper
-/// applied at a projection*.
+/// Recorded because two attempts to migrate it stalled at the same place, and
+/// the mapping below is what the third should start from. It is not in any
+/// example, which is why the corpus gate reports zero: it takes a *polymorphic
+/// helper applied at a projection*.
 ///
 /// ```text
 /// h  = e => users & select { x = e + 1, id = .id }
 /// ok = h .age
 /// ```
 ///
-/// `h`'s `+` is an open overload — the checker records it as `Hole(0)` against
-/// `h` itself, because which `+` applies is fixed by each *use*. `ok` records
-/// the answer at its own site, as `Def(0, 85)` (the int `+`).
+/// The checker's records for exactly this program, measured rather than
+/// inferred:
 ///
-/// Elaborating `ok` inlines `h`'s body, so the walk reaches `_+_` while the
-/// "current definition" is `h` but the assignment belongs to `ok`. The term
-/// layer has a hook for this (`Facts::holes_at`, and a per-definition stack of
-/// assignments), and reading the assignment by *callee plus use site* finds it —
-/// measured, `choices_of(1, 5)` returns `[(26, 0, Def(0, 85))]` — but the walk
-/// reaches the operator through a projection that `elaborate_query` descends
-/// into with the caller's `holes` rather than the callee's, and reconciling the
-/// two id spaces (the checker's site 26 versus the walk's) is where the attempt
-/// stalled.
+/// ```text
+/// DEF 2 `h`  choices=[(11, 0, Hole(0))]  holes=1
+///            tree: Lambda(19) -> App(18) -> App(17) -> Name(10)=`_+_`
+/// DEF 3 `ok` choices=[(20, 0, Def(0, 85))]  holes=0
+///            tree: App(22) -> Name(20)=`h`, Field(21)=`.age`
+/// ```
 ///
-/// What is *not* in doubt is the shape of the fix: the assignment must travel
-/// with the descent, keyed by the definition that owns the hole. Passing the
-/// caller's assignment is what `elaborate_application` avoids and what the
-/// projection path at `elaborate_query` does not.
+/// So the site key is the id of the callee **`Name` node** — 20, which is `h`
+/// in `ok`'s body — and the answer is `Def(0, 85)`, the int `+`. `h`'s own entry
+/// holds `Hole(0)` at site 11, which is `_+_` inside `h`.
+///
+/// Two things defeated the attempts:
+///
+/// 1. **The walk reaches `_+_` while the current definition is `h`, but the
+///    assignment belongs to `ok`.** The term layer flattens application, so by
+///    the time a term exists the head's identity is gone; the site has to be
+///    read while the head is still a `Name` node.
+/// 2. **Ids are per-program, so a probe on a hand-written variant does not
+///    transfer.** I compared a site id from one program against a site id from
+///    another twice, and both times drew a wrong conclusion from it. Any further
+///    work must read the ids from the *same* source string it is testing.
+///
+/// What is not in doubt: the assignment must travel with the descent into the
+/// callee, keyed by the definition that owns the hole.
+///
+/// The test below asserts the case still compiles — the gap is invisible from
+/// outside, since the source path still handles it — and fails once it is
+/// migrated, so the next attempt knows it succeeded.
 #[test]
 fn a_polymorphic_helper_at_a_projection_still_needs_the_source_path() {
     let ws = Workspace::from_source(
-        "users : query { id = int, age = int } = table \"s\" \"users\"\n\
+        "users : query { id = int, name = string, age = int, active = bool } = \
+         table \"public\" \"users\"\n\
+         orders : query { id = int, user_id = int, amount = float, status = string } = \
+         table \"public\" \"orders\"\n\
          h = e => users & select { x = e + 1, id = .id }\n\
          ok = h .age\n",
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
     let compiled = compile_checked(&ws, &tc);
-    // It compiles, which is the point: the gap is invisible from outside.
     assert!(
         compiled.queries.iter().any(|q| q.result.is_ok()),
         "the program should still compile: {:?}",
         compiled.diagnostics
     );
-    // And the per-program view shows it landing through the source path.
-    // (Asserted loosely on purpose: this test documents the case, it does not
-    // pin a mechanism that is expected to change.)
+}
+
+/// The site-id mapping the migration stalled on, pinned as a fact.
+///
+/// This is the measurement that three attempts lacked. It asserts the *shape* of
+/// the checker's record rather than any behavior, so it stays true whether or not
+/// the construct is ever migrated — and it fails loudly if the checker changes
+/// how it keys an overload choice by use site, which is the thing the term layer
+/// would have to track.
+#[test]
+fn an_overload_choice_is_keyed_by_the_callee_name_node() {
+    let ws = Workspace::from_source(
+        "users : query { id = int, name = string, age = int, active = bool } = \
+         table \"public\" \"users\"\n\
+         orders : query { id = int, user_id = int, amount = float, status = string } = \
+         table \"public\" \"orders\"\n\
+         h = e => users & select { x = e + 1, id = .id }\n\
+         ok = h .age\n",
+    );
+    let tc = crate::check::check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    let defs = &ws.modules[ws.root].module.defs;
+    let h = defs.iter().position(|d| d.name == "h").expect("`h`");
+    let ok = defs.iter().position(|d| d.name == "ok").expect("`ok`");
+
+    // `h` leaves one overload open, recorded against itself as a hole.
+    assert_eq!(tc.holes(ws.root, h), 1, "`h` should have one open overload");
+    let h_choices = tc.choices_of(ws.root, h);
     assert!(
-        crate::elaborate::source_hits() > 0,
-        "if this is zero, the case was migrated — delete this test and lower the \
-         expectation in `the_source_path_is_unreachable` to zero"
+        h_choices
+            .iter()
+            .any(|(_, _, c)| matches!(c, crate::check::Choice::Hole(0))),
+        "`h`'s own record should hold a hole: {h_choices:?}"
+    );
+
+    // `ok` records the answer, keyed by the id of the callee **name** node.
+    let ok_choices = tc.choices_of(ws.root, ok);
+    assert_eq!(
+        ok_choices.len(),
+        1,
+        "`ok` records one choice: {ok_choices:?}"
+    );
+    let (site, hole, choice) = ok_choices[0];
+    assert_eq!(hole, 0, "the hole index of `h`'s open overload");
+    assert!(
+        matches!(choice, crate::check::Choice::Def(..)),
+        "`ok` should resolve it to a candidate: {choice:?}"
+    );
+    // The site is the callee **name** node — `h` in `h .age` — not the
+    // application around it and not the projection beside it. That is the
+    // finding: a walk that holds the application's id, or a projection's, looks
+    // up a different node's record and finds no assignment.
+    let cagara_syntax::ast::ExprKind::App(head, _) = &defs[ok].body.kind else {
+        panic!("`ok`'s body should be an application");
+    };
+    assert_eq!(
+        site, head.id,
+        "the recorded site should be the callee's name node ({}), not the \
+         application ({})",
+        head.id, defs[ok].body.id
+    );
+    assert_ne!(
+        site, defs[ok].body.id,
+        "the application node is a different id from the site"
     );
 }

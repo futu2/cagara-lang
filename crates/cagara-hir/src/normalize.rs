@@ -319,17 +319,15 @@ impl Term {
                 // `Window` — which is what lets the spec be lowered by the code
                 // that owns its rules instead of by an expression lowering that
                 // would have to reinvent them.
-                if kind == TemplateKind::Win {
-                    if args.len() == 1 {
-                        let spec = args.pop().expect("just pushed");
-                        return Some(Term::Window {
-                            sql,
-                            spec: Box::new(spec),
-                            args: Vec::new(),
-                            ty,
-                            origin,
-                        });
-                    }
+                if kind == TemplateKind::Win && args.len() == 1 {
+                    let spec = args.pop().expect("just pushed");
+                    return Some(Term::Window {
+                        sql,
+                        spec: Box::new(spec),
+                        args: Vec::new(),
+                        ty,
+                        origin,
+                    });
                 }
                 Some(Term::Template {
                     sql,
@@ -1417,12 +1415,7 @@ pub fn term_to_expr(t: &Term) -> Option<cagara_syntax::ast::Expr> {
     use cagara_syntax::ast::{Expr, ExprKind, Side};
     let mk = |span: cagara_syntax::ast::Span, kind: ExprKind| Expr { id: 0, span, kind };
     match t {
-        Term::Column {
-            side,
-            name,
-            origin: _,
-            ..
-        } => {
+        Term::Column { side, name, .. } => {
             // The span is recovered from the checker's record by the caller;
             // here it is empty because the spec is re-read by *name*, not by
             // position, and no diagnostic is rendered from this syntax.
@@ -1459,10 +1452,7 @@ pub fn term_to_expr(t: &Term) -> Option<cagara_syntax::ast::Expr> {
             for item in items {
                 out.push(term_to_expr(item)?);
             }
-            Some(mk(
-                cagara_syntax::ast::Span::default(),
-                ExprKind::List(out.into()),
-            ))
+            Some(mk(cagara_syntax::ast::Span::default(), ExprKind::List(out)))
         }
         // A primitive, bare or applied. A primitive **with arguments** is an
         // application whose head is the primitive — `__desc .created_at`,

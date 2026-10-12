@@ -700,6 +700,14 @@ pub(crate) struct Checker<'w> {
     /// cannot answer. `Ty` never leaves the crate — `TypeCheck::use_ty`
     /// converts at the boundary.
     pub(crate) use_tys: HashMap<(usize, u32), Ty>,
+    /// What each module-scope name occurrence resolved to, by `ExprId`.
+    ///
+    /// The identity counterpart of `use_tys`: that map says what *type* an
+    /// expression got, this one says what a name *referred to*. A consumer
+    /// expanding a call needs the second and cannot recover it from the first,
+    /// and re-deriving it by looking the name up again is a second answer
+    /// waiting to disagree with this one.
+    pub(crate) resolutions: HashMap<(usize, u32), Resolved>,
     /// Key stages whose affix was not a literal, in the order their key
     /// arguments were read. `key_stage` consumes one per deferred argument to
     /// build a term with a fresh mapper variable instead of a concrete affix,

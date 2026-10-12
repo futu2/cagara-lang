@@ -1543,7 +1543,25 @@ impl<'w> Checker<'w> {
     }
 
     pub(crate) fn lookup(&mut self, n: &str, site: u32, sp: Span) -> Result<Ty, String> {
-        match self.env.scope.get(n).cloned() {
+        let binding = self.env.scope.get(n).cloned();
+        // Record **what this occurrence resolved to**, keyed by its `ExprId`.
+        //
+        // This is the fact a consumer working from the tree needs and cannot
+        // reconstruct: `use_ty` says what type an expression has, but not which
+        // definition a name referred to. Without it, any phase that wants to
+        // expand a call has to look the name up again in the scope — and a
+        // second lookup is a second answer waiting to disagree with the first.
+        // That is the shape of the bugs this project kept producing: an alias
+        // followed in checking but not in elaboration, a call the checker took
+        // and the elaborator refused.
+        //
+        // Recorded here because this is the single place a module-scope name
+        // becomes a binding; a resolution recorded anywhere else could fall out
+        // of step with the one actually used.
+        if let Some(resolved) = binding.as_ref().and_then(Resolved::of_binding) {
+            self.resolutions.insert((self.module, site), resolved);
+        }
+        match binding {
             Some(Binding::Def(dm, di)) => self.def_type(dm, di, site, sp),
             Some(Binding::Overloads(om, is)) => Ok(self.overload_type(n, om, &is, site, sp)),
             Some(Binding::Prim(p)) => Ok(self.prim_type(p, sp)),

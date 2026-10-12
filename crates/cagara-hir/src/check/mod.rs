@@ -81,6 +81,7 @@ pub(crate) use crate::core::ScalarType;
 pub(crate) use crate::db::ModuleInput;
 pub(crate) use crate::ir::{JoinKind, Phase};
 pub(crate) use crate::lower::parse_module;
+pub(crate) use crate::normalize::Resolved;
 pub(crate) use crate::primitive::Prim;
 pub(crate) use crate::resolve::{module_own, module_scope};
 pub(crate) use crate::rules::{self};
@@ -240,6 +241,36 @@ impl TypeCheck {
         };
         let mut out: Vec<u32> = checked
             .use_tys
+            .keys()
+            .filter(|(m, _)| *m == module)
+            .map(|(_, id)| *id)
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// What the module-scope name occurrence with this `ExprId` resolved to.
+    ///
+    /// The identity counterpart of [`TypeCheck::use_ty`]. It answers "which
+    /// definition did this name mean" where `use_ty` answers "what type did
+    /// this expression get", and a consumer expanding a call needs both: the
+    /// type says what the result is, the resolution says what to expand.
+    ///
+    /// `None` means the occurrence was not a module-scope name — a column
+    /// reference, a literal, a lambda-bound parameter — or the checker never
+    /// got as far as resolving it. The two are deliberately not distinguished,
+    /// matching [`TypeCheck::use_ty`]: both mean "nothing was recorded here".
+    pub fn resolution(&self, module: usize, id: u32) -> Option<&Resolved> {
+        self.modules.get(module)?.resolutions.get(&(module, id))
+    }
+
+    /// Every `ExprId` in `module` the checker recorded a resolution for.
+    pub fn resolved_ids(&self, module: usize) -> Vec<u32> {
+        let Some(checked) = self.modules.get(module) else {
+            return Vec::new();
+        };
+        let mut out: Vec<u32> = checked
+            .resolutions
             .keys()
             .filter(|(m, _)| *m == module)
             .map(|(_, id)| *id)
@@ -412,6 +443,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         probe_fields: out.probe_fields,
         use_tys: out.use_tys,
         use_types: out.use_types,
+        resolutions: out.resolutions,
     })
 }
 
@@ -440,6 +472,8 @@ struct ModuleOutput {
     probe_fields: Option<(usize, Vec<(String, String)>)>,
     use_tys: HashMap<(usize, u32), Ty>,
     use_types: HashMap<(usize, u32, u32), String>,
+    /// What each module-scope name occurrence resolved to, by `ExprId`.
+    resolutions: HashMap<(usize, u32), Resolved>,
 }
 
 /// A checked module with its diagnostics already rendered.
@@ -456,6 +490,13 @@ struct ModuleCheck {
     probe_fields: Option<(usize, Vec<(String, String)>)>,
     use_tys: HashMap<(usize, u32), Ty>,
     use_types: HashMap<(usize, u32, u32), String>,
+    /// What each module-scope name occurrence resolved to, by `ExprId`.
+    ///
+    /// The counterpart of `use_tys` for *identity* rather than type: that map
+    /// answers "what type did this expression get", this one answers "what did
+    /// this name refer to". A consumer expanding a call needs the second and
+    /// cannot recover it from the first.
+    resolutions: HashMap<(usize, u32), Resolved>,
 }
 
 /// What checking one module reads: its definitions and scope, and every
@@ -495,6 +536,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         uses: Vec::new(),
         use_types: HashMap::new(),
         use_tys: HashMap::new(),
+        resolutions: HashMap::new(),
         deferred_keys: Vec::new(),
         affix_mappers: Vec::new(),
         unify_depth: 0,
@@ -511,6 +553,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
     let probe_fields = c.probe_fields.map(|fs| (m, fs));
     let use_types = c.use_types;
     let use_tys = c.use_tys;
+    let resolutions = c.resolutions;
     ModuleOutput {
         schemes: c.schemes,
         errors: c.errors,
@@ -520,6 +563,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         probe_fields,
         use_types,
         use_tys,
+        resolutions,
     }
 }
 

@@ -2022,3 +2022,133 @@ mod bidirectional {
         );
     }
 }
+
+/// The checker records **what each name resolved to**, not only its type.
+///
+/// This is the fact normalization needs and could not previously get: `use_ty`
+/// says an expression is a `string`, but not *which* definition produced it.
+/// Without the resolution, any phase expanding a call has to look the name up
+/// again — a second answer waiting to disagree with the checker's.
+#[test]
+fn the_checker_records_what_each_name_resolved_to() {
+    let ws = Workspace::from_source(&format!(
+        "{TABLES}up = upper\nq = users & select {{ x = up .name }}\n"
+    ));
+    let tc = check(&ws);
+    // `up` in `up .name` is a name occurrence, so it has a resolution.
+    let ids = tc.resolved_ids(ws.root);
+    assert!(!ids.is_empty(), "no resolutions were recorded");
+    // Every resolved occurrence must name a real definition in this module.
+    let defs = &ws.modules[ws.root].module.defs;
+    for id in &ids {
+        match tc.resolution(ws.root, *id).expect("listed but absent") {
+            crate::normalize::Resolved::Def((m, d)) => {
+                assert!(
+                    *d < ws.modules[*m].module.defs.len(),
+                    "resolution points at a definition that does not exist"
+                );
+            }
+            crate::normalize::Resolved::Overloads { module, defs: ds } => {
+                assert!(!ds.is_empty(), "an overload resolution with no candidates");
+                for d in ds {
+                    assert!(*d < ws.modules[*module].module.defs.len());
+                }
+            }
+            crate::normalize::Resolved::Primitive => {}
+        }
+    }
+    // `upper` is reached through the alias `up`, and the resolution must name
+    // the *definition the name was written as* — following the alias is
+    // normalization's job, not the checker's.
+    let up = defs.iter().position(|d| d.name == "up").unwrap();
+    assert!(
+        ids.iter().any(|id| matches!(
+            tc.resolution(ws.root, *id),
+            Some(crate::normalize::Resolved::Def((_, d))) if *d == up
+        )),
+        "the alias `up` was not recorded as the resolution of its own use"
+    );
+}
+
+/// The resolution covers the cases that produced the alias and computed-head
+/// bugs, including the shapes where a name is used *as a value* rather than
+/// applied directly.
+///
+/// `07a7e12` and `3624dfc` were each about a call the checker accepted and the
+/// elaborator refused, and each was a *different spelling* of the same program.
+/// The resolution exists so the elaborator never has to re-derive what a name
+/// meant; these are the spellings that must therefore be recorded.
+///
+/// A resolution may point into another module: `upper` is the prelude's, and
+/// the occurrence is the user's. That is the point — the location of the *use*
+/// and the location of the *definition* are independent, which is exactly what
+/// a name-based second lookup in the elaborator could get wrong.
+#[test]
+fn resolution_covers_the_shapes_that_produced_the_alias_bugs() {
+    for (what, src, want) in [
+        // A direct call into the prelude.
+        (
+            "direct",
+            "q = users & select { x = upper .name }\n",
+            "upper",
+        ),
+        // A bare-name alias, applied. `f = upper` then `f .name`.
+        (
+            "alias",
+            "f = upper\nq = users & select { x = f .name }\n",
+            "f",
+        ),
+        // An alias of an alias.
+        (
+            "alias chain",
+            "f = upper\ng = f\nq = users & select { x = g .name }\n",
+            "g",
+        ),
+        // A name used as a *value*, passed to a composition rather than
+        // applied. This is the path that failed differently from a direct call.
+        (
+            "value in composition",
+            "p = trim >>> upper\nq = users & select { x = p .name }\n",
+            "p",
+        ),
+        // An alias used as a value inside a composition.
+        (
+            "alias as value",
+            "up = upper\np = trim >>> up\nq = users & select { x = p .name }\n",
+            "up",
+        ),
+        // A parameter holding a function, applied through the body.
+        (
+            "function parameter",
+            "app = g => (g .name)\nq = users & select { x = app upper }\n",
+            "app",
+        ),
+    ] {
+        let ws = Workspace::from_source(&format!("{TABLES}{src}"));
+        let tc = check(&ws);
+        assert!(tc.errors().is_empty(), "{what}: {:?}", tc.errors());
+        // Look the wanted name up in *every* module: it may be the prelude's.
+        let want_index = (0..ws.modules.len()).find_map(|m| {
+            ws.modules[m]
+                .module
+                .defs
+                .iter()
+                .position(|d| d.name == want)
+                .map(|i| (m, i))
+        });
+        let (want_module, want_def) =
+            want_index.unwrap_or_else(|| panic!("{what}: no definition `{want}` anywhere"));
+        let found = tc.resolved_ids(ws.root).iter().any(|id| {
+            matches!(
+                tc.resolution(ws.root, *id),
+                Some(crate::normalize::Resolved::Def((m, d)))
+                    if (*m, *d) == (want_module, want_def)
+            )
+        });
+        assert!(
+            found,
+            "{what}: the use of `{want}` (module {want_module}, def {want_def}) was not \
+             recorded as a resolution; the elaborator would have to look it up again"
+        );
+    }
+}

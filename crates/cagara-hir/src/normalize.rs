@@ -277,15 +277,42 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
 /// [`Term`]. Keeping it separate is what makes aliases disappear without a
 /// `follow_alias` walk — an alias *is* its target, so the second lookup simply
 /// does not happen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Mirrors [`crate::workspace::Binding`] rather than reusing it, for two
+/// reasons: `Binding` is the *resolver's* vocabulary and includes cases (a
+/// module, a name bound to nothing) that cannot denote a term, and a consumer
+/// should not gain a new variant every time the resolver does.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolved {
     /// The checker resolved the name to this definition.
     Def(DefId),
+    /// The name is defined more than once with signatures, and the checker
+    /// picked one candidate **per use**. The candidates travel with the
+    /// resolution because which one applies is a fact about *this* occurrence —
+    /// recorded in `TypeCheck`'s choices — not a property of the name.
+    Overloads { module: usize, defs: Vec<usize> },
     /// The checker resolved the name to a primitive.
     Primitive,
-    /// The name is bound by an enclosing binder (a lambda parameter), so it is
-    /// a local rather than a definition.
-    Local,
+}
+
+impl Resolved {
+    /// The resolution a module-scope binding denotes, or `None` when the
+    /// binding cannot denote a term at all.
+    ///
+    /// `None` for [`crate::workspace::Binding::Module`]: a module is not a
+    /// value, and a bare reference to one is already a checker error, so there
+    /// is nothing to report here.
+    pub fn of_binding(binding: &crate::workspace::Binding) -> Option<Self> {
+        match binding {
+            crate::workspace::Binding::Def(m, d) => Some(Resolved::Def((*m, *d))),
+            crate::workspace::Binding::Overloads(m, defs) => Some(Resolved::Overloads {
+                module: *m,
+                defs: defs.clone(),
+            }),
+            crate::workspace::Binding::Prim(_) => Some(Resolved::Primitive),
+            crate::workspace::Binding::Module(_) => None,
+        }
+    }
 }
 
 /// The operation normalization performs on one occurrence.

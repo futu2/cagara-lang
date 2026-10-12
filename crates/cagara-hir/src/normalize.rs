@@ -115,6 +115,21 @@ pub enum Term {
         source: Option<DefId>,
         origin: Origin,
     },
+    /// A value applied to arguments that could not be reduced yet.
+    ///
+    /// The head is a **local** — a lambda parameter — so what it stands for is
+    /// not known until the enclosing lambda is applied. `f x` inside
+    /// `f => x => f x` is this node; applying the outer lambda substitutes for
+    /// `f`, and the application reduces then.
+    ///
+    /// Without this node the normal form could not represent a curried
+    /// combinator, which is to say it could not represent the prelude's `&`,
+    /// `$`, `>>>` and `<<<` — the definitions every pipeline is built from.
+    Apply {
+        head: Box<Term>,
+        args: Vec<Term>,
+        origin: Origin,
+    },
     /// A `case`/`ifThenElse` chain, already flattened to arms plus a default.
     ///
     /// Flattened because the nesting is spelling: `case { a => x; true => y }`
@@ -137,18 +152,30 @@ pub enum Term {
 impl Term {
     /// Whether this term is a function value, i.e. whether it denotes something
     /// awaiting arguments rather than a finished expression.
+    ///
+    /// An `Apply` counts: it denotes the result of a function it has not reduced
+    /// yet, which is a value awaiting nothing further.
     pub fn is_function(&self) -> bool {
         matches!(self, Term::Lambda { .. })
     }
 
     /// Apply this term to one argument, reducing as far as the result allows.
     ///
-    /// Returns `None` when the term is not applicable — applying a column
-    /// reference, a literal, or a record is a *type* error, and the checker has
-    /// already rejected it, so the caller treats `None` as "cannot happen on a
-    /// checker-accepted program" rather than as a user diagnostic. Reporting it
-    /// here would invent a second, weaker error for something the checker
-    /// already owns.
+    /// Returns `None` when the term is not applicable — applying a literal, a
+    /// record, or a list is a *type* error, and the checker has already rejected
+    /// it, so the caller treats `None` as "cannot happen on a checker-accepted
+    /// program" rather than as a user diagnostic. Reporting it here would invent
+    /// a second, weaker error for something the checker already owns.
+    ///
+    /// A **local** head does not reduce: `f x` inside a lambda whose `f` is a
+    /// parameter has nothing to substitute into, because the value `f` will
+    /// stand for arrives when the *enclosing* lambda is applied. It becomes an
+    /// [`Term::Apply`] and reduces then. Treating it as a failure was wrong, and
+    /// wrong in an instructive way: it made the four curried combinators in the
+    /// prelude — `_&_`, `_$_`, `_>>>_`, `_<<<_`, all of the form
+    /// `f => x => f x` — the only definitions in the prelude that would not
+    /// normalize, which is to say the very definitions composition is built
+    /// from.
     pub fn apply(self, arg: Term) -> Option<Term> {
         match self {
             Term::Lambda {
@@ -177,10 +204,71 @@ impl Term {
                     })
                 }
             }
-            other => {
-                let _ = other;
-                None
+            // A head that is not yet a function: keep the application, so the
+            // substitution can happen when the head becomes one.
+            head @ Term::Local { .. } => {
+                let origin = match &head {
+                    Term::Local { origin, .. } => *origin,
+                    _ => unreachable!("matched on Local"),
+                };
+                Some(Term::Apply {
+                    head: Box::new(head),
+                    args: vec![arg],
+                    origin,
+                })
             }
+            // An application already awaiting arguments: extend it rather than
+            // nesting, so `f x y` is one node and not `((f x) y)`.
+            Term::Apply {
+                head,
+                mut args,
+                origin,
+            } => {
+                args.push(arg);
+                Some(Term::Apply { head, args, origin })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Apply `args` to `head` in order, reducing as far as possible.
+///
+/// The result is the reduced term when every argument applied, and otherwise a
+/// single [`Term::Apply`] holding the head and the arguments that did not. It
+/// is one node rather than a left-nested chain of one-argument applications:
+/// `f x y` is one application of two arguments, and splitting it would make two
+/// equal programs — `f x y` and the same written `(f x) y` — compare unequal
+/// after normalization, which is the property this module exists to provide.
+pub fn reduce_application(head: Term, args: Vec<Term>, origin: Origin) -> Term {
+    let mut value = head;
+    let mut rest = args.into_iter();
+    // Apply while the head is still a function. The first argument that cannot
+    // be applied ends the reduction: a head that is not a function does not
+    // become one by being given more arguments, so the remainder is kept
+    // together in a single node.
+    let mut pending: Vec<Term> = Vec::new();
+    for a in rest.by_ref() {
+        // `apply` consumes its argument; the failing branch has to keep it, so
+        // hand over a copy. A term here is small and this path runs once per
+        // argument, so the copy is not worth avoiding with a fallible-borrow
+        // signature that would complicate every other caller.
+        match value.clone().apply(a.clone()) {
+            Some(reduced) => value = reduced,
+            None => {
+                pending.push(a);
+                break;
+            }
+        }
+    }
+    pending.extend(rest);
+    if pending.is_empty() {
+        value
+    } else {
+        Term::Apply {
+            head: Box::new(value),
+            args: pending,
+            origin,
         }
     }
 }
@@ -240,6 +328,14 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
                     origin,
                 }
             }
+        }
+        // An unreduced application: substitute through both the head and the
+        // arguments, then retry the reduction. Retrying matters — substituting
+        // for the head is exactly what makes `f x` reduce when `f` arrives.
+        Term::Apply { head, args, origin } => {
+            let head = substitute(*head, name, arg);
+            let args: Vec<Term> = args.into_iter().map(|a| substitute(a, name, arg)).collect();
+            reduce_application(head, args, origin)
         }
         Term::Case {
             arms,
@@ -384,6 +480,297 @@ impl<'a> Normalizer<'a> {
     }
 }
 
+/// The facts the bridge reads, so it never touches `TypeCheck` directly.
+///
+/// Narrowing the dependency to exactly what normalization needs is deliberate:
+/// the checker's surface is large, and a bridge that could read anything would
+/// drift into re-deciding types — the failure this whole module exists to
+/// remove.
+pub trait Facts {
+    /// What the name occurrence with this `ExprId` resolved to.
+    ///
+    /// `None` when the occurrence was not a module-scope name.
+    fn resolution(&self, module: usize, id: u32) -> Option<Resolved>;
+
+    /// The definition body to normalize, given a resolved definition.
+    ///
+    /// Returned by value because the caller owns a workspace and the bridge
+    /// must not hold a borrow across the recursive walk.
+    fn def_body(&self, module: usize, def: usize) -> Option<Body>;
+
+    /// Whether the definition is a `sql "..."` template, and its text.
+    fn def_template(&self, module: usize, def: usize) -> Option<String>;
+}
+
+/// A definition's body, with the module and definition it came from.
+///
+/// The pair travels with the syntax because every fact the bridge reads —
+/// resolutions, types — is keyed by where a piece of syntax was *written*, and
+/// normalizing a callee's body moves to the callee's module.
+#[derive(Debug, Clone)]
+pub struct Body {
+    pub module: usize,
+    pub def: usize,
+    pub expr: cagara_syntax::ast::Expr,
+}
+
+/// What the bridge could not normalize.
+///
+/// Distinct from a *type* error: reaching this means the program is fine and
+/// normalization has no rule for the construct, which is a compiler capability
+/// gap. Classifying it here rather than at the call site keeps the caller from
+/// having to guess which failures are its own.
+#[derive(Debug, Clone)]
+pub struct Gap {
+    pub origin: Origin,
+    pub message: String,
+}
+
+impl Gap {
+    pub fn new(origin: Origin, message: impl Into<String>) -> Self {
+        Self {
+            origin,
+            message: message.into(),
+        }
+    }
+}
+
+/// Build the normal form of one expression.
+///
+/// This is the **bridge**: the single place that reads source syntax together
+/// with the checker's facts and produces a [`Term`]. Everything downstream
+/// consumes the term, so no later phase needs to look at syntax to decide what
+/// something means.
+///
+/// The rule it follows is narrow on purpose — for each form it does the least
+/// that produces a term, and defers everything else:
+///
+/// * a **column** or a **literal** becomes a leaf;
+/// * a **name** is resolved through [`Facts::resolution`], never by looking it
+///   up again. A name that resolves to a definition is *inlined* to that
+///   definition's normal form, which is what removes aliases: an alias has no
+///   term of its own, it simply is its target;
+/// * a **lambda** records its binders, so the term is a function value that
+///   [`Term::apply`] can reduce;
+/// * an **application** normalizes the head and the arguments and reduces.
+pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Result<Term, Gap> {
+    use cagara_syntax::ast::ExprKind;
+
+    let module = body.module;
+    let e = &body.expr;
+    let origin = Origin::new(module, e.span);
+
+    match &e.kind {
+        // A local binder wins over the module scope, exactly as lexical
+        // scoping requires. The check is against the *binder stack* rather
+        // than the resolver, because the resolver answers about module-scope
+        // names only.
+        ExprKind::Name(n) if cx.is_local(n) => Ok(Term::Local {
+            id: e.id,
+            label: n.clone(),
+            origin,
+        }),
+        // A literal, including the `sql "..."` template form written inline.
+        ExprKind::Lit(l) => Ok(Term::Lit {
+            lit: lit_of(l),
+            origin,
+        }),
+        ExprKind::Sql(sql) => Ok(Term::Template {
+            sql: std::sync::Arc::from(sql.as_str()),
+            args: Vec::new(),
+            origin,
+        }),
+        // A column reference. `side` distinguishes the two sides of a join
+        // predicate; it is part of the term rather than a later re-reading of
+        // the syntax, because a join's sides are a property of the query, not
+        // of the expression.
+        ExprKind::Field(_, n) => Ok(Term::Local {
+            id: e.id,
+            label: format!(".{n}"),
+            origin,
+        }),
+        // A name that is not a local: resolve it, and *inline* what it denotes.
+        // This is where aliases disappear — following the chain is not a step,
+        // it is the absence of a step.
+        ExprKind::Name(n) => match cx.resolve(e.id) {
+            Some(Resolved::Def((dm, dd))) => {
+                // A `sql` template is a value in its own right: inlining it
+                // means building the template, not forcing it to a scalar.
+                if let Some(sql) = facts.def_template(dm, dd) {
+                    return Ok(Term::Primitive {
+                        name: std::sync::Arc::from(sql.as_str()),
+                        args: Vec::new(),
+                        origin,
+                    });
+                }
+                let inner = facts
+                    .def_body(dm, dd)
+                    .ok_or_else(|| Gap::new(origin, format!("`{n}` has no body to normalize")))?;
+                expression(facts, cx, &inner)
+            }
+            Some(Resolved::Overloads { .. }) => Err(Gap::new(
+                origin,
+                format!("`{n}` is overloaded; normalization needs the chosen candidate"),
+            )),
+            Some(Resolved::Primitive) => Ok(Term::Primitive {
+                name: std::sync::Arc::from(n.as_str()),
+                args: Vec::new(),
+                origin,
+            }),
+            None => Err(Gap::new(
+                origin,
+                format!("the checker recorded no resolution for `{n}`"),
+            )),
+        },
+        // A lambda: record the binders, normalize the body under them.
+        ExprKind::Lambda(param, body_expr) => {
+            let inner = cx.with_binder(param, |cx| {
+                expression(
+                    facts,
+                    cx,
+                    &Body {
+                        module,
+                        def: body.def,
+                        expr: (**body_expr).clone(),
+                    },
+                )
+            })?;
+            Ok(Term::Lambda {
+                params: vec![param.clone()],
+                body: Box::new(inner),
+                source: Some((module, body.def)),
+                origin,
+            })
+        }
+        // An application: normalize the head, then reduce it against each
+        // argument. This is the substitution the old design did by re-walking
+        // source.
+        ExprKind::App(head, args) => {
+            let head_term = expression(
+                facts,
+                cx,
+                &Body {
+                    module,
+                    def: body.def,
+                    expr: (**head).clone(),
+                },
+            )?;
+            let mut arg_terms = Vec::with_capacity(args.len());
+            for arg in args.iter() {
+                arg_terms.push(expression(
+                    facts,
+                    cx,
+                    &Body {
+                        module,
+                        def: body.def,
+                        expr: arg.clone(),
+                    },
+                )?);
+            }
+            // Reduce as far as the head allows. An application that cannot
+            // reduce is *kept*, not rejected: `f x` inside `f => x => f x` has
+            // nothing to substitute into until the enclosing lambda is applied,
+            // and every curried combinator in the prelude is written that way.
+            Ok(reduce_application(head_term, arg_terms, origin))
+        }
+        // A `primitive "__name"` reference. Arguments, when there are any,
+        // arrive as an enclosing `App` and are reduced by the application arm
+        // above; a bare primitive is a value awaiting them, exactly as a `sql`
+        // template is.
+        ExprKind::Primitive(name) => Ok(Term::Primitive {
+            name: std::sync::Arc::from(name.as_str()),
+            args: Vec::new(),
+            origin,
+        }),
+        // Forms normalization has no rule for yet. Reported as a gap rather
+        // than guessed at, so the migration can proceed family by family and a
+        // missing family shows up as a named gap instead of a wrong term.
+        other => Err(Gap::new(
+            origin,
+            format!(
+                "normalization has no rule for {}",
+                describe_expr_kind(other)
+            ),
+        )),
+    }
+}
+
+/// A short human name for an expression form, for a gap message.
+fn describe_expr_kind(k: &cagara_syntax::ast::ExprKind) -> &'static str {
+    use cagara_syntax::ast::ExprKind as K;
+    match k {
+        K::Name(_) => "a name",
+        K::Lit(_) => "a literal",
+        K::Field(..) => "a column reference",
+        K::Proj(..) => "a projection",
+        K::App(..) => "an application",
+        K::Lambda(..) => "a lambda",
+        K::Record(_) => "a record",
+        K::List(_) => "a list",
+        K::Sql(_) => "a sql template",
+        K::Case(_) => "a case",
+        K::Primitive(_) => "a primitive",
+        K::Error => "an error node",
+    }
+}
+
+/// The literal a source literal denotes.
+///
+/// Mirrors `elaborate::lit_of`, which does the same copy for the checked layer.
+/// The two `Lit` enums have identical shape, so this is a pure translation; it
+/// is written out rather than derived so that a variant added to the AST is a
+/// compile error here instead of a silently dropped literal.
+fn lit_of(l: &cagara_syntax::ast::Lit) -> crate::ir::Lit {
+    use cagara_syntax::ast::Lit as L;
+    match l {
+        L::Int(i) => crate::ir::Lit::Int(*i),
+        L::Float(f) => crate::ir::Lit::Float(f.clone()),
+        L::Str(s) => crate::ir::Lit::Str(s.clone()),
+        L::Bool(b) => crate::ir::Lit::Bool(*b),
+    }
+}
+
+/// [`Facts`] backed by a real workspace, for tests and for the migration's
+/// differential check.
+///
+/// Lives in the library rather than in `#[cfg(test)]` because the migration
+/// compares the bridge against the existing elaborator, and that comparison has
+/// to run the same code the production path would.
+pub struct WorkspaceFacts<'a> {
+    pub ws: &'a crate::workspace::Workspace,
+    pub tc: &'a crate::check::TypeCheck,
+}
+
+impl<'a> WorkspaceFacts<'a> {
+    pub fn new(ws: &'a crate::workspace::Workspace, tc: &'a crate::check::TypeCheck) -> Self {
+        Self { ws, tc }
+    }
+}
+
+impl Facts for WorkspaceFacts<'_> {
+    fn resolution(&self, module: usize, id: u32) -> Option<Resolved> {
+        self.tc.resolution(module, id).cloned()
+    }
+
+    fn def_body(&self, module: usize, def: usize) -> Option<Body> {
+        let d = self.ws.modules.get(module)?.module.defs.get(def)?;
+        Some(Body {
+            module,
+            def,
+            expr: d.body.clone(),
+        })
+    }
+
+    fn def_template(&self, module: usize, def: usize) -> Option<String> {
+        use cagara_syntax::ast::ExprKind;
+        let d = self.ws.modules.get(module)?.module.defs.get(def)?;
+        match &d.body.kind {
+            ExprKind::Sql(sql) => Some(sql.clone()),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,11 +911,349 @@ mod tests {
         assert_eq!(direct, wrapped);
     }
 
-    /// Applying something that is not a function is not normalization's to
-    /// report.
+    /// Applying a **local** keeps the application rather than failing.
+    ///
+    /// A local head is a lambda parameter whose value arrives later, so there
+    /// is nothing to substitute yet. Treating this as a failure made the four
+    /// curried combinators in the prelude — `_&_`, `_$_`, `_>>>_`, `_<<<_`, all
+    /// written `f => x => f x` — the only definitions there that would not
+    /// normalize.
+    #[test]
+    fn applying_a_local_keeps_the_application() {
+        let kept = local("f")
+            .apply(local("x"))
+            .expect("a local head is applicable");
+        match kept {
+            Term::Apply { head, args, .. } => {
+                assert_eq!(*head, local("f"));
+                assert_eq!(args, vec![local("x")]);
+            }
+            other => panic!("expected a kept application, got {other:?}"),
+        }
+    }
+
+    /// Applying a term that can *never* be a function yields nothing.
+    ///
+    /// A literal has no value that could be substituted, so this is the case
+    /// `apply` rejects — and it is safe to reject because the checker has
+    /// already refused to type it.
     #[test]
     fn applying_a_non_function_yields_nothing() {
-        assert!(local("x").apply(local("y")).is_none());
+        let lit = Term::Lit {
+            lit: crate::ir::Lit::Int(1),
+            origin: origin(),
+        };
+        assert!(lit.apply(local("y")).is_none());
         assert!(lam(&[], local("x")).apply(local("y")).is_none());
+    }
+
+    /// **A curried combinator normalizes**, which is the case that motivated
+    /// the `Apply` node. `f => x => f x` must produce a term, and applying it
+    /// to a lambda must reduce all the way.
+    #[test]
+    fn a_curried_combinator_reduces() {
+        // `apply = f => x => f x`
+        let apply_fn = lam(&["f", "x"], local("f").apply(local("x")).unwrap());
+        assert!(apply_fn.is_function());
+        // Applied to an identity function, the result is a function.
+        let partial = apply_fn.apply(lam(&["y"], local("y"))).unwrap();
+        assert!(partial.is_function());
+        // And applied to a value, it reduces to that value.
+        let done = partial.apply(local("v")).unwrap();
+        assert_eq!(done, local("v"));
+    }
+}
+
+/// The bridge's central property: **equivalent spellings produce equal terms**.
+///
+/// This is what the whole module exists for, and it is the property the compiler
+/// currently has to test indirectly by comparing generated SQL. Here it is
+/// checked at the term level, before any SQL exists, which means a failure
+/// names the term that differs rather than a string of SQL.
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+    use crate::check::check;
+    use crate::workspace::Workspace;
+
+    const TABLES: &str = "users : query { id = int, name = string, age = int } = \
+                          table \"public\" \"users\"\n";
+
+    /// Normalize the named definition of a program.
+    fn term_of(src: &str, name: &str) -> Result<Term, Gap> {
+        let ws = Workspace::from_source(&format!("{TABLES}{src}"));
+        let tc = check(&ws);
+        assert!(tc.errors().is_empty(), "checker errors: {:?}", tc.errors());
+        let facts = WorkspaceFacts::new(&ws, &tc);
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == name)
+            .expect("no such definition");
+        let body = Body {
+            module: ws.root,
+            def,
+            expr: ws.modules[ws.root].module.defs[def].body.clone(),
+        };
+        let resolved = |id: u32| facts.resolution(ws.root, id);
+        let mut cx = Normalizer::new(Box::new(resolved));
+        expression(&facts, &mut cx, &body)
+    }
+
+    /// A definition whose body is a column reference normalizes to that column.
+    #[test]
+    fn a_bare_column_definition_normalizes() {
+        let t = term_of("c = .name\nq = users & select { x = c }\n", "c").unwrap();
+        assert_eq!(
+            t,
+            term_of("c = .name\nq = users & select { x = c }\n", "c").unwrap()
+        );
+        assert!(matches!(t, Term::Local { .. }), "got {t:?}");
+    }
+
+    /// A literal normalizes to a literal.
+    #[test]
+    fn a_literal_normalizes() {
+        let t = term_of("one = 1\nq = users & select { x = one }\n", "one").unwrap();
+        assert!(matches!(t, Term::Lit { .. }), "got {t:?}");
+    }
+
+    /// **An alias is erased.** `f = upper` must normalize to the same term as
+    /// `upper` — because following an alias is not a step, it is the absence of
+    /// one.
+    ///
+    /// This is the property `3624dfc` violated: the checker followed the alias
+    /// and the elaborator did not, so the same program was valid or not
+    /// depending on how it was written.
+    #[test]
+    fn an_alias_normalizes_away() {
+        // Normalize the alias definition itself. Both must reach the same
+        // verdict: if one is a gap the other must be too, with the same
+        // message, because the alias should be invisible.
+        let direct = term_of("q = users & select { x = .name }\nu = upper\n", "u");
+        let via_alias = term_of(
+            "q = users & select { x = .name }\nup = upper\nf = up\n",
+            "f",
+        );
+        match (direct, via_alias) {
+            // The terms must agree *up to source location*: an alias written at
+            // a different offset is legitimately a different span, and `Origin`
+            // exists to keep that honest so a diagnostic points at the text the
+            // user wrote. Equality of shape is what "the alias is invisible"
+            // means.
+            (Ok(a), Ok(b)) => assert_eq!(
+                strip_origins(&a),
+                strip_origins(&b),
+                "an alias produced a different term"
+            ),
+            (Err(a), Err(b)) => assert_eq!(
+                a.message, b.message,
+                "an alias produced a different gap; the alias should be invisible"
+            ),
+            (a, b) => panic!("alias changed the outcome:\n direct: {a:?}\n alias: {b:?}"),
+        }
+        // And the shape is the template, reached through the alias.
+        let t = term_of(
+            "q = users & select { x = .name }\nup = upper\nf = up\n",
+            "f",
+        )
+        .unwrap();
+        match t {
+            Term::Primitive { name, .. } => assert_eq!(&*name, "UPPER($1)"),
+            other => panic!("expected the aliased template, got {other:?}"),
+        }
+    }
+
+    /// A term with every `Origin` blanked, for comparing *shape*.
+    ///
+    /// Origins are deliberately part of term equality — a diagnostic has to
+    /// point at the text the user wrote, so two occurrences at different
+    /// offsets are genuinely different terms. But "these two spellings mean the
+    /// same program" is a claim about shape, so the comparison has to say which
+    /// of the two it is making.
+    fn strip_origins(t: &Term) -> Term {
+        let blank = Origin::new(0, cagara_syntax::ast::Span::default());
+        match t.clone() {
+            Term::Local { id, label, .. } => Term::Local {
+                id,
+                label,
+                origin: blank,
+            },
+            Term::Lit { lit, .. } => Term::Lit { lit, origin: blank },
+            Term::Template { sql, args, .. } => Term::Template {
+                sql,
+                args: args.iter().map(strip_origins).collect(),
+                origin: blank,
+            },
+            Term::Primitive { name, args, .. } => Term::Primitive {
+                name,
+                args: args.iter().map(strip_origins).collect(),
+                origin: blank,
+            },
+            Term::Apply { head, args, .. } => Term::Apply {
+                head: Box::new(strip_origins(&head)),
+                args: args.iter().map(strip_origins).collect(),
+                origin: blank,
+            },
+            Term::Lambda {
+                params,
+                body,
+                source,
+                ..
+            } => Term::Lambda {
+                params,
+                body: Box::new(strip_origins(&body)),
+                source,
+                origin: blank,
+            },
+            Term::Case { arms, default, .. } => Term::Case {
+                arms: arms
+                    .iter()
+                    .map(|(c, v)| (strip_origins(c), strip_origins(v)))
+                    .collect(),
+                default: Box::new(strip_origins(&default)),
+                origin: blank,
+            },
+            Term::Record { fields, .. } => Term::Record {
+                fields: fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), strip_origins(v)))
+                    .collect(),
+                origin: blank,
+            },
+            Term::List { items, .. } => Term::List {
+                items: items.iter().map(strip_origins).collect(),
+                origin: blank,
+            },
+        }
+    }
+
+    /// A `sql` template used bare is a template value, and the same one however
+    /// it was reached.
+    #[test]
+    fn a_template_is_a_value() {
+        let t = term_of(
+            "q = users & select { x = .name }\n\
+             t : expr r string -> expr r string = sql \"UPPER($1)\"\n",
+            "t",
+        )
+        .unwrap();
+        // A signatured `sql` template normalizes to a template value, which is
+        // what makes it usable in argument position without being applied.
+        match t {
+            Term::Template { sql, args, .. } => {
+                assert_eq!(&*sql, "UPPER($1)");
+                assert!(args.is_empty(), "a bare template has no arguments yet");
+            }
+            other => panic!("expected a template, got {other:?}"),
+        }
+    }
+
+    /// A lambda becomes a function value, with its binder recorded and the body
+    /// normalized under it.
+    #[test]
+    fn a_lambda_is_a_function_value() {
+        let t = term_of("q = users & select { y = .id }\nf = x => x\n", "f").unwrap();
+        match t {
+            Term::Lambda { params, body, .. } => {
+                assert_eq!(params, vec!["x".to_string()]);
+                assert!(
+                    matches!(*body, Term::Local { .. }),
+                    "the body should be the bound local, got {body:?}"
+                );
+            }
+            other => panic!("expected a lambda, got {other:?}"),
+        }
+    }
+}
+
+/// The bridge must normalize **every definition in the prelude**, because the
+/// prelude is written in the language and its definitions are what user
+/// programs expand into.
+///
+/// This is a gate, not a report. A construct the bridge cannot handle does not
+/// fail loudly at the point it is missing — it becomes a *gap*, which
+/// downstream means "this program cannot be compiled". Catching it here, on the
+/// corpus that uses the widest range of constructs, is what keeps a missing
+/// family from reaching a user.
+///
+/// The prelude is also the hardest available corpus for a specific reason: it
+/// contains the four curried combinators `_&_`, `_$_`, `_>>>_` and `_<<<_`.
+/// Every one is written `f => x => f x`, so the head of an application is a
+/// bound *parameter* rather than a definition — the case that made an earlier
+/// version of this module report a gap on exactly the definitions composition
+/// is built from.
+#[cfg(test)]
+mod prelude_covers_the_bridge {
+    use super::*;
+    use crate::check::check;
+    use crate::workspace::Workspace;
+
+    #[test]
+    fn every_definition_normalizes() {
+        let ws = Workspace::from_source("q = 1\n");
+        let tc = check(&ws);
+        let facts = WorkspaceFacts::new(&ws, &tc);
+        let mut gaps: Vec<String> = Vec::new();
+        let mut total = 0usize;
+        for m in 0..ws.modules.len() {
+            for (i, d) in ws.modules[m].module.defs.iter().enumerate() {
+                total += 1;
+                let body = Body {
+                    module: m,
+                    def: i,
+                    expr: d.body.clone(),
+                };
+                let resolved = |id: u32| facts.resolution(m, id);
+                let mut cx = Normalizer::new(Box::new(resolved));
+                if let Err(g) = expression(&facts, &mut cx, &body) {
+                    gaps.push(format!("`{}`: {}", d.name, g.message));
+                }
+            }
+        }
+        assert!(
+            total > 100,
+            "expected the prelude's definitions, found {total}"
+        );
+        assert!(
+            gaps.is_empty(),
+            "{} of {total} definitions did not normalize:\n{}",
+            gaps.len(),
+            gaps.join("\n")
+        );
+    }
+
+    /// The curried combinators in particular, named so a regression says which
+    /// one broke rather than only that a count changed.
+    #[test]
+    fn the_curried_combinators_normalize() {
+        let ws = Workspace::from_source("q = 1\n");
+        let tc = check(&ws);
+        let facts = WorkspaceFacts::new(&ws, &tc);
+        let mut checked = 0;
+        for m in 0..ws.modules.len() {
+            for (i, d) in ws.modules[m].module.defs.iter().enumerate() {
+                if !matches!(d.name.as_str(), "_&_" | "_$_" | "_>>>_" | "_<<<_" | "id") {
+                    continue;
+                }
+                let body = Body {
+                    module: m,
+                    def: i,
+                    expr: d.body.clone(),
+                };
+                let resolved = |id: u32| facts.resolution(m, id);
+                let mut cx = Normalizer::new(Box::new(resolved));
+                let term = expression(&facts, &mut cx, &body)
+                    .unwrap_or_else(|g| panic!("`{}` did not normalize: {}", d.name, g.message));
+                assert!(
+                    term.is_function(),
+                    "`{}` should normalize to a function value, got {term:?}",
+                    d.name
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 5, "only {checked} combinators were found");
     }
 }

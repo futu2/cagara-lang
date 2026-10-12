@@ -114,6 +114,13 @@ pub enum Term {
         ty: crate::core::ScalarType,
         origin: Origin,
     },
+    /// An **already-elaborated** expression: a name bound by an enclosing
+    /// application.
+    ///
+    /// The value exists only in the elaboration environment, so there is nothing
+    /// to normalize or substitute — the work is already done, and re-deriving it
+    /// would duplicate the caller's.
+    Elaborated(crate::checked::CheckedExpr),
     /// A literal, already at the type the checker gave it.
     Lit {
         lit: crate::ir::Lit,
@@ -483,7 +490,7 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
         // this is the binder's own name, recorded by the checker, not a name to
         // be looked up.
         Term::Local { label, .. } if label == name => arg.clone(),
-        Term::Local { .. } | Term::Column { .. } | Term::Lit { .. } => term,
+        Term::Local { .. } | Term::Column { .. } | Term::Lit { .. } | Term::Elaborated(_) => term,
         Term::Template {
             sql,
             args,
@@ -660,6 +667,12 @@ pub struct Normalizer<'a> {
     /// The module whose body is being walked, so a name is resolved against the
     /// records of the module it was *written in* rather than the caller's.
     current_module: usize,
+    /// The overload candidates assigned to the open holes of each definition
+    /// currently being walked, outermost first.
+    ///
+    /// A stack because the walk nests and a hole index is **local to the
+    /// definition that owns it**.
+    hole_stack: Vec<Vec<(usize, usize)>>,
 }
 
 impl<'a> Normalizer<'a> {
@@ -670,7 +683,40 @@ impl<'a> Normalizer<'a> {
             cache: HashMap::new(),
             binders: Vec::new(),
             current_module: 0,
+            hole_stack: Vec::new(),
         }
+    }
+
+    /// The candidate assigned to hole `k` of the definition being walked.
+    ///
+    /// **Positional**, because that is what the assignment is: `cx.holes` in
+    /// `elaborate.rs` is indexed by hole, `holes[k] = (callee_module,
+    /// chosen_def)`, and the source path reads it as `cx.holes.get(h)`. An
+    /// earlier version of this searched by the tuple's first element, which is
+    /// the *module* — so it compared a module index against a hole index and
+    /// found nothing, silently, for as long as no module happened to be numbered
+    /// like a hole.
+    ///
+    /// Innermost assignment first, for the reason the stack exists: a hole index
+    /// is local to its owner, so an outer definition's answer would be for a
+    /// different hole carrying the same number.
+    pub fn hole(&self, k: usize) -> Option<usize> {
+        self.hole_stack
+            .iter()
+            .rev()
+            .find_map(|assignment| assignment.get(k).map(|(_, chosen)| *chosen))
+    }
+
+    /// Walk with one definition's hole assignment in scope.
+    pub fn with_holes<T>(
+        &mut self,
+        holes: Vec<(usize, usize)>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.hole_stack.push(holes);
+        let out = f(self);
+        self.hole_stack.pop();
+        out
     }
 
     /// Whether `name` is bound by an enclosing binder rather than the module.
@@ -769,6 +815,25 @@ pub trait Facts {
     /// signature says plainly that `_+_` over ints returns an int.
     fn def_result_ty(&self, module: usize, def: usize) -> Option<crate::core::ScalarType>;
 
+    /// The overload candidates the **caller** chose, keyed by hole index.
+    ///
+    /// `owner` is the definition whose body the use sits in — *not* the callee.
+    /// `infer.rs` records a choice with `self.active.last()`, which is the
+    /// definition being elaborated, so asking about the callee returns nothing.
+    /// `site` is the callee *name* node's `ExprId`, which is where a definition
+    /// is instantiated.
+    fn holes_at(&self, owner: (usize, usize), site: u32) -> Vec<(usize, usize)> {
+        let _ = (owner, site);
+        Vec::new()
+    }
+
+    /// An already-elaborated binding from the *elaboration environment*, if the
+    /// name occurrence is bound by an enclosing application rather than the
+    /// module.
+    fn local_binding(&self, _name: &str) -> Option<crate::checked::CheckedExpr> {
+        None
+    }
+
     /// The scalar type the checker gave the expression with this `ExprId`.
     ///
     /// `ScalarType::Unknown` when the checker recorded none, matching
@@ -848,6 +913,13 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
         // scoping requires. The check is against the *binder stack* rather
         // than the resolver, because the resolver answers about module-scope
         // names only.
+        // A name bound by an enclosing application: the environment holds the
+        // argument already elaborated, so this is a value rather than something
+        // to resolve, and it is asked before the module scope because a parameter
+        // shadows a top-level definition of the same name.
+        ExprKind::Name(n) if facts.local_binding(n).is_some() => Ok(Term::Elaborated(
+            facts.local_binding(n).expect("checked just above"),
+        )),
         ExprKind::Name(n) if cx.is_local(n) => Ok(Term::Local {
             id: e.id,
             label: n.clone(),
@@ -926,15 +998,22 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
             Some(Resolved::Overloads { module: om, defs }) => {
                 let chosen = match facts.choice(module, body.def, e.id) {
                     Some(Choice::Def(_, di)) => di,
-                    Some(Choice::Hole(k)) => {
-                        return Err(Gap::new(
-                            origin,
-                            format!(
-                                "`{n}` is an open overload (hole {k}) inside its own definition; \
-                                 normalization runs per use, where the hole is assigned"
-                            ),
-                        ))
-                    }
+                    // The use sits at an open hole of the definition being
+                    // elaborated, so the answer is not recorded at this module
+                    // and site — it belongs to whoever applied the definition,
+                    // and travels in the assignment the walk pushed on entry.
+                    Some(Choice::Hole(k)) => match cx.hole(k) {
+                        Some(chosen) => chosen,
+                        None => {
+                            return Err(Gap::new(
+                                origin,
+                                format!(
+                                    "`{n}` is an open overload (hole {k}) and no assignment \
+                                     for it was supplied"
+                                ),
+                            ))
+                        }
+                    },
                     // Nothing recorded: the use is open inside its own
                     // definition. Reported rather than defaulted, because
                     // taking candidate zero would silently pick one of several
@@ -1013,45 +1092,61 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
         // argument. This is the substitution the old design did by re-walking
         // source.
         ExprKind::App(head, args) => {
-            let head_term = expression(
-                facts,
-                cx,
-                &Body {
-                    module,
-                    def: body.def,
-                    expr: (**head).clone(),
-                },
-            )?;
-            let mut arg_terms = Vec::with_capacity(args.len());
-            for arg in args.iter() {
-                arg_terms.push(expression(
+            // The callee's open overloads are resolved by **this** application,
+            // recorded against *this* definition at the id of the callee name
+            // node. The id has to be read here, while the head is still a
+            // `Name`: flattening an application discards that node, and a walk
+            // that has lost it cannot find the assignment however well it looks.
+            let pushed = match &head.kind {
+                ExprKind::Name(_) => {
+                    let h = facts.holes_at((module, body.def), head.id);
+                    Some(h)
+                }
+                _ => None,
+            };
+            let apply = |cx: &mut Normalizer<'_>| -> Result<Term, Gap> {
+                let head_term = expression(
                     facts,
                     cx,
                     &Body {
                         module,
                         def: body.def,
-                        expr: arg.clone(),
+                        expr: (**head).clone(),
                     },
-                )?);
+                )?;
+                let mut arg_terms = Vec::with_capacity(args.len());
+                for arg in args.iter() {
+                    arg_terms.push(expression(
+                        facts,
+                        cx,
+                        &Body {
+                            module,
+                            def: body.def,
+                            expr: arg.clone(),
+                        },
+                    )?);
+                }
+                // Reduce as far as the head allows. An application that cannot
+                // reduce is *kept*, not rejected: `f x` inside `f => x => f x`
+                // has nothing to substitute into until the enclosing lambda is
+                // applied, and every curried combinator in the prelude is
+                // written that way.
+                let reduced = reduce_application(head_term, arg_terms, origin);
+                // A *saturated* template takes the application's own type and
+                // span: reading the type off the head records the template's
+                // result at the *definition's* `ExprId` while the elaborator and
+                // the incremental facts read the type of the *use*, and the
+                // head's span would blame `upper` rather than `upper .name`.
+                Ok(apply_type_and_span(
+                    reduced,
+                    facts.use_ty(module, e.id),
+                    origin,
+                ))
+            };
+            match pushed {
+                Some(holes) => cx.with_holes(holes, apply),
+                None => apply(cx),
             }
-            // Reduce as far as the head allows. An application that cannot
-            // reduce is *kept*, not rejected: `f x` inside `f => x => f x` has
-            // nothing to substitute into until the enclosing lambda is applied,
-            // and every curried combinator in the prelude is written that way.
-            let reduced = reduce_application(head_term, arg_terms, origin);
-            // A *saturated* template takes the application's own type and span.
-            //
-            // Not cosmetic: reading the type off the head records the template's
-            // result type at the *definition's* `ExprId`, while the elaborator
-            // and the incremental facts read the type of the *use*; and the
-            // head's span would point a diagnostic at `upper` rather than at
-            // `upper .name`, which is the expression the user wrote and the one
-            // the checker blamed.
-            Ok(apply_type_and_span(
-                reduced,
-                facts.use_ty(module, e.id),
-                origin,
-            ))
         }
         // A `case { cond => value; …; true => default }`.
         //
@@ -1214,7 +1309,42 @@ pub fn elaborate_via_term_with(
     e: &cagara_syntax::ast::Expr,
     spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
 ) -> Result<crate::checked::CheckedExpr, Gap> {
-    let facts = InputFacts::new(input);
+    elaborate_with_env(input, module, owner, e, &[], spec)
+}
+
+/// Normalize and lower one expression, with the elaboration environment.
+///
+/// `env` is the one thing the checker cannot supply: names bound by an enclosing
+/// application live in the elaborator, and a term is built from the checker's
+/// records plus this.
+pub fn elaborate_with_env(
+    input: crate::compile::CompilerInput<'_>,
+    module: usize,
+    owner: usize,
+    e: &cagara_syntax::ast::Expr,
+    env: &[(String, crate::checked::CheckedExpr)],
+    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
+) -> Result<crate::checked::CheckedExpr, Gap> {
+    elaborate_with_holes(input, module, owner, e, env, &[], spec)
+}
+
+/// Normalize and lower, with the environment **and** the definition's hole
+/// assignment.
+///
+/// `holes` is the assignment the query path computed for the definition being
+/// elaborated: `cx.holes` in `elaborate.rs`, indexed by hole. A term's walk
+/// reaches those holes through the normalizer's stack, so the assignment is
+/// seeded there rather than left to `cx`.
+pub fn elaborate_with_holes(
+    input: crate::compile::CompilerInput<'_>,
+    module: usize,
+    owner: usize,
+    e: &cagara_syntax::ast::Expr,
+    env: &[(String, crate::checked::CheckedExpr)],
+    holes: &[(usize, usize)],
+    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
+) -> Result<crate::checked::CheckedExpr, Gap> {
+    let facts = InputFacts::with_env(input, env.to_vec());
     let body = Body {
         module,
         def: owner,
@@ -1225,7 +1355,9 @@ pub fn elaborate_via_term_with(
     // walk — hence the closure borrowing `facts` rather than `input`.
     let resolve = |module: usize, id: u32| facts.resolution(module, id);
     let mut cx = Normalizer::new(Box::new(resolve));
-    let term = match cx.in_module(module, |cx| expression(&facts, cx, &body)) {
+    let term = match cx.in_module(module, |cx| {
+        cx.with_holes(holes.to_vec(), |cx| expression(&facts, cx, &body))
+    }) {
         Ok(t) => t,
         Err(g) => {
             note_gap(&g.message);
@@ -1488,6 +1620,7 @@ pub fn term_to_expr(t: &Term) -> Option<cagara_syntax::ast::Expr> {
                 ExprKind::App(Box::new(f), out.into()),
             ))
         }
+        Term::Elaborated(_) => None,
         Term::Template { .. } | Term::Window { .. } => None,
         Term::Lambda { .. } | Term::Case { .. } => None,
     }
@@ -1554,6 +1687,7 @@ pub fn lower_expr_with(
             ty,
             origin,
         } => Ok(C::column(*side, name.clone(), ty.clone(), *origin)),
+        Term::Elaborated(e) => Ok(e.clone()),
         Term::Lit { lit, origin, .. } => Ok(C::lit(lit.clone(), *origin)),
         Term::Template {
             sql,
@@ -1702,6 +1836,7 @@ fn lower_primitive(
 /// A term's origin, for reporting a gap about a subterm.
 fn other_origin(t: &Term) -> Origin {
     match t {
+        Term::Elaborated(e) => e.origin(),
         Term::Local { origin, .. }
         | Term::Column { origin, .. }
         | Term::Lit { origin, .. }
@@ -1803,15 +1938,51 @@ impl<'a> WorkspaceFacts<'a> {
 /// the compiler, which deliberately holds only a read-only input view.
 pub struct InputFacts<'a> {
     pub input: crate::compile::CompilerInput<'a>,
+    /// Names bound by an enclosing application, innermost last.
+    pub env: Vec<(String, crate::checked::CheckedExpr)>,
 }
 
 impl<'a> InputFacts<'a> {
     pub fn new(input: crate::compile::CompilerInput<'a>) -> Self {
-        Self { input }
+        Self {
+            input,
+            env: Vec::new(),
+        }
+    }
+
+    /// The same facts, with the elaboration environment attached.
+    pub fn with_env(
+        input: crate::compile::CompilerInput<'a>,
+        env: Vec<(String, crate::checked::CheckedExpr)>,
+    ) -> Self {
+        Self { input, env }
     }
 }
 
 impl Facts for InputFacts<'_> {
+    fn holes_at(&self, (module, owner): (usize, usize), site: u32) -> Vec<(usize, usize)> {
+        self.input
+            .type_check()
+            .choices_of(module, owner)
+            .into_iter()
+            .filter(|(recorded, _, _)| *recorded == site)
+            .filter_map(|(_, hole, choice)| match choice {
+                Choice::Def(_, chosen) => Some((hole, chosen)),
+                // A hole that is itself open in the caller: the enclosing
+                // assignment on the stack answers for it.
+                Choice::Hole(_) => None,
+            })
+            .collect()
+    }
+
+    fn local_binding(&self, name: &str) -> Option<crate::checked::CheckedExpr> {
+        self.env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    }
+
     fn resolution(&self, module: usize, id: u32) -> Option<Resolved> {
         self.input.type_check().resolution(module, id).cloned()
     }
@@ -2291,6 +2462,7 @@ mod bridge_tests {
                 ty,
                 origin: blank,
             },
+            Term::Elaborated(e) => Term::Elaborated(e),
             Term::Lit { lit, ty, .. } => Term::Lit {
                 lit,
                 ty,

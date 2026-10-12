@@ -711,17 +711,13 @@ fn the_normalized_route_handles_every_construct() {
     }
     let gaps = crate::normalize::gap_reasons();
     let total_gaps: usize = gaps.iter().map(|(_, n)| n).sum();
-    eprintln!(
-        "fallback source-path hits: {}",
-        crate::elaborate::source_hits()
-    );
     for (reason, n) in &gaps {
-        eprintln!("fallback {n:4}  {reason}");
+        eprintln!("gap {n:4}  {reason}");
     }
     assert_eq!(
         total_gaps, 0,
-        "the normalized route fell back {total_gaps} time(s); the source path \
-         cannot be deleted while a construct still needs it"
+        "the term layer could not express {total_gaps} construct(s); with no \
+         fallback left, each of these is a compiler gap for a real program"
     );
 }
 
@@ -749,103 +745,72 @@ fn the_fallback_counter_observes_gaps() {
     );
 }
 
-/// The source path is **unreachable**: nothing in the corpus runs it.
+/// Every corpus program compiles through the normalized route.
 ///
-/// This began as an assertion that failed, and the failure was the finding:
-/// window function applications still needed the source path, because a window's
-/// first argument is its *spec* — a query-level record whose rules were already
-/// implemented elsewhere. Forcing the deletion then would have broken windows or
-/// duplicated those rules.
-///
-/// So the spec became a term. It is lowered by `normalize::lower_winspec`, which
-/// reads an order key's direction from the resolved `__asc`/`__desc` primitive
-/// rather than re-reading the name `asc`/`desc` from source — the same
-/// syntax-shape dispatch the rest of this migration removed, obtained once from
-/// the checker's record instead.
-///
-/// Zero is now the measured value, not the hoped-for one, and this test is what
-/// holds the line: a construct that regresses into the fallback makes it
-/// non-zero and fails here.
+/// The gate that made this possible is gone with the thing it measured: there is
+/// no longer a source path to fall back to, so "unreachable" is no longer a
+/// property that can fail. What remains worth asserting is that the corpus still
+/// compiles at all — a construct the term layer could not express would now be a
+/// hard compiler gap rather than a silent fallback, so this fails loudly.
 #[test]
-fn the_source_path_is_unreachable() {
+fn every_corpus_program_compiles_without_a_fallback() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut hits = 0usize;
-    let mut files = 0usize;
-    for entry in ["examples/report.cagara", "examples/public.cagara"] {
+    let mut checked = 0usize;
+    for entry in [
+        "examples/report.cagara",
+        "examples/public.cagara",
+        "examples/schema.cagara",
+        "examples/errors.cagara",
+    ] {
         let Ok(text) = std::fs::read_to_string(root.join(entry)) else {
             continue;
         };
         let ws = Workspace::from_source(&text);
         let tc = crate::check::check(&ws);
-        let before = crate::elaborate::source_hits();
-        let _ = crate::compile::compile_input(crate::compile::CompilerInput::new(&ws, &tc));
-        hits += crate::elaborate::source_hits() - before;
-        files += 1;
+        let compiled = crate::compile::compile_input(crate::compile::CompilerInput::new(&ws, &tc));
+        for query in &compiled.queries {
+            assert_ne!(
+                query.fault,
+                Some(Fault::Compiler),
+                "{entry} / `{}` hit a compiler gap now that no fallback exists",
+                query.name
+            );
+        }
+        checked += 1;
     }
-    assert!(files > 0, "no corpus files were found");
-    assert_eq!(
-        hits, 0,
-        "{hits} expression(s) still ran the source path; every construct \
-         should now go through the normalized route"
-    );
+    assert!(checked > 0, "no corpus files were found");
 }
 
-/// The **one** construct that still needs the source path, with both halves of
-/// the blocker measured.
+/// The construct that blocked this migration for six attempts, now migrated.
 ///
-/// Recorded because four attempts at it stalled, and each stalled for a
-/// different reason that only measurement separated. Not in any example, which
-/// is why the corpus gate reports zero: it takes a *polymorphic helper applied
-/// at a projection*.
+/// Kept as a regression test because it is the one case the corpus does not
+/// cover and the one that took longest to understand. A polymorphic helper
+/// applied at a projection:
 ///
 /// ```text
 /// h  = e => users & select { x = e + 1, id = .id }
 /// ok = h .age
 /// ```
 ///
-/// Two facts about the checker's record, both measured on this exact program:
+/// `h`'s `+` is an open overload; `ok` records the answer at the id of the
+/// callee *name* node. Elaborating `ok` inlines `h`'s body, so the walk reaches
+/// `_+_` while the current definition is `h` but the assignment belongs to
+/// `ok`.
 ///
-/// ```text
-/// DEF `h`  choices=[(11, 0, Hole(0))]      holes=1
-/// DEF `ok` choices=[(20, 0, Def(0, 85))]   holes=0
-/// ```
+/// Three things had to be right at once, and each was wrong in turn:
 ///
-/// 1. **The choice is recorded against the caller, not the callee.** `infer.rs`
-///    writes `self.active.last()`, which is the definition being elaborated — so
-///    `holes_at` must be asked about `ok`, and asking about `h` returns nothing
-///    at all. That was the first wrong turn.
-/// 2. **The recorded site is the callee *name* node's id.** Site 20 is `h` in
-///    `h .age`. Flattening an application discards that node, so the site has to
-///    be read while the head is still a `Name` — the second wrong turn.
-///
-/// The seam itself is sound and is covered by unit tests in `normalize`:
-/// `Normalizer::hole` answers from its stack, and `local_binding` turns a bound
-/// parameter into `Term::Elaborated`. What defeated every attempt is the
-/// **plumbing between them**, and the last measurement is the reason it is still
-/// open:
-///
-/// ```text
-/// HOLES-AT owner=(1,5) site=28 all=[(26, 0, Def(0, 85))]
-/// APP      app.id=30  head.id=28  span=297..304
-/// ```
-///
-/// The checker's recorded site is **26**; the walk presents **28**; and the span
-/// 297..304 matches none of `q` (247), `ok` (260) or `win` (273) in the same
-/// source string. So the ids the walk sees and the ids the checker recorded are
-/// not from the same numbering — which invalidates the obvious fix of comparing
-/// them, and is exactly the mistake that wasted three attempts: I compared ids
-/// across programs, or across two numberings of one program, and each comparison
-/// looked plausible.
-///
-/// The next step is to establish *why* the two numberings differ — whether
-/// elaboration walks a re-lowered AST rather than the `parse_module` result the
-/// checker reads — before touching this again. That is a question about where
-/// the AST comes from, not about hole assignment.
-///
-/// The test asserts the case compiles, since the gap is invisible from outside:
-/// the source path still handles it.
+/// 1. **The choice is recorded against the caller.** `infer.rs` writes
+///    `self.active.last()`. Asking about the callee returns nothing.
+/// 2. **The site is the callee name node's id**, not the application's and not a
+///    projection's — and flattening an application discards that node, so it has
+///    to be read while the head is still a `Name`.
+/// 3. **`cx.holes` is positional.** `holes[k]` is the assignment for hole `k`,
+///    each entry being `(callee_module, chosen_def)`. A version that searched by
+///    the tuple's first element was comparing a *module* index against a *hole*
+///    index, and found nothing for as long as no module happened to be numbered
+///    like a hole.
 #[test]
-fn a_polymorphic_helper_at_a_projection_still_needs_the_source_path() {
+fn a_polymorphic_helper_at_a_projection_is_migrated() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string, age = int, active = bool } = \
          table \"public\" \"users\"\n\
@@ -859,9 +824,17 @@ fn a_polymorphic_helper_at_a_projection_still_needs_the_source_path() {
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled.queries.iter().any(|q| q.result.is_ok()),
-        "the program should still compile: {:?}",
+        "the program should compile: {:?}",
         compiled.diagnostics
     );
+    for query in &compiled.queries {
+        assert_ne!(
+            query.fault,
+            Some(Fault::Compiler),
+            "`{}` should not need a fallback any more",
+            query.name
+        );
+    }
 }
 
 /// The checker records an overload choice against the **caller**, at the callee
@@ -920,4 +893,155 @@ fn an_overload_choice_is_keyed_by_the_use_site() {
         site, defs[ok].body.id,
         "the application node carries a different id from the site"
     );
+}
+
+/// The checker and the elaborator read the **same** AST, with the same
+/// `ExprId`s.
+///
+/// This is the check four failed attempts at the last construct lacked. I
+/// reasoned about the ids the walk sees versus the ids the checker recorded,
+/// without first establishing that the two come from one tree. If they do, the
+/// mismatch must have another cause; if they do not, nothing built on comparing
+/// them can work.
+///
+/// Both sides go through `lower::parse_module`: the checker via
+/// `parse_module(db, input.file(db))`, the elaborator via
+/// `Workspace::modules[..].module`, which is built from the same query in
+/// `Workspace::load`. This asserts that rather than assuming it.
+#[test]
+fn the_checker_and_the_elaborator_share_one_ast() {
+    let src = "users : query { id = int, age = int } = table \"s\" \"users\"\n\
+               h = e => users & select { x = e + 1, id = .id }\n\
+               ok = h .age\n";
+    let ws = Workspace::from_source(src);
+    let tc = crate::check::check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+
+    // The checker's view, straight from the salsa query.
+    let file = ws.inputs[ws.root].file(&ws.db);
+    let from_query = crate::lower::parse_module(&ws.db, *file);
+    // The elaborator's view, from the loaded module.
+    let from_workspace = &ws.modules[ws.root].module;
+
+    assert_eq!(
+        from_query.module.defs.len(),
+        from_workspace.defs.len(),
+        "the two views disagree on how many definitions there are"
+    );
+    for (i, (a, b)) in from_query
+        .module
+        .defs
+        .iter()
+        .zip(&from_workspace.defs)
+        .enumerate()
+    {
+        assert_eq!(a.name, b.name, "definition {i} differs by name");
+        assert_eq!(
+            a.body.id, b.body.id,
+            "definition {i} (`{}`) has a different body id: {} vs {}",
+            a.name, a.body.id, b.body.id
+        );
+        assert_eq!(
+            a.body.span, b.body.span,
+            "definition {i} (`{}`) has a different body span",
+            a.name
+        );
+    }
+}
+
+/// The `ExprId`s of the exact program the failing test uses, printed.
+///
+/// The traces in the earlier attempts printed spans that matched no definition
+/// in the program under test, which is what sent me looking for two ASTs. They
+/// share one, so the spans must have come from a *different program* — another
+/// test's elaboration, or the prelude's. This prints the ids for the one string
+/// that matters, and locates the callee name node by walking the tree.
+#[test]
+fn report_the_ids_of_the_failing_program() {
+    let ws = Workspace::from_source(
+        "users : query { id = int, name = string, age = int, active = bool } = \
+         table \"public\" \"users\"\n\
+         orders : query { id = int, user_id = int, amount = float, status = string } = \
+         table \"public\" \"orders\"\n\
+         h = e => users & select { x = e + 1, id = .id }\n\
+         q = h count\n\
+         ok = h .age\n\
+         win = h (rowNumber { order = [asc .id] })\n",
+    );
+    let tc = crate::check::check(&ws);
+    // `q = h count` is *meant* to be rejected — the test is about `ok` and
+    // `win` — so errors are expected here and the ids are printed regardless.
+    for (i, d) in ws.modules[ws.root].module.defs.iter().enumerate() {
+        eprintln!(
+            "DEF {i} `{}` body.id={} span={:?} choices={:?} holes={}",
+            d.name,
+            d.body.id,
+            d.body.span,
+            tc.choices_of(ws.root, i),
+            tc.holes(ws.root, i)
+        );
+        // The tree, so the recorded site can be located in it.
+        fn walk(e: &cagara_syntax::ast::Expr, depth: usize) {
+            use cagara_syntax::ast::ExprKind as K;
+            let k = match &e.kind {
+                K::App(..) => "App",
+                K::Name(n) => return eprintln!("{}Name({n}) id={}", "  ".repeat(depth), e.id),
+                K::Field(..) => "Field",
+                K::Lambda(..) => "Lambda",
+                K::Record(_) => "Record",
+                K::List(_) => "List",
+                _ => "other",
+            };
+            eprintln!("{}{k} id={}", "  ".repeat(depth), e.id);
+            match &e.kind {
+                K::App(f, a) => {
+                    walk(f, depth + 1);
+                    for x in a.iter() {
+                        walk(x, depth + 1);
+                    }
+                }
+                K::Lambda(_, b) => walk(b, depth + 1),
+                K::Record(fs) => {
+                    for (_, v) in fs {
+                        walk(v, depth + 1);
+                    }
+                }
+                K::List(xs) => {
+                    for x in xs {
+                        walk(x, depth + 1);
+                    }
+                }
+                K::Proj(b, _) => walk(b, depth + 1),
+                _ => {}
+            }
+        }
+        walk(&d.body, 2);
+    }
+}
+
+/// The same measurement, on the **exact** source `consistent_src` builds.
+///
+/// Every probe so far used a hand-written variant, whose ids and spans differ
+/// from the test's. That mismatch is what made four traces lead nowhere: the
+/// numbers were real but from another program. This uses the test's own string.
+#[test]
+fn report_the_ids_of_the_consistent_src_program() {
+    const TABLES: &str =
+        "users : query { id = int, name = string, age = int, active = bool } = table \"public\" \"users\"\n\
+         orders : query { id = int, user_id = int, amount = float, status = string } = table \"public\" \"orders\"\n";
+    let h = "h = e => users & select { x = e + 1, id = .id }\n";
+    let src = format!(
+        "{TABLES}{h}q = h count\nok = h .age\nwin = h (rowNumber {{ order = [asc .id] }})\n"
+    );
+    let ws = Workspace::from_source(&src);
+    let tc = crate::check::check(&ws);
+    for (i, d) in ws.modules[ws.root].module.defs.iter().enumerate() {
+        eprintln!(
+            "SRC-DEF {i} `{}` body.id={} span={:?} choices={:?}",
+            d.name,
+            d.body.id,
+            d.body.span,
+            tc.choices_of(ws.root, i)
+        );
+    }
 }

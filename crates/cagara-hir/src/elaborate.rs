@@ -48,14 +48,13 @@ thread_local! {
 
 #[cfg(test)]
 thread_local! {
-    /// How many times the alias-following walk ran. Should reach zero once
-    /// normalization resolves aliases, which is what makes deleting it safe.
-    static FOLLOW_ALIAS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many expressions fell back to the source path.
+    static SOURCE_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
-pub(crate) fn follow_alias_calls() -> usize {
-    FOLLOW_ALIAS_CALLS.with(|c| c.get())
+pub(crate) fn source_hits() -> usize {
+    SOURCE_HITS.with(|c| c.get())
 }
 
 #[cfg(test)]
@@ -1476,6 +1475,17 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
             return Ok(lowered);
         }
     }
+    #[cfg(test)]
+    {
+        SOURCE_HITS.with(|c| c.set(c.get() + 1));
+        eprintln!(
+            "SOURCE-PATH kind={:?} local={} module={} span={:?}",
+            describe(&e.kind),
+            is_locally_bound(cx, e),
+            cx.module,
+            e.span
+        );
+    }
     elaborate_expr_source(cx, e)
 }
 
@@ -1827,8 +1837,6 @@ fn resolve_callable(cx: Ctx<'_>, name: &str, f: &ast::Expr, origin: Origin) -> R
 ///
 /// [`ExprId`]: cagara_syntax::ast::ExprId
 fn follow_alias(cx: Ctx<'_>, dm: usize, di: usize, site: u32, origin: Origin) -> R<(usize, usize)> {
-    #[cfg(test)]
-    FOLLOW_ALIAS_CALLS.with(|c| c.set(c.get() + 1));
     let mut current = (dm, di);
     let mut seen: Vec<(usize, usize)> = Vec::new();
     loop {

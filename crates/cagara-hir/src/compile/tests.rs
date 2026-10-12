@@ -711,6 +711,10 @@ fn the_normalized_route_handles_every_construct() {
     }
     let gaps = crate::normalize::gap_reasons();
     let total_gaps: usize = gaps.iter().map(|(_, n)| n).sum();
+    eprintln!(
+        "fallback source-path hits: {}",
+        crate::elaborate::source_hits()
+    );
     for (reason, n) in &gaps {
         eprintln!("fallback {n:4}  {reason}");
     }
@@ -742,5 +746,49 @@ fn the_fallback_counter_observes_gaps() {
     assert!(
         crate::normalize::gap_reasons().is_empty(),
         "reset should clear"
+    );
+}
+
+/// The source path's remaining surface, measured rather than assumed.
+///
+/// This began as an assertion that the source path is unreachable, so that
+/// deleting it would be a checked step. It failed, and the failure is the
+/// finding: **window function applications** still need it.
+///
+/// That is not a defect to paper over. A window's first argument is its *spec* —
+/// a query-level record of partition, order and frame — and the rules for it
+/// (which fields exist, that an order key must name a column, what a frame bound
+/// may be) are already implemented by `elaborate_winspec`. Lowering a spec in
+/// the term layer would be a second copy of those rules, which is the
+/// duplication this whole migration exists to remove.
+///
+/// So the test records the exact expected count. It fails if a *new* construct
+/// starts falling back — which is what makes it a gate rather than a comment —
+/// and it fails if windows are migrated too, at which point the number drops and
+/// this expectation should be lowered with it. A bare "0" would have been wrong
+/// today and a bare "2" would rot silently; naming both what and why is what
+/// keeps it honest.
+#[test]
+fn only_windows_still_need_the_source_path() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut hits = 0usize;
+    let mut files = 0usize;
+    for entry in ["examples/report.cagara", "examples/public.cagara"] {
+        let Ok(text) = std::fs::read_to_string(root.join(entry)) else {
+            continue;
+        };
+        let ws = Workspace::from_source(&text);
+        let tc = crate::check::check(&ws);
+        let before = crate::elaborate::source_hits();
+        let _ = crate::compile::compile_input(crate::compile::CompilerInput::new(&ws, &tc));
+        hits += crate::elaborate::source_hits() - before;
+        files += 1;
+    }
+    assert!(files > 0, "no corpus files were found");
+    assert_eq!(
+        hits, 2,
+        "expected exactly the two window applications in report.cagara to need \
+         the source path; {hits} did. A larger number means a construct \
+         regressed into the fallback."
     );
 }

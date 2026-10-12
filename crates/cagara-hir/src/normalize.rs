@@ -180,6 +180,23 @@ pub enum Term {
         args: Vec<Term>,
         origin: Origin,
     },
+    /// A **window function** applied to its arguments: `rowNumber spec`,
+    /// `sumOver spec .amount`.
+    ///
+    /// Distinct from [`Term::Template`] because a window functions's first
+    /// argument is its *spec* — a query-level record of partition, order and
+    /// frame — not a scalar expression. Keeping it separate is what lets the
+    /// spec be lowered by the code that already knows how
+    /// (`elaborate_winspec`) rather than by a second implementation here.
+    Window {
+        sql: Arc<str>,
+        /// The window specification, as written.
+        spec: Box<Term>,
+        /// The scalar arguments, in order.
+        args: Vec<Term>,
+        ty: crate::core::ScalarType,
+        origin: Origin,
+    },
     /// A `case`/`ifThenElse` chain, already flattened to arms plus a default.
     ///
     /// Flattened because the nesting is spelling: `case { a => x; true => y }`
@@ -493,6 +510,19 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
             let args: Vec<Term> = args.into_iter().map(|a| substitute(a, name, arg)).collect();
             reduce_application(head, args, origin)
         }
+        Term::Window {
+            sql,
+            spec,
+            args,
+            ty,
+            origin,
+        } => Term::Window {
+            sql,
+            spec: Box::new(substitute(*spec, name, arg)),
+            args: args.into_iter().map(|a| substitute(a, name, arg)).collect(),
+            ty,
+            origin,
+        },
         Term::Case {
             arms,
             default,
@@ -1216,12 +1246,31 @@ pub fn lower_expr(t: &Term) -> Result<crate::checked::CheckedExpr, Gap> {
                 // A window template needs a spec, which is a query-level
                 // concept this expression lowering does not carry. Reported
                 // rather than given an invented spec.
+                // A window template reached as a bare name has no spec yet —
+                // it is a function awaiting one. Reaching here means it was
+                // applied without a spec argument, which the checker refuses to
+                // type, so this is reported rather than given an invented spec.
                 TemplateKind::Win => Err(Gap::new(
                     *origin,
-                    "a window template is lowered with its spec, not as a bare expression",
+                    "a window template needs its spec argument",
                 )),
             }
         }
+        // A window application is recognized, and its spec is carried as a
+        // term — but the spec is a *query-level* record with its own rules
+        // (which fields exist, that an order key must name a column, what a
+        // frame bound may be), and those rules are already implemented by
+        // `elaborate_winspec`. Lowering it here would be a second copy.
+        //
+        // So this arm reports rather than invents, and a caller that has a
+        // spec-lowering hook uses `lower_expr_with` instead. The window path
+        // therefore still runs through the source route, which is honest: it is
+        // one family, and claiming it is migrated while lowering it wrongly
+        // would be worse than leaving it.
+        Term::Window { origin, .. } => Err(Gap::new(
+            *origin,
+            "a window application needs its spec lowered by the query layer",
+        )),
         Term::Primitive {
             name,
             args,
@@ -1329,6 +1378,7 @@ fn other_origin(t: &Term) -> Origin {
         | Term::Primitive { origin, .. }
         | Term::Lambda { origin, .. }
         | Term::Apply { origin, .. }
+        | Term::Window { origin, .. }
         | Term::Case { origin, .. }
         | Term::Record { origin, .. }
         | Term::List { origin, .. } => *origin,
@@ -1937,6 +1987,19 @@ mod bridge_tests {
             Term::Apply { head, args, .. } => Term::Apply {
                 head: Box::new(strip_origins(&head)),
                 args: args.iter().map(strip_origins).collect(),
+                origin: blank,
+            },
+            Term::Window {
+                sql,
+                spec,
+                args,
+                ty,
+                ..
+            } => Term::Window {
+                sql,
+                spec: Box::new(strip_origins(&spec)),
+                args: args.iter().map(strip_origins).collect(),
+                ty,
                 origin: blank,
             },
             Term::Lambda {

@@ -789,3 +789,59 @@ fn the_source_path_is_unreachable() {
          should now go through the normalized route"
     );
 }
+
+/// The **one** construct that still needs the source path, named precisely.
+///
+/// Recorded because I failed to migrate it and the next attempt should start
+/// from the measurement rather than repeat the search. It is not in any example,
+/// which is why the corpus gate reports zero: it takes a *polymorphic helper
+/// applied at a projection*.
+///
+/// ```text
+/// h  = e => users & select { x = e + 1, id = .id }
+/// ok = h .age
+/// ```
+///
+/// `h`'s `+` is an open overload — the checker records it as `Hole(0)` against
+/// `h` itself, because which `+` applies is fixed by each *use*. `ok` records
+/// the answer at its own site, as `Def(0, 85)` (the int `+`).
+///
+/// Elaborating `ok` inlines `h`'s body, so the walk reaches `_+_` while the
+/// "current definition" is `h` but the assignment belongs to `ok`. The term
+/// layer has a hook for this (`Facts::holes_at`, and a per-definition stack of
+/// assignments), and reading the assignment by *callee plus use site* finds it —
+/// measured, `choices_of(1, 5)` returns `[(26, 0, Def(0, 85))]` — but the walk
+/// reaches the operator through a projection that `elaborate_query` descends
+/// into with the caller's `holes` rather than the callee's, and reconciling the
+/// two id spaces (the checker's site 26 versus the walk's) is where the attempt
+/// stalled.
+///
+/// What is *not* in doubt is the shape of the fix: the assignment must travel
+/// with the descent, keyed by the definition that owns the hole. Passing the
+/// caller's assignment is what `elaborate_application` avoids and what the
+/// projection path at `elaborate_query` does not.
+#[test]
+fn a_polymorphic_helper_at_a_projection_still_needs_the_source_path() {
+    let ws = Workspace::from_source(
+        "users : query { id = int, age = int } = table \"s\" \"users\"\n\
+         h = e => users & select { x = e + 1, id = .id }\n\
+         ok = h .age\n",
+    );
+    let tc = crate::check::check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    let compiled = compile_checked(&ws, &tc);
+    // It compiles, which is the point: the gap is invisible from outside.
+    assert!(
+        compiled.queries.iter().any(|q| q.result.is_ok()),
+        "the program should still compile: {:?}",
+        compiled.diagnostics
+    );
+    // And the per-program view shows it landing through the source path.
+    // (Asserted loosely on purpose: this test documents the case, it does not
+    // pin a mechanism that is expected to change.)
+    assert!(
+        crate::elaborate::source_hits() > 0,
+        "if this is zero, the case was migrated — delete this test and lower the \
+         expectation in `the_source_path_is_unreachable` to zero"
+    );
+}

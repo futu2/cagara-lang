@@ -5,7 +5,7 @@ if exists("b:current_syntax")
 endif
 
 syn keyword cagaraImport   import as
-syn keyword cagaraKeyword  sql
+syn keyword cagaraKeyword  sql case
 " Fixity keywords: how an operator is declared in prelude.cagara.
 syn keyword cagaraFixity   infixl infixr
 syn keyword cagaraBoolean  true false

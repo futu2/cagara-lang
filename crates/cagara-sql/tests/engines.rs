@@ -229,6 +229,19 @@ const CASES: &[(&str, &[&str])] = &[
         "mk_rename = nums & prefix \"n_\" & suffix \"_v2\" & select {.n_id_v2, .n_a_v2} & order [asc .n_id_v2]",
         &["1|7", "2|-7", "3|7", "4|-8"],
     ),
+    // A `case` is one searched `CASE`: the first true condition wins, and the
+    // trailing `true =>` arm is the `ELSE`. Rows 2 and 4 have `a` negative.
+    (
+        "case_bucket = nums & select { id = .id, k = case { .a > 0 => \"pos\"; .a < 0 => \"neg\"; true => \"zero\" } } & order [asc .id]",
+        &["1|pos", "2|neg", "3|pos", "4|neg"],
+    ),
+    // A `case` in an `agg` stage: its arms are aggregates, so the whole
+    // expression is one. `sum .a` over these rows is 7-7+7-8 = -1, and it is
+    // only reached because `count > 3` holds for the single group.
+    (
+        "case_agg = nums & agg { n = count, k = case { count > 3 => coalesce 0 (sum .a); true => 0 } }",
+        &["4|-1"],
+    ),
 ];
 
 struct Engine {

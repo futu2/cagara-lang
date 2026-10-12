@@ -40,6 +40,7 @@ ORDER BY revenue DESC NULLS LAST;
 - Pipelines with `&`: `where`, `select`, `agg`, `order`, `limit`, joins, window functions.
 - Hindley–Milner type inference with extensible records, so column types flow through the pipeline.
 - Explicit nulls: the right side of a left join and aggregates like `sum` are `maybe`.
+- Multi-way conditionals: `case { cond => value; ...; true => default }`, which compiles to one searched `CASE`.
 - Modules via `import "file.cagara"`, plus a standard library written in Cagara (`prelude.cagara`).
 - ANSI SQL by default, with dialect support and test coverage described in [`docs/SQL-DIALECTS.md`](docs/SQL-DIALECTS.md).
 - A formatter (`cagara fmt`) and a language server (`cagara lsp`) with diagnostics, hover, go-to-definition and completion.

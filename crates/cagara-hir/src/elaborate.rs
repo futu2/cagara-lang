@@ -1537,12 +1537,70 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
             .at(origin)),
         },
         ExprKind::App(f, args) => elaborate_call(cx, f, args, origin),
+        ExprKind::Case(arms) => elaborate_case(cx, e, arms, origin),
         other => Err(Error::unsupported(format!(
             "cannot elaborate {} as a scalar expression",
             describe(other)
         ))
         .at(origin)),
     }
+}
+
+/// Elaborate `case { cond => value; ...; true => default }`.
+///
+/// The lowering is the searched `CASE` the prelude's `ifThenElse` already
+/// emits — `CASE WHEN c1 THEN v1 WHEN c2 THEN v2 ELSE v_default END` — built
+/// here rather than reached through a name, because the arity depends on how
+/// many arms were written and no fixed-arity definition can express that.
+///
+/// The `ELSE` is the final `true =>` arm the checker requires, which is what
+/// makes the expression total: SQL's `CASE` with no matching branch is NULL,
+/// and a `case` typed from its arms would otherwise claim a value it can fail
+/// to produce.
+///
+/// The phase is not chosen here. `CheckedExpr::template` folds its arguments'
+/// phases with `rules::mix`, so a case whose arms are aggregates comes out an
+/// aggregate, exactly as `ifThenElse (…) (sum .x) 0` does — which is what
+/// makes one usable inside an `agg` stage.
+fn elaborate_case(
+    cx: Ctx<'_>,
+    e: &ast::Expr,
+    arms: &[(ast::Expr, ast::Expr)],
+    origin: Origin,
+) -> R<CheckedExpr> {
+    // The checker requires at least one arm and that the last is `true =>`, so
+    // splitting the default off the front-run of conditions is total here. Its
+    // rules are not restated: a `CheckedExpr` is built only from a program the
+    // checker accepted, and a second copy of the rule could silently diverge.
+    let Some(((_, default), whens)) = arms.split_last() else {
+        return Err(Error::new("`case` needs at least one arm").at(origin));
+    };
+    // A `case` that is only a default *is* that default. Emitting it as a
+    // `CASE` would need a `WHEN`, and there is no condition to test.
+    if whens.is_empty() {
+        return elaborate_expr_inner(cx, default);
+    }
+    let ty = cx
+        .input
+        .type_check()
+        .use_ty(cx.module, e.id)
+        .ok_or_else(|| {
+            Error::new(
+                "the checker recorded no scalar type for this `case`, so it cannot be \
+                 elaborated without inventing one",
+            )
+            .at(origin)
+        })?;
+    let mut sql = String::from("CASE");
+    let mut args: Vec<CheckedExpr> = Vec::with_capacity(whens.len() * 2 + 1);
+    for (cond, value) in whens {
+        args.push(elaborate_expr_inner(cx, cond)?);
+        args.push(elaborate_expr_inner(cx, value)?);
+        sql.push_str(&format!(" WHEN ${} THEN ${}", args.len() - 1, args.len()));
+    }
+    args.push(elaborate_expr_inner(cx, default)?);
+    sql.push_str(&format!(" ELSE ${} END", args.len()));
+    CheckedExpr::template(sql, args, ty, origin)
 }
 
 /// Elaborate an application in expression position: `upper .name`,
@@ -2962,6 +3020,7 @@ fn describe(k: &ExprKind) -> &'static str {
         ExprKind::Record(_) => "a record",
         ExprKind::List(_) => "a list",
         ExprKind::Sql(_) => "a `sql` template",
+        ExprKind::Case(_) => "a `case` expression",
         ExprKind::Primitive(_) => "a `primitive` reference",
         ExprKind::Error => "a syntax error",
     }

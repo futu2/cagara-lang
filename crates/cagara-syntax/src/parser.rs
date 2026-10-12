@@ -40,6 +40,7 @@ pub fn parse_with(input: &str, ops: &Ops) -> Parse {
         end: input.len(),
         depth: 0,
         bailed: false,
+        arm_start: false,
         ops,
     };
     p.file();
@@ -62,6 +63,10 @@ struct Parser<'a> {
     /// The rest of it has been consumed, so every enclosing construct would
     /// otherwise add its own "expected ..." error while unwinding.
     bailed: bool,
+    /// Set while the token at the cursor begins a `case` arm's condition, so
+    /// `cond => value` is not mistaken for a lambda (see
+    /// [`Parser::at_lambda_operand`]).
+    arm_start: bool,
     ops: &'a Ops,
 }
 
@@ -443,13 +448,28 @@ impl<'a> Parser<'a> {
         self.at_inner(Token::Ident) && self.peek_lex(1).map(|l| l.kind) == Some(Token::FatArrow)
     }
 
+    /// Like [`at_lambda`](Parser::at_lambda), but not at the start of a `case`
+    /// arm. `cond => value` and `p => body` are the same two tokens, so
+    /// without this an arm's condition would parse as a lambda parameter and
+    /// the arm's own `=>` would then be missing — every arm of every `case`
+    /// would be a syntax error. An arm's *value* is parsed normally, so a
+    /// lambda is still a term like any other one `=>` away.
+    fn at_lambda_operand(&self) -> bool {
+        !self.at_arm() && self.at_lambda()
+    }
+
+    /// Is the cursor on the first token of a `case` arm's condition?
+    fn at_arm(&self) -> bool {
+        self.arm_start
+    }
+
     fn expr(&mut self) {
         // Bail out on runaway nesting: report once, then consume to the next
         // item boundary so the rest of the file still parses.
         if !self.descend() {
             return;
         }
-        if self.at_lambda() {
+        if self.at_lambda_operand() {
             self.start(K::Lambda);
             self.bump(); // param
             self.bump(); // =>
@@ -494,7 +514,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             self.bump();
-            if self.at_lambda() {
+            if self.at_lambda_operand() {
                 // allow `q & x => ...` style right operands
                 self.expr();
             } else {
@@ -535,7 +555,7 @@ impl<'a> Parser<'a> {
 
     fn atom_start(&self) -> bool {
         !self.at_boundary()
-            && !self.at_lambda()
+            && !self.at_lambda_operand()
             && matches!(
                 self.peek(),
                 Some(
@@ -551,6 +571,7 @@ impl<'a> Parser<'a> {
                         | Token::LBrace
                         | Token::LBracket
                         | Token::SqlKw
+                        | Token::CaseKw
                         | Token::PrimitiveKw
                 )
             )
@@ -639,6 +660,7 @@ impl<'a> Parser<'a> {
                 self.expect(Token::String, "SQL template string after `sql`");
                 self.finish();
             }
+            Some(Token::CaseKw) => self.case_expr(),
             Some(Token::PrimitiveKw) => {
                 self.start(K::PrimitiveExpr);
                 self.bump();
@@ -714,6 +736,56 @@ impl<'a> Parser<'a> {
         self.expect(Token::RBracket, "`]`");
         self.finish();
     }
+
+    /// `case { cond => value; cond => value; ... }` — a multi-way
+    /// `ifThenElse`. Braces and semicolons only: a `case` has to be usable
+    /// inside a record (`select { x = case { ... } }`), so it must not share
+    /// the comma or the closing brace with the record around it.
+    ///
+    /// Whether the arms type-check — that they agree on a result type, and
+    /// that the last one is `true =>` — is the checker's question, not the
+    /// parser's. Here an arm is only required to have the shape
+    /// `expr => expr`.
+    fn case_expr(&mut self) {
+        self.start(K::CaseExpr);
+        self.bump(); // case
+        if !self.expect(Token::LBrace, "`{` after `case`") {
+            self.finish();
+            return;
+        }
+        loop {
+            // A name in column 0 ends the definition, so it is never an arm.
+            if self.at(Token::RBrace) || self.at_boundary() {
+                break;
+            }
+            self.arm();
+            if self.at(Token::Semicolon) {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        self.expect(Token::RBrace, "`}` closing `case`");
+        self.finish();
+    }
+
+    /// One `cond => value` arm. The separator is `=>`, the same token a lambda
+    /// uses, so no new punctuation is introduced — which is why the condition
+    /// is parsed with `arm_start` set: it must not be treated as a lambda's
+    /// parameter list.
+    fn arm(&mut self) {
+        self.start(K::CaseArm);
+        self.arm_start = true;
+        self.expr();
+        self.arm_start = false;
+        if self.expect(
+            Token::FatArrow,
+            "`=>` between a case's condition and its value",
+        ) {
+            self.expr();
+        }
+        self.finish();
+    }
 }
 
 #[cfg(test)]
@@ -786,6 +858,93 @@ mod tests {
         assert!(p.errors.is_empty(), "{:?}", p.errors);
         let defs: Vec<_> = p.syntax().children().collect();
         assert_eq!(defs.len(), 2);
+    }
+
+    /// `case { cond => value; ... }`: arms separated by `;`, the whole thing
+    /// delimited by braces so it can sit inside a record.
+    #[test]
+    fn case_arms_are_semicolon_separated() {
+        assert_eq!(
+            body("x = case { a => 1; b => 2 }"),
+            "(CaseExpr (CaseArm (NameRef a) (Literal 1)) (CaseArm (NameRef b) (Literal 2)))"
+        );
+        // One arm, and a trailing separator.
+        assert_eq!(
+            body("x = case { .a => 1; }"),
+            "(CaseExpr (CaseArm (FieldExpr .a) (Literal 1)))"
+        );
+        // An empty `case` parses; whether it has an `else` is the checker's
+        // question, so the parser does not turn it into a syntax error.
+        assert_eq!(body("x = case {}"), "(CaseExpr)");
+    }
+
+    /// The reason for `{ ... ; ... }` rather than a comma-separated form: a
+    /// `case` is a term like any other, so it nests inside a record, an
+    /// argument list, and another `case`. Sharing the comma would make
+    /// `{ x = case { a => 1, b => 2 }, y = 3 }` ambiguous.
+    #[test]
+    fn case_nests_inside_records_and_arguments() {
+        assert_eq!(
+            body("q = t & select { x = case { .a => 1; .b => 2 }, y = 3 }"),
+            "(BinExpr (NameRef t) (App (NameRef select) (RecordExpr (RecordField x (CaseExpr (CaseArm (FieldExpr .a) (Literal 1)) (CaseArm (FieldExpr .b) (Literal 2)))) (RecordField y (Literal 3)))))"
+        );
+        // As an argument. The parens are `ParenExpr` in the tree, which is
+        // what keeps `f (case {..}) 3` an application of two arguments.
+        assert_eq!(
+            body("x = f (case { a => 1; b => 2 }) 3"),
+            "(App (NameRef f) (ParenExpr (CaseExpr (CaseArm (NameRef a) (Literal 1)) (CaseArm (NameRef b) (Literal 2)))) (Literal 3))"
+        );
+        assert_eq!(
+            body("x = f (case { a => 1; true => 2 }) 3"),
+            "(App (NameRef f) (ParenExpr (CaseExpr (CaseArm (NameRef a) (Literal 1)) (CaseArm (NameRef true) (Literal 2)))) (Literal 3))"
+        );
+        // A `case` is an atom wherever an atom may stand: `{` follows it
+        // immediately, so no projection is formed and it needs no parens.
+        // `x` is applied to `.v` — the same rule that makes `f .x` an
+        // application rather than a projection.
+        assert_eq!(
+            body("x = f case { a => 1; true => 2 }.v"),
+            "(App (NameRef f) (CaseExpr (CaseArm (NameRef a) (Literal 1)) (CaseArm (NameRef true) (Literal 2))) (FieldExpr .v))"
+        );
+        // The value side is parsed normally, so a lambda is still a lambda
+        // there — only the condition is protected from `at_lambda`.
+        assert_eq!(
+            body("x = case { .a => y => y + 1; true => 2 }"),
+            "(CaseExpr (CaseArm (FieldExpr .a) (Lambda y (BinExpr (NameRef y) (Literal 1)))) (CaseArm (NameRef true) (Literal 2)))"
+        );
+    }
+
+    /// A lambda is still a lambda in an arm, and a missing value is one
+    /// syntax error rather than a cascade.
+    #[test]
+    fn case_arms_report_their_own_mistakes() {
+        let p = parse("x = case { a => 1; b }");
+        assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+        assert!(p.errors[0].message.contains("`=>`"), "{:?}", p.errors);
+        let p = parse("x = case { a => 1");
+        assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+        assert!(p.errors[0].message.contains('}'), "{:?}", p.errors);
+    }
+
+    /// `case` always needs its braces: without them the arms would be
+    /// juxtaposed with whatever follows, and the tree would not say what was
+    /// meant.
+    #[test]
+    fn case_without_braces_is_a_syntax_error() {
+        let p = parse("x = case a => 1");
+        assert!(!p.errors.is_empty());
+        assert!(p.errors[0].message.contains('{'), "{:?}", p.errors);
+    }
+
+    /// A name in column 0 still starts the next definition, even inside an
+    /// unterminated `case`: the layout rule is what ends an item, so recovery
+    /// must not swallow the rest of the file.
+    #[test]
+    fn an_unterminated_case_stops_at_the_next_definition() {
+        let src = "a = case { x => 1\nb = 2\n";
+        let p = parse(src);
+        let defs: Vec<_> = p.syntax().children().collect();
+        assert_eq!(defs.len(), 2, "{:?}", p.errors);
     }
 
     /// A line break is `\n`, `\r\n`, or a bare `\r`: the whitespace regex

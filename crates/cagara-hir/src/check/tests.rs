@@ -159,6 +159,169 @@ fn constants_lift_and_widen() {
     assert_eq!(ty("q = users & where true\n", "q"), ty("", "users"));
 }
 
+/// `case { cond => value; ... }`: like `ifThenElse`, one row and one result
+/// type for every arm, and one phase for the whole expression.
+#[test]
+fn case_types_like_a_multi_way_if() {
+    assert_eq!(
+        ty(
+            "q = orders & select { b = case { .amount > 100.0 => \"big\"; .amount > 10.0 => \"mid\"; true => \"small\" } }\n",
+            "q"
+        ),
+        "query { b = string }"
+    );
+    // The result type comes from the arms, not from a `true` arm, and the
+    // conditions are lifted like any other literal (`0` becomes a float
+    // when it shares an arm's type with one).
+    assert_eq!(
+        ty(
+            "q = orders & select { b = case { .amount > 100.0 => 1; true => 0 } }\n",
+            "q"
+        ),
+        "query { b = int }"
+    );
+    assert_eq!(
+        ty(
+            "q = orders & select { b = case { .amount > 100.0 => 1.5; true => 0 } }\n",
+            "q"
+        ),
+        "query { b = float }"
+    );
+    // An arm may be a whole expression over the input row, and the default
+    // arm may stand alone when there is nothing to test against.
+    assert_eq!(
+        ty(
+            "people : query { id = int, score = int } = table \"p\" \"people\"\n\
+             q = people & select { b = case { .score > 10 => .score; true => 0 } }\n",
+            "q"
+        ),
+        "query { b = int }"
+    );
+    assert_eq!(
+        ty(
+            "people : query { id = int, score = int } = table \"p\" \"people\"\n\
+             q = people & select { b = case { true => 7 } }\n",
+            "q"
+        ),
+        "query { b = int }"
+    );
+    // The arms' phase is the expression's: a case of aggregates is an
+    // aggregate, and is allowed exactly where `sum` is. Both arms must agree
+    // on type, so each is `coalesce`d — `sum` itself is a `maybe`.
+    assert_eq!(
+        ty(
+            "q = orders & agg { k = group .user_id, b = case { count > 3 => coalesce 0.0 (sum .amount); true => 0.0 } }\n",
+            "q"
+        ),
+        "query { k = int, b = float }"
+    );
+    // And with `maybe` arms, the result is a `maybe`.
+    assert_eq!(
+        ty(
+            "q = orders & agg { k = group .user_id, b = case { count > 3 => sum .amount; true => sum .amount } }\n",
+            "q"
+        ),
+        "query { k = int, b = maybe float }"
+    );
+}
+
+/// The mistakes a `case` can make: arms that disagree, conditions that are not
+/// booleans, conditions over a different row, and no arm at all.
+///
+/// The messages are asserted as observed, and each one names the *arm* at
+/// fault rather than the `case` as a whole — which is what the `ExprKind::Case`
+/// spans are for. The condition cases come back through `select`'s field, so
+/// they carry the `field \`b\`:` prefix the projection adds.
+#[test]
+fn case_rejects_mismatched_arms() {
+    let e = err(
+        "q = orders & select { b = case { .amount > 1.0 => 1; true => \"x\" } }\n",
+        "q",
+    );
+    assert!(e.contains("expected int, found string"), "{e}");
+    // A condition has to be a bool, and the message names the condition —
+    // not the arm and not the whole case.
+    let e = err(
+        "q = orders & select { b = case { .amount => 1; true => 2 } }\n",
+        "q",
+    );
+    assert!(e.contains("expected bool, found float"), "{e}");
+    // Every condition and value is read against the *same* row, so a
+    // condition that names a column the input does not have fails here
+    // rather than silently in SQL.
+    let e = err(
+        "q = orders & select { b = case { .nope > 1 => 1; true => 2 } }\n",
+        "q",
+    );
+    assert!(e.contains("no column `nope`"), "{e}");
+    // A `case` with no arm at all has no result type, so it is refused
+    // rather than given a made-up one.
+    let e = err("q = orders & select { b = case {} }\n", "q");
+    assert!(e.contains("at least one arm"), "{e}");
+    // A `case` whose last arm is conditional has a hole: SQL's `CASE` yields
+    // NULL for a row no arm matches, which the arms present would type as
+    // non-null. Refusing it is what keeps the result type honest.
+    let e = err(
+        "q = orders & select { b = case { .amount > 1.0 => 1 } }\n",
+        "q",
+    );
+    assert!(e.contains("default arm"), "{e}");
+    let e = err(
+        "q = orders & select { b = case { .amount > 1.0 => 1; .amount > 2.0 => 2 } }\n",
+        "q",
+    );
+    assert!(e.contains("default arm"), "{e}");
+}
+
+/// A condition that decides a branch must not be nullable, exactly as a
+/// `where` predicate must not be: a NULL cannot choose an arm, and both SQL and
+/// Cagara decline to define which one it would pick.
+///
+/// `case` gets this from the ordinary machinery — the condition is compared
+/// against `expr r bool` like any other argument, and a `maybe` is refused
+/// there. The message is the one `where` gives, which is the point: there is
+/// one rule and one way of stating it, not a rule per conditional form.
+#[test]
+fn case_rejects_a_nullable_condition() {
+    let nullable = "people : query { id = int, score = maybe int } = table \"p\" \"people\"\n";
+    let e = err(
+        &format!(
+            "{nullable}q = people & select {{ b = case {{ .score > 10 => 1; true => 2 }} }}\n"
+        ),
+        "q",
+    );
+    assert!(e.contains("non-null") && e.contains("coalesce"), "{e}");
+    // `coalesce` clears it, and what the arm *produces* may be a `maybe` as
+    // long as every arm agrees.
+    assert_eq!(
+        ty(
+            &format!("{nullable}q = people & select {{ b = case {{ coalesce 0 .score > 10 => 1; true => 2 }} }}\n"),
+            "q"
+        ),
+        "query { b = int }"
+    );
+}
+
+/// The arms of a `case` share one phase, so a case of aggregates is an
+/// aggregate and belongs where `sum` belongs.
+#[test]
+fn case_takes_the_phase_of_its_arms() {
+    assert_eq!(
+        ty(
+            "q = orders & agg { k = group .user_id, b = case { count > 3 => coalesce 0.0 (sum .amount); true => 0.0 } }\n",
+            "q"
+        ),
+        "query { k = int, b = float }"
+    );
+    // ...which is why one does not fit in a `select` field beside plain
+    // columns: the same rule that rejects `select { n = sum .amount }`.
+    let e = err(
+        "q = orders & select { k = .user_id, b = case { count > 3 => coalesce 0.0 (sum .amount); true => 0.0 } }\n",
+        "q",
+    );
+    assert!(e.contains("aggregate"), "{e}");
+}
+
 #[test]
 fn let_polymorphism_across_schemas() {
     let src = "people : query { age = int, city = string } = table \"p\" \"people\"\n\

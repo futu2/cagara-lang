@@ -110,6 +110,10 @@ pub enum ExprKind {
     List(Vec<Expr>),
     /// `sql "template"` with `$1`, `$2` placeholders
     Sql(String),
+    /// `case { cond => value; ... }` — a multi-way conditional. Conds and
+    /// values are in source order; one cond may be `true`, which is how the
+    /// final `else` is written.
+    Case(Vec<(Expr, Expr)>),
     /// `primitive "name"` — typed reference to a built-in primitive
     Primitive(String),
     Error,
@@ -477,6 +481,23 @@ impl Lower<'_> {
                     .collect(),
             ),
             K::ListExpr => ExprKind::List(n.children().map(|c| self.expr(&c)).collect()),
+            K::CaseExpr => {
+                let arms = n
+                    .children()
+                    .filter(|c| c.kind() == K::CaseArm)
+                    .map(|a| {
+                        let mut cs = a.children();
+                        match (cs.next(), cs.next()) {
+                            (Some(c), Some(v)) => (self.expr(&c), self.expr(&v)),
+                            _ => (
+                                self.mk(span(&a), ExprKind::Error),
+                                self.mk(span(&a), ExprKind::Error),
+                            ),
+                        }
+                    })
+                    .collect();
+                ExprKind::Case(arms)
+            }
             K::SqlExpr => match token(n, K::String) {
                 Some(t) => ExprKind::Sql(unescape(t.text())),
                 None => ExprKind::Error,

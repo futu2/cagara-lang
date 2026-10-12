@@ -333,6 +333,56 @@ size = orders & select { id = .id, bucket = ifThenElse (.amount > 100.0) "big" "
 SELECT id, CASE WHEN (amount > 100.0) THEN 'big' ELSE 'small' END AS bucket FROM public.orders;
 ```
 
+When there are more than two cases, `case` writes the chain without nesting:
+
+```haskell
+size = orders & select {
+  id = .id,
+  bucket = case {
+    .amount > 1000.0 => "huge";
+    .amount > 100.0 => "big";
+    true => "small"
+  }
+}
+```
+
+```sql
+SELECT id, CASE WHEN (amount > 1000.0) THEN 'huge'
+                WHEN (amount > 100.0) THEN 'big'
+                ELSE 'small' END AS bucket FROM public.orders;
+```
+
+Arms are separated by `;` (not `,`, which a record uses) and the whole thing is
+braced, so a `case` nests inside a record, an argument list, or another `case`
+without ambiguity. Each arm is `condition => value`, using the same `=>` a
+lambda does. The conditions are tried top to bottom and the first true one
+wins.
+
+The last arm is a condition like any other; writing `true => value` is the
+default, and it is **required**. That is what makes the expression total: SQL's
+`CASE` with no matching branch is `NULL`, but a `case` takes its type from its
+arms, so without a default it would claim a non-null value it can fail to
+produce. `true` is the only condition that needs no column, so
+`case { true => 7 }` is legal and is just `7`.
+
+The conditions and the values are all expressions over the same row, and every
+value must have one type — the same rules `ifThenElse`'s three arguments obey:
+
+```haskell
+# A condition must be a bool, and must not be nullable: a NULL cannot choose
+# an arm. Use `coalesce` or `isNotNull` first, as in `where`.
+bad  = orders & select { b = case { .amount => 1; true => 0 } }
+bad2 = people & select { b = case { .score > 10 => 1; true => 0 } }   # .score is maybe
+good = people & select { b = case { coalesce 0 .score > 10 => 1; true => 0 } }
+```
+
+Because the arms share one phase, a `case` whose arms are aggregates is an
+aggregate and belongs in `agg` where `sum` belongs:
+
+```haskell
+q = orders & agg { k = group .user_id, b = case { count > 3 => coalesce 0.0 (sum .amount); true => 0.0 } }
+```
+
 ### Casts
 
 Casts are named by their **result** type: `toInt`, `toFloat`, `toBool`,
@@ -1100,7 +1150,7 @@ error messages.
 
 **Casts:** `toInt` `toFloat` `toBool` `toString`
 
-**Conditionals:** `ifThenElse` (alias `caseWhen`)
+**Conditionals:** `ifThenElse` (alias `caseWhen`), `case { cond => value; ...; true => default }`
 
 Positions are 1-based, as in SQL. `addWeeks` and `addQuarters` are defined in
 Cagara as 7 days and 3 months, so only `DAY` and `MONTH` need dialect support.

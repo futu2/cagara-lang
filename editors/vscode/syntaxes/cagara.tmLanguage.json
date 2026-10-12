@@ -45,7 +45,7 @@
         { "include": "#comment" },
         { "include": "#string" },
         {
-          "match": "\\b(sql)\\b",
+          "match": "\\b(sql|case)\\b",
           "name": "keyword.other.sql.cagara"
         },
         {

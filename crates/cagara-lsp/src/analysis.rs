@@ -186,6 +186,14 @@ impl Walk<'_> {
             }
             ExprKind::Record(fs) => fs.iter().for_each(|(_, v)| self.expr(v)),
             ExprKind::List(xs) => xs.iter().for_each(|x| self.expr(x)),
+            // Both halves of every arm are names in scope: a condition and the
+            // value it selects. A local bound inside an arm's value (`x => ...`)
+            // is pushed and popped by the `Lambda` arm above, so arms need no
+            // scope handling of their own.
+            ExprKind::Case(arms) => arms.iter().for_each(|(cond, value)| {
+                self.expr(cond);
+                self.expr(value);
+            }),
             ExprKind::Lit(_)
             | ExprKind::Field(..)
             | ExprKind::Sql(_)
@@ -325,6 +333,11 @@ fn atom_at(text: &str, e: &Expr, offset: usize, found: &mut Option<(Span, (usize
         ExprKind::Lambda(_, body) => atom_at(text, body, offset, found),
         ExprKind::Record(fs) => fs.iter().for_each(|(_, v)| atom_at(text, v, offset, found)),
         ExprKind::List(xs) => xs.iter().for_each(|x| atom_at(text, x, offset, found)),
+        // Hover works on a column or literal anywhere, arms included.
+        ExprKind::Case(arms) => arms.iter().for_each(|(cond, value)| {
+            atom_at(text, cond, offset, found);
+            atom_at(text, value, offset, found);
+        }),
         ExprKind::Name(_) | ExprKind::Sql(_) | ExprKind::Primitive(_) | ExprKind::Error => {}
     }
 }
@@ -955,6 +968,28 @@ mod tests {
         assert!(h.contains("1 : int"), "{h}");
     }
 
+    /// A `case` arm is walked like any other expression, so hover and
+    /// navigation work inside both halves of an arm — the condition and the
+    /// value it selects.
+    #[test]
+    fn case_arms_are_reachable_by_hover_and_definition() {
+        let src = "users : query { id = int, score = float } = table \"p\" \"users\"\n\
+                   adult = .score >= 18\n\
+                   q = users & select { b = case { adult => .score; true => 0.0 } }\n";
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        // The condition is a name use, resolved to its definition.
+        let h = hover(&ws, at_in(src, "adult =>", 2)).unwrap_or_default();
+        assert!(h.contains("adult"), "{h}");
+        let d = definition(&ws, at_in(src, "adult =>", 2));
+        assert_eq!(d.len(), 1, "{d:?}");
+        // The value half is an expression over the row, so its column hovers.
+        let h = hover(&ws, at_in(src, "=> .score", 4)).unwrap_or_default();
+        assert!(h.contains(".score : float"), "{h}");
+        // Both halves are recorded as references to what they name.
+        let rs = references(&ws, at_in(src, "adult =>", 2), false);
+        assert!(!rs.is_empty(), "the condition is a use of `adult`");
+    }
+
     #[test]
     fn hover_breaks_long_types() {
         let src = "users : query { id = int, name = string, email = string, created = timestamp, score = float } = table \"p\" \"users\"\n\
@@ -1060,6 +1095,26 @@ mod tests {
         let before = diagnostics(&ws);
         completion(&ws, pos(1, 26));
         assert_eq!(diagnostics(&ws), before);
+    }
+
+    /// A `case` arm takes the same expressions as anywhere else, so completion
+    /// works on both halves of an arm.
+    ///
+    /// The two halves can report the row's columns in different *orders*: the
+    /// row a `case` sees is built in the order its arms first mention columns
+    /// (`.age` in the condition, then `.id` in the value), where the table's
+    /// own order is `id, age`. Both list the same columns, so the ordering is
+    /// pinned here rather than left implicit.
+    #[test]
+    fn column_completion_inside_a_case_arm() {
+        let src = "users : query { id = int, age = int } = table \"p\" \"users\"\n\
+                   a = users & select { b = case { .age >= 18 => .id; true => .id } }\n";
+        let at = |needle: &str, within: usize| at_in(src, needle, within);
+        // The condition half completes from the input row, in table order.
+        assert_eq!(fields(src, at(".age >= 18", 3)), ["id", "age"]);
+        // The value half completes from the same row, in the order the arms
+        // first named its columns.
+        assert_eq!(fields(src, at("18 => .id", 8)), ["age", "id"]);
     }
 
     #[test]

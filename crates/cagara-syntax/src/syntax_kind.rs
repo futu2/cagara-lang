@@ -166,6 +166,7 @@ kind_table! {
         AsKw #[token("as")],
         SqlKw #[token("sql")],
         PrimitiveKw #[token("primitive")],
+        CaseKw #[token("case")],
 
         FatArrow #[token("=>")],
         Arrow #[token("->")],
@@ -220,6 +221,7 @@ kind_table! {
         Comma #[token(",")],
         Eq #[token("=")],
         Colon #[token(":")],
+        Semicolon #[token(";")],
 
         /// `.name` — column of the single input row
         Field #[regex(r"\.[a-zA-Z_][a-zA-Z0-9_]*")],
@@ -292,6 +294,10 @@ kind_table! {
         SqlExpr,
         /// `primitive "name"`
         PrimitiveExpr,
+        /// `case { cond => value; ... }`
+        CaseExpr,
+        /// `cond => value` inside a `case`
+        CaseArm,
         /// wraps unparseable input
         ErrorNode,
     }
@@ -308,14 +314,14 @@ mod tests {
     #[test]
     fn kind_order_and_numbering_are_frozen() {
         let expected = "\
-            Whitespace Comment ImportKw AsKw SqlKw PrimitiveKw FatArrow Arrow ComposeRight AndAnd \
-            OrOr EqEq NotEq Diamond LtEq GtEq Lt Gt Plus Minus Star Slash Percent AmpOp Op \
+            Whitespace Comment ImportKw AsKw SqlKw PrimitiveKw CaseKw FatArrow Arrow ComposeRight \
+            AndAnd OrOr EqEq NotEq Diamond LtEq GtEq Lt Gt Plus Minus Star Slash Percent AmpOp Op \
             QuestionQuestion Question LtQuestion QuestionGt LtQuestionGt Dollar Bar LParen RParen \
-            LBrace RBrace LBracket RBracket Comma Eq Colon Field LeftField RightField Ident Int \
-            Float String UnterminatedString Error SourceFile ImportDecl OpDecl Definition TypeAnn \
-            TyApp TyRecord TyField TyFun TyParen TyStr Lambda BinExpr App NegExpr ParenExpr \
-            RecordExpr RecordField ListExpr NameRef Literal FieldExpr ProjExpr SqlExpr PrimitiveExpr \
-            ErrorNode";
+            LBrace RBrace LBracket RBracket Comma Eq Colon Semicolon Field LeftField RightField \
+            Ident Int Float String UnterminatedString Error SourceFile ImportDecl OpDecl \
+            Definition TypeAnn TyApp TyRecord TyField TyFun TyParen TyStr Lambda BinExpr App \
+            NegExpr ParenExpr RecordExpr RecordField ListExpr NameRef Literal FieldExpr ProjExpr \
+            SqlExpr PrimitiveExpr CaseExpr CaseArm ErrorNode";
         let got: Vec<String> = ALL.iter().map(|k| format!("{k:?}")).collect();
         assert_eq!(got.join(" "), expected);
     }

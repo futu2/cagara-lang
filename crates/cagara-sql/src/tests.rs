@@ -281,6 +281,66 @@ fn join_uses_sides() {
 }
 
 #[test]
+fn case_lowers_to_a_searched_case() {
+    // Three arms: one `WHEN` per condition, and the trailing `true =>` arm
+    // becomes the `ELSE`.
+    assert_eq!(
+        sql(
+            "q = users & select { b = case { .age > 40 => \"old\"; .age > 20 => \"mid\"; true => \"young\" } }\n",
+            "q"
+        ),
+        "SELECT CASE WHEN (age > 40) THEN 'old' WHEN (age > 20) THEN 'mid' ELSE 'young' END AS b FROM public.users"
+    );
+    // A lone `true =>` arm is just its value: there is no condition to test,
+    // so no `CASE` is emitted.
+    assert_eq!(
+        sql(
+            "q = users & select { b = case { true => \"only\" } }\n",
+            "q"
+        ),
+        "SELECT 'only' AS b FROM public.users"
+    );
+    // A `case` is an expression like any other, so it works as a `where`
+    // predicate...
+    assert_eq!(
+        sql(
+            "q = users & where (case { .active => true; true => .age > 18 })\n",
+            "q"
+        ),
+        "SELECT id, name, age, active FROM public.users WHERE CASE WHEN active THEN TRUE ELSE (age > 18) END"
+    );
+    // ...and its arms may be aggregates, in which case the whole `case` is
+    // one, exactly as `ifThenElse` over `sum` is.
+    assert_eq!(
+        sql(
+            "q = users & agg { n = count, b = case { count > 3 => coalesce 0 (sum .age); true => 0 } }\n",
+            "q"
+        ),
+        "SELECT COUNT(*) AS n, CASE WHEN (COUNT(*) > 3) THEN COALESCE(SUM(age), 0) ELSE 0 END AS b FROM public.users"
+    );
+}
+
+#[test]
+fn case_is_nested_and_dialect_independent() {
+    // A `case` inside a `case`'s arm, and inside a record field, both lower
+    // through the ordinary expression path.
+    assert_eq!(
+        sql(
+            "q = users & select { b = case { .active => case { .age > 40 => \"a\"; true => \"b\" }; true => \"c\" } }\n",
+            "q"
+        ),
+        "SELECT CASE WHEN active THEN CASE WHEN (age > 40) THEN 'a' ELSE 'b' END ELSE 'c' END AS b FROM public.users"
+    );
+    // Every supported dialect spells a searched `CASE` the same way, so no
+    // rewrite is needed and none is applied.
+    let src = "q = users & select { b = case { .age > 40 => \"old\"; true => \"young\" } }\n";
+    let ansi = sql(src, "q");
+    for d in ["postgres", "mysql", "tsql", "sqlite", "trino", "snowflake"] {
+        assert_eq!(dialect(src, "q", d).unwrap(), ansi, "{d}");
+    }
+}
+
+#[test]
 fn distinct_case_cast_and_membership() {
     let s = sql(
         "q = users & where (inList [1, 2] .id) & distinct\n\

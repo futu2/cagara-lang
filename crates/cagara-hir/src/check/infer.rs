@@ -966,6 +966,7 @@ impl<'w> Checker<'w> {
             ExprKind::Record(..) => self.infer_record(env, e),
             ExprKind::List(..) => self.infer_list(env, e),
             ExprKind::Sql(..) => self.infer_sql(env, e),
+            ExprKind::Case(..) => self.infer_case(env, e),
             ExprKind::Primitive(..) => self.infer_primitive(env, e),
             ExprKind::Error => self.infer_error(env, e),
         }
@@ -1265,6 +1266,73 @@ impl<'w> Checker<'w> {
             msg: "`sql \"...\"` must be the whole body of a definition with a type signature"
                 .into(),
         })
+    }
+
+    /// `case { cond => value; ... }`.
+    ///
+    /// One shared result type and one row, exactly like `ifThenElse`, whose
+    /// type is `expr r bool -> expr r a -> expr r a -> expr r a`: every
+    /// condition is a boolean expression over the same row, every value is an
+    /// expression over that row, and all the values have one type. The phase
+    /// is left free, because an expression type carries its own phase — a case
+    /// whose arms are aggregates is an aggregate, the same way
+    /// `ifThenElse c (sum .x) 0` is.
+    fn infer_case(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
+        let sp = e.span;
+        let ExprKind::Case(arms) = &e.kind else {
+            unreachable!("dispatched on ExprKind::Case")
+        };
+        // An armless `case` has no value to take a type from, so it is refused
+        // rather than given a made-up one. Reported here instead of in the
+        // parser because `case { }` is well-formed syntax whose problem is
+        // that it cannot be typed.
+        if arms.is_empty() {
+            return Err(TyErr {
+                span: sp,
+                msg: "`case` needs at least one arm: write `cond => value`, and end with \
+                      `true => ...` for a default"
+                    .into(),
+            });
+        }
+        // The last arm must be unconditional, so the `case` always produces a
+        // value. Without it SQL's `CASE` yields NULL for an unmatched row while
+        // the arms present would type the result as non-null — the expression
+        // would claim a value it can fail to produce. `ifThenElse` has no such
+        // hole because its else is a required argument, and `true => ...` is
+        // how the n-ary form writes the same thing.
+        match arms.last() {
+            Some((cond, _)) if matches!(cond.kind, ExprKind::Lit(ast::Lit::Bool(true))) => {}
+            _ => {
+                return Err(TyErr {
+                    span: sp,
+                    msg: "a `case` must end with a default arm, written `true => value`, so \
+                          that it always produces a value"
+                        .into(),
+                })
+            }
+        }
+        // The phase is a plain unconstrained variable, *not*
+        // `fresh_col_phase()`: a `case` is phase-polymorphic like
+        // `ifThenElse`, whose signature declares `expr r a -> expr r a` with
+        // `r` free. `fresh_col_phase` marks the variable row-or-win, and `bind`
+        // refuses to let such a variable become `agg` — which is the rule that
+        // keeps a bare column out of an aggregate. Using it here made every
+        // aggregate arm fail with "aggregates cannot mix with ungrouped
+        // columns", even though `ifThenElse (…) (sum .amount) 0.0` is legal.
+        let (phase, row) = (self.fresh(), self.fresh_row());
+        let result = self.fresh();
+        for (cond, value) in arms {
+            let ct = self.infer(env, cond)?;
+            self.span = cond.span;
+            self.coerce(&ct, &expr(phase.clone(), row.clone(), con("bool")))
+                .map_err(at(cond.span))?;
+            let vt = self.infer(env, value)?;
+            self.span = value.span;
+            self.coerce(&vt, &expr(phase.clone(), row.clone(), result.clone()))
+                .map_err(at(value.span))?;
+        }
+        self.uses.push((e.id, sp, result.clone(), None));
+        Ok(expr(phase, row, result))
     }
 
     fn infer_primitive(&mut self, _env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {

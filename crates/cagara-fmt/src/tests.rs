@@ -42,6 +42,13 @@ fn every_construct_is_actually_reformatted() {
         ),
         ("q=t&where(.a>1)\n", "q = t & where (.a > 1)\n"),
         ("q = t & update {.a}\n", "q = t & update { .a }\n"),
+        // A `case` gets its own layout: `case` and `{` spaced, arms
+        // normalized, and the whole thing reformatted rather than printed as
+        // written.
+        (
+            "q=t&select{b=case{.a>1=>\"x\";true=>\"y\"}}\n",
+            "q = t & select { b = case { .a > 1 => \"x\"; true => \"y\" } }\n",
+        ),
         // Operator declarations are items like any other, and a spelling the
         // prelude has not declared still parses as a declaration.
         (
@@ -148,6 +155,39 @@ fn long_records_break_one_field_per_line() {
   }
 ",
     );
+}
+
+#[test]
+fn long_cases_break_one_arm_per_line() {
+    // A `case` that does not fit breaks after each `;`, the way a record
+    // breaks after each `,`. The arms stay indented under the `case`, and the
+    // last one keeps its closing brace on the same line.
+    check(
+        "q = t & select { b = case { a_very_long_condition_name_here > 1 => \"first_result\"; another_long_condition > 2 => \"second_result\"; true => \"fallback\" } }\n",
+        "q = t
+  & select {
+    b = case { a_very_long_condition_name_here > 1 => \"first_result\";
+      another_long_condition > 2 => \"second_result\";
+      true => \"fallback\" }
+  }
+",
+    );
+    // A short one stays on one line, and a lone default arm has nothing to
+    // break after however long the value is.
+    check(
+        "q=t&select{b=case{.a>1=>\"x\";true=>\"y\"}}\n",
+        "q = t & select { b = case { .a > 1 => \"x\"; true => \"y\" } }\n",
+    );
+    check(
+        "q = t & select { b = case { true => 1 } }\n",
+        "q = t & select { b = case { true => 1 } }\n",
+    );
+    // An arm's own operands may break without splitting the arm: `=>` is a
+    // fixed separator, so `cond` and `value` stay on either side of it.
+    let out = fmt(
+        "q = t & select { b = case { .a_very_long_column_name > 1 => upper (concat \"a\" (concat \"b\" .name)); true => \"y\" } }\n",
+    );
+    assert!(out.contains("=> upper"), "{out}");
 }
 
 #[test]

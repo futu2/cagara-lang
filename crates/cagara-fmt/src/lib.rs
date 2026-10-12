@@ -451,7 +451,7 @@ impl Fmt<'_> {
 
     fn huggable(&self, n: &SyntaxNode, top: bool) -> bool {
         match n.kind() {
-            K::RecordExpr | K::ListExpr | K::ParenExpr | K::Lambda => true,
+            K::RecordExpr | K::ListExpr | K::ParenExpr | K::Lambda | K::CaseExpr => true,
             K::BinExpr => top && bin_parts(n).is_ok_and(|(_, op, _, _)| is_pipe(&op)),
             K::App => self.hugs_last_arg(n),
             _ => false,
@@ -511,8 +511,89 @@ impl Fmt<'_> {
                     self.rhs(&node(Some(body))?, top)?,
                 ]))
             }
+            K::CaseExpr => self.case(n),
             _ => Err(Bail),
         }
+    }
+
+    /// `case { c1 => v1; c2 => v2 }`: flat if it fits, else one arm per line.
+    ///
+    /// The node's first element is the `case` keyword, so the braces are found
+    /// by kind rather than by position: `signature` is `case`, `{`, arms and
+    /// `;`s, `}`. The arms are separated by `;` and there is no trailing
+    /// separator to preserve (unlike a record's comma).
+    fn case(&self, n: &SyntaxNode) -> R {
+        let els = sig(n);
+        let keyword = token(els.first(), K::CaseKw)?;
+        let (open_at, close_at) = match (
+            els.iter().position(|e| e.kind() == K::LBrace),
+            els.iter().rposition(|e| e.kind() == K::RBrace),
+        ) {
+            (Some(o), Some(c)) if o < c => (o, c),
+            _ => return Err(Bail),
+        };
+        let (open, close) = (
+            token(els.get(open_at), K::LBrace)?,
+            token(els.get(close_at), K::RBrace)?,
+        );
+        let arms = &els[open_at + 1..close_at];
+        // `case {}` has no arm to break after; the checker rejects it, but the
+        // formatter must still lay it out rather than bail, so a file being
+        // typed keeps formatting.
+        if arms.is_empty() && !has_inner_comment(n) {
+            return Ok(concat(vec![
+                self.tok(&keyword),
+                text(" "),
+                self.tok(&open),
+                self.tok(&close),
+            ]));
+        }
+        // The pad is one space, the way a record's is.
+        let mut inner = vec![text(" ")];
+        for (i, e) in arms.iter().enumerate() {
+            match e {
+                NodeOrToken::Node(a) if a.kind() == K::CaseArm => inner.push(self.arm(a)?),
+                NodeOrToken::Token(t) if t.kind() == K::Semicolon => {
+                    inner.push(self.tok(t));
+                    if i + 1 < arms.len() {
+                        inner.push(Doc::Line);
+                    }
+                }
+                _ => return Err(Bail),
+            }
+        }
+        inner.push(self.leading(&close, false));
+        let d = concat(vec![
+            self.tok(&keyword),
+            text(" "),
+            self.tok(&open),
+            indent(concat(inner)),
+            text(" "),
+            self.tok_body(&close),
+        ]);
+        Ok(if has_inner_comment(n) {
+            broken_group(d)
+        } else {
+            group(d)
+        })
+    }
+
+    /// `cond => value`. The condition is not printed with `rhs`, which could
+    /// move it to its own line: `=>` is a fixed separator, not a place a
+    /// `case` may break, so the arm stays together and only its own operands
+    /// break.
+    fn arm(&self, n: &SyntaxNode) -> R {
+        let els = sig(n);
+        let [cond, arrow, value] = els.as_slice() else {
+            return Err(Bail);
+        };
+        Ok(concat(vec![
+            self.expr(&node(Some(cond))?, false)?,
+            text(" "),
+            self.tok(&token(Some(arrow), K::FatArrow)?),
+            text(" "),
+            self.expr(&node(Some(value))?, false)?,
+        ]))
     }
 
     fn paren(&self, n: &SyntaxNode, inner: impl Fn(&SyntaxNode) -> R) -> R {

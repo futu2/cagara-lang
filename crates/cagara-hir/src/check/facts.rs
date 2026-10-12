@@ -91,6 +91,12 @@ pub(crate) fn definition_facts(
             ExprKind::Lambda(_, body) => pending.push(body),
             ExprKind::Record(fields) => pending.extend(fields.iter().rev().map(|(_, value)| value)),
             ExprKind::List(values) => pending.extend(values.iter().rev()),
+            ExprKind::Case(arms) => {
+                for (cond, value) in arms.iter().rev() {
+                    pending.push(value);
+                    pending.push(cond);
+                }
+            }
             ExprKind::Lit(_)
             | ExprKind::Field(_, _)
             | ExprKind::Sql(_)

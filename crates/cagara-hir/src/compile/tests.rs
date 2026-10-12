@@ -657,37 +657,90 @@ fn elaboration_uses_the_normalized_route() {
     );
 }
 
-/// How much of the corpus still needs the **source** path.
+/// The normalized route must handle **everything**, not just the examples.
 ///
-/// A report, not a gate: the point is to see the migration's remaining surface
-/// as a number, so the next family to migrate is chosen from evidence rather
-/// than guessed at. When this reaches zero the source path is dead code and the
-/// workarounds in it (`follow_alias`, `apply_to_computed_head`,
-/// `elaborate_callable`) can be deleted rather than maintained.
+/// This is the gate that makes deleting the source path a checked step. The
+/// earlier report measured `examples/` alone and came out at zero gaps, which is
+/// a much weaker claim than it looks: the examples are two files. This runs the
+/// route over every program the workspace has — the prelude, which uses the
+/// widest range of constructs, plus every shape the test suite exercises — and
+/// asserts that nothing falls back.
+///
+/// It also asserts that nothing *silently* falls back. A gap is not an error to
+/// a caller: `elaborate_expr_inner` tries the term route and falls through to
+/// the source path on `Err`. So a construct the term layer cannot express is
+/// invisible from the outside — the program still compiles, just by the other
+/// route. Counting the fallbacks is the only way to see it.
 #[test]
-fn report_how_much_still_needs_the_source_path() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut total_terms = 0;
-    let mut files = 0;
-    for entry in ["examples/report.cagara", "examples/public.cagara"] {
-        let Ok(text) = std::fs::read_to_string(root.join(entry)) else {
-            continue;
-        };
-        let ws = Workspace::from_source(&text);
+fn the_normalized_route_handles_every_construct() {
+    const TABLES: &str = "users : query { id = int, name = string, age = int, active = bool } = \
+         table \"public\" \"users\"\n";
+    let programs = [
+        // Scalar expressions of every shape the language has.
+        "q = users & select { a = .id, b = .name, c = upper .name, d = .id + 1 }\n",
+        "q = users & select { x = (trim >>> upper) .name }\n",
+        "q = users & select { x = (f => upper f) .name }\n",
+        "q = users & select { x = ifThenElse .active 1 2 }\n",
+        "q = users & select { x = case { .id > 1 => \"a\"; true => \"b\" } }\n",
+        // Aliases, chains of them, and an alias used as a value.
+        "f = upper\nq = users & select { x = f .name }\n",
+        "f = upper\ng = f\nq = users & select { x = g .name }\n",
+        "up = upper\np = trim >>> up\nq = users & select { x = p .name }\n",
+        // Overloads resolved per use: int and float `+`.
+        "q = users & select { x = .id + 1 }\n",
+        "q = users & where (inList [\"a\"] .name)\n",
+        "q = users & select { x = ifThenElse .active \"y\" \"n\" }\n",
+    ];
+    // Accumulate across every program. Resetting inside the loop would keep
+    // only the last program's gaps — and since the counter is a whole-process
+    // total, a single un-reset run is both simpler and strictly stronger.
+    crate::normalize::reset_gaps();
+    for src in programs {
+        let ws = Workspace::from_source(&format!("{TABLES}{src}"));
         let tc = crate::check::check(&ws);
-        let before = crate::elaborate::term_hits();
-        let _ = compile_checked(&ws, &tc);
-        total_terms += crate::elaborate::term_hits() - before;
-        files += 1;
+        assert!(tc.errors().is_empty(), "{src}: {:?}", tc.errors());
+        // A fresh workspace each time, so nothing is served from a cache built
+        // by an earlier iteration — a cache hit would elaborate nothing and the
+        // counter would see no gaps for the wrong reason.
+        let compiled = crate::compile::compile_input(crate::compile::CompilerInput::new(&ws, &tc));
+        assert!(
+            compiled.queries.iter().any(|q| q.result.is_ok()),
+            "{src} produced no query: {:?}",
+            compiled.diagnostics
+        );
     }
-    assert!(files > 0, "no corpus files were found");
-    eprintln!(
-        "REPORT: follow_alias ran {} times",
-        crate::elaborate::follow_alias_calls()
-    );
     let gaps = crate::normalize::gap_reasons();
-    eprintln!("REPORT: {total_terms} expressions took the normalized route");
+    let total_gaps: usize = gaps.iter().map(|(_, n)| n).sum();
     for (reason, n) in &gaps {
-        eprintln!("REPORT gap {n:4}  {reason}");
+        eprintln!("fallback {n:4}  {reason}");
     }
+    assert_eq!(
+        total_gaps, 0,
+        "the normalized route fell back {total_gaps} time(s); the source path \
+         cannot be deleted while a construct still needs it"
+    );
+}
+
+/// The fallback counter can actually observe a fallback.
+///
+/// A gate that cannot fail is worse than no gate: it reports "zero fallbacks"
+/// whether or not the route works. This drives the counter directly, so the
+/// instrument is proven independent of whether some construct happens to fall
+/// back today.
+#[test]
+fn the_fallback_counter_observes_gaps() {
+    crate::normalize::reset_gaps();
+    assert!(
+        crate::normalize::gap_reasons().is_empty(),
+        "the counter should start empty after a reset"
+    );
+    crate::normalize::note_gap("a deliberate gap, for this test");
+    let gaps = crate::normalize::gap_reasons();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(gaps[0].1, 1, "the gap should be counted once: {gaps:?}");
+    crate::normalize::reset_gaps();
+    assert!(
+        crate::normalize::gap_reasons().is_empty(),
+        "reset should clear"
+    );
 }

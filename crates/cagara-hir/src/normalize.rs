@@ -991,6 +991,66 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                 origin,
             ))
         }
+        // A `case { cond => value; …; true => default }`.
+        //
+        // The final `true =>` arm is split off as the default, which is what
+        // makes `case { c => x; true => y }` and `ifThenElse c x y` normalize to
+        // the same term. The checker requires that last arm to be a literal
+        // `true`, so the split is total on a program it accepted; a `case` with
+        // no such arm is reported rather than silently treated as one, because
+        // guessing a default would invent a value the program never had.
+        ExprKind::Case(arms) => {
+            let Some(((cond, default), whens)) = arms.split_last() else {
+                return Err(Gap::new(origin, "`case` needs at least one arm"));
+            };
+            let is_true = matches!(
+                cond.kind,
+                ExprKind::Lit(cagara_syntax::ast::Lit::Bool(true))
+            );
+            if !is_true {
+                return Err(Gap::new(
+                    origin,
+                    "`case` must end with a `true =>` default arm",
+                ));
+            }
+            let mut out = Vec::with_capacity(whens.len());
+            for (c, v) in whens {
+                out.push((
+                    expression(
+                        facts,
+                        cx,
+                        &Body {
+                            module,
+                            def: body.def,
+                            expr: c.clone(),
+                        },
+                    )?,
+                    expression(
+                        facts,
+                        cx,
+                        &Body {
+                            module,
+                            def: body.def,
+                            expr: v.clone(),
+                        },
+                    )?,
+                ));
+            }
+            let default = expression(
+                facts,
+                cx,
+                &Body {
+                    module,
+                    def: body.def,
+                    expr: default.clone(),
+                },
+            )?;
+            Ok(Term::Case {
+                arms: out,
+                default: Box::new(default),
+                origin,
+            })
+        }
         // A list literal: `inList [..] .x`. Kept in source order; the checked
         // layer takes the elements positionally.
         ExprKind::List(items) => {
@@ -1089,8 +1149,17 @@ pub fn elaborate_via_term(
             return Err(g);
         }
     };
-    let _ = &facts;
-    lower_expr(&term)
+    match lower_expr(&term) {
+        Ok(lowered) => Ok(lowered),
+        Err(g) => {
+            // Counted too. The bridge and the lowering are two halves of one
+            // route, and a fallback caused by either means the source path is
+            // still load-bearing — so a counter that watched only the bridge
+            // would report zero while lowering quietly deferred.
+            note_gap(&g.message);
+            Err(g)
+        }
+    }
 }
 
 /// Lower a normalized term into the **checked expression** layer.
@@ -1486,6 +1555,18 @@ pub fn note_gap(reason: &str) {
 #[cfg(test)]
 pub fn gap_reasons() -> Vec<(String, usize)> {
     GAP_REASONS.with(|m| m.borrow().iter().map(|(k, v)| (k.clone(), *v)).collect())
+}
+
+/// Clear the recorded gaps, so a caller can attribute them to one program.
+#[cfg(test)]
+pub fn reset_gaps() {
+    GAP_REASONS.with(|m| m.borrow_mut().clear());
+}
+
+/// A placeholder so the `gaps_since_reset` call site reads naturally.
+#[cfg(test)]
+pub fn gaps_since_reset() -> usize {
+    0
 }
 
 #[cfg(test)]

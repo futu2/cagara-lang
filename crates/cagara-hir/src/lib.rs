@@ -5,6 +5,7 @@ pub mod db;
 pub mod elaborate;
 pub mod ir;
 pub mod lower;
+pub mod normalize;
 pub mod primitive;
 pub mod resolve;
 pub mod rules;

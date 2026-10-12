@@ -1,0 +1,2 @@
+# public.cagara
+public_users: query { id = int, display_name = string } => SELECT id, name AS display_name FROM public.users

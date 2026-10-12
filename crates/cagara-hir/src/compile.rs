@@ -129,6 +129,20 @@ pub struct CompiledQuery {
     pub key: DefinitionKey,
     pub name: String,
     pub result: Result<Rel, Diag>,
+    /// Who is at fault when `result` is an `Err`.
+    ///
+    /// The diagnostic text is for a human; this is the machine-readable half of
+    /// the same verdict, so a caller can tell a *program* error from a
+    /// *compiler capability gap* without matching on the message. The checked
+    /// layer already distinguishes the two ([`Fault`]) and the distinctive
+    /// "internal error in `x`" prefix exists only as a rendering choice, so
+    /// classifying by substring would invert the dependency: tests would be
+    /// pinned to user-facing wording.
+    ///
+    /// `None` when the definition compiled, and also for a definition that was
+    /// never a query to begin with (`Fault::NotAQuery`): that is *no verdict*
+    /// rather than a failure, and it produces no `result` entry at all.
+    pub fault: Option<Fault>,
 }
 
 /// The complete result of checking and compiling a workspace's root module.
@@ -204,27 +218,13 @@ pub(crate) fn compile_reusing(
             module: root.index(),
             def: index,
         };
-        let result = reuse.remove(&id).or_else(|| {
-            match elaborate_definition(input, root.index(), index, definition) {
-                Ok(query) => Some(match crate::checked::erase(query) {
-                    Ok(rel) => match crate::schema::schema_located(&rel) {
-                        Ok(_) => Ok(rel),
-                        Err((location, message)) => Err(input
-                            .diagnostic(location.map(|l| Origin::new(l.module, l.span)), message)),
-                    },
-                    Err(error) => Err(internal_error(input, &name, &error)),
-                }),
-                Err(error) if is_not_a_query(&error) => {
-                    tc.error_for(root.index(), index).cloned().map(Err)
-                }
-                Err(error) => Some(Err(match error.fault {
-                    Fault::Program => input.diagnostic(error.origin, error.message),
-                    Fault::Compiler => internal_error(input, &name, &error),
-                    Fault::NotAQuery => unreachable!("handled above"),
-                })),
-            }
-        });
-        let Some(result) = result else {
+        let compiled = match reuse.remove(&id) {
+            // A reused relation is a success by construction: only successful,
+            // unaffected queries are ever stored for reuse.
+            Some(result) => Some((result, None)),
+            None => compile_definition(input, tc, root, index, definition, &name),
+        };
+        let Some((result, fault)) = compiled else {
             continue;
         };
         if let Err(diag) = &result {
@@ -235,9 +235,62 @@ pub(crate) fn compile_reusing(
             key,
             name,
             result,
+            fault,
         });
     }
     out
+}
+
+/// Compile one root definition, reporting **who is at fault** alongside the
+/// diagnostic.
+///
+/// `None` means the definition has no verdict: it is not a query, so there is
+/// nothing to build and nothing to report. Every other outcome yields a result
+/// and, when it is an `Err`, the [`Fault`] that produced it.
+fn compile_definition(
+    input: CompilerInput<'_>,
+    tc: &TypeCheck,
+    root: ModuleSnapshot<'_>,
+    index: usize,
+    definition: &cagara_syntax::ast::Def,
+    name: &str,
+) -> Option<(Result<Rel, Diag>, Option<Fault>)> {
+    let elaborated = match elaborate_definition(input, root.index(), index, definition) {
+        Ok(query) => query,
+        // Not a failure at all: a scalar definition, a stage, … has no query to
+        // build. The checker's own diagnostic (if it produced one) is the only
+        // thing worth reporting here, because elaboration has no verdict.
+        Err(error) if is_not_a_query(&error) => {
+            let diag = tc.error_for(root.index(), index).cloned()?;
+            return Some((Err(diag), Some(Fault::Program)));
+        }
+        Err(error) => {
+            let fault = error.fault;
+            let diag = match fault {
+                Fault::Program => input.diagnostic(error.origin, error.message),
+                Fault::Compiler => internal_error(input, name, &error),
+                Fault::NotAQuery => unreachable!("handled above"),
+            };
+            return Some((Err(diag), Some(fault)));
+        }
+    };
+    // Erasure and schema validation run after the checked tree exists. A
+    // failure in either is a *compiler* fault: the checker already accepted the
+    // definition, so the program is well-typed and this phase could not build
+    // it. Reporting that distinction is the whole point of carrying `Fault`.
+    Some(match crate::checked::erase(elaborated) {
+        Ok(rel) => match crate::schema::schema_located(&rel) {
+            Ok(_) => (Ok(rel), None),
+            Err((location, message)) => (
+                Err(input.diagnostic(location.map(|l| Origin::new(l.module, l.span)), message)),
+                Some(Fault::Compiler),
+            ),
+        },
+        Err(error) => (
+            Err(internal_error(input, name, &error)),
+            Some(Fault::Compiler),
+        ),
+    })
 }
 
 fn source_hash(source: &str) -> u64 {
@@ -290,6 +343,26 @@ pub fn root_queries(ws: &Workspace) -> Vec<(String, Result<Rel, Diag>)> {
         .queries
         .into_iter()
         .map(|query| (query.name, query.result))
+        .collect()
+}
+
+/// One root definition's verdict, for a caller that needs to tell a *program*
+/// error from a *compiler capability gap*.
+///
+/// [`root_queries_checked`] collapses both failures to `Err(Diag)`, which is
+/// what a renderer wants and exactly what a totality check must not do: a
+/// checker-accepted definition a later phase could not build is then
+/// indistinguishable from one that was simply malformed. A definition that is
+/// not a query at all (`Fault::NotAQuery`) never appears here — it has no
+/// verdict, which is different from having a failing one.
+pub fn root_verdicts(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Rel, Diag>, Fault)> {
+    compile_input(CompilerInput::new(ws, tc))
+        .queries
+        .into_iter()
+        .filter_map(|query| {
+            let fault = query.fault?;
+            Some((query.name, query.result, fault))
+        })
         .collect()
 }
 

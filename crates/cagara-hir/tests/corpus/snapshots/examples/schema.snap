@@ -1,0 +1,2 @@
+# schema.cagara
+users: query { id = int, name = string, password_hash = string } => SELECT id, name, password_hash FROM public.users

@@ -972,34 +972,44 @@ fn users_of_a_failed_definition_fail_too() {
 fn consistent(ws: &Workspace) -> Vec<(String, Result<String, String>)> {
     let tc = check(ws);
     let m = ws.root;
-    let evaluated = crate::root_queries_checked(ws, &tc);
+    let verdicts = crate::root_verdicts(ws, &tc);
     let mut out = Vec::new();
     for (i, d) in ws.modules[m].module.defs.iter().enumerate() {
         let r = match tc.error_for(m, i) {
             Some(e) => Err(e.message.clone()),
             None => {
-                if let Some((_, Err(e))) = evaluated.iter().find(|(n, _)| *n == d.name) {
-                    // An *elaboration gap* is not a user error and is not what
-                    // this helper tests. Its contract is "the checker accepts a
-                    // program => the program compiles, and any rejection came
-                    // from a rule the checker shares rather than from the IR
-                    // validator alone". A definition the source elaborator
-                    // cannot build yet is the compiler admitting a limitation,
-                    // and it is reported as such — loudly, in production.
+                match verdicts
+                    .iter()
+                    .find(|(n, _, _)| *n == d.name)
+                    .map(|(_, r, f)| (r, *f))
+                {
+                    // A definition the checker accepted but a later phase could
+                    // not build is a *compiler capability gap*, and this helper
+                    // deliberately does not treat it as a rule violation: its
+                    // contract is "the checker accepts a program => the program
+                    // compiles, and any rejection came from a rule the checker
+                    // shares rather than from the IR validator alone". Counting
+                    // the gap as a failure here would take the whole suite down
+                    // for any un-migrated construct, hiding gaps instead of
+                    // surfacing them.
                     //
-                    // Panicking here instead would mean every ordinary-function
-                    // construct takes this whole suite down, hiding the gaps
-                    // rather than surfacing them. They are surfaced elsewhere:
-                    // the message says "internal error", and
-                    // `examples_are_consistent` fails on it, so a gap in a
-                    // shipped example cannot pass unnoticed.
-                    if e.message.contains("internal error in") {
-                        Err(e.message.clone())
-                    } else {
-                        panic!("`{}` type-checks but fails later: {}", d.name, e.message);
+                    // This reads the structured [`crate::Fault`] rather than
+                    // matching the rendered message. The old substring test on
+                    // "internal error in" classified by user-facing wording:
+                    // rewording the diagnostic would have silently turned every
+                    // gap into a panic here, and a *program* error that happened
+                    // to quote that phrase would have been swallowed. The
+                    // dedicated gates are
+                    // `compile::tests::shipped_examples_have_no_compiler_gaps`,
+                    // `…::accepted_programs_have_no_checker_errors`, and the
+                    // fuzzer's totality check.
+                    Some((Err(e), crate::Fault::Compiler)) => {
+                        Err(format!("compiler gap: {}", e.message))
                     }
-                } else {
-                    Ok(tc.type_of(m, i).unwrap_or("?").to_string())
+                    Some((Err(e), _)) => {
+                        panic!("`{}` type-checks but fails later: {}", d.name, e.message)
+                    }
+                    _ => Ok(tc.type_of(m, i).unwrap_or("?").to_string()),
                 }
             }
         };

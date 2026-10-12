@@ -1,0 +1,11 @@
+# report.cagara
+users: query { id = int, name = string, age = int, active = bool } => SELECT id, name, age, active FROM public.users
+orders: query { id = int, user_id = int, amount = float, status = string, created_at = date } => SELECT id, user_id, amount, status, created_at FROM public.orders
+adults: query { label = string, id = int, next_age = int } => SELECT id, UPPER(name) AS label, age + 1 AS next_age FROM public.users WHERE ((age >= 18) AND active) ORDER BY UPPER(name) NULLS LAST LIMIT 10
+revenue: query { revenue = maybe float, n = int, user_id = int } => SELECT user_id, SUM(amount) AS revenue, COUNT(*) AS n FROM public.orders WHERE (status = 'paid') GROUP BY user_id HAVING (COUNT(*) >= 5) ORDER BY COALESCE(SUM(amount), 0.0) DESC NULLS LAST
+spec: { partition = list (sortkey { user_id = a | b }), order = list (sortkey { created_at = c | d }) }
+latest: query { rn = int, id = int, user_id = int } => SELECT id, user_id, rn FROM (SELECT id, user_id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at DESC NULLS LAST) AS rn FROM public.orders) AS t1 WHERE (rn <= 3)
+running: query { id = int, total = maybe float } => SELECT id, SUM(amount) OVER (PARTITION BY user_id ORDER BY created_at NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS total FROM public.orders
+order_names: query { order_id = int, name = string, amount = float } => SELECT t1.id AS order_id, t2.name, t1.amount FROM public.orders AS t1 INNER JOIN public.users AS t2 ON t1.user_id = t2.id
+user_totals: query { id = int, total = float, orders = int } => SELECT t1.id, COALESCE(SUM(COALESCE(t2.amount, 0.0)), 0.0) AS total, COALESCE(SUM(CASE WHEN (t2.user_id IS NOT NULL) THEN 1 ELSE 0 END), 0) AS orders FROM public.users AS t1 LEFT JOIN public.orders AS t2 ON t1.id = t2.user_id GROUP BY t1.id
+active_totals: query { id = int, name = string, total = float } => SELECT t1.id, t1.name, COALESCE(SUM(COALESCE(t2.amount, 0.0)), 0.0) AS total FROM (SELECT id, name, age, active FROM public.users WHERE active) AS t1 LEFT JOIN public.orders AS t2 ON t1.id = t2.user_id GROUP BY t1.id, t1.name ORDER BY COALESCE(SUM(COALESCE(t2.amount, 0.0)), 0.0) DESC NULLS LAST LIMIT 20

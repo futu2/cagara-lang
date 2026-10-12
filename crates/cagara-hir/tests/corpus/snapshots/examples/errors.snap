@@ -1,0 +1,5 @@
+# errors.cagara
+users: query { id = int, name = string, age = int } => SELECT id, name, age FROM public.users
+nested: rejected
+ungrouped: rejected
+missing: rejected

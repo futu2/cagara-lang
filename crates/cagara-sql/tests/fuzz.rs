@@ -1,13 +1,21 @@
-//! Property test: a *valid* Cagara program never panics the compiler.
+//! Property test: a *valid* Cagara program never panics the compiler, and
+//! never silently disappears between checking and lowering.
 //!
 //! `cagara-fmt` already fuzzes the parser with token soup, which is mostly
 //! rejected. This generates programs that are meant to type-check — real
 //! tables, real stages, real operators — and runs each one through the whole
 //! pipeline: parse, type check, evaluate to the IR, validate its schema, and
 //! lower to SQL. A program that panics (rather than reporting a diagnostic) is
-//! a bug whether or not it happens to be well-typed, so an assertion here is
-//! only about *not crashing*; a legitimate type error is an acceptable
-//! outcome.
+//! a bug whether or not it happens to be well-typed.
+//!
+//! Not crashing is the weaker of the two properties this asserts. The stronger
+//! one is **totality**: a definition the checker accepted must not vanish
+//! silently. Skipping every `Err` — which is what this test used to do — hides
+//! precisely the bug class the compiler kept producing, because a
+//! checker-accepted definition that a later phase rejects looks exactly like a
+//! definition that was never a query. So the loop below distinguishes the
+//! three verdicts a definition can have (`Fault::{Program, Compiler,
+//! NotAQuery}`) instead of collapsing them.
 //!
 //! The generator tracks the columns each stage produces, so the programs it
 //! builds really do compile. `the_generator_reaches_sql` pins that floor: a
@@ -16,7 +24,7 @@
 //! The generator is deterministic (seeded xorshift), so a failure prints the
 //! seed and the program.
 
-use cagara_hir::{check, root_queries_checked, Workspace};
+use cagara_hir::{check, root_queries_checked, root_verdicts, Fault, Workspace};
 use cagara_sql::{compile, Dialect, Options};
 
 /// A small deterministic PRNG (xorshift64*), so failures reproduce.
@@ -334,6 +342,17 @@ fn program(rng: &mut Rng, i: usize) -> String {
 }
 
 /// Run one program through the whole pipeline.
+///
+/// Two properties, and the second is the one that earns its keep:
+///
+/// 1. **No panic.** Any phase may legitimately report an error, but none may
+///    crash on a program the generator built.
+/// 2. **Totality.** A definition the checker accepted must not vanish. The
+///    generator builds programs that are *meant* to type-check, so when the
+///    checker takes one and a later phase rejects it, that is a compiler
+///    capability gap — the exact class of bug this project kept shipping. The
+///    old loop skipped every `Err`, which made such a gap indistinguishable
+///    from a definition that was never a query.
 fn check_pipeline(src: &str, seed: u64) {
     let full = format!("{SCHEMA}{src}");
     // 1. Parse and load. This must never panic; loading errors are fine.
@@ -342,7 +361,18 @@ fn check_pipeline(src: &str, seed: u64) {
     let tc = check(&ws);
     // 3. Evaluate to the IR and validate its schema, then lower to SQL for
     //    every dialect we claim to support.
-    for (_, result) in root_queries_checked(&ws, &tc) {
+    for (name, result, fault) in root_verdicts(&ws, &tc) {
+        // The gate. `Fault::Program` is a real diagnostic (and, since the
+        // generator aims at legal programs, also a signal — but a weak one,
+        // because a generator limitation can produce a genuine type error).
+        // `Fault::Compiler` is never legitimate: the checker accepted this
+        // definition, so no later phase may refuse it.
+        assert!(
+            fault != Fault::Compiler,
+            "seed {seed}: `{name}` was accepted by the checker but a later phase \
+             reported a compiler gap\n{src}\n-> {:?}",
+            result.as_ref().err().map(|d| &d.message)
+        );
         let Ok(rel) = result else { continue };
         for d in ["ansi", "postgres", "sqlite", "duckdb", "mysql", "tsql"] {
             let dialect =

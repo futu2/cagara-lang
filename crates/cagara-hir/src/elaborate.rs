@@ -1468,23 +1468,32 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
     // something the checker recorded a resolution for, and the term layer has no
     // access to the elaboration environment. Those are handled below.
     if !is_locally_bound(cx, e) {
-        if let Ok(lowered) = crate::normalize::elaborate_via_term(cx.input, cx.module, cx.owner, e)
-        {
-            #[cfg(test)]
-            TERM_HITS.with(|c| c.set(c.get() + 1));
-            return Ok(lowered);
+        // A window's spec is a query-level record whose rules — which fields
+        // exist, that an order key must name a column, what a frame bound may be
+        // — are already implemented by `elaborate_winspec`. The term layer
+        // carries the spec's structure and hands it back here, so those rules
+        // keep exactly one implementation.
+        // The spec is lowered from its **term**, so an order key's direction
+        // comes from the resolved `__asc`/`__desc` primitive rather than from
+        // re-reading the name `asc`/`desc` out of source — the syntax-shape
+        // dispatch this migration removes.
+        let spec = |term: &crate::normalize::Term| crate::normalize::lower_winspec(term);
+        match crate::normalize::elaborate_via_term_with(cx.input, cx.module, cx.owner, e, &spec) {
+            Ok(lowered) => {
+                #[cfg(test)]
+                TERM_HITS.with(|c| c.set(c.get() + 1));
+                return Ok(lowered);
+            }
+            Err(_gap) => {}
         }
     }
     #[cfg(test)]
     {
         SOURCE_HITS.with(|c| c.set(c.get() + 1));
-        eprintln!(
-            "SOURCE-PATH kind={:?} local={} module={} span={:?}",
-            describe(&e.kind),
-            is_locally_bound(cx, e),
-            cx.module,
-            e.span
-        );
+        let why = crate::normalize::elaborate_via_term(cx.input, cx.module, cx.owner, e)
+            .err()
+            .map(|g| g.message);
+        eprintln!("SOURCE-PATH span={:?} gap={why:?}", e.span);
     }
     elaborate_expr_source(cx, e)
 }

@@ -749,27 +749,25 @@ fn the_fallback_counter_observes_gaps() {
     );
 }
 
-/// The source path's remaining surface, measured rather than assumed.
+/// The source path is **unreachable**: nothing in the corpus runs it.
 ///
-/// This began as an assertion that the source path is unreachable, so that
-/// deleting it would be a checked step. It failed, and the failure is the
-/// finding: **window function applications** still need it.
+/// This began as an assertion that failed, and the failure was the finding:
+/// window function applications still needed the source path, because a window's
+/// first argument is its *spec* — a query-level record whose rules were already
+/// implemented elsewhere. Forcing the deletion then would have broken windows or
+/// duplicated those rules.
 ///
-/// That is not a defect to paper over. A window's first argument is its *spec* —
-/// a query-level record of partition, order and frame — and the rules for it
-/// (which fields exist, that an order key must name a column, what a frame bound
-/// may be) are already implemented by `elaborate_winspec`. Lowering a spec in
-/// the term layer would be a second copy of those rules, which is the
-/// duplication this whole migration exists to remove.
+/// So the spec became a term. It is lowered by `normalize::lower_winspec`, which
+/// reads an order key's direction from the resolved `__asc`/`__desc` primitive
+/// rather than re-reading the name `asc`/`desc` from source — the same
+/// syntax-shape dispatch the rest of this migration removed, obtained once from
+/// the checker's record instead.
 ///
-/// So the test records the exact expected count. It fails if a *new* construct
-/// starts falling back — which is what makes it a gate rather than a comment —
-/// and it fails if windows are migrated too, at which point the number drops and
-/// this expectation should be lowered with it. A bare "0" would have been wrong
-/// today and a bare "2" would rot silently; naming both what and why is what
-/// keeps it honest.
+/// Zero is now the measured value, not the hoped-for one, and this test is what
+/// holds the line: a construct that regresses into the fallback makes it
+/// non-zero and fails here.
 #[test]
-fn only_windows_still_need_the_source_path() {
+fn the_source_path_is_unreachable() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut hits = 0usize;
     let mut files = 0usize;
@@ -786,9 +784,8 @@ fn only_windows_still_need_the_source_path() {
     }
     assert!(files > 0, "no corpus files were found");
     assert_eq!(
-        hits, 2,
-        "expected exactly the two window applications in report.cagara to need \
-         the source path; {hits} did. A larger number means a construct \
-         regressed into the fallback."
+        hits, 0,
+        "{hits} expression(s) still ran the source path; every construct \
+         should now go through the normalized route"
     );
 }

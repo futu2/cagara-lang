@@ -314,10 +314,44 @@ impl Term {
                 origin,
             } => {
                 args.push(arg);
+                // A **window** template's first argument is its spec, not a
+                // scalar, so once that argument arrives the node becomes a
+                // `Window` — which is what lets the spec be lowered by the code
+                // that owns its rules instead of by an expression lowering that
+                // would have to reinvent them.
+                if kind == TemplateKind::Win {
+                    if args.len() == 1 {
+                        let spec = args.pop().expect("just pushed");
+                        return Some(Term::Window {
+                            sql,
+                            spec: Box::new(spec),
+                            args: Vec::new(),
+                            ty,
+                            origin,
+                        });
+                    }
+                }
                 Some(Term::Template {
                     sql,
                     args,
                     kind,
+                    ty,
+                    origin,
+                })
+            }
+            // A window application collecting its value arguments.
+            Term::Window {
+                sql,
+                spec: spec_term,
+                mut args,
+                ty,
+                origin,
+            } => {
+                args.push(arg);
+                Some(Term::Window {
+                    sql,
+                    spec: spec_term,
+                    args,
                     ty,
                     origin,
                 })
@@ -1161,6 +1195,27 @@ pub fn elaborate_via_term(
     owner: usize,
     e: &cagara_syntax::ast::Expr,
 ) -> Result<crate::checked::CheckedExpr, Gap> {
+    elaborate_via_term_with(input, module, owner, e, &|_| {
+        Err(Gap::new(
+            Origin::new(module, cagara_syntax::ast::Span::default()),
+            "a window specification has no lowering here",
+        ))
+    })
+}
+
+/// Normalize and lower one expression, completing window specs with `spec`.
+///
+/// The window-spec hook is what lets this layer carry a spec's *structure*
+/// without owning its *rules*: partition, order and frame have an existing
+/// implementation, and a second one here would be the duplication this module
+/// exists to remove.
+pub fn elaborate_via_term_with(
+    input: crate::compile::CompilerInput<'_>,
+    module: usize,
+    owner: usize,
+    e: &cagara_syntax::ast::Expr,
+    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
+) -> Result<crate::checked::CheckedExpr, Gap> {
     let facts = InputFacts::new(input);
     let body = Body {
         module,
@@ -1179,7 +1234,7 @@ pub fn elaborate_via_term(
             return Err(g);
         }
     };
-    match lower_expr(&term) {
+    match lower_expr_with(&term, spec) {
         Ok(lowered) => Ok(lowered),
         Err(g) => {
             // Counted too. The bridge and the lowering are two halves of one
@@ -1189,6 +1244,262 @@ pub fn elaborate_via_term(
             note_gap(&g.message);
             Err(g)
         }
+    }
+}
+
+/// Lower a window specification term into the checked layer.
+///
+/// The **field rules** are not restated here: which fields a spec may have is
+/// `rules::winspec`, and the structural validity of the result is
+/// `checked::window_spec`. What this function does is the part the term layer
+/// owns — reading an already-resolved *term* rather than re-parsing source.
+///
+/// Order keys are the reason this cannot simply hand the whole record back as
+/// syntax. `asc e` and `desc e` are prelude **primitives** (`__asc`, `__desc`),
+/// so by the time a term exists the direction is a resolved primitive wrapping
+/// an expression — and recovering it from the name is precisely the
+/// syntax-shape dispatch this migration removes. Reading it from the term is
+/// the same fact, obtained once.
+pub fn lower_winspec(t: &Term) -> Result<crate::checked::WinSpecChecked, Gap> {
+    let Term::Record { fields, origin } = t else {
+        return Err(Gap::new(
+            other_origin(t),
+            "a window specification must be a record `{ partition = .., order = .., frame = .. }`",
+        ));
+    };
+    let mut partition = Vec::new();
+    let mut order = Vec::new();
+    let mut frame = None;
+    for (key, value) in fields {
+        match key.as_str() {
+            crate::rules::winspec::PARTITION => {
+                let Term::List { items, .. } = value else {
+                    return Err(Gap::new(
+                        other_origin(value),
+                        "`partition` must be a list of expressions",
+                    ));
+                };
+                partition = lower_exprs(items)?;
+            }
+            crate::rules::winspec::ORDER => {
+                let Term::List { items, .. } = value else {
+                    return Err(Gap::new(
+                        other_origin(value),
+                        "`order` must be a list of sort keys",
+                    ));
+                };
+                for item in items {
+                    order.push(lower_sortkey(item)?);
+                }
+            }
+            crate::rules::winspec::FRAME => {
+                frame = Some(lower_frame(value)?);
+            }
+            other => {
+                return Err(Gap::new(
+                    *origin,
+                    format!(
+                        "unknown window spec field `{other}`; expected {}",
+                        crate::rules::winspec::names()
+                    ),
+                ))
+            }
+        }
+    }
+    crate::checked::window_spec(partition, order, frame).map_err(|e| Gap::new(*origin, e.message))
+}
+
+/// Lower one sort key: `asc e`, `desc e`, or a bare expression (ascending).
+fn lower_sortkey(t: &Term) -> Result<(crate::checked::CheckedExpr, bool), Gap> {
+    // The direction is a resolved primitive wrapping exactly one argument.
+    if let Term::Primitive { name, args, .. } = t {
+        if args.len() == 1 {
+            let ascending = match &**name {
+                "__asc" => Some(true),
+                "__desc" => Some(false),
+                _ => None,
+            };
+            if let Some(ascending) = ascending {
+                return Ok((lower_expr(&args[0])?, ascending));
+            }
+        }
+    }
+    Ok((lower_expr(t)?, true))
+}
+
+/// Lower a frame: `rows a b`, or one of the prelude's named frames.
+///
+/// Resolved through the term, so a name bound to a frame is already its body —
+/// the case that needed a scope lookup here before.
+fn lower_frame(t: &Term) -> Result<crate::ir::Frame, Gap> {
+    let origin = other_origin(t);
+    let (name, args) = match t {
+        Term::Primitive { name, args, .. } => (&**name, args.as_slice()),
+        _ => {
+            return Err(Gap::new(
+                origin,
+                "a frame must be `rows a b`, `range a b`, or `groups a b`",
+            ))
+        }
+    };
+    // The IR carries only the two bounds — the `ROWS`/`RANGE`/`GROUPS` keyword
+    // is not represented, matching `ir::Frame` and the source path.
+    match name {
+        "__rows" => {}
+        other => {
+            return Err(Gap::new(
+                origin,
+                format!("`{other}` is not a frame kind this layer can read"),
+            ))
+        }
+    }
+    let [start, end] = args else {
+        return Err(Gap::new(origin, "a frame needs two bounds"));
+    };
+    Ok(crate::ir::Frame {
+        start: lower_bound(start)?,
+        end: lower_bound(end)?,
+    })
+}
+
+/// Lower one frame bound: `unboundedPreceding`, `currentRow`,
+/// `unboundedFollowing`, or `preceding n` / `following n`.
+fn lower_bound(t: &Term) -> Result<crate::ir::Bound, Gap> {
+    let origin = other_origin(t);
+    let (name, args) = match t {
+        Term::Primitive { name, args, .. } => (&**name, args.as_slice()),
+        _ => return Err(Gap::new(origin, "a frame bound must be a bound")),
+    };
+    Ok(match (name, args) {
+        ("__unboundedPreceding", []) => crate::ir::Bound::UnboundedPreceding,
+        ("__unboundedFollowing", []) => crate::ir::Bound::UnboundedFollowing,
+        ("__currentRow", []) => crate::ir::Bound::CurrentRow,
+        ("__preceding", [n]) => crate::ir::Bound::Preceding(frame_offset(n)?),
+        ("__following", [n]) => crate::ir::Bound::Following(frame_offset(n)?),
+        _ => {
+            return Err(Gap::new(
+                origin,
+                format!("`{name}` is not a frame bound this layer can read"),
+            ))
+        }
+    })
+}
+
+/// The integer a frame offset term denotes.
+fn frame_offset(t: &Term) -> Result<i64, Gap> {
+    match t {
+        Term::Lit {
+            lit: crate::ir::Lit::Int(i),
+            ..
+        } => Ok(*i),
+        // A frame offset is a *literal* by the language's rules, so a computed
+        // one is refused rather than evaluated — matching the source path, which
+        // reads the literal too.
+        other => Err(Gap::new(
+            other_origin(other),
+            "a frame offset must be a whole-number literal",
+        )),
+    }
+}
+
+/// Recover the source expression a term was built from, where one exists.
+///
+/// A narrow, deliberate escape hatch for concepts the term layer carries but
+/// does not own the rules for — today only a window specification. The term
+/// keeps the spec's *structure* so that aliases inside it are already resolved;
+/// the rules for interpreting a partition, an order key, or a frame bound live
+/// in `elaborate::elaborate_winspec`, and handing the structure back is how those
+/// rules keep one implementation instead of growing a second one here.
+///
+/// `None` for a term with no source form — a lambda, an unreduced application —
+/// which a caller reports rather than guesses at.
+pub fn term_to_expr(t: &Term) -> Option<cagara_syntax::ast::Expr> {
+    use cagara_syntax::ast::{Expr, ExprKind, Side};
+    let mk = |span: cagara_syntax::ast::Span, kind: ExprKind| Expr { id: 0, span, kind };
+    match t {
+        Term::Column {
+            side,
+            name,
+            origin: _,
+            ..
+        } => {
+            // The span is recovered from the checker's record by the caller;
+            // here it is empty because the spec is re-read by *name*, not by
+            // position, and no diagnostic is rendered from this syntax.
+            let span = cagara_syntax::ast::Span::default();
+            let _ = side;
+            Some(mk(span, ExprKind::Field(Side::Single, name.clone())))
+        }
+        Term::Local { label, .. } => {
+            let span = cagara_syntax::ast::Span::default();
+            Some(mk(span, ExprKind::Name(label.clone())))
+        }
+        Term::Lit { lit, .. } => {
+            use crate::ir::Lit;
+            let l = match lit {
+                Lit::Int(i) => cagara_syntax::ast::Lit::Int(*i),
+                Lit::Float(s) => cagara_syntax::ast::Lit::Float(s.clone()),
+                Lit::Str(s) => cagara_syntax::ast::Lit::Str(s.clone()),
+                Lit::Bool(b) => cagara_syntax::ast::Lit::Bool(*b),
+            };
+            Some(mk(cagara_syntax::ast::Span::default(), ExprKind::Lit(l)))
+        }
+        Term::Record { fields, .. } => {
+            let mut out = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                out.push((name.clone(), term_to_expr(value)?));
+            }
+            Some(mk(
+                cagara_syntax::ast::Span::default(),
+                ExprKind::Record(out),
+            ))
+        }
+        Term::List { items, .. } => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(term_to_expr(item)?);
+            }
+            Some(mk(
+                cagara_syntax::ast::Span::default(),
+                ExprKind::List(out.into()),
+            ))
+        }
+        // A primitive, bare or applied. A primitive **with arguments** is an
+        // application whose head is the primitive — `__desc .created_at`,
+        // `__rows a b` — and reading only the bare form is why the order and
+        // frame of a window specification came back unreadable.
+        Term::Primitive { name, args, .. } => {
+            let head = mk(
+                cagara_syntax::ast::Span::default(),
+                ExprKind::Primitive(name.to_string()),
+            );
+            if args.is_empty() {
+                return Some(head);
+            }
+            let mut out = Vec::with_capacity(args.len());
+            for a in args {
+                out.push(term_to_expr(a)?);
+            }
+            Some(mk(
+                cagara_syntax::ast::Span::default(),
+                ExprKind::App(Box::new(head), out.into()),
+            ))
+        }
+        // An application whose head is a binder. Nothing in a window spec is
+        // written that way, so it is reported rather than guessed at.
+        Term::Apply { head, args, .. } => {
+            let f = term_to_expr(head)?;
+            let mut out = Vec::with_capacity(args.len());
+            for a in args {
+                out.push(term_to_expr(a)?);
+            }
+            Some(mk(
+                cagara_syntax::ast::Span::default(),
+                ExprKind::App(Box::new(f), out.into()),
+            ))
+        }
+        Term::Template { .. } | Term::Window { .. } => None,
+        Term::Lambda { .. } | Term::Case { .. } => None,
     }
 }
 
@@ -1206,6 +1517,30 @@ pub fn elaborate_via_term(
 /// `ifThenElse (…) (sum .x) 0` usable inside an `agg` stage without this
 /// function having to reason about phases at all.
 pub fn lower_expr(t: &Term) -> Result<crate::checked::CheckedExpr, Gap> {
+    lower_expr_with(t, &|_| {
+        Err(Gap::new(
+            Origin::new(0, cagara_syntax::ast::Span::default()),
+            "a window specification has no lowering here",
+        ))
+    })
+}
+
+/// Lower a term, completing window applications with `spec`.
+///
+/// The hook exists because a window's spec is a **query-level** record with its
+/// own rules — which fields exist, that an order key must name a column, what a
+/// frame bound may be — and those rules already have an implementation
+/// (`elaborate::elaborate_winspec`). Reimplementing them here would be exactly
+/// the second-source-of-truth duplication this module exists to remove, so the
+/// term layer carries the spec's *structure* and hands it back for lowering.
+///
+/// A caller with no window support passes a hook that refuses, which is what
+/// [`lower_expr`] does: an expression-only consumer gets a clear gap rather than
+/// a wrong node.
+pub fn lower_expr_with(
+    t: &Term,
+    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
+) -> Result<crate::checked::CheckedExpr, Gap> {
     use crate::checked::CheckedExpr as C;
 
     match t {
@@ -1237,7 +1572,7 @@ pub fn lower_expr(t: &Term) -> Result<crate::checked::CheckedExpr, Gap> {
             ty,
             origin,
         } => {
-            let lowered = lower_exprs(args)?;
+            let lowered = lower_exprs_with(args, spec)?;
             match kind {
                 TemplateKind::Scalar => C::template(sql.to_string(), lowered, ty.clone(), *origin)
                     .map_err(|e| Gap::new(*origin, e.message)),
@@ -1256,27 +1591,24 @@ pub fn lower_expr(t: &Term) -> Result<crate::checked::CheckedExpr, Gap> {
                 )),
             }
         }
-        // A window application is recognized, and its spec is carried as a
-        // term — but the spec is a *query-level* record with its own rules
-        // (which fields exist, that an order key must name a column, what a
-        // frame bound may be), and those rules are already implemented by
-        // `elaborate_winspec`. Lowering it here would be a second copy.
-        //
-        // So this arm reports rather than invents, and a caller that has a
-        // spec-lowering hook uses `lower_expr_with` instead. The window path
-        // therefore still runs through the source route, which is honest: it is
-        // one family, and claiming it is migrated while lowering it wrongly
-        // would be worse than leaving it.
-        Term::Window { origin, .. } => Err(Gap::new(
-            *origin,
-            "a window application needs its spec lowered by the query layer",
-        )),
+        Term::Window {
+            sql,
+            spec: spec_term,
+            args,
+            ty,
+            origin,
+        } => {
+            let lowered_spec = spec(spec_term)?;
+            let values = lower_exprs_with(args, spec)?;
+            C::win_template(sql.to_string(), values, lowered_spec, ty.clone(), *origin)
+                .map_err(|e| Gap::new(*origin, e.message))
+        }
         Term::Primitive {
             name,
             args,
             ty: _,
             origin,
-        } => lower_primitive(name, args, *origin),
+        } => lower_primitive(name, args, *origin, spec),
         Term::Case {
             arms,
             default,
@@ -1291,14 +1623,14 @@ pub fn lower_expr(t: &Term) -> Result<crate::checked::CheckedExpr, Gap> {
             for (cond, value) in arms {
                 sql.push_str(" WHEN $");
                 sql.push_str(&(lowered.len() + 1).to_string());
-                lowered.push(lower_expr(cond)?);
+                lowered.push(lower_expr_with(cond, spec)?);
                 sql.push_str(" THEN $");
                 sql.push_str(&(lowered.len() + 1).to_string());
-                lowered.push(lower_expr(value)?);
+                lowered.push(lower_expr_with(value, spec)?);
             }
             sql.push_str(" ELSE $");
             sql.push_str(&(lowered.len() + 1).to_string());
-            lowered.push(lower_expr(default)?);
+            lowered.push(lower_expr_with(default, spec)?);
             sql.push_str(" END");
             C::template(sql, lowered, crate::core::ScalarType::Unknown, *origin)
                 .map_err(|e| Gap::new(*origin, e.message))
@@ -1329,6 +1661,14 @@ fn lower_exprs(ts: &[Term]) -> Result<Vec<crate::checked::CheckedExpr>, Gap> {
     ts.iter().map(lower_expr).collect()
 }
 
+/// Lower a sequence of terms, forwarding a window-spec hook.
+fn lower_exprs_with(
+    ts: &[Term],
+    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
+) -> Result<Vec<crate::checked::CheckedExpr>, Gap> {
+    ts.iter().map(|t| lower_expr_with(t, spec)).collect()
+}
+
 /// Lower an expression primitive: `group`, `in`, and the rest.
 ///
 /// Only the two the checked layer has constructors for are handled; the others
@@ -1338,19 +1678,20 @@ fn lower_primitive(
     name: &str,
     args: &[Term],
     origin: Origin,
+    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
 ) -> Result<crate::checked::CheckedExpr, Gap> {
     use crate::checked::CheckedExpr as C;
     match (name, args) {
         // `group key`: an aggregate-phase node whose type is the key's.
         ("__group", [key]) => {
-            C::group(lower_expr(key)?, origin).map_err(|e| Gap::new(origin, e.message))
+            C::group(lower_expr_with(key, spec)?, origin).map_err(|e| Gap::new(origin, e.message))
         }
         // `inList [..] .x`: the list comes first, then the value, matching the
         // prelude's declaration. Swapping them can still produce a well-typed
         // tree, so the order is stated explicitly.
         ("__in", [list, value]) => {
             let items = match list {
-                Term::List { items, .. } => lower_exprs(items)?,
+                Term::List { items, .. } => lower_exprs_with(items, spec)?,
                 other => {
                     return Err(Gap::new(
                         other_origin(other),
@@ -1358,7 +1699,7 @@ fn lower_primitive(
                     ))
                 }
             };
-            C::in_(lower_expr(value)?, items, false, origin)
+            C::in_(lower_expr_with(value, spec)?, items, false, origin)
                 .map_err(|e| Gap::new(origin, e.message))
         }
         (other, _) => Err(Gap::new(

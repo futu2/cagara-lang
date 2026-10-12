@@ -2152,3 +2152,109 @@ fn resolution_covers_the_shapes_that_produced_the_alias_bugs() {
         );
     }
 }
+
+/// The checker records a type for an **application** node, not only for its
+/// head and arguments.
+///
+/// Found by the normalization migration: `infer_app` returned the function
+/// result type but never pushed the application's own `ExprId` into `uses`, so
+/// `use_ty(app_id)` had no answer. A consumer that builds a node from the
+/// application — which is every consumer that wants the type of `upper .name`
+/// rather than of `upper` — had nothing to read.
+#[test]
+fn an_application_records_its_own_type() {
+    let ws = Workspace::from_source(&format!(
+        "{TABLES}q = users & select {{ x = upper .name }}\n"
+    ));
+    let tc = check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    // Find the `upper .name` application's `ExprId` and ask for its type.
+    // By *name*, not by index: `TABLES` already defines `users`, so position 1
+    // is a table definition and its only application is the `table` call.
+    let def = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .find(|d| d.name == "q")
+        .expect("the test program defines `q`");
+    let mut apps = Vec::new();
+    fn walk<'a>(e: &'a cagara_syntax::ast::Expr, out: &mut Vec<&'a cagara_syntax::ast::Expr>) {
+        use cagara_syntax::ast::ExprKind as K;
+        match &e.kind {
+            K::App(f, args) => {
+                out.push(e);
+                walk(f, out);
+                for a in args.iter() {
+                    walk(a, out);
+                }
+            }
+            K::Record(fs) => {
+                for (_, v) in fs {
+                    walk(v, out);
+                }
+            }
+            K::Proj(b, _) => walk(b, out),
+            K::Lambda(_, b) => walk(b, out),
+            _ => {}
+        }
+    }
+    walk(&def.body, &mut apps);
+    assert!(!apps.is_empty(), "no application found in the test program");
+    // The walk collects every application, including the outer pipeline
+    // (`users & select {…}`), whose type is a `query` and therefore not a
+    // scalar. What must have a recorded type is the *inside* one — the
+    // `upper .name` whose type is `expr r string`. Asserting on any
+    // application at all would pass for the wrong reason.
+    let scalars: Vec<(u32, crate::core::ScalarType)> = apps
+        .iter()
+        .filter_map(|a| tc.use_ty(ws.root, a.id).map(|t| (a.id, t)))
+        .collect();
+    assert!(
+        !scalars.is_empty(),
+        "no scalar application had a recorded type; apps={:?} all-use-ids={:?}",
+        apps.iter().map(|a| a.id).collect::<Vec<_>>(),
+        tc.use_ids(ws.root)
+    );
+    assert!(
+        scalars
+            .iter()
+            .any(|(_, t)| *t == crate::core::ScalarType::String),
+        "the `upper .name` application should be a string, got {scalars:?}"
+    );
+}
+
+/// `ExprId`s are unique within a module, which is what makes `(module, ExprId)`
+/// a sound key for `use_ty` and the resolution map.
+///
+/// Worth pinning because both maps depend on it and neither would fail
+/// *loudly* if it stopped being true: a colliding id would silently return
+/// another expression's type, which is the kind of wrong answer that looks
+/// like a plausible one.
+#[test]
+fn exprids_are_unique_within_a_module() {
+    let ws = Workspace::from_source(
+        "a : query { x = int } = table \"s\" \"t1\"\n\
+         b : query { y = float } = table \"s\" \"t2\"\n",
+    );
+    let tc = check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    // Every expression id the checker recorded, with the type it recorded.
+    let ids = tc.use_ids(ws.root);
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), ids.len(), "use_ids returned a duplicate");
+    // Two definitions in one module still number their expressions into one
+    // sequence, so their applications have distinct ids.
+    let mut app_ids: Vec<u32> = Vec::new();
+    for d in &ws.modules[ws.root].module.defs {
+        if let cagara_syntax::ast::ExprKind::App(_, _) = &d.body.kind {
+            app_ids.push(d.body.id);
+        }
+    }
+    assert_eq!(app_ids.len(), 2, "expected two applications: {app_ids:?}");
+    assert_ne!(
+        app_ids[0], app_ids[1],
+        "two definitions in one module must not share an ExprId"
+    );
+}

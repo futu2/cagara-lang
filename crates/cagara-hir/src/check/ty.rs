@@ -417,6 +417,17 @@ pub(crate) fn scheme_view(t: &Ty) -> SchemeView {
             }
         }
         Ty::Var(_) | Ty::Rigid(..) | Ty::Gen(_) | Ty::Empty => SchemeView::Open,
+        // `expr r a` is the *scalar* `a` together with a phase and a row. A
+        // consumer asking for the type of an expression wants `a`: the row is
+        // what the column is read from and the phase is where it may be used,
+        // and both are query-level facts carried elsewhere.
+        //
+        // Unwrapping here rather than at each call site matters because
+        // `use_ty` is one of several readers. Without it, `upper .name` had the
+        // recorded type `expr r string` and every reader saw `Unknown`, since
+        // `ty_to_scalar` has no `expr` case — the type was present and
+        // unreadable, which is worse than absent because it looks recorded.
+        Ty::Con("expr", args) if args.len() == 3 => scheme_view(&args[2]),
         Ty::Con(..) => SchemeView::Scalar(ty_to_scalar(t)),
     }
 }

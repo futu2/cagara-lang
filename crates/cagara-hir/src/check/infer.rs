@@ -1383,6 +1383,16 @@ impl<'w> Checker<'w> {
             };
             self.solve()?;
         }
+        // Record the **application's own** type after solving, not before.
+        //
+        // `ft` is only partly determined mid-loop: for `.age + 1` the type is
+        // `expr r a` with `a` still an unsolved variable, and it becomes `int`
+        // only once `solve` has run the constraints the earlier arguments
+        // queued. Recording the pre-solve form put a variable in the map, which
+        // a reader sees as `Unknown` — a type that looks recorded and is not
+        // usable, which is worse than recording nothing.
+        self.solve()?;
+        self.uses.push((e.id, e.span, self.resolve(&ft), None));
         Ok(ft)
     }
 

@@ -790,50 +790,60 @@ fn the_source_path_is_unreachable() {
     );
 }
 
-/// The **one** construct that still needs the source path, with the site-id
-/// mapping worked out.
+/// The **one** construct that still needs the source path, with both halves of
+/// the blocker measured.
 ///
-/// Recorded because two attempts to migrate it stalled at the same place, and
-/// the mapping below is what the third should start from. It is not in any
-/// example, which is why the corpus gate reports zero: it takes a *polymorphic
-/// helper applied at a projection*.
+/// Recorded because four attempts at it stalled, and each stalled for a
+/// different reason that only measurement separated. Not in any example, which
+/// is why the corpus gate reports zero: it takes a *polymorphic helper applied
+/// at a projection*.
 ///
 /// ```text
 /// h  = e => users & select { x = e + 1, id = .id }
 /// ok = h .age
 /// ```
 ///
-/// The checker's records for exactly this program, measured rather than
-/// inferred:
+/// Two facts about the checker's record, both measured on this exact program:
 ///
 /// ```text
-/// DEF 2 `h`  choices=[(11, 0, Hole(0))]  holes=1
-///            tree: Lambda(19) -> App(18) -> App(17) -> Name(10)=`_+_`
-/// DEF 3 `ok` choices=[(20, 0, Def(0, 85))]  holes=0
-///            tree: App(22) -> Name(20)=`h`, Field(21)=`.age`
+/// DEF `h`  choices=[(11, 0, Hole(0))]      holes=1
+/// DEF `ok` choices=[(20, 0, Def(0, 85))]   holes=0
 /// ```
 ///
-/// So the site key is the id of the callee **`Name` node** — 20, which is `h`
-/// in `ok`'s body — and the answer is `Def(0, 85)`, the int `+`. `h`'s own entry
-/// holds `Hole(0)` at site 11, which is `_+_` inside `h`.
+/// 1. **The choice is recorded against the caller, not the callee.** `infer.rs`
+///    writes `self.active.last()`, which is the definition being elaborated — so
+///    `holes_at` must be asked about `ok`, and asking about `h` returns nothing
+///    at all. That was the first wrong turn.
+/// 2. **The recorded site is the callee *name* node's id.** Site 20 is `h` in
+///    `h .age`. Flattening an application discards that node, so the site has to
+///    be read while the head is still a `Name` — the second wrong turn.
 ///
-/// Two things defeated the attempts:
+/// The seam itself is sound and is covered by unit tests in `normalize`:
+/// `Normalizer::hole` answers from its stack, and `local_binding` turns a bound
+/// parameter into `Term::Elaborated`. What defeated every attempt is the
+/// **plumbing between them**, and the last measurement is the reason it is still
+/// open:
 ///
-/// 1. **The walk reaches `_+_` while the current definition is `h`, but the
-///    assignment belongs to `ok`.** The term layer flattens application, so by
-///    the time a term exists the head's identity is gone; the site has to be
-///    read while the head is still a `Name` node.
-/// 2. **Ids are per-program, so a probe on a hand-written variant does not
-///    transfer.** I compared a site id from one program against a site id from
-///    another twice, and both times drew a wrong conclusion from it. Any further
-///    work must read the ids from the *same* source string it is testing.
+/// ```text
+/// HOLES-AT owner=(1,5) site=28 all=[(26, 0, Def(0, 85))]
+/// APP      app.id=30  head.id=28  span=297..304
+/// ```
 ///
-/// What is not in doubt: the assignment must travel with the descent into the
-/// callee, keyed by the definition that owns the hole.
+/// The checker's recorded site is **26**; the walk presents **28**; and the span
+/// 297..304 matches none of `q` (247), `ok` (260) or `win` (273) in the same
+/// source string. So the ids the walk sees and the ids the checker recorded are
+/// not from the same numbering — which invalidates the obvious fix of comparing
+/// them, and is exactly the mistake that wasted three attempts: I compared ids
+/// across programs, or across two numberings of one program, and each comparison
+/// looked plausible.
 ///
-/// The test below asserts the case still compiles — the gap is invisible from
-/// outside, since the source path still handles it — and fails once it is
-/// migrated, so the next attempt knows it succeeded.
+/// The next step is to establish *why* the two numberings differ — whether
+/// elaboration walks a re-lowered AST rather than the `parse_module` result the
+/// checker reads — before touching this again. That is a question about where
+/// the AST comes from, not about hole assignment.
+///
+/// The test asserts the case compiles, since the gap is invisible from outside:
+/// the source path still handles it.
 #[test]
 fn a_polymorphic_helper_at_a_projection_still_needs_the_source_path() {
     let ws = Workspace::from_source(
@@ -854,15 +864,10 @@ fn a_polymorphic_helper_at_a_projection_still_needs_the_source_path() {
     );
 }
 
-/// The site-id mapping the migration stalled on, pinned as a fact.
-///
-/// This is the measurement that three attempts lacked. It asserts the *shape* of
-/// the checker's record rather than any behavior, so it stays true whether or not
-/// the construct is ever migrated — and it fails loudly if the checker changes
-/// how it keys an overload choice by use site, which is the thing the term layer
-/// would have to track.
+/// The checker records an overload choice against the **caller**, at the callee
+/// *name* node's id. Pinned as a fact so it does not have to be rediscovered.
 #[test]
-fn an_overload_choice_is_keyed_by_the_callee_name_node() {
+fn an_overload_choice_is_keyed_by_the_use_site() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string, age = int, active = bool } = \
          table \"public\" \"users\"\n\
@@ -877,17 +882,18 @@ fn an_overload_choice_is_keyed_by_the_callee_name_node() {
     let h = defs.iter().position(|d| d.name == "h").expect("`h`");
     let ok = defs.iter().position(|d| d.name == "ok").expect("`ok`");
 
-    // `h` leaves one overload open, recorded against itself as a hole.
+    // The callee leaves one overload open, recorded against itself as a hole.
     assert_eq!(tc.holes(ws.root, h), 1, "`h` should have one open overload");
-    let h_choices = tc.choices_of(ws.root, h);
     assert!(
-        h_choices
+        tc.choices_of(ws.root, h)
             .iter()
             .any(|(_, _, c)| matches!(c, crate::check::Choice::Hole(0))),
-        "`h`'s own record should hold a hole: {h_choices:?}"
+        "`h`'s own record should hold a hole: {:?}",
+        tc.choices_of(ws.root, h)
     );
 
-    // `ok` records the answer, keyed by the id of the callee **name** node.
+    // The caller holds the answer — this is the fact: recorded against `ok`, not
+    // against `h`. Asking about the callee returns nothing.
     let ok_choices = tc.choices_of(ws.root, ok);
     assert_eq!(
         ok_choices.len(),
@@ -900,21 +906,18 @@ fn an_overload_choice_is_keyed_by_the_callee_name_node() {
         matches!(choice, crate::check::Choice::Def(..)),
         "`ok` should resolve it to a candidate: {choice:?}"
     );
-    // The site is the callee **name** node — `h` in `h .age` — not the
-    // application around it and not the projection beside it. That is the
-    // finding: a walk that holds the application's id, or a projection's, looks
-    // up a different node's record and finds no assignment.
+    // The site is the callee *name* node, `h` in `h .age`, not the application.
     let cagara_syntax::ast::ExprKind::App(head, _) = &defs[ok].body.kind else {
         panic!("`ok`'s body should be an application");
     };
     assert_eq!(
         site, head.id,
-        "the recorded site should be the callee's name node ({}), not the \
+        "the recorded site should be the callee name node ({}) rather than the \
          application ({})",
         head.id, defs[ok].body.id
     );
     assert_ne!(
         site, defs[ok].body.id,
-        "the application node is a different id from the site"
+        "the application node carries a different id from the site"
     );
 }

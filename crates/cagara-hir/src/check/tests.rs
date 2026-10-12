@@ -2258,3 +2258,127 @@ fn exprids_are_unique_within_a_module() {
         "two definitions in one module must not share an ExprId"
     );
 }
+
+/// A literal is polymorphic, so every fork of a `case` ends up with the `case`'s
+/// own type.
+///
+/// `1` is not `int`. It is a value that takes whatever numeric type its context
+/// demands, like Haskell's `fromInteger`; `"paid"` is the same for
+/// `fromString`. So a `case` whose forks mention literals of different kinds is
+/// not a type error — each literal is instantiated at the one type the `case`
+/// settles on, and the `case` therefore does not claim a type that one of its
+/// own forks lacks.
+///
+/// This is what made `case { c => 1; true => 2.0 }` look wrong: the `1` fork was
+/// being *recorded* at its default kind `int` while the `case` resolved to
+/// `float`. The fix is not to reject the program but to record the literal at
+/// the type it was lifted to, which is what `check` now does for every checked
+/// literal.
+#[test]
+fn a_literal_fork_takes_the_cases_type() {
+    // `1` beside `2.0` is one numeric type, and the literal takes it.
+    assert_eq!(
+        ty(
+            "q = users & select { x = case { .active => 1; true => 2.0 } }\n",
+            "q"
+        ),
+        "query { x = float }"
+    );
+    // The same in the other order, and with the literal in the default arm.
+    assert_eq!(
+        ty(
+            "q = users & select { x = case { .active => 2.0; true => 1 } }\n",
+            "q"
+        ),
+        "query { x = float }"
+    );
+    assert_eq!(
+        ty(
+            "q = users & select { x = case { .active => 1.5; true => 0 } }\n",
+            "q"
+        ),
+        "query { x = float }"
+    );
+    // Two integer literals stay integer.
+    assert_eq!(
+        ty(
+            "q = users & select { x = case { .active => 1; true => 2 } }\n",
+            "q"
+        ),
+        "query { x = int }"
+    );
+    // A string literal beside a `date` column is instantiated at `date`: the
+    // `fromString` half of the same rule. `TABLES` has no date column, so the
+    // table is declared here.
+    assert_eq!(
+        ty(
+            "d : query { id = int, at = date } = table \"s\" \"d\"\n\
+             q = d & select { x = ifThenElse (.id > 0) \"2020-01-01\" .at }\n",
+            "q"
+        ),
+        "query { x = date }"
+    );
+
+    // `ifThenElse` is the same construct written as a definition, so it must
+    // agree with `case` rather than differing — the rule lives in `check`, not
+    // in the `case` form.
+    assert_eq!(
+        ty("q = users & select { x = ifThenElse .active 1 2.0 }\n", "q"),
+        "query { x = float }"
+    );
+    assert_eq!(
+        ty("q = users & select { x = ifThenElse .active 1 2 }\n", "q"),
+        "query { x = int }"
+    );
+
+    // The *recorded* fork type is the lifted one, not the literal's default
+    // kind. This is the fact the type above cannot show: the fork `1` must be
+    // recorded as `float`, or the `case` is typed `float` while a fork inside it
+    // says `int`.
+    let ws = Workspace::from_source(&format!(
+        "{TABLES}q = users & select {{ x = case {{ .active => 1; true => 2.0 }} }}\n"
+    ));
+    let tc = check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    let body = &ws.modules[ws.root].module.defs[2].body;
+    let mut lits = Vec::new();
+    collect_lits(body, &mut lits);
+    let one = lits
+        .iter()
+        .find(|(_, text)| text.starts_with("Int("))
+        .expect("the `1` fork");
+    assert_eq!(
+        format!("{:?}", tc.use_ty(ws.root, one.0)),
+        "Some(Float)",
+        "`1` in a float `case` is a float, not an int"
+    );
+
+    fn collect_lits(e: &cagara_syntax::ast::Expr, out: &mut Vec<(u32, String)>) {
+        use cagara_syntax::ast::ExprKind as K;
+        if let K::Lit(l) = &e.kind {
+            out.push((e.id, format!("{l:?}")));
+        }
+        match &e.kind {
+            K::Record(fs) => {
+                for (_, v) in fs {
+                    collect_lits(v, out);
+                }
+            }
+            K::Case(arms) => {
+                for (c, v) in arms {
+                    collect_lits(c, out);
+                    collect_lits(v, out);
+                }
+            }
+            K::Proj(b, _) => collect_lits(b, out),
+            K::App(f, a) => {
+                collect_lits(f, out);
+                for x in a.iter() {
+                    collect_lits(x, out);
+                }
+            }
+            K::Lambda(_, b) => collect_lits(b, out),
+            _ => {}
+        }
+    }
+}

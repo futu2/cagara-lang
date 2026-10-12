@@ -1013,6 +1013,26 @@ impl<'w> Checker<'w> {
             _ => {
                 let actual = self.infer(env, e)?;
                 self.coerce(&actual, expected).map_err(at(e.span))?;
+                // A literal is **polymorphic**, closer to `fromInteger` and
+                // `fromString` than to `int` and `string`: it takes whatever
+                // numeric or string-like type its context demands, so `1` in a
+                // float position *is* a float. `infer_lit` can only record the
+                // literal's default kind, so a literal checked against a known
+                // type has to be re-recorded at the type it was lifted to.
+                //
+                // Without this, `1` reads back as `int` in a `case` typed
+                // `float`, and the `case` claims a type one of its own forks does
+                // not have. Measured: the `1` fork recorded `Int` while the case
+                // recorded `float`. The application path re-records a literal
+                // argument for the same reason; this generalises it to every
+                // checked position, which is where a `case` arm is.
+                if let ExprKind::Lit(l) = &e.kind {
+                    let lifted = match self.resolve(expected) {
+                        Ty::Con("expr", a) if a.len() == 3 => a[2].clone(),
+                        other => other,
+                    };
+                    self.uses.push((e.id, e.span, lifted, Some(lit_name(l))));
+                }
                 Ok(self.resolve(expected))
             }
         }
@@ -1346,16 +1366,10 @@ impl<'w> Checker<'w> {
             ft = match self.resolve(&ft) {
                 Ty::Fun(p, r) => {
                     let p = *p;
+                    // `check` re-records a literal argument at the type it was
+                    // lifted to (`18` in `.age >= 18` has the value type it was
+                    // lifted to), so no special case is needed here.
                     self.check(env, arg, &p)?;
-                    if let ExprKind::Lit(l) = &arg.kind {
-                        // A lifted literal (`18` in `.age >= 18`) has
-                        // the value type it was lifted to.
-                        let v = match self.resolve(&p) {
-                            Ty::Con("expr", a) => a[2].clone(),
-                            o => o,
-                        };
-                        self.uses.push((arg.id, arg.span, v, Some(lit_name(l))));
-                    }
                     *r
                 }
                 Ty::Var(_) => {

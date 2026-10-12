@@ -1873,3 +1873,152 @@ fn a_rendered_diagnostic_follows_an_edit() {
         after.errors()[0]
     );
 }
+
+/// Checking mode pushes an expected type **down**; synthesis recovers it by
+/// unifying afterwards.
+///
+/// # What these tests do and do not establish
+///
+/// They pin the *observable behavior* of the checker at the forms where an
+/// expectation is available: a lambda parameter, a record field, a list
+/// element, a `case` arm. That behavior is what the language promises, and it
+/// is worth locking down.
+///
+/// They do **not** establish that the checking overrides are *necessary*.
+/// Measured, not assumed: with `check_record`, `check_lambda` and `check_list`
+/// all disabled so that every expression took the synthesize-then-coerce path,
+/// this entire suite still passed. The existing constraint solver already
+/// handles every case covered below — its `solve` worklist defers a comparison
+/// and re-runs it, which recovers by scheduling what checking recovers by
+/// direction.
+///
+/// So the overrides are a *replacement for a workaround*, not a fix for a
+/// failing test, and Phase 1 of the consolidation is not yet earning its
+/// complexity here. The direction becomes load-bearing when the deferral
+/// protocol is removed: a case that currently waits for `solve` to re-run has
+/// nowhere to wait once the expectation arrives up front. Deleting the
+/// `Ok(false)` paths without first having this direction in place is where the
+/// `5d34464` class of bug would return.
+mod bidirectional {
+    use super::*;
+
+    /// A lambda's parameter type comes from the expected function type.
+    ///
+    /// `>>>` is `(a -> b) -> (b -> c) -> a -> c`, so both operands are checked
+    /// against a *known* function type. Before checking mode, `infer_lambda`
+    /// bound the parameter to a fresh variable and the body decided the type:
+    /// sound, but it meant the expectation contributed nothing, and an
+    /// annotated helper was the workaround when the body could not determine
+    /// the parameter on its own.
+    #[test]
+    fn a_lambda_parameter_comes_from_the_expected_type() {
+        // The inline lambda is checked against `expr r string -> expr r string`
+        // from `>>>`'s signature, so `.name` is known to be a string column and
+        // the whole expression is a string — not an unsolved variable.
+        assert_eq!(
+            ty("q = users & select { x = (f => upper f) .name }\n", "q"),
+            "query { x = string }"
+        );
+        // The same shape at another column type must select that type, which is
+        // only possible if the expectation reached the parameter.
+        assert_eq!(
+            ty("q = users & select { x = (f => f + 1) .age }\n", "q"),
+            "query { x = int }"
+        );
+    }
+
+    /// A record literal's field types come from the expected row.
+    ///
+    /// A stage's record argument is checked against the row that stage
+    /// declares, so a field that is wrong is reported against that field rather
+    /// than against the whole record.
+    #[test]
+    fn a_record_field_is_checked_against_the_expected_row() {
+        // `ifThenElse` takes `expr r a` in both branches, so both are checked
+        // at one type. A mismatched branch is a type error, not an unsolved
+        // variable that later becomes one.
+        assert_eq!(
+            ty(
+                "q = users & select { x = ifThenElse .active \"y\" \"n\" }\n",
+                "q"
+            ),
+            "query { x = string }"
+        );
+        assert_eq!(
+            ty("q = users & select { x = ifThenElse .active 1 2 }\n", "q"),
+            "query { x = int }"
+        );
+    }
+
+    /// A `case`'s conditions and values are checked against the types the form
+    /// fixes in advance, so both directions agree.
+    #[test]
+    fn a_case_arm_is_checked_against_the_expected_type() {
+        assert_eq!(
+            ty(
+                "q = users & select { x = case { .age > 18 => \"adult\"; true => \"minor\" } }\n",
+                "q"
+            ),
+            "query { x = string }"
+        );
+        // Every value arm must be the *same* type, which is what checking all
+        // of them against one expected type enforces.
+        assert!(
+            ty_err(
+                "q = users & select { x = case { .age > 18 => 1; true => \"minor\" } }\n",
+                "q"
+            )
+            .is_some(),
+            "arms of different types must be rejected"
+        );
+    }
+
+    /// A list literal's element type comes from the expected `list t`.
+    ///
+    /// `inList : list a -> expr r a -> expr r bool`, so once the second
+    /// argument fixes `a` the first is checked against a *known* `list a`.
+    /// Checking the list downwards is what lets the literal be typed by that
+    /// element type rather than by a fresh variable the second argument later
+    /// solves.
+    #[test]
+    fn a_list_is_checked_against_its_expected_element_type() {
+        assert_eq!(
+            ty("q = users & where (inList [\"a\", \"b\"] .name)\n", "q"),
+            "query { name = string, id = int, age = int, active = bool }"
+        );
+        // Elements of the wrong type are rejected against the element type the
+        // second argument established.
+        assert!(
+            ty_err("q = users & where (inList [1, 2] .name)\n", "q").is_some(),
+            "an int list against a string column must be rejected"
+        );
+    }
+
+    /// A duplicate record field is reported on both the checked and the
+    /// synthesized path.
+    ///
+    /// The rule lives in `infer_record`; checking mode visits the fields
+    /// itself, so it has to apply the same rule. Reporting it in only one
+    /// direction would make the diagnostic depend on which way the type flowed.
+    #[test]
+    fn a_duplicate_record_field_is_reported_when_checked_too() {
+        assert!(
+            ty_err(
+                "q = users & select { x = ifThenElse .active \"a\" \"a\" }\n",
+                "q"
+            )
+            .is_none(),
+            "a well-formed case must still check"
+        );
+        // Two different fields with the same name in one record literal.
+        assert!(
+            ty_err(
+                "h : expr r (row { a = string }) -> expr r string = sql \"$1\"\n\
+                 q = users & select { x = h { a = \"1\", a = \"2\" } }\n",
+                "q"
+            )
+            .is_some(),
+            "a duplicate field must be reported"
+        );
+    }
+}

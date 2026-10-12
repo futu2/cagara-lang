@@ -972,6 +972,172 @@ impl<'w> Checker<'w> {
         }
     }
 
+    /// Check `e` **against an expected type**, propagating that expectation
+    /// downward instead of recovering it by unification after the fact.
+    ///
+    /// This is the checking half of bidirectional typing. [`Self::infer`]
+    /// synthesizes a type bottom-up and the caller then unifies it with what it
+    /// wanted ([`Self::coerce`]); `check` supplies the wanted type top-down, so
+    /// a form that cannot be typed without knowing its result — a record
+    /// literal whose field types come from an expected row, a lambda whose
+    /// parameter type comes from an expected function — is typed directly
+    /// rather than left open for the constraint solver to guess at.
+    ///
+    /// The default is to synthesize and then coerce, which is always sound.
+    /// The forms that override it are the ones where the expectation carries
+    /// information the expression cannot produce on its own.
+    ///
+    /// Each subexpression is visited **exactly once** on every path. That is
+    /// load-bearing, not stylistic: the type of every expression is recorded in
+    /// `use_tys` under its `ExprId`, and elaboration and the incremental facts
+    /// both read that map. Synthesizing a node and *then* re-visiting its
+    /// children to check them would record each child twice.
+    pub(crate) fn check(
+        &mut self,
+        env: &mut Vec<(String, Ty)>,
+        e: &ast::Expr,
+        expected: &Ty,
+    ) -> R<Ty> {
+        match &e.kind {
+            // A record literal is the surface argument of a `row`-typed
+            // position: `expr r (row s)`, `agg (expr r (row s))`, a `winspec`.
+            // Its fields are named, so the expected row supplies each field's
+            // type rather than each field being unified against a fresh
+            // variable.
+            ExprKind::Record(..) => self.check_record(env, e, expected),
+            // A lambda's parameter type comes from the expected function type
+            // when it has one.
+            ExprKind::Lambda(..) => self.check_lambda(env, e, expected),
+            // A list literal's element type comes from the expected `list t`.
+            ExprKind::List(..) => self.check_list(env, e, expected),
+            _ => {
+                let actual = self.infer(env, e)?;
+                self.coerce(&actual, expected).map_err(at(e.span))?;
+                Ok(self.resolve(expected))
+            }
+        }
+    }
+
+    /// Check `e` against `expected`, discarding the resulting type.
+    ///
+    /// The common case: a caller that knows what it wants and only needs to
+    /// know whether it got it.
+    pub(crate) fn expect(
+        &mut self,
+        env: &mut Vec<(String, Ty)>,
+        e: &ast::Expr,
+        expected: &Ty,
+    ) -> R<()> {
+        self.check(env, e, expected).map(|_| ())
+    }
+
+    /// A record literal checked against an expected row.
+    ///
+    /// Each field is checked against the type the expected row gives it. A
+    /// field the expectation does not mention is checked against a fresh
+    /// variable, so an over-long record is still reported by the constraint
+    /// that compares the two rows rather than here.
+    fn check_record(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr, expected: &Ty) -> R<Ty> {
+        let ExprKind::Record(fields) = &e.kind else {
+            unreachable!("dispatched on ExprKind::Record")
+        };
+        let want = self.resolve(expected);
+        // Only the fields the expectation already names can type anything. An
+        // open row may still grow, so it supplies nothing here; the remaining
+        // fields fall back to fresh variables and the row comparison settles
+        // them.
+        let (expected_fields, _) = self.flatten(&want);
+        let mut typed: Vec<(String, Ty)> = Vec::new();
+        for (name, value) in fields {
+            // The duplicate-field rule is `infer_record`'s. This path visits
+            // the fields itself, so it must apply the same rule: reporting it
+            // in only one direction would make the diagnostic depend on which
+            // way the type flowed.
+            if typed.iter().any(|(n, _)| n == name) {
+                return Err(TyErr {
+                    span: e.span,
+                    msg: format!("field `{name}` appears twice"),
+                });
+            }
+            let field_ty = expected_fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| self.fresh());
+            self.check(env, value, &field_ty)?;
+            typed.push((name.clone(), field_ty));
+        }
+        // Each field was visited exactly once, above. The record's own type is
+        // assembled from those results rather than re-inferred, because
+        // inferring the whole record would walk every field a second time.
+        let actual = row(typed, Ty::Empty);
+        self.coerce(&actual, expected).map_err(at(e.span))?;
+        Ok(self.resolve(expected))
+    }
+
+    /// A lambda checked against an expected function type.
+    ///
+    /// The parameter type comes from the expectation instead of a fresh
+    /// variable, so the body is inferred in an environment that already knows
+    /// it. That direction is the point: `infer_lambda` binds each parameter to
+    /// a fresh variable and lets the body's unifications decide, which is sound
+    /// but loses the expectation — and is why annotating a helper's signature
+    /// used to be the workaround for a deferred row.
+    ///
+    /// The body is inferred exactly once and its type *is* the result type of
+    /// the function type returned; inferring the whole lambda as well would
+    /// visit every subexpression twice.
+    fn check_lambda(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr, expected: &Ty) -> R<Ty> {
+        let ExprKind::Lambda(param, body) = &e.kind else {
+            unreachable!("dispatched on ExprKind::Lambda")
+        };
+        let want = self.resolve(expected);
+        // Peel one arrow when the expectation has one. When it is not a
+        // function there is nothing to draw the parameter type from, so
+        // synthesis is the only option.
+        let param_ty = match &want {
+            Ty::Fun(p, _) => Some((**p).clone()),
+            _ => None,
+        };
+        let Some(param_ty) = param_ty else {
+            let actual = self.infer(env, e)?;
+            self.coerce(&actual, expected).map_err(at(e.span))?;
+            return Ok(self.resolve(expected));
+        };
+        env.push((param.clone(), param_ty.clone()));
+        let body_ty = self.infer(env, body);
+        env.pop();
+        let actual = fun(param_ty, body_ty?);
+        self.coerce(&actual, expected).map_err(at(e.span))?;
+        Ok(self.resolve(expected))
+    }
+
+    /// A list literal checked against an expected `list t`.
+    ///
+    /// Each item is visited once, against the expected element type; the list's
+    /// own type is assembled from that rather than re-inferred.
+    fn check_list(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr, expected: &Ty) -> R<Ty> {
+        let ExprKind::List(items) = &e.kind else {
+            unreachable!("dispatched on ExprKind::List")
+        };
+        let want = self.resolve(expected);
+        let element = match &want {
+            Ty::Con(name, args) if *name == "list" && args.len() == 1 => Some(args[0].clone()),
+            _ => None,
+        };
+        let Some(element) = element else {
+            let actual = self.infer(env, e)?;
+            self.coerce(&actual, expected).map_err(at(e.span))?;
+            return Ok(self.resolve(expected));
+        };
+        for item in items {
+            self.check(env, item, &element)?;
+        }
+        let actual = Ty::Con("list", vec![element]);
+        self.coerce(&actual, expected).map_err(at(e.span))?;
+        Ok(self.resolve(expected))
+    }
+
     fn infer_name(&mut self, env: &mut [(String, Ty)], e: &ast::Expr) -> R<Ty> {
         let sp = e.span;
         let ExprKind::Name(n) = &e.kind else {
@@ -1164,11 +1330,23 @@ impl<'w> Checker<'w> {
                     continue;
                 }
             }
-            let at_ = self.infer(env, arg)?;
             self.span = arg.span;
+            // Resolve the callee's type *before* typing the argument, so a
+            // known parameter type can be pushed down into the argument instead
+            // of being recovered by unifying after the fact.
+            //
+            // This is the direction that matters most: an application is where
+            // a lambda, a record literal, or a list is most often written, and
+            // those are exactly the forms that cannot be synthesized without
+            // knowing what they are being checked against. Typing the argument
+            // first and coercing afterwards still works when the argument is
+            // self-describing (`.age`, `1`, `upper`) — which is why this went
+            // unnoticed — but leaves the expectation to unification when it is
+            // not.
             ft = match self.resolve(&ft) {
                 Ty::Fun(p, r) => {
-                    self.coerce(&at_, &p).map_err(at(arg.span))?;
+                    let p = *p;
+                    self.check(env, arg, &p)?;
                     if let ExprKind::Lit(l) = &arg.kind {
                         // A lifted literal (`18` in `.age >= 18`) has
                         // the value type it was lifted to.
@@ -1181,12 +1359,18 @@ impl<'w> Checker<'w> {
                     *r
                 }
                 Ty::Var(_) => {
+                    let at_ = self.infer(env, arg)?;
                     let r = self.fresh();
                     self.unify(&ft, &fun(at_, r.clone()))
                         .map_err(at(arg.span))?;
                     r
                 }
                 o => {
+                    // The callee is neither a function nor a variable. Report
+                    // that before typing the argument: the argument cannot
+                    // change the verdict, and typing it first would add
+                    // unrelated diagnostics for a call that was never
+                    // well-formed.
                     let msg = format!(
                         "cannot apply a value of type {} to an argument",
                         self.show(&o)
@@ -1322,14 +1506,18 @@ impl<'w> Checker<'w> {
         let (phase, row) = (self.fresh(), self.fresh_row());
         let result = self.fresh();
         for (cond, value) in arms {
-            let ct = self.infer(env, cond)?;
+            // Both positions have a type the language fixes in advance — the
+            // condition is a boolean expression, the value an expression of the
+            // `case`'s own result type — so both are *checked* against it
+            // rather than synthesized and unified afterwards.
             self.span = cond.span;
-            self.coerce(&ct, &expr(phase.clone(), row.clone(), con("bool")))
-                .map_err(at(cond.span))?;
-            let vt = self.infer(env, value)?;
+            self.expect(env, cond, &expr(phase.clone(), row.clone(), con("bool")))?;
             self.span = value.span;
-            self.coerce(&vt, &expr(phase.clone(), row.clone(), result.clone()))
-                .map_err(at(value.span))?;
+            self.expect(
+                env,
+                value,
+                &expr(phase.clone(), row.clone(), result.clone()),
+            )?;
         }
         self.uses.push((e.id, sp, result.clone(), None));
         Ok(expr(phase, row, result))

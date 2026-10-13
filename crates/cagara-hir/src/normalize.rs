@@ -84,6 +84,14 @@ pub type DefId = (usize, usize);
 /// win (expr r a)` a window function. The declared form is the only place that
 /// distinction survives, because once a template is applied its scheme says
 /// what it *returned*, not which node built it.
+///
+/// One enum with one reader ([`declared_template_kind`]) on purpose. Elaboration
+/// carries the same three cases and is the reason both exist — it built the
+/// checked node from a `kind` read off the same signature, from the same three
+/// strings, at the same time this layer did. Two enums and two readers of one
+/// rule is the duplication this migration set out to remove, and a `head` string
+/// added to one and not the other would have been a silently different answer
+/// rather than a compile error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemplateKind {
     Scalar,
@@ -1906,15 +1914,19 @@ fn describe_expr_kind(k: &cagara_syntax::ast::ExprKind) -> &'static str {
 
 /// The phase kind a definition's **declared signature** gives it.
 ///
-/// Mirrors `elaborate::declared_kind`, and duplicated for the same reason
-/// `lit_of` is: this one feeds a [`Term`], that one feeds a `CheckedExpr`, and
-/// coupling them would mean a change to the checked layer forcing a change
-/// here.
+/// The single reader of this rule. Elaboration used to carry the same three-case
+/// match over the same three strings, with its own copy of the enum, justified
+/// by an analogy to `lit_of` — but the two are not alike. `lit_of` translates
+/// between two `Lit` enums that *should* stay independent, so writing it out
+/// makes a new AST variant a compile error there. This reads three `head`
+/// strings out of a type expression and answers a question both layers ask; a
+/// fourth kind added to one side and not the other would have been two silently
+/// different answers, not a compile error.
 ///
 /// Read from the type expression rather than the resolved scheme because only
 /// the declared form distinguishes `expr r a` from `agg (expr r a)`; after
 /// resolution both are just the result type.
-fn declared_template_kind(d: &cagara_syntax::ast::Def) -> TemplateKind {
+pub(crate) fn declared_template_kind(d: &cagara_syntax::ast::Def) -> TemplateKind {
     use cagara_syntax::ast::TypeExpr;
     let Some(mut t) = d.ty.as_ref() else {
         return TemplateKind::Scalar;
@@ -1932,10 +1944,11 @@ fn declared_template_kind(d: &cagara_syntax::ast::Def) -> TemplateKind {
 
 /// The literal a source literal denotes.
 ///
-/// Mirrors `elaborate::lit_of`, which does the same copy for the checked layer.
 /// The two `Lit` enums have identical shape, so this is a pure translation; it
 /// is written out rather than derived so that a variant added to the AST is a
-/// compile error here instead of a silently dropped literal.
+/// compile error here instead of a silently dropped literal. (The
+/// `elaborate::lit_of` this once mirrored went with the source path; every
+/// literal now reaches the checked layer through this one.)
 fn lit_of(l: &cagara_syntax::ast::Lit) -> crate::ir::Lit {
     use cagara_syntax::ast::Lit as L;
     match l {

@@ -1642,12 +1642,14 @@ pub(crate) struct StageSite {
 /// expression.
 ///
 /// Deliberately not the resolved scheme — see the comment at the use site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeclaredKind {
-    Scalar,
-    Agg,
-    Win,
-}
+///
+/// An alias rather than a second enum. Elaboration and normalization each had
+/// their own three-case copy of this and their own reader of it, which is one
+/// rule in two places: a declared head added to one side and not the other would
+/// have been two silently different answers. The cases and the reader both live
+/// in [`crate::normalize`] now, and this name is kept because it is what the
+/// query path's call sites read as.
+pub(crate) use crate::normalize::TemplateKind as DeclaredKind;
 
 /// The declared result kind of a `sql` template definition.
 /// How many expression arguments a `sql` template definition takes.
@@ -1745,19 +1747,14 @@ fn check_placeholders(sql: &str, expr_args: usize) -> R<()> {
     Ok(())
 }
 
+/// The declared result kind of a `sql` template definition.
+///
+/// Thin, because the rule lives in one place now: this is the query path's name
+/// for [`crate::normalize::declared_template_kind`], which the term layer also
+/// reads. Two readers of one rule would be the duplication the migration exists
+/// to remove.
 fn declared_kind(d: &ast::Def) -> DeclaredKind {
-    let Some(mut t) = d.ty.as_ref() else {
-        return DeclaredKind::Scalar;
-    };
-    // Strip the argument arrows to reach the result.
-    while let ast::TypeExpr::Fun(_, r) = t {
-        t = r;
-    }
-    match t {
-        ast::TypeExpr::App { head, .. } if head == "agg" => DeclaredKind::Agg,
-        ast::TypeExpr::App { head, .. } if head == "win" => DeclaredKind::Win,
-        _ => DeclaredKind::Scalar,
-    }
+    crate::normalize::declared_template_kind(d)
 }
 
 /// The overload candidates chosen for `callee` **used at `site`**.

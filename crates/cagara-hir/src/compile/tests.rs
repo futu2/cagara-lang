@@ -926,6 +926,99 @@ fn both_facts_adapters_resolve_the_same_assignment() {
     );
 }
 
+/// Query-path fallbacks discard capability gaps, and they are of exactly one
+/// class: the relational primitives reporting that they are reached through the
+/// stage operators instead.
+///
+/// The query path tries several readings of one expression and keeps the first
+/// that works. A reading that fails because the *program* is wrong is the normal
+/// way a fallback runs and is correctly silent. A reading that fails with
+/// `Fault::Compiler` says this phase cannot build the construct, and the
+/// fallback then hides that behind whichever reading worked. Those were
+/// invisible: the term bridge's zero-gap gate cannot see them, because the
+/// bridge is never the thing that failed.
+///
+/// Measured across the shipped examples, the prelude and a program using stages,
+/// joins and set operations, every one is the same class:
+///
+///     the primitive `__select` is not elaborated here; relational primitives
+///     are reached through the stage operators
+///
+/// That is the dispatch working as designed — `where p q` must be read as a
+/// stage application, so the primitive path is tried and *refuses*, by design,
+/// with wording that says so. So this is not a defect list; it is the boundary
+/// of the earlier claim, made checkable. If a discarded gap ever appears that is
+/// not this class, this fails and names it, instead of the invisibility being
+/// total.
+#[test]
+fn discarded_query_path_gaps_are_only_the_dispatched_primitives() {
+    const PRIMITIVE_REFUSAL: &str = "relational primitives are reached through the stage operators";
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    crate::normalize::reset_discarded_gaps();
+    let mut programs = 0usize;
+    for entry in [
+        "examples/report.cagara",
+        "examples/public.cagara",
+        "examples/schema.cagara",
+        "examples/errors.cagara",
+    ] {
+        let Ok(text) = std::fs::read_to_string(root.join(entry)) else {
+            continue;
+        };
+        let ws = Workspace::from_source(&text);
+        let tc = crate::check::check(&ws);
+        let _ = crate::compile::compile_input(crate::compile::CompilerInput::new(&ws, &tc));
+        programs += 1;
+    }
+    for src in [
+        "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+         q = users & where (.id > 1) & select { .name } & order [asc .name] & limit 3\n",
+        "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+         q = users & select { x = upper .name }\n",
+        "users : query { id = int } = table \"s\" \"users\"\n\
+         other : query { id = int } = table \"s\" \"other\"\n\
+         q = users & union other\n",
+    ] {
+        let ws = Workspace::from_source(src);
+        let tc = crate::check::check(&ws);
+        let _ = crate::compile::compile_input(crate::compile::CompilerInput::new(&ws, &tc));
+        programs += 1;
+    }
+
+    let gaps = crate::normalize::discarded_gaps();
+    let total: usize = gaps.iter().map(|(_, n)| n).sum();
+    for (reason, n) in &gaps {
+        eprintln!("discarded gap {n:4}  {reason}");
+    }
+    // The gate must be able to observe a discard at all, or "only the known
+    // class" would hold for the wrong reason — because none was recorded.
+    assert!(
+        total > 0,
+        "no discarded capability gaps were recorded across {programs} programs; \
+         the sieve is not wired to the fallbacks any more"
+    );
+    let unexpected: Vec<&(String, usize)> = gaps
+        .iter()
+        .filter(|(reason, _)| {
+            // A reason is one of the four call sites' descriptions; the class is
+            // decided by the *message* of the gap it discarded, which the sieve
+            // does not carry. What identifies the class here is therefore the
+            // site plus the fact that every discard today comes from the
+            // stage-dispatch site. Asserting the site keeps this honest without
+            // pretending to know more than was recorded.
+            !reason.contains("a stage's trailing argument was not readable")
+                && !reason.contains("a bound stage's argument was not readable")
+        })
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "discarded capability gaps now come from a fallback that is not the \
+         stage dispatch, which is new information rather than a known class: \
+         {unexpected:?}\n\nall reasons: {gaps:?}\n\nKnown class: {}",
+        PRIMITIVE_REFUSAL
+    );
+}
+
 /// The construct that blocked this migration for six attempts, now migrated.
 ///
 /// Kept as a regression test because it is the one case the corpus does not

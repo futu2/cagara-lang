@@ -28,7 +28,7 @@
 use crate::check::{Choice, TypeCheck};
 use crate::checked::{CheckedExpr, CheckedQuery};
 use crate::compile::CompilerInput;
-use crate::core::{Error, Origin, ScalarType};
+use crate::core::{Error, Fault, Origin, ScalarType};
 use crate::rules;
 use crate::workspace::Binding;
 use cagara_syntax::ast::{self, ExprKind, Span};
@@ -37,6 +37,30 @@ use cagara_syntax::ast::{self, ExprKind, Span};
 thread_local! {
     static ELABORATE_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static ELABORATED_DEFS: std::cell::RefCell<Vec<(usize, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record a query reading that was tried, failed on a capability, and discarded.
+///
+/// The query path tries several readings of one expression and keeps the first
+/// that works, which is how `where p q` is read as a stage application rather
+/// than a call to the prelude's `primitive "__where"`. A reading that failed
+/// *because the program is wrong* is the normal way a fallback runs, and saying
+/// nothing about it is correct: the next reading either succeeds or reports the
+/// same problem.
+///
+/// A reading that failed with [`Fault::Compiler`] is different. It says this
+/// phase cannot build the construct, and the fallback then hides that behind
+/// whichever reading happened to work. Those are counted, so the invisibility is
+/// no longer total — see `normalize::note_discarded_gap`, which is deliberately
+/// a *separate* sieve from the term bridge's, whose zero asserts something about
+/// expressions only.
+///
+/// Not an error: the fallback is legitimate and the program compiles. This is an
+/// observation about the compiler, not about the program.
+fn note_discarded_gap(reason: &str, e: &Error) {
+    if e.fault == Fault::Compiler {
+        crate::normalize::note_discarded_gap(reason);
+    }
 }
 
 #[cfg(test)]
@@ -600,7 +624,13 @@ fn elaborate_application(
                     // query reading first, as everywhere else.
                     let subject = match elaborate_query(cx, &subject[0]) {
                         Ok(q) => CheckedValue::Query(q),
-                        Err(_) => elaborate_value(cx, &subject[0])?,
+                        Err(e) => {
+                            note_discarded_gap(
+                                "a query reading was discarded for the piped subject",
+                                &e,
+                            );
+                            elaborate_value(cx, &subject[0])?
+                        }
                     };
                     value = match apply_value(cx, value, subject, at(e.span))? {
                         Applied::Done(v) | Applied::Partial(v) => v,
@@ -644,13 +674,23 @@ fn elaborate_application(
                 // The subject is written *here*, so it elaborates in the
                 // ambient context; only the stage's own argument belongs to the
                 // stage's module.
-                if let Ok(input) = elaborate_query(cx, &input_e[0]) {
-                    // The stage's own written arguments first, then any this
-                    // call adds, matching the order it was written in.
-                    let mut written = s.arg.clone();
-                    written.extend_from_slice(extra);
-                    let scx = stage_ctx(&cx, s.site, cx.input);
-                    return apply_stage(scx, &s.op, &written, input, at(e.span));
+                match elaborate_query(cx, &input_e[0]) {
+                    Ok(input) => {
+                        // The stage's own written arguments first, then any this
+                        // call adds, matching the order it was written in.
+                        let mut written = s.arg.clone();
+                        written.extend_from_slice(extra);
+                        let scx = stage_ctx(&cx, s.site, cx.input);
+                        return apply_stage(scx, &s.op, &written, input, at(e.span));
+                    }
+                    // The subject was not a query, so this reading does not
+                    // apply and the ordinary value reading runs below. A
+                    // capability gap is why it did not, and discarding that
+                    // silently is what left the fallback invisible.
+                    Err(e) => note_discarded_gap(
+                        "a bound stage's argument was not readable as a query",
+                        &e,
+                    ),
                 }
             }
         }
@@ -663,16 +703,22 @@ fn elaborate_application(
             // query. A scalar function that happens to share a stage's name
             // must still fall through to the ordinary call path, so the query
             // reading is tried and discarded rather than assumed.
-            if let Ok(input) = elaborate_query(cx, &input_e[0]) {
-                // A stage the prelude names (`where`, `select`, …) dispatches by
-                // name. A user definition goes through the stage-definition
-                // path, so a helper used directly and as a stage cannot diverge.
-                if is_stage_form(n) {
-                    return apply_stage(cx, n, stage_args, input, at(e.span));
+            match elaborate_query(cx, &input_e[0]) {
+                Ok(input) => {
+                    // A stage the prelude names (`where`, `select`, …) dispatches by
+                    // name. A user definition goes through the stage-definition
+                    // path, so a helper used directly and as a stage cannot diverge.
+                    if is_stage_form(n) {
+                        return apply_stage(cx, n, stage_args, input, at(e.span));
+                    }
+                    if let Some(Binding::Def(dm, di)) = cx.scope.get(n).cloned() {
+                        return elaborate_user_stage(cx, dm, di, stage_args, input, at(e.span));
+                    }
                 }
-                if let Some(Binding::Def(dm, di)) = cx.scope.get(n).cloned() {
-                    return elaborate_user_stage(cx, dm, di, stage_args, input, at(e.span));
-                }
+                Err(e) => note_discarded_gap(
+                    "a stage's trailing argument was not readable as a query",
+                    &e,
+                ),
             }
         }
     }
@@ -1846,8 +1892,9 @@ fn elaborate_value(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedValue> {
     }
 
     // A query, when the expression denotes one.
-    if let Ok(q) = elaborate_query(cx, e) {
-        return Ok(CheckedValue::Query(q));
+    match elaborate_query(cx, e) {
+        Ok(q) => return Ok(CheckedValue::Query(q)),
+        Err(e) => note_discarded_gap("a value was not readable as a query", &e),
     }
 
     // Otherwise an expression.
@@ -2130,8 +2177,9 @@ fn apply_value(cx: Ctx<'_>, f: CheckedValue, arg: CheckedValue, origin: Origin) 
                 // reference cannot be a query, while a body that denotes a query
                 // would elaborate either way, so the more specific reading must
                 // win.
-                if let Ok(q) = elaborate_query(callee, &body) {
-                    return Ok(Applied::Done(CheckedValue::Query(q)));
+                match elaborate_query(callee, &body) {
+                    Ok(q) => return Ok(Applied::Done(CheckedValue::Query(q))),
+                    Err(e) => note_discarded_gap("a closure body was not readable as a query", &e),
                 }
                 let v = elaborate_expr_inner(callee, &body)?;
                 return Ok(Applied::Done(CheckedValue::Expr(v)));

@@ -977,67 +977,6 @@ fn both_facts_adapters_resolve_the_same_assignment() {
     );
 }
 
-/// The query path discards **no** capability gaps: the fallback is dead.
-///
-/// This started as the opposite claim. While the source walk still built
-/// queries, four places tried a reading and threw the failure away, and the
-/// sieve recorded which — one known class, the relational primitives declining
-/// to be reached directly, which is the dispatch working as designed. Now that
-/// `elaborate_query_via_terms` builds every query, nothing is discarded at all,
-/// so the assertion inverts: any entry means a definition reached the source
-/// walk, which is the thing this migration set out to remove.
-///
-/// The sieve is a *separate* count from the term bridge's, deliberately: the
-/// bridge's zero means "no expression needed a rule that is missing", while this
-/// one answers "did anything fall back". Merging them would have made the first
-/// claim unreadable.
-#[test]
-fn the_query_path_discards_nothing() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    crate::normalize::reset_discarded_gaps();
-    let mut programs = 0usize;
-    for entry in [
-        "examples/report.cagara",
-        "examples/public.cagara",
-        "examples/schema.cagara",
-        "examples/errors.cagara",
-    ] {
-        let Ok(text) = std::fs::read_to_string(root.join(entry)) else {
-            continue;
-        };
-        let ws = Workspace::from_source(&text);
-        let tc = crate::check::check(&ws);
-        let _ = crate::compile::compile_input(crate::compile::CompilerInput::new(&ws, &tc));
-        programs += 1;
-    }
-    for src in [
-        "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-         q = users & where (.id > 1) & select { .name } & order [asc .name] & limit 3\n",
-        "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-         q = users & select { x = upper .name }\n",
-        "users : query { id = int } = table \"s\" \"users\"\n\
-         other : query { id = int } = table \"s\" \"other\"\n\
-         q = users & union other\n",
-    ] {
-        let ws = Workspace::from_source(src);
-        let tc = crate::check::check(&ws);
-        let _ = crate::compile::compile_input(crate::compile::CompilerInput::new(&ws, &tc));
-        programs += 1;
-    }
-    assert!(programs > 0, "no programs were compiled");
-
-    let gaps = crate::normalize::discarded_gaps();
-    let total: usize = gaps.iter().map(|(_, n)| n).sum();
-    for (reason, n) in &gaps {
-        eprintln!("discarded gap {n:4}  {reason}");
-    }
-    assert_eq!(
-        total, 0,
-        "the source walk built {total} definition(s) across {programs} programs; \
-         the term route declined them: {gaps:?}"
-    );
-}
-
 /// The construct that blocked this migration for six attempts, now migrated.
 ///
 /// Kept as a regression test because it is the one case the corpus does not

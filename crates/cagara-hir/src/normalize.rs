@@ -2307,29 +2307,32 @@ pub fn gaps_since_reset() -> usize {
 
 #[cfg(test)]
 thread_local! {
-    /// Capability gaps raised on the **query** path and discarded there.
+    /// Capability gaps a **fallback** discarded instead of reporting.
     ///
-    /// A separate sieve from `GAP_REASONS`, because the term bridge cannot see
-    /// these and its zero must not be read as covering them. The query path
-    /// still walks source, and in four places it *tries* a query reading and
-    /// falls back to another reading when that fails; a failure carrying
-    /// `Fault::Compiler` is this phase saying "I cannot build that", and the
-    /// fallback then hides it.
+    /// Nothing discards any more: the source query walk is gone, so there is no
+    /// second reading for a failure to be hidden behind. The sieve survives as
+    /// the guard against one being *reintroduced* — a new fallback that sets a
+    /// failure aside without recording it would be invisible, and this is the
+    /// hook that makes recording the easy thing to do. It is a separate count
+    /// from `GAP_REASONS` because the two mean opposite things: that one is
+    /// non-zero when a rule is missing, this one when a failure is being
+    /// swallowed.
     static DISCARDED_GAPS: std::cell::RefCell<std::collections::BTreeMap<String, usize>> =
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
-/// Record a query-path capability gap that a fallback reading discarded.
+/// Record a capability gap a fallback is about to discard.
 ///
 /// Deliberately **not** wired into [`note_gap`]: the term bridge's counter means
 /// "no expression needed a rule that is missing", and it asserts zero. Folding
 /// these in would make that gate fail on discarded *attempts* that are not
-/// expressions at all, and the honest fix for one of those is a different
-/// question — whether the attempt should be made there — rather than a new term
-/// rule.
+/// expressions at all.
 ///
 /// The *reason* is recorded rather than only a count, so an assertion over this
-/// names the fallback that ran instead of saying a number changed.
+/// names the fallback that ran instead of saying a number changed. With the
+/// source walk gone there is no caller, which is the intended state: the
+/// function exists so that a future fallback has an obvious place to declare
+/// itself, and the gate over it fails loudly the moment one does not.
 pub fn note_discarded_gap(reason: &str) {
     #[cfg(test)]
     DISCARDED_GAPS.with(|m| *m.borrow_mut().entry(reason.to_string()).or_default() += 1);

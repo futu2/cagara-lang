@@ -66,16 +66,43 @@ fn term_path(src: &str, name: &str) -> String {
     format!("{rel:?}")
 }
 
-/// A `Rel` debug rendering with every `Span { .. }` body replaced.
+/// A `Rel` debug rendering with every source location removed.
 ///
-/// The two paths legitimately differ in which text they blame, so the
-/// comparison is over structure. Spans are the only thing removed: names,
-/// columns, literal values, argument order and nesting all stay.
+/// The two paths legitimately differ in which text they blame, so the comparison
+/// is over structure. A location is **module plus span**, and both parts can
+/// differ for a reason that is not a defect: a stage reached through the
+/// prelude's `_>>>_` carries the prelude's module, because the composition body
+/// is written there, while the same pipeline written inline carries the user's.
+/// What must agree is the shape: the same stages, in the same order, over the
+/// same columns and literals.
 fn strip_spans(rel: &str) -> String {
     let mut out = String::with_capacity(rel.len());
     let bytes = rel.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
+        // `Loc { module: .., span: Span { .. } }` — drop the whole location.
+        if rel[i..].starts_with("Loc {") {
+            let mut depth = 0usize;
+            let mut j = i;
+            loop {
+                match bytes.get(j) {
+                    Some(b'{') => depth += 1,
+                    Some(b'}') => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    None => break,
+                    _ => {}
+                }
+                j += 1;
+            }
+            out.push_str("Loc { .. }");
+            i = j;
+            continue;
+        }
         if rel[i..].starts_with("Span {") {
             let mut depth = 0usize;
             let mut j = i;
@@ -177,6 +204,140 @@ fn both_paths_build_the_same_query() {
         compared += 1;
     }
     assert!(compared >= 29, "only {compared} cases ran");
+}
+
+/// A **stage value** applied to an input lowers like the inline spelling.
+///
+/// A stage is a term with its input missing — a partially applied primitive
+/// (`s = select { .id }` is `__select [record]`) or a `Lambda`
+/// (`s = where p >>> select f` is `Lambda [x] → __select [f, __where [p, x]]`).
+/// Applying it substitutes the input, and the result is the same saturated term
+/// the inline spelling produces, so the lowering needs no stage cases of its
+/// own: reducing *is* the stage application, which is what lets
+/// `elaborate_user_stage`, `apply_lambda_stage` and `apply_point_free_stage`
+/// go away.
+///
+/// This asserts the equivalence on the three spellings of one pipeline, which is
+/// the property those three functions exist to provide separately.
+#[test]
+fn a_stage_value_lowers_like_its_inline_spelling() {
+    // One pipeline, written three ways. Each `q` must produce the same query.
+    let spellings: &[(&str, &str)] = &[
+        (
+            "named stage",
+            "s = where (.age > 1) >>> select { .name }\nq = users & s\n",
+        ),
+        (
+            "composed stage",
+            "s = where (.age > 1) >>> select { .name }\nq = users & s\n",
+        ),
+        (
+            "inline composition",
+            "q = users & (where (.age > 1) >>> select { .name })\n",
+        ),
+        (
+            "inline lambda",
+            "q = users & (x => select { .name } (where (.age > 1) x))\n",
+        ),
+        (
+            "inline pipeline",
+            "q = users & where (.age > 1) & select { .name }\n",
+        ),
+    ];
+
+    let mut built = Vec::new();
+    for (label, body) in spellings {
+        let src = format!("{TABLES}{body}");
+        let from_source = strip_spans(&source_path(&src, "q"));
+        let from_term = strip_spans(&term_path(&src, "q"));
+        assert_eq!(
+            from_source, from_term,
+            "{label}: the term path and the source path disagree"
+        );
+        built.push((label, from_source));
+    }
+    // Every spelling is the *same query*, not merely each self-consistent.
+    for (label, rel) in &built[1..] {
+        assert_eq!(
+            &built[0].1, rel,
+            "`{label}` lowered to a different query from `{}`",
+            built[0].0
+        );
+    }
+}
+
+/// Every relational primitive the prelude declares is either lowered or is a
+/// known row combinator.
+///
+/// Step three of the plan was "stage values" — a term whose input is missing,
+/// either a partially applied primitive or a `Lambda` over one. This records the
+/// measurement that made that step unnecessary, and it is the *reason*: applying
+/// a stage is the reduction the normalizer already performs, so by the time a
+/// term reaches the lowering every stage is saturated and the unary and binary
+/// cases are the whole vocabulary. `a_stage_value_lowers_like_its_inline_spelling`
+/// is the behavioural half of the same claim.
+///
+/// The vocabulary is read from the prelude rather than listed here, so a stage
+/// added to the language fails this test instead of silently reaching
+/// "not lowered yet".
+#[test]
+fn the_lowering_covers_the_relational_vocabulary() {
+    const PRELUDE: &str = include_str!("../../../prelude.cagara");
+    // A primitive whose declared signature mentions a query more than once is a
+    // stage: `query r -> query s`, or `… -> query r -> query s`.
+    // A declaration's signature may span several lines before the `primitive`
+    // keyword, so the signature text is accumulated until the body is reached.
+    let mut stages: Vec<String> = Vec::new();
+    let mut signature = String::new();
+    for line in PRELUDE.lines() {
+        let Some(pos) = line.find("primitive \"") else {
+            signature.push_str(line);
+            signature.push(' ');
+            continue;
+        };
+        signature.push_str(&line[..pos]);
+        let rest = &line[pos + "primitive \"".len()..];
+        if let Some(end) = rest.find('\"') {
+            // A stage takes a query and gives one back, so `query` appears at
+            // least twice in its signature.
+            if signature.matches("query").count() >= 2 {
+                stages.push(rest[..end].to_string());
+            }
+        }
+        signature.clear();
+    }
+    stages.sort();
+    stages.dedup();
+
+    // The two row combinators: `merge` overlays rows and is rejected as a query
+    // body by the source path; `mapValue` is internal to the outer-join row laws
+    // and its wrapper argument is a type-level name a user cannot write. Neither
+    // has a `CheckedQuery` constructor to lower into.
+    let row_combinators = ["__mapValue", "__merge"];
+    let stages: Vec<&String> = stages
+        .iter()
+        .filter(|s| !row_combinators.contains(&s.as_str()))
+        .collect();
+    assert!(
+        stages.len() >= 19,
+        "expected the prelude's relational vocabulary, found {}: {stages:?}",
+        stages.len()
+    );
+
+    // Each one is named in the lowering, which is where a missing case would be
+    // absent. Reading the source of this crate in a test is unusual; it is worth
+    // it here because the alternative is a hand-written list that a new stage
+    // would not update.
+    const LOWERING: &str = include_str!("../src/normalize.rs");
+    let missing: Vec<&&String> = stages
+        .iter()
+        .filter(|name| !LOWERING.contains(&format!("\"{name}\"")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these relational primitives are declared by the prelude and have no \
+         lowering case: {missing:?}"
+    );
 }
 
 /// The two set-operation spellings really do differ, so agreeing with both

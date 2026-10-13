@@ -1034,11 +1034,11 @@ fn both_facts_adapters_resolve_the_same_assignment() {
     );
 }
 
-/// The construct that blocked this migration for six attempts, now migrated.
+/// A polymorphic helper applied at a projection resolves its open overload.
 ///
-/// Kept as a regression test because it is the one case the corpus does not
-/// cover and the one that took longest to understand. A polymorphic helper
-/// applied at a projection:
+/// This was the hardest construct to get right during the rewrite and the one
+/// the corpus does not cover, so it is kept as a regression test with the
+/// reasoning intact. A polymorphic helper applied at a projection:
 ///
 /// ```text
 /// h  = e => users & select { x = e + 1, id = .id }
@@ -1063,7 +1063,7 @@ fn both_facts_adapters_resolve_the_same_assignment() {
 ///    index, and found nothing for as long as no module happened to be numbered
 ///    like a hole.
 #[test]
-fn a_polymorphic_helper_at_a_projection_is_migrated() {
+fn a_polymorphic_helper_at_a_projection_resolves_its_overload() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string, age = int, active = bool } = \
          table \"public\" \"users\"\n\

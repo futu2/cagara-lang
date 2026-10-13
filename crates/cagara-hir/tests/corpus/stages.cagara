@@ -6,8 +6,8 @@
 #
 # They agree because applying a stage *is* reduction: `users & s` substitutes the
 # input, so by the time a query is lowered every stage is saturated. That is why
-# the lowering has no stage-value case of its own — see
-# `docs/implementation/checked-core-migration.md`.
+# the lowering has no stage-value case of its own: there is no shape left to
+# recognize, only a saturated pipeline like any other.
 users : query { id = int, name = string, age = int } = table "public" "users"
 
 # One pipeline, five spellings. Each must emit the same SQL.

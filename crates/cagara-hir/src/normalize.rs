@@ -23,7 +23,7 @@
 //! path for scalar expressions went first, and the query path followed it, so
 //! `follow_alias`, `elaborate_callable`, `apply_to_computed_head` and the
 //! parallel window, frame and order helpers they had grown no longer exist.
-//! `elaborate.rs` is 275 lines where it was 2329, and nothing in this file
+//! `elaborate.rs` is 270 lines where it was 2329, and nothing in this file
 //! classifies a callee, follows an alias, or re-walks a body.
 //!
 //! The exception that outlived all of it is the **window specification**. A

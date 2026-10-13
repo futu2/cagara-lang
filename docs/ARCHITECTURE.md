@@ -170,7 +170,7 @@ The current checked layer supports local, testable claims:
   Until recently the second half was not true: a definition whose body was a
   query was built by re-walking its source, and that layer could report a
   capability gap *and* try its next reading of an expression. Both are gone —
-  `elaborate.rs` is 275 lines where it was 2329 — and no grammar rule or runtime
+  `elaborate.rs` is 270 lines where it was 2329 — and no grammar rule or runtime
   path in this crate re-reads source to decide what something means.
 
 The compiler uses an explicit immutable input view and produces an owned

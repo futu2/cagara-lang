@@ -21,13 +21,33 @@ site, so a helper can remain polymorphic in its mapper and row:
 addPrefix = p => q => q & prefix p
 ```
 
-`mapValue` currently supports `nullable` and `list`. It is used by outer joins
-to make columns on the missing side nullable. The wrappers are deliberately
-first-order; Cagara does not expose higher-kinded type-level functions.
+`mapValue` supports three wrappers. Read from the checker
+(`check/infer.rs`, the `wrapper.as_str()` match):
+
+| Wrapper | Effect |
+|---|---|
+| `"nullable"` | Wrap every field type in `maybe` |
+| `"list"` | Wrap every field type in `list` |
+| `"id"` | The identity mapper — no change, handled before the reduction |
+
+`"nullable"` is the one outer joins use, to make the missing side's columns
+nullable. The wrappers are deliberately first-order; Cagara does not expose
+higher-kinded type-level functions.
 
 `merge` keeps the left row's field positions, replaces collisions with the
 right row's types, and appends right-only fields. This is the row rule used by
 `update` and joins.
+
+**None of these three is a query stage you can write.** They are *type-level*
+row operations: the checker reduces them during inference, and the row they build
+is what the enclosing stage's own constructors read. Writing one as a query body
+type-checks and then fails at lowering with
+``the relational primitive `__mapValue` is not lowered yet``, because there is no
+relational operator for "change every column's type" — the type change is carried
+by the checked row, not by a stage.
+
+The user-facing spelling of `keyMap` is `prefix` / `suffix` and of `merge` is
+`update`, which is why those are stages and these are not.
 
 ## Constraints
 
@@ -41,5 +61,8 @@ Key and mapper arguments must be literals when the operation needs a concrete
 witness. A collision or empty mapped name is an error. Open rows defer the
 operation until their tail is known; no guessed columns are introduced.
 
-The surface syntax is documented in [`LEARN.md`](LEARN.md), and the type
-implementation lives in `crates/cagara-hir/src/check.rs`.
+The user-facing row operations are documented in [`LEARN.md`](LEARN.md) —
+`prefix`, `suffix` and `update` cover what `keyMap` and `merge` do. `mapValue`
+has no surface spelling outside the prelude's own use of it. The type
+implementation lives in `crates/cagara-hir/src/check/` (`infer.rs` for the
+operations, `reduce.rs` for the kind rules, `ty.rs` for the representation).

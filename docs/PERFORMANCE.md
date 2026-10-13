@@ -70,6 +70,54 @@ import and 10.5 ms to compile it. That measurement identified catalog copies
 on both paths. Earlier debug-profile measurements use a different harness
 and are not a release-performance baseline.
 
+## The checked-core migration costs cold compilation
+
+Measured on a single machine — an AMD Ryzen 9 5900HX, Rust 1.99.0, release
+builds, 100k tables, both layouts. The two compilers were built from `a2b1773`
+(before the migration) and from the current commit, and run in the same session,
+so the columns are comparable to each other even though they are not comparable
+to the table above, which used slower hardware.
+
+| Phase | Root: before | Root: after | Import: before | Import: after |
+| --- | ---: | ---: | ---: | ---: |
+| Load and resolve | 825 ms | 845 ms | 794 ms | 802 ms |
+| Cold type check | 1.04 s | 1.15 s | 1.04 s | 1.14 s |
+| Cold compile, owned result | 463 ms | 666 ms | 43 µs | 42 µs |
+| Edited compile, owned result | 492 ms | 522 ms | 18 µs | 17 µs |
+
+Two increases, both attributable to a single deliberate change each.
+
+**Cold type check, +10%.** The checker now stores each node's *deeply* resolved
+type (`use_tys.insert((m, id), self.zonk(&t))`) where it previously chased one
+variable chain and stopped (`self.resolve(&t)`). That is the whole diff in
+`check/infer.rs` — `git diff a2b1773 70eb285` shows it as one line. It is not an
+oversight: with a shallow resolve, an application's `query r` kept `r` as a
+variable, so a `table`'s columns were recorded and then unreachable, and every
+consumer had to recover them from the declaring definition's signature — which is
+wrong when one definition inlines two tables. The deep type is what makes a node
+answer for its own row.
+
+**Cold compile, +44% on the root layout.** Every query is now built by normalizing
+to a term and lowering, instead of by walking source once. Splitting the cost over
+20k tables: normalization 26 ms, lowering 2.5 ms — so the term-building walk is
+the cost and the lowering added by the migration is noise beside it.
+
+One optimization was tried and **rejected by measurement**: sharing a single
+`Normalizer` across definitions so its inlining cache survives. It saves 1.3 ms of
+32 ms, so repeated prelude inlining is not where the time goes.
+
+The import layout is unaffected, and that is the informative column: its root
+query is one definition, so nothing scales with catalog size. The migration's cost
+is per *root query compiled*, not per definition in the catalog.
+
+Worth knowing if a catalog ever compiles tens of thousands of root queries on a
+cold cache. There is no known fix to reach for: the cache-sharing attempt above
+was the obvious candidate and it did not move the number, so the cost appears to
+be the term-building walk itself rather than any repeated work around it.
+Reducing it would mean not building a term for a definition that is a trivial
+leaf, which trades away the property the migration exists to have — one route for
+every query — for a layout that is not the documented scale target.
+
 ## What the cache guarantees and what remains linear
 
 - Unchanged checks share immutable module results. A small importing module

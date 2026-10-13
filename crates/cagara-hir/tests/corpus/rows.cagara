@@ -1,0 +1,29 @@
+# The stages that reshape a row: update, omit, prefix, suffix, distinct, rename.
+#
+# `update` and `omit` compute a new *row*, and the checked constructors are what
+# enforce that — a name `update` adds is available to later stages, a name `omit`
+# removes is not. `prefix`/`suffix` rewrite every column name, so they are the
+# only stages whose output row depends on their argument rather than on their
+# input.
+#
+# None of these appeared in the examples, and all four are row-level operations
+# where a wrong column set would be silent: the SQL would still run.
+users : query { id = int, name = string, age = int, active = bool } = table "public" "users"
+
+# A new column, then a stage that reads it — proving `update` widens the row.
+updated = users & update { doubled = .age + .age } & where (.doubled > 10)
+
+# `omit` narrows the row, so the remaining columns are the ones left.
+trimmed = users & omit "active"
+
+# Renaming every column: the argument decides the output row.
+prefixed = users & prefix "u_"
+suffixed = users & suffix "_col"
+both = users & prefix "p_" & suffix "_s"
+
+# `distinct` after a projection removes duplicate rows.
+ages = users & select { .age } & distinct
+
+# A projection that renames is an ordinary record field, so the new name is what
+# later stages see.
+renamed = users & select { user_id = .id } & order [asc .user_id]

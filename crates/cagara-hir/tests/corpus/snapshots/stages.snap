@@ -1,0 +1,12 @@
+# stages.cagara
+users: query { id = int, name = string, age = int } => SELECT id, name, age FROM public.users
+named: query a -> query b
+inline_pipeline: query { name = string } => SELECT name FROM public.users WHERE (age > 18)
+named_applied: query { name = string } => SELECT name FROM public.users WHERE (age > 18)
+composed: query { age = a | b } -> query c
+composed_applied: query { name = string } => SELECT name FROM public.users WHERE (age > 18)
+inline_lambda: query { name = string } => SELECT name FROM public.users WHERE (age > 18)
+with_arg: query a -> query b
+with_arg_applied: query { id = int } => SELECT id FROM public.users
+takes_count: query a -> query a
+takes_count_applied: query { id = int, name = string, age = int } => SELECT id, name, age FROM public.users LIMIT 3

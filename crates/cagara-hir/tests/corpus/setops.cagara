@@ -1,0 +1,26 @@
+# Every set operation, in both spellings.
+#
+# The examples had no set operation at all, which is why a reversed `except`
+# reached users: none of the golden files exercised the piped form, so swapping
+# the operands was invisible to the entire suite (see
+# `docs/implementation/FIXED-piped-set-operand-order.md`).
+#
+# The two spellings deliberately put the piped query on **opposite sides** —
+# `users & union admins` passes `[admins, users]`, while `users &| admins`
+# passes `[users, admins]` — because `union` is curried at the pipe's own level
+# and `&|` re-binds in its body. Both are correct, and for `except` the
+# difference is observable. Each pair is here so a snapshot pins that the two
+# do not silently converge.
+users : query { id = int, name = string } = table "public" "users"
+admins : query { id = int, name = string } = table "public" "admins"
+
+union_named = users & union admins
+union_op = users &| admins
+union_direct = union users admins
+
+union_all = users & unionAll admins
+intersect = users & intersect admins
+
+# The one where order is observable: these two are different queries.
+except_named = users & except admins
+except_op = users &~ admins

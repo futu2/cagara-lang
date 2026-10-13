@@ -1,0 +1,28 @@
+# Stage values: a stage named, composed, or written inline as a lambda.
+#
+# A stage is a pipeline missing its input, and the language offers three ways to
+# write one. All three must reach the same query, and the snapshot records them
+# side by side so a divergence is a diff rather than a review question.
+#
+# They agree because applying a stage *is* reduction: `users & s` substitutes the
+# input, so by the time a query is lowered every stage is saturated. That is why
+# the lowering has no stage-value case of its own — see
+# `docs/implementation/checked-core-migration.md`.
+users : query { id = int, name = string, age = int } = table "public" "users"
+
+# One pipeline, five spellings. Each must emit the same SQL.
+named = select { .name }
+inline_pipeline = users & where (.age > 18) & select { .name }
+named_applied = users & (where (.age > 18) >>> select { .name })
+
+composed = where (.age > 18) >>> select { .name }
+composed_applied = users & composed
+
+inline_lambda = users & (x => select { .name } (where (.age > 18) x))
+
+# A stage that takes an argument of its own before the piped query.
+with_arg = select { .id }
+with_arg_applied = users & with_arg
+
+takes_count = q => limit 3 q
+takes_count_applied = users & takes_count

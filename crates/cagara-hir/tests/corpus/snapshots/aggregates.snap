@@ -1,0 +1,5 @@
+# aggregates.cagara
+orders: query { id = int, user_id = int, amount = float, status = string } => SELECT id, user_id, amount, status FROM public.orders
+total: query { n = int } => SELECT COUNT(*) AS n FROM public.orders
+per_user: query { u = int, n = int, total = maybe float, biggest = maybe float, smallest = maybe float } => SELECT user_id AS u, COUNT(*) AS n, SUM(amount) AS total, MAX(amount) AS biggest, MIN(amount) AS smallest FROM public.orders GROUP BY user_id
+by_status: query { n = int, s = string } => SELECT status AS s, COUNT(*) AS n FROM public.orders GROUP BY status ORDER BY COUNT(*) DESC NULLS LAST LIMIT 3

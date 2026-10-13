@@ -1,0 +1,6 @@
+# windows.cagara
+orders: query { id = int, user_id = int, amount = float } => SELECT id, user_id, amount FROM public.orders
+numbered: query { r = int } => SELECT ROW_NUMBER() OVER (ORDER BY id NULLS LAST) AS r FROM public.orders
+per_user: query { s = maybe float } => SELECT SUM(amount) OVER (PARTITION BY user_id) AS s FROM public.orders
+running: query { s = maybe float } => SELECT SUM(amount) OVER (PARTITION BY user_id ORDER BY id NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s FROM public.orders
+over_agg: query { k = int, r = int } => SELECT k, ROW_NUMBER() OVER (ORDER BY n DESC NULLS LAST) AS r FROM (SELECT user_id AS k, COUNT(*) AS n FROM public.orders GROUP BY user_id) AS t1

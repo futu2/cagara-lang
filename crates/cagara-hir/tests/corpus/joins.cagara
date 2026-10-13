@@ -1,0 +1,23 @@
+# Every join kind, and the operator spelling.
+#
+# The examples used `innerJoin` and `leftJoin` only, so `rightJoin`, `fullJoin`,
+# `semiJoin` and `antiJoin` had no golden SQL — and the nullable side of an
+# outer join is computed per kind (`join_row`), so a wrong side would have been
+# as invisible as the reversed `except` was.
+#
+# `?` is the operator spelling of an inner join. It reaches the same term as the
+# named form, which is the point of normalizing first: the two cannot diverge.
+users : query { id = int, name = string } = table "public" "users"
+orders : query { id = int, user_id = int, amount = float } = table "public" "orders"
+
+inner_named = users & innerJoin orders (.<id == .>user_id)
+inner_op = users & orders ? (.<id == .>user_id)
+
+left = users & leftJoin orders (.<id == .>user_id)
+right = users & rightJoin orders (.<id == .>user_id)
+full = users & fullJoin orders (.<id == .>user_id)
+semi = users & semiJoin orders (.<id == .>user_id)
+anti = users & antiJoin orders (.<id == .>user_id)
+
+# A join is a stage like any other, so it composes.
+joined_then_filtered = users & innerJoin orders (.<id == .>user_id) & where (.amount > 10.0)

@@ -386,6 +386,22 @@ fn an_elaboration_error_points_at_the_users_module_not_the_prelude() {
         !d.source.contains("Cagara prelude"),
         "the diagnostic rendered the prelude's source: {d}"
     );
+    // The span must be the offending **argument**, not the stage that wanted it.
+    // `limit` starts at column 25 of the source line and `(1 + 1)` at 31, so a
+    // diagnostic blaming the stage would report the earlier column. A
+    // differential run against the pre-migration compiler is what showed this
+    // mattered: the message had drifted to the whole stage while still mentioning
+    // an int, so the message assertion above passed and only the caret was wrong.
+    //
+    // `limit` begins at byte 40 and `(1 + 1)` at byte 46 of the line, so the two
+    // are distinguishable by column alone and the assertion is meaningful
+    // whichever base the renderer uses: a caret on the stage would be at or
+    // before 41, one on the argument at or after 47.
+    assert!(
+        d.col >= 47,
+        "the caret must be on the argument (byte 46+), not on `limit` (byte 40): {d}"
+    );
+    assert_eq!(d.width, 5, "the caret should underline `1 + 1`: {d}");
 }
 
 /// Every definition the checker accepted must reach a verdict that is not a

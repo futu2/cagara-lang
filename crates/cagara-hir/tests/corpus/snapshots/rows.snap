@@ -1,0 +1,9 @@
+# rows.cagara
+users: query { id = int, name = string, age = int, active = bool } => SELECT id, name, age, active FROM public.users
+updated: query { doubled = int, id = int, name = string, age = int, active = bool } => SELECT id, name, age, active, age + age AS doubled FROM public.users WHERE ((age + age) > 10)
+trimmed: query { id = int, name = string, age = int } => SELECT id, name, age FROM public.users
+prefixed: query { u_id = int, u_name = string, u_age = int, u_active = bool } => SELECT id AS u_id, name AS u_name, age AS u_age, active AS u_active FROM public.users
+suffixed: query { id_col = int, name_col = string, age_col = int, active_col = bool } => SELECT id AS id_col, name AS name_col, age AS age_col, active AS active_col FROM public.users
+both: query { p_id_s = int, p_name_s = string, p_age_s = int, p_active_s = bool } => SELECT id AS p_id_s, name AS p_name_s, age AS p_age_s, active AS p_active_s FROM public.users
+ages: query { age = int } => SELECT DISTINCT age FROM public.users
+renamed: query { user_id = int } => SELECT id AS user_id FROM public.users ORDER BY id NULLS LAST

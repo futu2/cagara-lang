@@ -1,0 +1,22 @@
+# Aggregates: grouping, the aggregate functions, and an ungrouped aggregate.
+#
+# The examples grouped by one column and counted. The rule that makes `agg`
+# different from every other stage is that its output row is *declared* by its
+# fields rather than derived from its input, and that a bare column reference
+# outside `group` is an error rather than a silently-included one.
+orders : query { id = int, user_id = int, amount = float, status = string } = table "public" "orders"
+
+# The whole input as one group.
+total = orders & agg { n = count }
+
+# A group key plus several aggregates.
+per_user = orders & agg {
+  u = group .user_id,
+  n = count,
+  total = sum .amount,
+  biggest = max .amount,
+  smallest = min .amount,
+}
+
+# A group key that is itself an expression, then an order over the output row.
+by_status = orders & agg { s = group .status, n = count } & order [desc .n] & limit 3

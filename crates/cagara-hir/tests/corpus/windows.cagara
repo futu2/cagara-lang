@@ -1,0 +1,29 @@
+# Window functions, and a window over an aggregate's output.
+#
+# A window reaches the lowering from *inside* a `select` field rather than as a
+# stage of its own, so it is the one construct that needs a spec hook
+# (`lower_winspec`) rather than a case in the stage table. The examples used
+# `rowNumber` and `sumOver`; the frame form and the phase rule below did not
+# appear anywhere.
+orders : query { id = int, user_id = int, amount = float } = table "public" "orders"
+
+# An order-only specification.
+numbered = orders & select { r = rowNumber {order = [asc .id]} }
+
+# A partition, which resets the function per group.
+per_user = orders & select { s = sumOver {partition = [.user_id]} .amount }
+
+# A full specification, including an explicit frame.
+running = orders & select {
+  s = sumOver {partition = [.user_id], order = [asc .id], frame = runningFrame} .amount
+}
+
+# A window applied to an aggregate's *output*, not to a base table.
+#
+# This is the phase rule: a window is computed after grouping, so filtering on
+# one needs a derived table. It is why `rowNumber` over `n = count` is legal and
+# why the same expression inside a `where` is not.
+over_agg = orders & agg { k = group .user_id, n = count } & select {
+  .k,
+  r = rowNumber {order = [desc .n]}
+}

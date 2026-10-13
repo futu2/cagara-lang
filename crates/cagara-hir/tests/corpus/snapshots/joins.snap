@@ -1,0 +1,11 @@
+# joins.cagara
+users: query { id = int, name = string } => SELECT id, name FROM public.users
+orders: query { id = int, user_id = int, amount = float } => SELECT id, user_id, amount FROM public.orders
+inner_named: query { id = int, name = string, user_id = int, amount = float } => SELECT t1.id, t1.name, t2.user_id, t2.amount FROM public.users AS t1 INNER JOIN public.orders AS t2 ON t1.id = t2.user_id
+inner_op: query { id = int, name = string, user_id = int, amount = float } => SELECT t1.id, t1.name, t2.user_id, t2.amount FROM public.users AS t1 INNER JOIN public.orders AS t2 ON t1.id = t2.user_id
+left: query { id = int, name = string, user_id = maybe int, amount = maybe float } => SELECT t1.id, t1.name, t2.user_id, t2.amount FROM public.users AS t1 LEFT JOIN public.orders AS t2 ON t1.id = t2.user_id
+right: query { id = maybe int, name = maybe string, user_id = int, amount = float } => SELECT t1.id, t1.name, t2.user_id, t2.amount FROM public.users AS t1 RIGHT JOIN public.orders AS t2 ON t1.id = t2.user_id
+full: query { id = maybe int, name = maybe string, user_id = maybe int, amount = maybe float } => SELECT t1.id, t1.name, t2.user_id, t2.amount FROM public.users AS t1 FULL JOIN public.orders AS t2 ON t1.id = t2.user_id
+semi: query { id = int, name = string } => SELECT t1.id, t1.name FROM (SELECT id, name FROM public.users) AS t1 WHERE (EXISTS (SELECT t2.id, t2.user_id, t2.amount FROM (SELECT id, user_id, amount FROM public.orders) AS t2 WHERE (t1.id = t2.user_id)))
+anti: query { id = int, name = string } => SELECT t1.id, t1.name FROM (SELECT id, name FROM public.users) AS t1 WHERE (NOT EXISTS (SELECT t2.id, t2.user_id, t2.amount FROM (SELECT id, user_id, amount FROM public.orders) AS t2 WHERE (t1.id = t2.user_id)))
+joined_then_filtered: query { amount = float, id = int, name = string, user_id = int } => SELECT t1.id, t1.name, t2.user_id, t2.amount FROM public.users AS t1 INNER JOIN public.orders AS t2 ON t1.id = t2.user_id WHERE (t2.amount > 10.0)

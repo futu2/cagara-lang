@@ -3272,15 +3272,50 @@ fn string_of(t: &Term) -> Option<String> {
 /// gap tells the caller "this phase cannot build that", which sends the
 /// definition down the fallback route and lets the source path report the
 /// mistake. The mistake is the program's, and it reads the same either way, so
-/// it is reported here. The wording matches `elaborate::int_literal`, which is
-/// the only other place that states this rule; a negative count is caught by the
-/// checked constructor instead, so it is not restated.
+/// it is reported here.
+///
+/// # Why this does not name the form it found
+///
+/// The source path said `` `limit` expects an int, found an application ``,
+/// because it held the syntax tree and could name the node. This route cannot,
+/// and that is not an oversight to repair: `1 + 1` normalizes to a `Template`
+/// (`sql "$1 + $2"` applied), so by the time the lowering sees it, "it was
+/// written as an application" is precisely the information normalization exists
+/// to discard. A term-kind match here would answer "a sql template" — true of
+/// the term and useless to a reader, while leaking internal vocabulary at someone
+/// who wrote `1 + 1`.
+///
+/// So the message states the requirement rather than describing the input. That
+/// is actionable whatever was found, and it is honest about what this layer can
+/// see. The **span** is carried from the argument's own origin, so the caret
+/// lands on the expression the user wrote rather than on `limit`; that is the
+/// part that guides a reader, and it matches the source path exactly — verified
+/// by a differential run against the pre-migration compiler over twenty error
+/// programs, which is also what caught the original wording being too thin.
+///
+/// A negative count is caught by the checked constructor instead, so it is not
+/// restated here.
 fn int_of(t: &Term, what: &str, origin: Origin) -> Result<i64, Gap> {
     match t {
         Term::Lit {
             lit: crate::ir::Lit::Int(n),
             ..
         } => Ok(*n),
-        _ => Err(Gap::program(origin, format!("`{what}` expects an int"))),
+        other => {
+            // The argument's own origin, so the caret is on the expression the
+            // user wrote rather than on the stage that wanted an int. Falls back
+            // to the stage's span when the term carries none.
+            let at = other_origin(other);
+            let at = if at.span == cagara_syntax::ast::Span::default() {
+                origin
+            } else {
+                at
+            };
+            // "expects an int" states the type the checker would also want;
+            // "literal" states the rule only this layer knows — a column or an
+            // arithmetic expression is an int and still not a count. Both are
+            // needed, so both are said.
+            Err(Gap::program(at, format!("`{what}` expects an int literal")))
+        }
     }
 }

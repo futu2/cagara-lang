@@ -29,10 +29,27 @@ Rel            backend-facing relational structure without type metadata
 
 `Term` is what makes the rest compositional. It is a small calculus — local
 binders, columns, literals, templates, lambdas, applications, `case`, records,
-lists — with an application reduction that substitutes arguments for parameters.
-A term carries no AST node and no name waiting to be looked up, so it cannot
-silently depend on where it was written. Names resolve and applications reduce
-once, in the normal form, instead of being rediscovered by each consumer.
+lists, and relational primitives — with an application reduction that substitutes
+arguments for parameters. A term carries no AST node and no name waiting to be
+looked up, so it cannot silently depend on where it was written. Names resolve
+and applications reduce once, in the normal form, instead of being rediscovered by
+each consumer.
+
+A relational primitive also carries the **row it produces**, taken from the type
+the checker recorded at that application. It has to be the node's own type and not
+the declaring definition's signature, because a definition can inline two tables —
+`innerJoin orders (.<id == .>uid)` over a joined pair — and each needs its own
+columns. That is the fact the query lowering rests on: `CheckedQuery::table`
+refuses to build without columns, and the term is where they come from.
+
+The shapes are uniform enough to state: every stage is
+`Primitive "__stage" [own arguments…, piped input]`, in declaration order with the
+piped input last. `users & where p` is `__where [p, __table [schema, name]]`; a
+join is `__innerJoin [right, on, input]`. Pipe syntax, operator sugar, aliases and
+composition are already gone by the time a term exists, which is why lowering is
+mechanical and why a stage *value* — a partially applied primitive, or a lambda
+over one — needs no case of its own: applying it is the reduction the normalizer
+already performs.
 
 `CheckedQuery` and `CheckedExpr` are immutable trees. Query nodes own their
 structure, while unchanged output rows are shared through `Arc`; computed rows
@@ -44,12 +61,13 @@ private so callers cannot bypass those constructors.
 
 Ordinary functions are inlined by the reduction, not called. A definition that
 names itself is reported as recursion rather than expanded without end: the
-elaborator tracks which definitions it is expanding, and the normal form applies
-the same rule, so the two layers agree on what recursion is. The elaborator's
-small `CheckedValue` enum represents expressions, queries, stages, and
-partially-applied callables only while a source expression is being expanded.
-It produces no runtime values. Once a definition is elaborated, its result is a
-`CheckedQuery`; SQL lowering never sees this temporary representation.
+normalizer carries a stack of the definitions it is already inlining
+(`Normalizer::active`), and that stack is now the *only* place recursion is
+detected, because there is no longer a second walk to agree with.
+
+Nothing here evaluates. A definition's normal form is built once and cached, and
+the result of elaborating a definition is a `CheckedQuery`; SQL lowering never
+sees an intermediate value representation.
 
 The type checker records facts in `TypeCheck` and uses mutable inference state
 internally. Checking is bidirectional: `infer` synthesizes a type, and `check`
@@ -135,13 +153,25 @@ The current checked layer supports local, testable claims:
 - Outer-join nullability and set-operation compatibility are represented in
   output rows.
 - Erasure is structural and leaves no type-checking work to SQL lowering.
-- Normalization is total over scalar expressions: every expression form reduces
-  to a term, and a form without a rule is reported as a compiler gap rather than
-  silently lowered by a second path. There is no fallback route for an
-  expression. Relational construction is not normalized yet: a definition whose
-  body is a query is still elaborated from source, and that layer both reports a
-  capability gap and, in places, tries its next reading of an expression, so the
-  claim is scoped to expressions rather than to both layers.
+- Normalization is total over the language: every expression form **and** every
+  relational construction reduces to a term, and a form without a rule is
+  reported as a compiler gap rather than silently lowered by a second path.
+  There is no fallback route, for expressions or for queries.
+
+  This is the claim the architecture is built to make, so it is worth saying how
+  it is held rather than only that it is asserted. `compile::tests` gates it from
+  two directions: `the_normalized_route_handles_every_construct` counts the gaps
+  over every program shape the suite exercises and requires zero, and
+  `every_query_is_built_by_the_term_route` asserts that a representative program
+  per construct reaches the term route rather than an alternative. The latter is
+  meaningful because a fallback would have to declare itself to the discarded-gap
+  sieve, which is asserted empty.
+
+  Until recently the second half was not true: a definition whose body was a
+  query was built by re-walking its source, and that layer could report a
+  capability gap *and* try its next reading of an expression. Both are gone —
+  `elaborate.rs` is 275 lines where it was 2329 — and no grammar rule or runtime
+  path in this crate re-reads source to decide what something means.
 
 The compiler uses an explicit immutable input view and produces an owned
 compilation result. The shell still owns Salsa state and the checker uses

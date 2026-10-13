@@ -737,8 +737,10 @@ pub struct Normalizer<'a> {
     hole_stack: Vec<Vec<(usize, usize)>>,
     /// The definitions currently being inlined, outermost first.
     ///
-    /// Mirrors `Ctx::active` in the elaborator. The term layer inlines rather
-    /// than calls, so it needs its own record of what is already being expanded.
+    /// The term layer inlines rather than calls, so a definition that names
+    /// itself would expand without end; this is the record of what is already
+    /// being expanded. It used to mirror an equivalent stack in the elaborator,
+    /// which no longer exists.
     active: Vec<DefId>,
 }
 
@@ -833,9 +835,9 @@ impl<'a> Normalizer<'a> {
     ///
     /// The term layer **inlines** a definition rather than calling it, so a
     /// definition that names itself — `f = f`, or a cycle through two — inlines
-    /// forever. The elaborator guards this in `enter`, with the `active` stack on
-    /// `Ctx`; a walk that builds terms has to apply the same rule, because it is
-    /// the same recursion and the term route is now the only one.
+    /// forever. The `active` stack is the only guard, here or anywhere: the
+    /// source walk that used to apply the same rule is gone, so this is the
+    /// single place where recursion is detected.
     ///
     /// Measured: without this, `f = f` overflows the stack rather than reporting
     /// "refers to itself".
@@ -1467,8 +1469,7 @@ fn inline_resolved(
                 .def_body(dm, dd)
                 .ok_or_else(|| Gap::new(origin, format!("`{display}` has no body to normalize")))?;
             // A definition that names itself would inline forever, so the walk
-            // carries what it is already expanding and reports the cycle the way
-            // the elaborator does.
+            // carries what it is already expanding and reports the cycle.
             // The callee's names were recorded under the **callee's** module, so
             // the walk moves there. This is what makes a user definition that
             // calls a prelude helper resolve the helper's own names correctly.

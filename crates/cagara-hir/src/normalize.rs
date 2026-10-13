@@ -3052,6 +3052,64 @@ fn lower_query_primitive(
                 Q::suffix(q, affix, origin).map_err(at)
             }
         }
+        // A join: `__innerJoin [right, on, input]`. The **piped input is last**
+        // and the joined input is first, which is the prelude's declaration
+        // order (`innerJoin : query s -> expr (join r s) bool -> query r -> …`)
+        // with the trailing argument supplied by the pipe. Nothing here decides
+        // which side is which: the term says, and `users & orders ? on`
+        // normalizes to the same node, so the operator and named spellings
+        // cannot diverge.
+        "__innerJoin" | "__leftJoin" | "__rightJoin" | "__fullJoin" | "__semiJoin"
+        | "__antiJoin" => {
+            let [right, on, input] = args else {
+                return Err(Gap::new(
+                    origin,
+                    format!("`{name}` takes a right input, a predicate and a piped input"),
+                ));
+            };
+            let kind = match name {
+                "__innerJoin" => crate::ir::JoinKind::Inner,
+                "__leftJoin" => crate::ir::JoinKind::Left,
+                "__rightJoin" => crate::ir::JoinKind::Right,
+                "__fullJoin" => crate::ir::JoinKind::Full,
+                "__semiJoin" => crate::ir::JoinKind::Semi,
+                _ => crate::ir::JoinKind::Anti,
+            };
+            Q::join(
+                kind,
+                lower_input(input)?,
+                lower_input(right)?,
+                expr(on)?,
+                origin,
+            )
+            .map_err(at)
+        }
+        // A set operation: `__union [left, right]`, in **argument order**, which
+        // is the primitive's own declaration order. The two spellings really do
+        // differ and the term records the difference rather than smoothing it:
+        //
+        //     users & union vips   ->  __union [vips, users]
+        //     users &| vips        ->  __union [users, vips]
+        //
+        // because `union` is `query r -> query r -> query r` at the pipe's own
+        // level, so the piped query arrives last, while `&|` is
+        // `q => r => union q r` (`prelude.cagara:153`), where the body re-binds
+        // and the piped query ends up first. Reading `args[0]` as the left
+        // operand is therefore not a convention chosen here — it is what the
+        // term says. Inferring the side from which spelling was written is what
+        // reversed `except` once already.
+        "__union" | "__unionAll" | "__intersect" | "__except" => {
+            let [left, right] = args else {
+                return Err(Gap::new(origin, format!("`{name}` takes two queries")));
+            };
+            let kind = match name {
+                "__union" => crate::ir::SetKind::Union,
+                "__unionAll" => crate::ir::SetKind::UnionAll,
+                "__intersect" => crate::ir::SetKind::Intersect,
+                _ => crate::ir::SetKind::Except,
+            };
+            Q::set(kind, lower_input(left)?, lower_input(right)?, origin).map_err(at)
+        }
         _ => Err(Gap::new(
             origin,
             format!("the relational primitive `{name}` is not lowered yet"),

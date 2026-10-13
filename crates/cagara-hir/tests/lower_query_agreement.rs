@@ -18,6 +18,7 @@ use cagara_hir::{root_queries_checked, Workspace};
 const TABLES: &str = "\
 users : query { id = int, name = string, age = int } = table \"s\" \"users\"
 orders : query { id = int, uid = int, amount = float } = table \"s\" \"orders\"
+vips : query { id = int, name = string, age = int } = table \"s\" \"vips\"
 ";
 
 /// The source path's query for `name`, as an erased relation.
@@ -126,6 +127,33 @@ fn both_paths_build_the_same_query() {
             "a table via a name",
             "base = users\nq = base & where (.id > 1)\n",
         ),
+        // The binary stages, and for the set operations both spellings: they
+        // deliberately put the piped query on opposite sides, so a lowering that
+        // guessed the side would pass one spelling and reverse the other.
+        (
+            "innerJoin",
+            "q = users & innerJoin orders (.<id == .>uid)\n",
+        ),
+        ("leftJoin", "q = users & leftJoin orders (.<id == .>uid)\n"),
+        (
+            "rightJoin",
+            "q = users & rightJoin orders (.<id == .>uid)\n",
+        ),
+        ("fullJoin", "q = users & fullJoin orders (.<id == .>uid)\n"),
+        ("semiJoin", "q = users & semiJoin orders (.<id == .>uid)\n"),
+        ("antiJoin", "q = users & antiJoin orders (.<id == .>uid)\n"),
+        ("join operator", "q = users & orders ? (.<id == .>uid)\n"),
+        ("union, bare name", "q = users & union vips\n"),
+        ("union, operator", "q = users &| vips\n"),
+        ("union, direct call", "q = union users vips\n"),
+        ("unionAll", "q = users & unionAll vips\n"),
+        ("intersect", "q = users & intersect vips\n"),
+        ("except, bare name", "q = users & except vips\n"),
+        ("except, operator", "q = users &~ vips\n"),
+        (
+            "a join then a filter",
+            "q = users & innerJoin orders (.<id == .>uid) & where (.amount > 1.0)\n",
+        ),
     ];
 
     let mut compared = 0usize;
@@ -148,7 +176,34 @@ fn both_paths_build_the_same_query() {
         );
         compared += 1;
     }
-    assert!(compared >= 14, "only {compared} cases ran");
+    assert!(compared >= 29, "only {compared} cases ran");
+}
+
+/// The two set-operation spellings really do differ, so agreeing with both
+/// means the lowering read the operand order rather than guessing it.
+///
+/// `users & union vips` puts the piped query on the right; `users &| vips` puts
+/// it on the left. A lowering that assumed one would still pass whichever case
+/// matched its assumption, so the evidence is that the two are *different* and
+/// each equals its own source-path result.
+#[test]
+fn the_two_set_spellings_really_do_differ() {
+    let bare = format!("{TABLES}q = users & union vips\n");
+    let operator = format!("{TABLES}q = users &| vips\n");
+    let from_bare = strip_spans(&term_path(&bare, "q"));
+    let from_operator = strip_spans(&term_path(&operator, "q"));
+    assert_ne!(
+        from_bare, from_operator,
+        "the two spellings lowered to the same tree; one of them must be reversed"
+    );
+    // Each still agrees with its own source-path result, so neither was fixed
+    // by making the other one wrong.
+    for src in [&bare, &operator] {
+        assert_eq!(
+            strip_spans(&source_path(src, "q")),
+            strip_spans(&term_path(src, "q"))
+        );
+    }
 }
 
 /// The comparison can actually fail: a deliberately wrong lowering differs.

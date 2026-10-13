@@ -1,15 +1,28 @@
-//! The term lowering must build the **same checked query** as the source path.
+//! Every query shape lowers to the checked tree the compiler produces.
 //!
-//! This is the migration's evidence for the relational half: `lower_query`
-//! consumes a normalized term, while `elaborate_query` walks source, and the two
-//! are compared through the erased `Rel` — the tree every later phase sees. A
-//! difference means the lowering dropped or reordered something, which is
-//! exactly the class of bug the set-operation operand order once was.
+//! # What this compares, and what it used to
 //!
-//! The comparison is *not* the tautology the expression half started with: the
-//! two sides really are different code. It is written so that it can fail —
-//! `the_comparison_can_fail` drives it on a query whose lowering is deliberately
-//! wrong, so a green run means the walk found something to compare.
+//! While the migration was in progress this was a **differential** test:
+//! `source_path` called `root_queries_checked`, which went through the source
+//! walk, and `term_path` normalized and lowered by hand, so a disagreement meant
+//! the new path had dropped or reordered something. That is how the
+//! set-operation operand order was checked — the bug that once reversed
+//! `except`.
+//!
+//! There is no source walk now, so the two sides are no longer independent
+//! implementations: `source_path` still exercises the whole pipeline
+//! (check, elaborate, erase) while `term_path` drives normalization and
+//! lowering directly, and what this pins is that the *direct* route agrees with
+//! the one the compiler takes. That is a weaker claim than it once was, and
+//! saying so here is the point — a test that still claimed to compare two
+//! implementations would be the third time in this refactor that a comment
+//! described a world that had ended.
+//!
+//! What replaces the lost differential evidence is the corpus: the four shipped
+//! examples' snapshots are byte-identical across the switch, so the SQL users
+//! see is unchanged. This file's job is coverage of the *shapes* — every stage,
+//! join, set operation, window and stage-value spelling — and
+//! `the_comparison_can_fail` keeps it honest.
 
 use cagara_hir::check::check;
 use cagara_hir::normalize::{lower_query, Body, Facts, Normalizer, WorkspaceFacts};
@@ -21,7 +34,10 @@ orders : query { id = int, uid = int, amount = float } = table \"s\" \"orders\"
 vips : query { id = int, name = string, age = int } = table \"s\" \"vips\"
 ";
 
-/// The source path's query for `name`, as an erased relation.
+/// The compiler's query for `name`, as an erased relation.
+///
+/// This is the whole production pipeline, not an independent implementation. See
+/// the module comment for what that means for the comparison.
 fn source_path(src: &str, name: &str) -> String {
     let ws = Workspace::from_source(src);
     let tc = check(&ws);
@@ -35,7 +51,7 @@ fn source_path(src: &str, name: &str) -> String {
     format!("{rel:?}")
 }
 
-/// The term path's query for `name`, as an erased relation.
+/// The same query built by driving normalization and lowering directly.
 fn term_path(src: &str, name: &str) -> String {
     let ws = Workspace::from_source(src);
     let tc = check(&ws);
@@ -287,40 +303,56 @@ fn a_stage_value_lowers_like_its_inline_spelling() {
     }
 }
 
-/// Every relational primitive the prelude declares is either lowered or is a
-/// known row combinator.
+/// Every relational stage the prelude declares has a lowering case.
 ///
-/// Step three of the plan was "stage values" — a term whose input is missing,
-/// either a partially applied primitive or a `Lambda` over one. This records the
-/// measurement that made that step unnecessary, and it is the *reason*: applying
-/// a stage is the reduction the normalizer already performs, so by the time a
-/// term reaches the lowering every stage is saturated and the unary and binary
-/// cases are the whole vocabulary. `a_stage_value_lowers_like_its_inline_spelling`
-/// is the behavioural half of the same claim.
+/// Read from the prelude rather than listed here, so a stage added to the
+/// language fails this test instead of silently reaching "not lowered yet".
 ///
-/// The vocabulary is read from the prelude rather than listed here, so a stage
-/// added to the language fails this test instead of silently reaching
-/// "not lowered yet".
+/// The check is **behavioural**: each stage is written as a real program, that
+/// program is normalized and lowered, and the failure message is inspected for
+/// "not lowered yet". Two earlier versions of this were wrong in ways worth
+/// recording, because both looked convincing:
+///
+/// * searching this crate's source for the primitive's name passes on a
+///   *comment* — it would have gone green on a name mentioned only in prose;
+/// * writing the primitive's own name as a program body normalizes nothing,
+///   because `__agg` is not a name the checker knows — every case hit the
+///   early `continue`, so the scan inspected zero stages and "nothing is
+///   unlowered" was true because nothing was looked at. The floor below is what
+///   caught that.
+///
+/// The two primitives left out are row combinators rather than query stages:
+/// `__merge` overlays rows and is rejected as a query body, and `__mapValue` is
+/// internal to the outer-join row laws, with a wrapper argument a user cannot
+/// write. Neither has a `CheckedQuery` constructor to lower into.
 #[test]
 fn the_lowering_covers_the_relational_vocabulary() {
     const PRELUDE: &str = include_str!("../../../prelude.cagara");
-    // A primitive whose declared signature mentions a query more than once is a
-    // stage: `query r -> query s`, or `… -> query r -> query s`.
     // A declaration's signature may span several lines before the `primitive`
-    // keyword, so the signature text is accumulated until the body is reached.
+    // keyword, so signature text is accumulated — and cleared at every blank
+    // line as well as at every body. Without the blank-line reset a multi-line
+    // signature bleeds into the next declaration, which is how `rows` (a
+    // `bound -> bound -> frame`) was first mistaken for a stage.
     let mut stages: Vec<String> = Vec::new();
     let mut signature = String::new();
     for line in PRELUDE.lines() {
+        if line.trim().is_empty() {
+            signature.clear();
+            continue;
+        }
         let Some(pos) = line.find("primitive \"") else {
-            signature.push_str(line);
-            signature.push(' ');
+            // A comment belongs to no signature.
+            if !line.trim_start().starts_with('#') {
+                signature.push_str(line);
+                signature.push(' ');
+            }
             continue;
         };
         signature.push_str(&line[..pos]);
         let rest = &line[pos + "primitive \"".len()..];
         if let Some(end) = rest.find('\"') {
             // A stage takes a query and gives one back, so `query` appears at
-            // least twice in its signature.
+            // least twice in its own signature.
             if signature.matches("query").count() >= 2 {
                 stages.push(rest[..end].to_string());
             }
@@ -330,10 +362,6 @@ fn the_lowering_covers_the_relational_vocabulary() {
     stages.sort();
     stages.dedup();
 
-    // The two row combinators: `merge` overlays rows and is rejected as a query
-    // body by the source path; `mapValue` is internal to the outer-join row laws
-    // and its wrapper argument is a type-level name a user cannot write. Neither
-    // has a `CheckedQuery` constructor to lower into.
     let row_combinators = ["__mapValue", "__merge"];
     let stages: Vec<&String> = stages
         .iter()
@@ -345,19 +373,92 @@ fn the_lowering_covers_the_relational_vocabulary() {
         stages.len()
     );
 
-    // Each one is named in the lowering, which is where a missing case would be
-    // absent. Reading the source of this crate in a test is unusual; it is worth
-    // it here because the alternative is a hand-written list that a new stage
-    // would not update.
-    const LOWERING: &str = include_str!("../src/normalize.rs");
-    let missing: Vec<&&String> = stages
-        .iter()
-        .filter(|name| !LOWERING.contains(&format!("\"{name}\"")))
-        .collect();
+    // Each stage, written the way the language spells it, applied to a query.
+    // The spelling is the primitive's name without its leading underscores, and
+    // the join operators take their arguments differently, so they are written
+    // out.
+    let program_for = |prim: &str| -> String {
+        let tables = "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+                      other : query { id = int, name = string } = table \"s\" \"other\"\n";
+        let body = match prim {
+            "__table" => "q = users\n".to_string(),
+            "__where" => "q = users & where (.id > 1)\n".to_string(),
+            "__select" => "q = users & select { .id }\n".to_string(),
+            "__update" => "q = users & update { n = .id }\n".to_string(),
+            "__agg" => "q = users & agg { k = group .id, n = count }\n".to_string(),
+            "__order" => "q = users & order [asc .id]\n".to_string(),
+            "__limit" => "q = users & limit 1\n".to_string(),
+            "__offset" => "q = users & offset 1\n".to_string(),
+            "__distinct" => "q = users & distinct\n".to_string(),
+            "__omit" => "q = users & omit \"name\"\n".to_string(),
+            "__prefix" => "q = users & prefix \"p_\"\n".to_string(),
+            "__suffix" => "q = users & suffix \"_s\"\n".to_string(),
+            "__innerJoin" => "q = users & innerJoin other (.<id == .>id)\n".to_string(),
+            "__leftJoin" => "q = users & leftJoin other (.<id == .>id)\n".to_string(),
+            "__rightJoin" => "q = users & rightJoin other (.<id == .>id)\n".to_string(),
+            "__fullJoin" => "q = users & fullJoin other (.<id == .>id)\n".to_string(),
+            "__semiJoin" => "q = users & semiJoin other (.<id == .>id)\n".to_string(),
+            "__antiJoin" => "q = users & antiJoin other (.<id == .>id)\n".to_string(),
+            "__union" | "__unionAll" | "__intersect" | "__except" => {
+                let op = prim.trim_start_matches("__");
+                format!("q = users & {op} other\n")
+            }
+            other => panic!("no source spelling for `{other}`; add it to this test"),
+        };
+        format!("{tables}{body}")
+    };
+
+    let mut unlowered = Vec::new();
+    let mut inspected = 0usize;
+    for prim in &stages {
+        let src = program_for(prim);
+        let ws = Workspace::from_source(&src);
+        let tc = check(&ws);
+        assert!(
+            tc.errors().is_empty(),
+            "{prim}: the program this test writes is not legal, so it proves \
+             nothing: {:?}",
+            tc.errors()
+        );
+        let facts = WorkspaceFacts::new(&ws, &tc);
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .expect("`q`");
+        let body = Body {
+            module: ws.root,
+            def,
+            expr: ws.modules[ws.root].module.defs[def].body.clone(),
+        };
+        let resolved = |m: usize, id: u32| facts.resolution(m, id);
+        let mut cx = Normalizer::new(Box::new(resolved));
+        inspected += 1;
+        let term = cx
+            .in_module(ws.root, |cx| {
+                cagara_hir::normalize::expression(&facts, cx, &body)
+            })
+            .unwrap_or_else(|g| panic!("{prim} did not normalize: {}", g.message));
+        if let Err(g) = lower_query(&term) {
+            if g.message.contains("is not lowered yet") {
+                unlowered.push(prim.to_string());
+            }
+        }
+    }
+    // A floor, so a change that stops the scan reaching any stage fails rather
+    // than passing with nothing examined — which is exactly how the previous
+    // version of this test was green.
     assert!(
-        missing.is_empty(),
+        inspected >= 19,
+        "only {inspected} of {} relational stages were inspected; the scan is not \
+         looking where it thinks it is",
+        stages.len()
+    );
+    assert!(
+        unlowered.is_empty(),
         "these relational primitives are declared by the prelude and have no \
-         lowering case: {missing:?}"
+         lowering case: {unlowered:?}"
     );
 }
 

@@ -98,25 +98,55 @@ wrong when one definition inlines two tables. The deep type is what makes a node
 answer for its own row.
 
 **Cold compile, +44% on the root layout.** Every query is now built by normalizing
-to a term and lowering, instead of by walking source once. Splitting the cost over
-20k tables: normalization 26 ms, lowering 2.5 ms — so the term-building walk is
-the cost and the lowering added by the migration is noise beside it.
+to a term and lowering, instead of by walking source once. Splitting that cost
+over the benchmark's 20k tables, warm and measured once: normalization **31.1 ms**
+(1.56 µs per definition), lowering **2.3 ms** (116 ns per definition). The
+term-building walk is essentially all of it; the lowering this migration added is
+under 7% of the pair.
 
-One optimization was tried and **rejected by measurement**: sharing a single
-`Normalizer` across definitions so its inlining cache survives. It saves 1.3 ms of
-32 ms, so repeated prelude inlining is not where the time goes.
+The generator's bodies are the best case for this: `table "public" "tN"` is one
+application and a leaf. Per definition, that body normalizes in **1.6 µs**, while
+`table & where` costs 12.6 µs, `table & select & order & limit` 30.9 µs, and
+`table & agg` 13.0 µs — so the cost tracks the number of **stages in the body**,
+not the number of definitions in the catalog.
 
-The import layout is unaffected, and that is the informative column: its root
-query is one definition, so nothing scales with catalog size. The migration's cost
-is per *root query compiled*, not per definition in the catalog.
+Measured directly on one fixed program, normalizing and lowering a pipeline of
+`table` plus N alternating stages, warm, averaged over 200 iterations:
 
-Worth knowing if a catalog ever compiles tens of thousands of root queries on a
-cold cache. There is no known fix to reach for: the cache-sharing attempt above
-was the obvious candidate and it did not move the number, so the cost appears to
-be the term-building walk itself rather than any repeated work around it.
-Reducing it would mean not building a term for a definition that is a trivial
-leaf, which trades away the property the migration exists to have — one route for
-every query — for a layout that is not the documented scale target.
+| Stages | Per iteration |
+| ---: | ---: |
+| 1 | 4.7 µs |
+| 2 | 9.4 µs |
+| 3 | 18.0 µs |
+| 4 | 24.8 µs |
+| 5 | 34.6 µs |
+| 6 | 47.1 µs |
+
+That averages **8.5 µs per stage** from 1 to 6 stages, and it is the number a real
+program pays. The growth is **not** linear: the increments are 4.7, 8.6, 6.8, 9.8
+and 12.6 µs, so the last stage costs well over twice what the first does. Depth
+compounds rather than adding, which is the expected shape — each stage's row is
+computed from the previous stage's, and the terms nest.
+
+Either way the 31 ms of normalization over 20k trivial tables is a floor rather
+than a representative figure; a catalog whose queries chain six stages each would
+pay several times that.
+
+Two optimizations were tried and **rejected by measurement**, both the obvious
+ones: sharing a single `Normalizer` across definitions so its inlining cache
+survives saves 1.3 ms of 31 ms, and the resolver and the hole-assignment lookup
+together account for about 2 ms of the 31 ms. The cost is the term construction
+itself — allocating a `Term` per node, with its origin and type — rather than
+repeated work around it.
+
+The import layout is unaffected, which is the column that says what the cost is:
+its root query is one definition, so nothing scales with catalog size. The
+migration's cost is per *root query compiled*, weighted by that query's stages.
+
+Worth knowing if a catalog ever compiles many root queries with long pipelines on
+a cold cache. There is no fix to reach for that keeps the property the migration
+exists to have; avoiding a term for a trivial leaf would reintroduce a second
+route, which is exactly what the migration removed.
 
 ## What the cache guarantees and what remains linear
 

@@ -174,10 +174,21 @@ pub enum Term {
     /// constructors require it, and it is recorded per `ExprId` rather than
     /// derivable from the primitive's name — `__in` over ints and over strings
     /// are the same primitive at two types.
+    ///
+    /// `row` is the same kind of fact one level up: the columns the checker gave
+    /// the occurrence, read from its recorded type. `table "s" "t"` is a
+    /// primitive whose arguments are two strings, so the term says nothing about
+    /// its columns, while the checked constructor refuses to build a table
+    /// without them. The row is recorded here — where the occurrence's `ExprId`
+    /// is still in hand — rather than recovered later from the *declaring
+    /// definition's* signature, which is a different fact and the wrong one as
+    /// soon as two tables are inlined into one program. `None` for every
+    /// primitive that denotes no row, and for a node the checker did not close.
     Primitive {
         name: Arc<str>,
         args: Vec<Term>,
         ty: crate::core::ScalarType,
+        row: Option<std::sync::Arc<Vec<(String, crate::core::ScalarType)>>>,
         origin: Origin,
     },
     /// A definition whose normal form is a *function*: `params` are the binders
@@ -396,6 +407,7 @@ impl Term {
                 name,
                 mut args,
                 ty,
+                row,
                 origin,
             } => {
                 args.push(arg);
@@ -403,6 +415,7 @@ impl Term {
                     name,
                     args,
                     ty,
+                    row,
                     origin,
                 })
             }
@@ -463,7 +476,12 @@ pub fn reduce_application(head: Term, args: Vec<Term>, origin: Origin) -> Term {
 ///
 /// An unreduced `Apply` keeps its own origin for the same reason: it stands for
 /// the application a user wrote.
-fn apply_type_and_span(term: Term, ty: crate::core::ScalarType, origin: Origin) -> Term {
+fn apply_type_and_span(
+    term: Term,
+    ty: crate::core::ScalarType,
+    row: Option<Vec<(String, crate::core::ScalarType)>>,
+    origin: Origin,
+) -> Term {
     use crate::core::ScalarType;
     // Never replace a known type with an unknown one. The application's own
     // type is the better source when it is known, but it is legitimately
@@ -494,11 +512,16 @@ fn apply_type_and_span(term: Term, ty: crate::core::ScalarType, origin: Origin) 
             name,
             args,
             ty: current,
+            row: current_row,
             ..
         } => Term::Primitive {
             name,
             args,
             ty: prefer(&current),
+            // The application's row when it has one, otherwise the one already
+            // carried: a primitive that is not a table keeps `None`, and a
+            // saturated table takes the row of the node that saturated it.
+            row: row.map(Arc::new).or(current_row),
             origin,
         },
         other => other,
@@ -538,11 +561,13 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
             name: pname,
             args,
             ty,
+            row,
             origin,
         } => Term::Primitive {
             name: pname,
             args: args.into_iter().map(|a| substitute(a, name, arg)).collect(),
             ty,
+            row,
             origin,
         },
         Term::Lambda {
@@ -908,6 +933,22 @@ pub trait Facts {
     /// carrying rather than a reason to fail, because the definition was
     /// already reported.
     fn use_ty(&self, module: usize, id: u32) -> crate::core::ScalarType;
+
+    /// The **row** the checker recorded for the expression with this `ExprId`.
+    ///
+    /// The structured counterpart of [`Facts::use_ty`], which answers with a
+    /// scalar and therefore answers `None` for anything query-shaped. A
+    /// `table "s" "t"` node is recorded as `query { id = int, name = string }`,
+    /// and that row is what the checked table constructor needs; recovering it
+    /// from the declaring definition's signature instead would be a *different*
+    /// fact, and the wrong one once two tables are inlined into one program.
+    ///
+    /// `None` when the node got no row: not a query, or the checker did not
+    /// close it.
+    fn use_row(&self, module: usize, id: u32) -> Option<Vec<(String, crate::core::ScalarType)>> {
+        let _ = (module, id);
+        None
+    }
 }
 
 /// The hole assignment a use site resolved, as `holes[k] = (callee_module,
@@ -1153,7 +1194,7 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                     )?);
                 }
                 // Reduce as far as the head allows. An application that cannot
-                // reduce is *kept*, not rejected: `f x` inside `f => x => f x`
+                // reduce is *kept*, not rejected: `f x` inside `f => f x`
                 // has nothing to substitute into until the enclosing lambda is
                 // applied, and every curried combinator in the prelude is
                 // written that way.
@@ -1163,9 +1204,19 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                 // result at the *definition's* `ExprId` while the elaborator and
                 // the incremental facts read the type of the *use*, and the
                 // head's span would blame `upper` rather than `upper .name`.
+                //
+                // The same argument applies to the **row**, and this is the only
+                // place it can be picked up: `table "s" "t"` is a prelude
+                // primitive applied here, so the saturated term is built while
+                // this node is in hand, while the primitive's own definition in
+                // the prelude has no query row at all. Reading it from the
+                // *declaring definition* instead would be a different fact — and
+                // the wrong one as soon as two tables are inlined into one
+                // program, since each needs its own columns.
                 Ok(apply_type_and_span(
                     reduced,
                     facts.use_ty(module, e.id),
+                    facts.use_row(module, e.id),
                     origin,
                 ))
             };
@@ -1281,10 +1332,17 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
         // arrive as an enclosing `App` and are reduced by the application arm
         // above; a bare primitive is a value awaiting them, exactly as a `sql`
         // template is.
+        //
+        // The occurrence's *row* is read here, where its `ExprId` still is.
+        // `table "s" "t"` carries no columns in its arguments, and the checked
+        // constructor will not build a table without them, so the fact has to be
+        // picked up while the node is in hand — a later phase has only a span,
+        // and a span is not a node identity.
         ExprKind::Primitive(name) => Ok(Term::Primitive {
             name: std::sync::Arc::from(name.as_str()),
             args: Vec::new(),
             ty: facts.use_ty(module, e.id),
+            row: facts.use_row(module, e.id).map(std::sync::Arc::new),
             origin,
         }),
         // Forms normalization has no rule for yet. Reported as a gap rather
@@ -1435,6 +1493,7 @@ fn inline_resolved(
             name: std::sync::Arc::from(display),
             args: Vec::new(),
             ty: facts.use_ty(module, id),
+            row: facts.use_row(module, id).map(std::sync::Arc::new),
             origin,
         }),
         None => Err(Gap::new(
@@ -1753,6 +1812,7 @@ pub fn lower_expr_with(
             name,
             args,
             ty: _,
+            row: _,
             origin,
         } => lower_primitive(name, args, *origin, spec),
         Term::Case {
@@ -2073,6 +2133,13 @@ impl Facts for InputFacts<'_> {
             .use_ty(module, id)
             .unwrap_or(crate::core::ScalarType::Unknown)
     }
+
+    fn use_row(&self, module: usize, id: u32) -> Option<Vec<(String, crate::core::ScalarType)>> {
+        match self.input.type_check().use_scheme(module, id)? {
+            crate::check::SchemeView::Query { fields } => fields,
+            _ => None,
+        }
+    }
 }
 
 impl Facts for WorkspaceFacts<'_> {
@@ -2136,6 +2203,13 @@ impl Facts for WorkspaceFacts<'_> {
         self.tc
             .use_ty(module, id)
             .unwrap_or(crate::core::ScalarType::Unknown)
+    }
+
+    fn use_row(&self, module: usize, id: u32) -> Option<Vec<(String, crate::core::ScalarType)>> {
+        match self.tc.use_scheme(module, id)? {
+            crate::check::SchemeView::Query { fields } => fields,
+            _ => None,
+        }
     }
 }
 
@@ -2576,10 +2650,17 @@ mod bridge_tests {
                 ty,
                 origin: blank,
             },
-            Term::Primitive { name, args, ty, .. } => Term::Primitive {
+            Term::Primitive {
+                name,
+                args,
+                ty,
+                row,
+                ..
+            } => Term::Primitive {
                 name,
                 args: args.iter().map(strip_origins).collect(),
                 ty,
+                row,
                 origin: blank,
             },
             Term::Apply { head, args, .. } => Term::Apply {
@@ -2805,5 +2886,246 @@ mod prelude_covers_the_bridge {
             }
         }
         assert!(checked >= 5, "only {checked} combinators were found");
+    }
+}
+
+// ── lowering a term that denotes a *query* ──────────────────────────────────
+
+/// Lower a term that denotes a **query** into the checked relational layer.
+///
+/// The relational half of [`lower_expr_with`], and it exists for the same
+/// reason: by the time a term exists, every name is resolved, every application
+/// is saturated, and the argument order is the one the prelude's declaration
+/// gives — the pipe, the operator sugar, aliases and composition are all gone.
+/// So this matches on the *primitive* each stage was reached through, exactly as
+/// [`lower_primitive`] matches on the expression ones, and hands the pieces to a
+/// `CheckedQuery` constructor that already states the rule for that stage.
+///
+/// Every stage's arguments are in **declaration order with the piped input
+/// last** — `__where [pred, input]`, `__select [fields, input]`,
+/// `__innerJoin [right, on, input]` — which is what the normalizer produces and
+/// what the prelude says. Nothing here re-derives that order from syntax, and
+/// nothing here re-reads a name.
+///
+/// `spec` completes window applications, as in the expression lowering.
+pub fn lower_query(t: &Term) -> Result<crate::checked::CheckedQuery, Gap> {
+    lower_query_with(t, &|_| {
+        Err(Gap::new(
+            Origin::new(0, cagara_syntax::ast::Span::default()),
+            "a window specification has no lowering here",
+        ))
+    })
+}
+
+/// Lower a query term, completing window specs with `spec`.
+pub fn lower_query_with(
+    t: &Term,
+    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
+) -> Result<crate::checked::CheckedQuery, Gap> {
+    let Term::Primitive {
+        name,
+        args,
+        row,
+        origin,
+        ..
+    } = t
+    else {
+        return Err(Gap::new(
+            other_origin(t),
+            "a query term must be a stage application or a table",
+        ));
+    };
+    lower_query_primitive(
+        name,
+        args,
+        row.as_ref().map(|r| r.as_slice()),
+        *origin,
+        spec,
+    )
+}
+
+fn lower_query_primitive(
+    name: &str,
+    args: &[Term],
+    row: Option<&[(String, crate::core::ScalarType)]>,
+    origin: Origin,
+    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
+) -> Result<crate::checked::CheckedQuery, Gap> {
+    use crate::checked::CheckedQuery as Q;
+    let at = |e: crate::core::Error| Gap::new(origin, e.message);
+    // The piped input is the **last** argument of every stage, and a stage's own
+    // arguments are in front of it, in declaration order.
+    let split = |n: usize| -> Result<(&[Term], &Term), Gap> {
+        if args.len() != n + 1 {
+            return Err(Gap::new(
+                origin,
+                format!("`{name}` takes {n} argument(s) and a piped input"),
+            ));
+        }
+        Ok((&args[..n], &args[n]))
+    };
+    let lower_input = |t: &Term| lower_query_with(t, spec);
+    let expr = |t: &Term| lower_expr_with(t, spec);
+
+    match name {
+        // `table "s" "t"`: the only leaf, and the only place a row is needed
+        // that the arguments do not carry.
+        "__table" => {
+            let (s, n) = match args {
+                [s, n] => (string_of(s), string_of(n)),
+                _ => (None, None),
+            };
+            let (Some(schema), Some(table)) = (s, n) else {
+                return Err(Gap::new(origin, "`table` takes a schema and a name"));
+            };
+            let columns = row.map(|r| crate::core::RowType::new(r.to_vec()));
+            Q::table(schema, table, columns, origin).map_err(at)
+        }
+        "__where" => {
+            let ([pred], input) = split(1)? else {
+                unreachable!()
+            };
+            Q::where_(lower_input(input)?, expr(pred)?, origin).map_err(at)
+        }
+        "__select" => {
+            let ([fields], input) = split(1)? else {
+                unreachable!()
+            };
+            Q::select(lower_input(input)?, fields_of(fields, spec)?, origin).map_err(at)
+        }
+        "__update" => {
+            let ([fields], input) = split(1)? else {
+                unreachable!()
+            };
+            Q::update(lower_input(input)?, fields_of(fields, spec)?, origin).map_err(at)
+        }
+        "__agg" => {
+            let ([fields], input) = split(1)? else {
+                unreachable!()
+            };
+            Q::agg(lower_input(input)?, fields_of(fields, spec)?, origin).map_err(at)
+        }
+        "__order" => {
+            let ([keys], input) = split(1)? else {
+                unreachable!()
+            };
+            Q::order(lower_input(input)?, sort_keys(keys, spec)?, origin).map_err(at)
+        }
+        "__limit" => {
+            let ([n], input) = split(1)? else {
+                unreachable!()
+            };
+            Q::limit(lower_input(input)?, int_of(n, "limit", origin)?, origin).map_err(at)
+        }
+        "__offset" => {
+            let ([n], input) = split(1)? else {
+                unreachable!()
+            };
+            Q::offset(lower_input(input)?, int_of(n, "offset", origin)?, origin).map_err(at)
+        }
+        "__distinct" => {
+            let ([], input) = split(0)? else {
+                unreachable!()
+            };
+            Q::distinct(lower_input(input)?, origin).map_err(at)
+        }
+        "__omit" => {
+            let ([k], input) = split(1)? else {
+                unreachable!()
+            };
+            let Some(key) = string_of(k) else {
+                return Err(Gap::new(origin, "`omit` takes a column name"));
+            };
+            Q::omit(lower_input(input)?, key, origin).map_err(at)
+        }
+        "__prefix" | "__suffix" => {
+            let ([a], input) = split(1)? else {
+                unreachable!()
+            };
+            let Some(affix) = string_of(a) else {
+                return Err(Gap::new(origin, format!("`{name}` takes a string")));
+            };
+            let q = lower_input(input)?;
+            if name == "__prefix" {
+                Q::prefix(q, affix, origin).map_err(at)
+            } else {
+                Q::suffix(q, affix, origin).map_err(at)
+            }
+        }
+        _ => Err(Gap::new(
+            origin,
+            format!("the relational primitive `{name}` is not lowered yet"),
+        )),
+    }
+}
+
+/// The fields of a `select`/`update`/`agg` record term, in source order.
+fn fields_of(
+    t: &Term,
+    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
+) -> Result<Vec<(String, crate::checked::CheckedExpr)>, Gap> {
+    let Term::Record { fields, .. } = t else {
+        return Err(Gap::new(
+            other_origin(t),
+            "a projection's fields must be a record",
+        ));
+    };
+    fields
+        .iter()
+        .map(|(n, v)| Ok((n.clone(), lower_expr_with(v, spec)?)))
+        .collect()
+}
+
+/// The keys of an `order` list term, with each key's direction.
+///
+/// The direction is carried by the resolved `__asc`/`__desc` primitive rather
+/// than by re-reading the name out of source, which is what makes the two
+/// spellings of a sort agree.
+fn sort_keys(
+    t: &Term,
+    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
+) -> Result<Vec<(crate::checked::CheckedExpr, bool)>, Gap> {
+    let Term::List { items, .. } = t else {
+        return Err(Gap::new(other_origin(t), "`order` takes a list of keys"));
+    };
+    items
+        .iter()
+        .map(|item| match item {
+            Term::Primitive { name, args, .. } if &**name == "__asc" || &**name == "__desc" => {
+                let [key] = &args[..] else {
+                    return Err(Gap::new(
+                        other_origin(item),
+                        "a sort key takes one expression",
+                    ));
+                };
+                Ok((lower_expr_with(key, spec)?, &**name == "__asc"))
+            }
+            other => Ok((lower_expr_with(other, spec)?, true)),
+        })
+        .collect()
+}
+
+/// The text of a string literal term.
+fn string_of(t: &Term) -> Option<String> {
+    match t {
+        Term::Lit {
+            lit: crate::ir::Lit::Str(s),
+            ..
+        } => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// The value of a whole-number literal term.
+fn int_of(t: &Term, what: &str, origin: Origin) -> Result<i64, Gap> {
+    match t {
+        Term::Lit {
+            lit: crate::ir::Lit::Int(n),
+            ..
+        } => Ok(*n),
+        _ => Err(Gap::new(
+            origin,
+            format!("`{what}` takes a whole-number literal"),
+        )),
     }
 }

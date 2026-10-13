@@ -875,6 +875,12 @@ pub trait Facts {
     /// definition being elaborated, so asking about the callee returns nothing.
     /// `site` is the callee *name* node's `ExprId`, which is where a definition
     /// is instantiated.
+    ///
+    /// The default answers "nothing recorded", which is the truthful answer for
+    /// an adapter that has no checker to consult. An adapter that *has* one must
+    /// override it with [`resolved_assignment`], because a default that silently
+    /// answers "no assignment" makes every hole open and lets the fall-through
+    /// path stand in for the assignment.
     fn holes_at(&self, owner: (usize, usize), site: u32) -> Vec<(usize, usize)> {
         let _ = (owner, site);
         Vec::new()
@@ -894,6 +900,42 @@ pub trait Facts {
     /// carrying rather than a reason to fail, because the definition was
     /// already reported.
     fn use_ty(&self, module: usize, id: u32) -> crate::core::ScalarType;
+}
+
+/// The hole assignment a use site resolved, as `holes[k] = (callee_module,
+/// chosen_def)` — the canonical answer to [`Facts::holes_at`].
+///
+/// Shared by both adapters so the production path and the tests cannot answer
+/// this question differently. They did: `impl Facts for WorkspaceFacts` never
+/// overrode the method, so every test elaborated with *no* assignment on the
+/// stack, leaving the fall-through path — an enclosing assignment, or nothing —
+/// to stand in for the assignment the checker had actually resolved. Tests then
+/// covered a route production never takes.
+///
+/// **Kept in the checker's order, with open holes dropped**, which is what makes
+/// the *position* of an entry equal to its hole index — the read
+/// [`Normalizer::hole`] documents. Dropping an entry shifts every later
+/// position, so that equality holds only while no site mixes a resolved choice
+/// with an open one;
+/// `compile::tests::every_use_site_records_contiguous_choices` states that
+/// invariant, because nothing in the checker does.
+///
+/// An open hole is left out deliberately: it is answered by the *enclosing*
+/// assignment sitting on the normalizer's stack, not by this one.
+fn resolved_assignment(
+    tc: &crate::check::TypeCheck,
+    module: usize,
+    owner: usize,
+    site: u32,
+) -> Vec<(usize, usize)> {
+    tc.choices_of(module, owner)
+        .into_iter()
+        .filter(|(recorded, _, _)| *recorded == site)
+        .filter_map(|(_, hole, choice)| match choice {
+            Choice::Def(_, chosen) => Some((hole, chosen)),
+            Choice::Hole(_) => None,
+        })
+        .collect()
 }
 
 /// A `sql` template definition: its text and its declared phase kind.
@@ -1954,26 +1996,12 @@ impl<'a> InputFacts<'a> {
 impl Facts for InputFacts<'_> {
     /// The assignment resolved for the callee at this use site.
     ///
-    /// **Kept in the checker's order, with open holes dropped**, which is what
-    /// makes the *position* of an entry equal to its hole index — the read
-    /// [`Normalizer::hole`] documents. Dropping an entry shifts every later
-    /// position, so that equality holds only while no site mixes a resolved
-    /// choice with an open one. `compile::tests::every_use_site_records_contiguous_choices`
-    /// states that invariant, because nothing in the checker does.
-    ///
-    /// An open hole is deliberately left out: it is answered by the *enclosing*
-    /// assignment sitting on the normalizer's stack, not by this one.
+    /// Overridden rather than left to the trait's default, for the reason
+    /// [`resolved_assignment`] gives: an adapter with a checker in hand that
+    /// answers "nothing recorded" makes every hole open and tests a route
+    /// production never takes.
     fn holes_at(&self, (module, owner): (usize, usize), site: u32) -> Vec<(usize, usize)> {
-        self.input
-            .type_check()
-            .choices_of(module, owner)
-            .into_iter()
-            .filter(|(recorded, _, _)| *recorded == site)
-            .filter_map(|(_, hole, choice)| match choice {
-                Choice::Def(_, chosen) => Some((hole, chosen)),
-                Choice::Hole(_) => None,
-            })
-            .collect()
+        resolved_assignment(self.input.type_check(), module, owner, site)
     }
 
     fn local_binding(&self, name: &str) -> Option<crate::checked::CheckedExpr> {
@@ -2037,6 +2065,15 @@ impl Facts for InputFacts<'_> {
 impl Facts for WorkspaceFacts<'_> {
     fn resolution(&self, module: usize, id: u32) -> Option<Resolved> {
         self.tc.resolution(module, id).cloned()
+    }
+
+    /// The same answer the compiler's adapter gives, from the same function.
+    ///
+    /// This used to fall back to the trait's default — no assignment, every hole
+    /// open — which made the test adapter and the production adapter disagree
+    /// about a question the walk depends on.
+    fn holes_at(&self, (module, owner): (usize, usize), site: u32) -> Vec<(usize, usize)> {
+        resolved_assignment(self.tc, module, owner, site)
     }
 
     fn def_body(&self, module: usize, def: usize) -> Option<Body> {

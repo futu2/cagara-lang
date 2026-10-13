@@ -870,6 +870,62 @@ fn every_use_site_records_contiguous_choices() {
     );
 }
 
+/// Both `Facts` adapters answer the hole-assignment question identically.
+///
+/// The workspace adapter (used by tests) did not override `holes_at`, so it fell
+/// back to the trait's default — no assignment, every hole open — while the
+/// compiler's adapter read the checker's choices. The walk then differed between
+/// the two on `h .age`: production found the assignment, tests did not and let
+/// the fall-through stand in for it. Both happened to produce the same term here,
+/// which is exactly why nothing caught it.
+///
+/// This asserts the two agree rather than that either is "right", so it fails if
+/// either one drifts. It is the cheap half of merging the adapters; the other
+/// half is that they now share `resolved_assignment`.
+#[test]
+fn both_facts_adapters_resolve_the_same_assignment() {
+    use crate::compile::CompilerInput;
+    use crate::normalize::{Facts, InputFacts, WorkspaceFacts};
+    use cagara_syntax::ast::ExprKind;
+
+    let ws = Workspace::from_source(
+        "users : query { id = int, name = string, age = int, active = bool } = \
+         table \"public\" \"users\"\n\
+         h = e => users & select { x = e + 1, id = .id }\n\
+         ok = h .age\n",
+    );
+    let tc = crate::check::check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    let ok = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .position(|d| d.name == "ok")
+        .expect("`ok`");
+    let ExprKind::App(head, _) = &ws.modules[ws.root].module.defs[ok].body.kind else {
+        panic!("`ok`'s body should be an application");
+    };
+    let site = head.id;
+
+    let workspace_facts = WorkspaceFacts::new(&ws, &tc);
+    let input = CompilerInput::new(&ws, &tc);
+    let input_facts = InputFacts::new(input);
+
+    // The assignment is not empty — otherwise "both agree" would hold trivially
+    // on a pair of empty vectors, which is the shape of the bug being guarded.
+    let from_workspace = workspace_facts.holes_at((ws.root, ok), site);
+    assert!(
+        !from_workspace.is_empty(),
+        "`ok` resolved `h`'s open overload, so its assignment must not be empty"
+    );
+    assert_eq!(
+        from_workspace,
+        input_facts.holes_at((ws.root, ok), site),
+        "the test adapter and the compiler adapter disagree about the \
+         assignment at site {site}"
+    );
+}
+
 /// The construct that blocked this migration for six attempts, now migrated.
 ///
 /// Kept as a regression test because it is the one case the corpus does not

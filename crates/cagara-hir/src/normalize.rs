@@ -1016,6 +1016,17 @@ pub struct Body {
 pub struct Gap {
     pub origin: Origin,
     pub message: String,
+    /// Whether the *program* is wrong rather than this phase being unable to
+    /// build it.
+    ///
+    /// The distinction is the one `Fault` draws for the checked layer, and it
+    /// matters at the same boundary: a `Gap` means "normalization has no rule
+    /// for this", which sends a caller down its fallback route, while a rule the
+    /// program *broke* — `limit` given something that is not a count — is the
+    /// program's to fix and must be reported rather than routed around. Most
+    /// gaps are capability gaps, so that is the default and the program-error
+    /// case opts in.
+    pub fault: crate::core::Fault,
 }
 
 impl Gap {
@@ -1023,6 +1034,17 @@ impl Gap {
         Self {
             origin,
             message: message.into(),
+            fault: crate::core::Fault::Compiler,
+        }
+    }
+
+    /// A gap the **program** caused: a rule it broke, not a rule that is
+    /// missing. Reported to the user rather than falling back.
+    pub fn program(origin: Origin, message: impl Into<String>) -> Self {
+        Self {
+            origin,
+            message: message.into(),
+            fault: crate::core::Fault::Program,
         }
     }
 }
@@ -1501,6 +1523,43 @@ fn inline_resolved(
             format!("the checker recorded no resolution for `{display}`"),
         )),
     }
+}
+
+/// Normalize and lower a whole **query** definition through the term layer.
+///
+/// The relational counterpart of [`elaborate_with_holes`]: a definition whose
+/// declared scheme is a query is normalized to a term and lowered, instead of
+/// being re-walked from source. Normalization resolves names, inlines
+/// definitions and reduces applications — a stage's included — so the lowering
+/// sees a saturated tree and has nothing left to look up.
+///
+/// `Err` with `Fault::Compiler` means the term layer could not build the
+/// definition, which is the caller's cue to record the fallback.
+pub fn elaborate_query_via_terms(
+    input: crate::compile::CompilerInput<'_>,
+    module: usize,
+    owner: usize,
+    e: &cagara_syntax::ast::Expr,
+) -> Result<crate::checked::CheckedQuery, crate::core::Error> {
+    let facts = InputFacts::new(input);
+    let body = Body {
+        module,
+        def: owner,
+        expr: e.clone(),
+    };
+    let resolve = |module: usize, id: u32| facts.resolution(module, id);
+    let mut cx = Normalizer::new(Box::new(resolve));
+    let to_error = |g: Gap| {
+        let e = match g.fault {
+            crate::core::Fault::Compiler => crate::core::Error::unsupported(g.message),
+            _ => crate::core::Error::new(g.message),
+        };
+        e.at(g.origin)
+    };
+    let term = cx
+        .in_module(module, |cx| expression(&facts, cx, &body))
+        .map_err(to_error)?;
+    lower_query(&term).map_err(to_error)
 }
 
 /// Normalize and lower, with the environment **and** the definition's hole
@@ -2953,7 +3012,18 @@ fn lower_query_primitive(
     spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
 ) -> Result<crate::checked::CheckedQuery, Gap> {
     use crate::checked::CheckedQuery as Q;
-    let at = |e: crate::core::Error| Gap::new(origin, e.message);
+    // A constructor's rejection is carried through **with its fault**, not
+    // flattened to a capability gap. Every rule the checked layer states —
+    // a column that is not there, a predicate that is not bool, inputs with
+    // different columns — is the *program's* to fix, and reporting it as "this
+    // phase cannot build that" would send the caller down its fallback route
+    // instead of telling the user. The wording is unchanged either way; the
+    // classification is what decides who hears it.
+    let at = |e: crate::core::Error| {
+        let mut gap = Gap::new(origin, e.message);
+        gap.fault = e.fault;
+        gap
+    };
     // The piped input is the **last** argument of every stage, and a stage's own
     // arguments are in front of it, in declaration order.
     let split = |n: usize| -> Result<(&[Term], &Term), Gap> {
@@ -3176,15 +3246,21 @@ fn string_of(t: &Term) -> Option<String> {
 }
 
 /// The value of a whole-number literal term.
+/// The count a `limit`/`offset` stage was given, as a literal.
+///
+/// A **program** rule rather than a gap, and the distinction is load-bearing: a
+/// gap tells the caller "this phase cannot build that", which sends the
+/// definition down the fallback route and lets the source path report the
+/// mistake. The mistake is the program's, and it reads the same either way, so
+/// it is reported here. The wording matches `elaborate::int_literal`, which is
+/// the only other place that states this rule; a negative count is caught by the
+/// checked constructor instead, so it is not restated.
 fn int_of(t: &Term, what: &str, origin: Origin) -> Result<i64, Gap> {
     match t {
         Term::Lit {
             lit: crate::ir::Lit::Int(n),
             ..
         } => Ok(*n),
-        _ => Err(Gap::new(
-            origin,
-            format!("`{what}` takes a whole-number literal"),
-        )),
+        _ => Err(Gap::program(origin, format!("`{what}` expects an int"))),
     }
 }

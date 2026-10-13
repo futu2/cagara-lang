@@ -64,17 +64,6 @@ fn note_discarded_gap(reason: &str, e: &Error) {
 }
 
 #[cfg(test)]
-thread_local! {
-    /// How many expressions took the normalized route.
-    static TERM_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn term_hits() -> usize {
-    TERM_HITS.with(|c| c.get())
-}
-
-#[cfg(test)]
 pub(crate) fn elaborate_runs() -> usize {
     ELABORATE_RUNS.with(|runs| runs.get())
 }
@@ -237,6 +226,21 @@ fn elaborate_def(
     // overloads: those are chosen per use, and a definition with holes is
     // skipped by `elaborate_module` anyway. See `Ctx::holes`.
     let holes: [(usize, usize); 0] = [];
+    // The normalized route for a whole query, tried before the source walk.
+    //
+    // Normalization resolves every name, inlines every definition and reduces
+    // every application — including a stage's — so by the time `lower_query`
+    // sees a term there is no syntax left to re-read and no chain to follow.
+    // The source walk below it exists for the shapes this does not yet cover;
+    // `note_discarded_gap` records which, so the fallback cannot go unnoticed
+    // the way it did for expressions.
+    match crate::normalize::elaborate_query_via_terms(input, module, def, &d.body) {
+        Ok(q) => return Ok(q),
+        Err(e) if !e.is_unsupported() => return Err(e),
+        Err(e) => {
+            note_discarded_gap("a definition's query was built by the source walk", &e);
+        }
+    }
     let cx = Ctx {
         input,
         module,
@@ -1451,11 +1455,7 @@ fn elaborate_expr_inner(cx: Ctx<'_>, e: &ast::Expr) -> R<CheckedExpr> {
     match crate::normalize::elaborate_with_holes(
         cx.input, cx.module, cx.owner, e, &env, &holes, &spec,
     ) {
-        Ok(lowered) => {
-            #[cfg(test)]
-            TERM_HITS.with(|c| c.set(c.get() + 1));
-            Ok(lowered)
-        }
+        Ok(lowered) => Ok(lowered),
         // No fallback: the source path this could revert to is gone, so a `Gap`
         // here means a construct was added to the language without a term rule.
         // It is reported rather than handled by a second implementation of the

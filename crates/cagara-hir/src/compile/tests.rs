@@ -631,31 +631,82 @@ fn equivalent_spellings_all_compile() {
     }
 }
 
-/// The normalized route is actually **taken**, not silently bypassed.
+/// Every query a definition declares is built by the **term** route.
 ///
-/// There is no second path to bypass it with any more, so what this guards is
-/// the weaker but still real fact that elaboration goes through the term bridge
-/// at all. Everything else here would pass if these expressions were served some
-/// other way — from a cache, or by a constructor that skipped the bridge — and
-/// the gap gate would then report zero gaps for the wrong reason.
+/// This is the gate the expression half never had — the one that was deleted
+/// with the source path it measured, and which the review of this refactor found
+/// cited by a comment that no longer pointed at anything. It can be a real gate
+/// now because the fallback is still there to observe: the route reports a
+/// discarded capability gap when it declines a definition, so a definition that
+/// reached the source walk would show up as a non-zero count rather than as a
+/// silent success.
+///
+/// The programs are the shapes that exercise the whole vocabulary: stages, a
+/// join, a set operation, an aggregate, a window, a named stage, a composed
+/// stage, an inline lambda, a `case`, and a pipeline.
 #[test]
-fn elaboration_uses_the_normalized_route() {
-    let ws = Workspace::from_source(
-        "users : query { id = int, name = string } = table \"public\" \"users\"\n\
-         q = users & select { x = upper .name, y = .id + 1 }\n",
-    );
-    let tc = crate::check::check(&ws);
-    let before = crate::elaborate::term_hits();
-    let compiled = compile_checked(&ws, &tc);
-    assert!(
-        compiled.queries.iter().any(|q| q.result.is_ok()),
-        "the test program should compile: {:?}",
-        compiled.diagnostics
-    );
-    assert!(
-        crate::elaborate::term_hits() > before,
-        "no expression took the normalized route; elaboration never reached the term bridge"
-    );
+fn every_query_is_built_by_the_term_route() {
+    const PROGRAMS: &[(&str, &str)] = &[
+        ("a filter", "q = users & where (.age > 1)\n"),
+        ("a projection", "q = users & select { .name }\n"),
+        (
+            "a join",
+            "q = users & innerJoin orders (.<id == .>user_id)\n",
+        ),
+        ("a set operation", "q = users & union admins\n"),
+        (
+            "an aggregate",
+            "q = users & agg { a = group .age, n = count }\n",
+        ),
+        (
+            "a window",
+            "q = users & select { r = rowNumber {order = [asc .id]} }\n",
+        ),
+        ("a named stage", "s = select { .id }\nq = users & s\n"),
+        (
+            "a composed stage",
+            "s = where (.age > 1) >>> select { .id }\nq = users & s\n",
+        ),
+        (
+            "an inline lambda stage",
+            "q = users & (x => where (.age > 1) x)\n",
+        ),
+        (
+            "a case",
+            "q = users & select { x = case { .age > 1 => \"a\"; true => \"b\" } }\n",
+        ),
+        (
+            "a pipeline",
+            "q = users & where (.age > 1) & select { .id } & order [asc .id] & limit 2\n",
+        ),
+    ];
+    const TABLES: &str = "users : query { id = int, name = string, age = int } = \
+                          table \"public\" \"users\"\n\
+                          orders : query { id = int, user_id = int, amount = float } = \
+                          table \"public\" \"orders\"\n\
+                          admins : query { id = int, name = string, age = int } = \
+                          table \"public\" \"admins\"\n";
+
+    for (label, body) in PROGRAMS {
+        crate::normalize::reset_discarded_gaps();
+        // A fresh workspace per case, so nothing is served from a cache built by
+        // an earlier one — a cache hit would elaborate nothing and the counter
+        // would read zero for the wrong reason.
+        let ws = Workspace::from_source(&format!("{TABLES}{body}"));
+        let tc = crate::check::check(&ws);
+        assert!(tc.errors().is_empty(), "{label}: {:?}", tc.errors());
+        let compiled = compile_checked(&ws, &tc);
+        assert!(
+            compiled.queries.iter().any(|q| q.result.is_ok()),
+            "{label} produced no query: {:?}",
+            compiled.diagnostics
+        );
+        let discarded = crate::normalize::discarded_gaps();
+        assert!(
+            discarded.is_empty(),
+            "{label} was built by the source walk; the term route declined it: {discarded:?}"
+        );
+    }
 }
 
 /// The normalized route must handle **everything**, not just the examples.
@@ -926,33 +977,22 @@ fn both_facts_adapters_resolve_the_same_assignment() {
     );
 }
 
-/// Query-path fallbacks discard capability gaps, and they are of exactly one
-/// class: the relational primitives reporting that they are reached through the
-/// stage operators instead.
+/// The query path discards **no** capability gaps: the fallback is dead.
 ///
-/// The query path tries several readings of one expression and keeps the first
-/// that works. A reading that fails because the *program* is wrong is the normal
-/// way a fallback runs and is correctly silent. A reading that fails with
-/// `Fault::Compiler` says this phase cannot build the construct, and the
-/// fallback then hides that behind whichever reading worked. Those were
-/// invisible: the term bridge's zero-gap gate cannot see them, because the
-/// bridge is never the thing that failed.
+/// This started as the opposite claim. While the source walk still built
+/// queries, four places tried a reading and threw the failure away, and the
+/// sieve recorded which — one known class, the relational primitives declining
+/// to be reached directly, which is the dispatch working as designed. Now that
+/// `elaborate_query_via_terms` builds every query, nothing is discarded at all,
+/// so the assertion inverts: any entry means a definition reached the source
+/// walk, which is the thing this migration set out to remove.
 ///
-/// Measured across the shipped examples, the prelude and a program using stages,
-/// joins and set operations, every one is the same class:
-///
-///     the primitive `__select` is not elaborated here; relational primitives
-///     are reached through the stage operators
-///
-/// That is the dispatch working as designed — `where p q` must be read as a
-/// stage application, so the primitive path is tried and *refuses*, by design,
-/// with wording that says so. So this is not a defect list; it is the boundary
-/// of the earlier claim, made checkable. If a discarded gap ever appears that is
-/// not this class, this fails and names it, instead of the invisibility being
-/// total.
+/// The sieve is a *separate* count from the term bridge's, deliberately: the
+/// bridge's zero means "no expression needed a rule that is missing", while this
+/// one answers "did anything fall back". Merging them would have made the first
+/// claim unreadable.
 #[test]
-fn discarded_query_path_gaps_are_only_the_dispatched_primitives() {
-    const PRIMITIVE_REFUSAL: &str = "relational primitives are reached through the stage operators";
+fn the_query_path_discards_nothing() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     crate::normalize::reset_discarded_gaps();
     let mut programs = 0usize;
@@ -984,38 +1024,17 @@ fn discarded_query_path_gaps_are_only_the_dispatched_primitives() {
         let _ = crate::compile::compile_input(crate::compile::CompilerInput::new(&ws, &tc));
         programs += 1;
     }
+    assert!(programs > 0, "no programs were compiled");
 
     let gaps = crate::normalize::discarded_gaps();
     let total: usize = gaps.iter().map(|(_, n)| n).sum();
     for (reason, n) in &gaps {
         eprintln!("discarded gap {n:4}  {reason}");
     }
-    // The gate must be able to observe a discard at all, or "only the known
-    // class" would hold for the wrong reason — because none was recorded.
-    assert!(
-        total > 0,
-        "no discarded capability gaps were recorded across {programs} programs; \
-         the sieve is not wired to the fallbacks any more"
-    );
-    let unexpected: Vec<&(String, usize)> = gaps
-        .iter()
-        .filter(|(reason, _)| {
-            // A reason is one of the four call sites' descriptions; the class is
-            // decided by the *message* of the gap it discarded, which the sieve
-            // does not carry. What identifies the class here is therefore the
-            // site plus the fact that every discard today comes from the
-            // stage-dispatch site. Asserting the site keeps this honest without
-            // pretending to know more than was recorded.
-            !reason.contains("a stage's trailing argument was not readable")
-                && !reason.contains("a bound stage's argument was not readable")
-        })
-        .collect();
-    assert!(
-        unexpected.is_empty(),
-        "discarded capability gaps now come from a fallback that is not the \
-         stage dispatch, which is new information rather than a known class: \
-         {unexpected:?}\n\nall reasons: {gaps:?}\n\nKnown class: {}",
-        PRIMITIVE_REFUSAL
+    assert_eq!(
+        total, 0,
+        "the source walk built {total} definition(s) across {programs} programs; \
+         the term route declined them: {gaps:?}"
     );
 }
 

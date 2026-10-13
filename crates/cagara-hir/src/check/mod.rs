@@ -332,6 +332,30 @@ impl TypeCheck {
         Some(scheme_view(&s.ty))
     }
 
+    /// The shape of the type the checker recorded for one **expression**.
+    ///
+    /// [`TypeCheck::use_ty`] answers "what scalar is this node", and by
+    /// construction answers `None` for a query, a function, or a row — it
+    /// filters those out. But the checker records the *whole* type for every use
+    /// (`infer.rs` inserts `self.resolve(&t)` per `ExprId`, and `uses` carries
+    /// the same value), so `table "s" "t"` is recorded as
+    /// `query { id = int, name = string }` and `select { .name }` as
+    /// `query { name = string }`. That row is exactly what a lowering of the
+    /// relational primitives needs, and it is a fact about the node rather than
+    /// something to be recovered by re-walking source or re-reading a
+    /// definition's signature.
+    ///
+    /// This is the accessor for a consumer that needs *structure* rather than a
+    /// scalar: a phase building a typed tree walks the AST and asks "what did
+    /// this node get", and for a query-valued node the answer includes its row.
+    ///
+    /// `None` when the checker recorded nothing for that id — the node is not
+    /// one it typed, or checking did not reach it.
+    pub fn use_scheme(&self, module: usize, id: u32) -> Option<SchemeView> {
+        let t = self.modules.get(module)?.use_tys.get(&(module, id))?;
+        Some(scheme_view(t))
+    }
+
     /// A definition's scalar type, as closed data.
     ///
     /// `None` for a scheme that is not a scalar — a function, a row, or a

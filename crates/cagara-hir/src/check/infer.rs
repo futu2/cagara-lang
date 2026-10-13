@@ -62,7 +62,16 @@ impl<'w> Checker<'w> {
             // did *this* node get?". The span map above cannot answer that — it
             // is keyed by location, and the type has already been flattened to a
             // string by then.
-            self.use_tys.insert((m, id), self.resolve(&t));
+            //
+            // **Deeply** resolved, not just at the top. `resolve` chases a
+            // variable chain and stops, so `query r` came back with `r` still a
+            // variable while the printed map showed `query { id = int }` — the
+            // row was recorded and then unreachable, which is how a `table`'s
+            // columns became something a consumer had to recover from the
+            // definition's signature instead of reading off the node. `zonk`
+            // resolves inside constructors, rows, and function arrows, so what
+            // is stored here is the type the node actually got.
+            self.use_tys.insert((m, id), self.zonk(&t));
         }
         // Whatever the definition learned about the probe's row, even if it
         // failed later on. Only the definition that actually referenced the

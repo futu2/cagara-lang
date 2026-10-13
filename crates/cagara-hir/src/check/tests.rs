@@ -2023,6 +2023,112 @@ mod bidirectional {
     }
 }
 
+/// Every expression node is typed **completely**, rows included.
+///
+/// `use_ty` answers "what scalar is this node", which by construction answers
+/// `None` for a query: it filters to `Scalar`/`Open` and drops everything else.
+/// The checker does record the whole type per `ExprId`, but it stored
+/// `self.resolve(&t)` — a *shallow* resolve that chases a top-level variable and
+/// stops. `query r` therefore came back with `r` still a variable, so the row
+/// was recorded and unreachable at the same time: `use_types` printed
+/// `query { id = int }` while the structured read said `None`.
+///
+/// That is what forced a consumer to recover a `table`'s columns from the
+/// *declaring definition's* signature — a second reading of a fact the node
+/// already carried. This asserts the node answers for itself, on the shapes
+/// where the old shallow resolve gave nothing: a table, a stage applied to one,
+/// a projection that changes the row, and a join whose row is the merge of two.
+#[test]
+fn every_node_records_its_whole_type() {
+    let ws = Workspace::from_source(
+        "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+         orders : query { id = int, uid = int } = table \"s\" \"orders\"\n\
+         q = users & where (.id > 1) & select { .name }\n\
+         r = users & innerJoin orders (.<id == .>uid)\n",
+    );
+    let tc = check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+
+    // The row each node denotes, found by its source text so the assertion names
+    // the construct rather than an opaque id.
+    let text = &ws.modules[ws.root].text;
+    let fields_of = |needle: &str| -> Option<Vec<(String, crate::core::ScalarType)>> {
+        tc.use_ids(ws.root).into_iter().find_map(|id| {
+            let span = ws.modules[ws.root]
+                .module
+                .defs
+                .iter()
+                .flat_map(|d| all_exprs(&d.body))
+                .find(|e| {
+                    e.id == id
+                        && text
+                            .get(e.span.start as usize..e.span.end as usize)
+                            .is_some_and(|s| s == needle)
+                })
+                .map(|e| e.span)?;
+            let _ = span;
+            match tc.use_scheme(ws.root, id)? {
+                crate::check::SchemeView::Query { fields } => fields,
+                _ => None,
+            }
+        })
+    };
+
+    let names = |fs: &[(String, crate::core::ScalarType)]| {
+        fs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()
+    };
+
+    for (src, want) in [
+        ("table \"s\" \"users\"", vec!["id", "name"]),
+        ("table \"s\" \"orders\"", vec!["id", "uid"]),
+        ("users & where (.id > 1)", vec!["id", "name"]),
+        ("users & where (.id > 1) & select { .name }", vec!["name"]),
+        (
+            "users & innerJoin orders (.<id == .>uid)",
+            vec!["id", "name", "uid"],
+        ),
+    ] {
+        let got = fields_of(src).unwrap_or_else(|| {
+            panic!("`{src}` recorded no query row; a node that carries a row must expose it")
+        });
+        assert_eq!(names(&got), want, "`{src}` recorded the wrong row: {got:?}");
+    }
+}
+
+/// Every expression in a body, for a test locating a node by its source text.
+fn all_exprs(e: &cagara_syntax::ast::Expr) -> Vec<&cagara_syntax::ast::Expr> {
+    use cagara_syntax::ast::ExprKind as K;
+    let mut out = vec![e];
+    match &e.kind {
+        K::App(f, args) => {
+            out.extend(all_exprs(f));
+            for a in args {
+                out.extend(all_exprs(a));
+            }
+        }
+        K::Record(fs) => {
+            for (_, v) in fs {
+                out.extend(all_exprs(v));
+            }
+        }
+        K::Lambda(_, b) => out.extend(all_exprs(b)),
+        K::List(xs) => {
+            for x in xs {
+                out.extend(all_exprs(x));
+            }
+        }
+        K::Case(arms) => {
+            for (c, v) in arms {
+                out.extend(all_exprs(c));
+                out.extend(all_exprs(v));
+            }
+        }
+        K::Proj(b, _) => out.extend(all_exprs(b)),
+        _ => {}
+    }
+    out
+}
+
 /// The checker records **what each name resolved to**, not only its type.
 ///
 /// This is the fact normalization needs and could not previously get: `use_ty`

@@ -160,6 +160,19 @@ Every common stage has a one-token shorthand at the same precedence as `&`:
 | `&*` | `agg` |
 | `&.` | `order` |
 | `&-` | `limit` |
+| `&\|` | `union` |
+| `&!` | `unionAll` |
+| `&^` | `intersect` |
+| `&~` | `except` |
+
+This table is the whole set: there is no shorthand for `offset`, `distinct`,
+`omit`, `prefix` or `suffix`. The symbols are **mnemonic rather than initial** —
+`?` for a filter, `=` for replacing the row, `*` for grouping, and the four set
+operations taking the arithmetic-looking `|`, `!`, `^`, `~` — so a symbol cannot
+be inferred from the stage's name and this table is the only place they are all
+listed. That matters because an incomplete table is how a wrong entry hides:
+`&^` was documented as `offset` for several releases, and a reader copying it got
+a type error.
 
 These are equivalent pairs:
 
@@ -198,15 +211,21 @@ A shorthand is not built into the compiler. It is two lines in
 `prelude.cagara` — one to *declare* the symbol, one to *define* what it means:
 
 ```haskell
-infixl 1 &^                  # declare: same level as `&`, so a stage
-_&^_ = q => n => offset n q    # define: `q &^ n` is `offset n q`
+infixl 1 &=                  # declare: same level as `&`, so a stage
+_&=_ = q => fields => select fields q   # define: `q &= f` is `select f q`
 ```
 
 The parser reads the declarations to find out what an operator's precedence
-is, and the desugared call `_&^_ q n` is an ordinary prelude definition like
-any other. So adding a shorthand to the language is those two lines and
+is, and the desugared call `_&=_ q fields` is an ordinary prelude definition
+like any other. So adding a shorthand to the language is those two lines and
 nothing else: the formatter, the error messages and the editor grammars all
 follow from the declaration.
+
+The shorthand list is not arbitrary: `&` is the pipe, and a symbol after it
+names the stage it stands for. `&^` in particular means **intersect**, not
+`offset` — the set operations take the symbols `&|`, `&!`, `&^` and `&~`, and
+`offset` has no shorthand. Passing a number to `&^` is a type error, because it
+combines two queries.
 
 There is no special form for a stage. `&`, `&+` and `+` are the same kind of
 thing — an infix operator with a precedence and an associativity — and one
@@ -232,8 +251,12 @@ be declared, so a typo is a compile error pointing at the operator rather than
 a silently different parse:
 
 ```haskell
-bad = users &~ 5   # unknown operator `&~`; declare it in `prelude.cagara`
+bad = users &>> 5   # unknown operator `&>>`; declare it in `prelude.cagara`
 ```
+
+`&>>` is deliberately not declared. The example used to use `&~`, which *is* —
+it is `except` — so the snippet demonstrated a type error while claiming to show
+an unknown operator.
 
 Declarations are read from the prelude only, and may not appear in your own
 files: an operator's precedence is a property of the language, not of one

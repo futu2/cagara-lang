@@ -921,6 +921,85 @@ fn every_use_site_records_contiguous_choices() {
     );
 }
 
+/// Every use site carries **one** overload hole, so `Facts::choice` never has to
+/// choose between entries.
+///
+/// `choice_at` returns `None` when a site has several entries, deliberately:
+/// without the hole index there is no way to tell which one the caller meant, so
+/// reporting the use as unresolved keeps a coin-flip from being recorded as a
+/// decision. This measures whether that branch is reachable — it is not, in any
+/// program available here, because the checker keys choices by `(ExprId, hole)`
+/// and each overloaded *application* is its own `ExprId`.
+///
+/// The assertion is therefore the *documentation* of a defensive branch: if a
+/// program is ever found where one site really does carry two holes, this fails
+/// and names it, and the fix is to thread the hole index through the trait
+/// rather than to loosen the check.
+///
+/// The corpus is the same one the contiguity test uses, plus the shapes that
+/// were expected to produce several holes and did not: nested sums, a definition
+/// applied to two overloaded arguments, and a record of two sums.
+#[test]
+fn every_use_site_carries_one_hole() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut workspaces = vec![("the prelude".to_string(), Workspace::from_source("q = 1\n"))];
+    for entry in [
+        "examples/report.cagara",
+        "examples/public.cagara",
+        "examples/schema.cagara",
+        "examples/errors.cagara",
+    ] {
+        if let Ok(text) = std::fs::read_to_string(root.join(entry)) {
+            workspaces.push((entry.to_string(), Workspace::from_source(&text)));
+        }
+    }
+    for (label, src) in [
+        ("nested sums", "q = 1 + 2 + 3 + 4\n"),
+        (
+            "a definition applied to two overloaded arguments",
+            "f : expr r int -> expr r int -> expr r int = a => b => a + b\nq = f (1 + 2) (3 + 4)\n",
+        ),
+        ("a record of two sums", "q = { a = 1 + 2, b = 3 + 4 }\n"),
+        (
+            "two overloaded columns compared",
+            "q = (1 + 2) == (3 + 4)\n",
+        ),
+    ] {
+        workspaces.push((label.to_string(), Workspace::from_source(src)));
+    }
+
+    let mut sites = 0usize;
+    for (label, ws) in &workspaces {
+        let tc = crate::check::check(ws);
+        for m in 0..ws.modules.len() {
+            for d in 0..ws.modules[m].module.defs.len() {
+                let mut by_site: std::collections::BTreeMap<u32, Vec<usize>> =
+                    std::collections::BTreeMap::new();
+                for (site, hole, _) in tc.choices_of(m, d) {
+                    by_site.entry(site).or_default().push(hole);
+                }
+                for (site, holes) in by_site {
+                    sites += 1;
+                    assert_eq!(
+                        holes.len(),
+                        1,
+                        "{label}: definition {d} of module {m} records {holes:?} at \
+                         site {site}. `Facts::choice` returns `None` for such a \
+                         site, so this use resolves as an unknown overload; thread \
+                         the hole index through `Facts::choice` rather than \
+                         loosening that check"
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        sites > 0,
+        "no use site with a recorded choice was found; the scan is not looking \
+         where it thinks it is"
+    );
+}
+
 /// Both `Facts` adapters answer the hole-assignment question identically.
 ///
 /// The workspace adapter (used by tests) did not override `holes_at`, so it fell

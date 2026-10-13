@@ -18,13 +18,20 @@
 //! * a polymorphic definition was re-elaborated once per hole assignment,
 //!   because substitution baked the choice in at expansion time.
 //!
-//! The source path for **scalar expressions** is gone, and with it
-//! `apply_to_computed_head` and the parallel window, frame and order helpers it
-//! had grown. Two of the workarounds above are still live on the *query* path,
-//! which still walks source: `follow_alias` follows an alias used as a value,
-//! and `elaborate_callable` still classifies a callee by shape. They stay in
-//! this list because the list is a record rather than a wish; a version that
-//! called them gone would be wrong in the direction that costs a reader most.
+//! **All four are gone.** This list is kept as the record of what the
+//! normalization pass paid for, not as a description of the code: the source
+//! path for scalar expressions went first, and the query path followed it, so
+//! `follow_alias`, `elaborate_callable`, `apply_to_computed_head` and the
+//! parallel window, frame and order helpers they had grown no longer exist.
+//! `elaborate.rs` is 275 lines where it was 2329, and nothing in this file
+//! classifies a callee, follows an alias, or re-walks a body.
+//!
+//! The exception that outlived all of it is the **window specification**. A
+//! window's `sql` and arguments arrive as a term like any other, but its
+//! `partition`/`order`/`frame` record is handed to [`lower_winspec`] rather than
+//! walked inline — a hook, not a second reading, and the reason the query
+//! lowering had to be given one. It is named here because it is the last place
+//! where a term's *structure* is dispatched on rather than its rule applied.
 //!
 //! # What normalization is
 //!
@@ -54,12 +61,12 @@
 //! `the_normalized_route_handles_every_construct`, which counts the gaps over
 //! every program shape the suite exercises and asserts the count is zero.
 //!
-//! It covers **expressions**, not yet relational construction. A definition whose
-//! body is a query — the stages, joins and set operations themselves — is still
-//! elaborated by walking source in [`crate::elaborate`], which is where
-//! `follow_alias` and `elaborate_callable` are still needed; that is the
-//! remaining half of the migration. The gap counter is wired into the term
-//! bridge, so that gate's zero is a statement about this layer.
+//! It covers expressions **and** relational construction. The comment here used
+//! to say the query half was still elaborated by walking source, with
+//! `follow_alias` and `elaborate_callable` needed for it; both are gone, and
+//! [`crate::elaborate`]'s only job now is to decide whether a definition is a
+//! query and hand it to this module. The gate's zero is therefore a statement
+//! about the whole language rather than about one layer of it.
 //!
 //! # Why the normal form is data, not syntax
 //!
@@ -715,8 +722,6 @@ pub type Resolver<'a> = dyn Fn(usize, u32) -> Option<Resolved> + 'a;
 /// binding must win.
 pub struct Normalizer<'a> {
     resolver: Box<Resolver<'a>>,
-    /// The definition currently being normalized, for `Term::Lambda::source`.
-    owner: Option<DefId>,
     /// Bodys already normalized, so a diamond-shaped dependency is reduced once.
     cache: HashMap<DefId, Arc<Term>>,
     /// Bindings introduced by enclosing lambdas, innermost last.
@@ -741,7 +746,6 @@ impl<'a> Normalizer<'a> {
     pub fn new(resolver: Box<Resolver<'a>>) -> Self {
         Self {
             resolver,
-            owner: None,
             cache: HashMap::new(),
             binders: Vec::new(),
             current_module: 0,
@@ -853,9 +857,7 @@ impl<'a> Normalizer<'a> {
         if let Some(cached) = self.cache.get(&id) {
             return Arc::clone(cached);
         }
-        let previous = self.owner.replace(id);
         let term = build(self);
-        self.owner = previous;
         let shared = Arc::new(term);
         self.cache.insert(id, Arc::clone(&shared));
         shared
@@ -952,6 +954,43 @@ pub trait Facts {
 }
 
 /// The hole assignment a use site resolved, as `holes[k] = (callee_module,
+/// The overload choice the checker recorded at one use site.
+///
+/// Shared by both [`Facts`] adapters, which had this logic twice — the same
+/// duplication [`resolved_assignment`] was extracted to remove, and for the same
+/// reason: two copies of a rule are two chances to disagree, and the adapters
+/// are supposed to be interchangeable.
+///
+/// **A use site has exactly one hole in every program measured.** The checker
+/// keys choices by `(ExprId, hole)`, and each overloaded *application* is its
+/// own `ExprId`, so `1 + 2 + 3 + 4`, `f (1 + 2) (3 + 4)` and a record of two
+/// sums each record one entry per site with `hole = 0`. The multi-entry branch
+/// is therefore defensive against a state nothing produces today.
+///
+/// It stays, and stays a `None` rather than "take the first", because the
+/// alternative is guessing: with several entries at one site there is no way to
+/// tell from the site alone *which* hole the caller meant, and `choices_of` is
+/// sorted by source order rather than by relevance. Reporting it as unresolved
+/// makes a future multi-hole site a visible gap instead of a silent coin-flip;
+/// threading the hole index through the trait would be the right fix at that
+/// point, not before it.
+fn choice_at(
+    tc: &crate::check::TypeCheck,
+    module: usize,
+    owner: usize,
+    site: u32,
+) -> Option<Choice> {
+    let mut found = tc
+        .choices_of(module, owner)
+        .into_iter()
+        .filter(|(s, _, _)| *s == site);
+    let first = found.next()?;
+    if found.next().is_some() {
+        return None;
+    }
+    Some(first.2)
+}
+
 /// chosen_def)` — the canonical answer to [`Facts::holes_at`].
 ///
 /// Shared by both adapters so the production path and the tests cannot answer
@@ -2170,16 +2209,7 @@ impl Facts for InputFacts<'_> {
     }
 
     fn choice(&self, module: usize, owner: usize, site: u32) -> Option<Choice> {
-        let tc = self.input.type_check();
-        let mut found = tc
-            .choices_of(module, owner)
-            .into_iter()
-            .filter(|(s, _, _)| *s == site);
-        let first = found.next()?;
-        if found.next().is_some() {
-            return None;
-        }
-        Some(first.2)
+        choice_at(self.input.type_check(), module, owner, site)
     }
 
     fn def_result_ty(&self, module: usize, def: usize) -> Option<crate::core::ScalarType> {
@@ -2237,21 +2267,7 @@ impl Facts for WorkspaceFacts<'_> {
     }
 
     fn choice(&self, module: usize, owner: usize, site: u32) -> Option<Choice> {
-        // The checker records one entry per `(site, hole)`. A use with a single
-        // hole — the common case, and the only one the bridge resolves — has
-        // exactly one entry at this site; a use with several is ambiguous here
-        // and deliberately reported as unresolved rather than taken in
-        // iteration order, which is not a stable answer.
-        let mut found = self
-            .tc
-            .choices_of(module, owner)
-            .into_iter()
-            .filter(|(s, _, _)| *s == site);
-        let first = found.next()?;
-        if found.next().is_some() {
-            return None;
-        }
-        Some(first.2)
+        choice_at(self.tc, module, owner, site)
     }
 
     fn def_result_ty(&self, module: usize, def: usize) -> Option<crate::core::ScalarType> {

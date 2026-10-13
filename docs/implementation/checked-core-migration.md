@@ -108,9 +108,20 @@ Three measurements, in the order they were needed:
 
 1. **The source walk panics if reached.** With the fallback still in place, made
    the walk panic and ran the whole suite: **nothing reached it.**
-2. **Disabling the term route fails the gate loudly.** The inverted
-   discards-nothing check reports **40 fallbacks across 7 programs** (18 whole
-   queries, 22 stage discards), so its green is not vacuous.
+2. **A fallback that records is caught.** Disabling the term route makes the gate
+   report **40 fallbacks across 7 programs** (18 whole queries, 22 stage
+   discards); making a definition record a single discard fails it with the
+   reason and a count, so its green is not vacuous.
+
+   **What this does not cover**, and it took a failed simulation to see it: the
+   sieve is empty when nothing *records* a discard, so this catches a fallback
+   that declares itself or a construct the term route rejects. It would not catch
+   a *silent* misroute — a second route that built a query without declining or
+   recording anything. My first attempt at testing this gate did exactly that and
+   the gate correctly passed, because there was nothing to report. `elaborate_def`
+   has no branch — it calls the term route and returns the result — so no such
+   route exists, but the gate is evidence about the fallbacks that exist rather
+   than a proof that none could.
 3. **The compilers agree byte-for-byte.** Building `70eb285~1` in a worktree and
    diffing its output against the current compiler on all four examples: 12 SQL
    statements and 3 diagnostics, **identical in text, line, column and wording**

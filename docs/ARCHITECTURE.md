@@ -162,10 +162,18 @@ The current checked layer supports local, testable claims:
   it is held rather than only that it is asserted. `compile::tests` gates it from
   two directions: `the_normalized_route_handles_every_construct` counts the gaps
   over every program shape the suite exercises and requires zero, and
-  `every_query_is_built_by_the_term_route` asserts that a representative program
-  per construct reaches the term route rather than an alternative. The latter is
-  meaningful because a fallback would have to declare itself to the discarded-gap
-  sieve, which is asserted empty.
+  `every_query_is_built_by_the_term_route` requires that a representative program
+  per construct reaches the term route while the discarded-gap sieve stays empty.
+
+  The second half of that gate has an honest limit, and stating it is the point
+  of this paragraph. The sieve is empty when nothing **records** a discard, so the
+  gate catches a fallback that declares itself and a construct the term route
+  rejects — tested by making a definition record a discard, which fails with the
+  reason and a count. It would not catch a *silent* misroute: a second route that
+  built a query without declining anything and without recording. Nothing in this
+  crate does that — `elaborate_def` calls the term route and returns its result,
+  with no branch — but the gate is evidence about the fallbacks that exist, not a
+  proof that none could.
 
   Until recently the second half was not true: a definition whose body was a
   query was built by re-walking its source, and that layer could report a

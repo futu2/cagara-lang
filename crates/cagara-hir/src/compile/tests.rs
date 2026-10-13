@@ -647,19 +647,19 @@ fn equivalent_spellings_all_compile() {
     }
 }
 
-/// Every query a definition declares is built by the **term** route.
-///
-/// This is the gate the expression half never had — the one that was deleted
-/// with the source path it measured, and which the review of this refactor found
-/// cited by a comment that no longer pointed at anything. It can be a real gate
-/// now because the fallback is still there to observe: the route reports a
-/// discarded capability gap when it declines a definition, so a definition that
-/// reached the source walk would show up as a non-zero count rather than as a
-/// silent success.
+/// Every query a definition declares reaches the **term** route, not a gap.
 ///
 /// The programs are the shapes that exercise the whole vocabulary: stages, a
 /// join, a set operation, an aggregate, a window, a named stage, a composed
 /// stage, an inline lambda, a `case`, and a pipeline.
+///
+/// The signal is the **fault**, not a counter. This test used to assert that a
+/// discarded-gap sieve was empty, which became vacuous once the source walk was
+/// deleted: nothing wrote to the sieve any more, so it read zero whether the
+/// route worked or not. Verified by breaking a lowering case — this test passed
+/// while `no_corpus_program_hits_a_compiler_gap` failed and named the program.
+/// A `Fault::Compiler` verdict is raised by the route itself, so it cannot go
+/// quiet when the code it describes changes shape.
 #[test]
 fn every_query_is_built_by_the_term_route() {
     const PROGRAMS: &[(&str, &str)] = &[
@@ -704,42 +704,34 @@ fn every_query_is_built_by_the_term_route() {
                           table \"public\" \"admins\"\n";
 
     for (label, body) in PROGRAMS {
-        crate::normalize::reset_discarded_gaps();
-        // A fresh workspace per case, so nothing is served from a cache built by
-        // an earlier one — a cache hit would elaborate nothing and the counter
-        // would read zero for the wrong reason.
         let ws = Workspace::from_source(&format!("{TABLES}{body}"));
         let tc = crate::check::check(&ws);
         assert!(tc.errors().is_empty(), "{label}: {:?}", tc.errors());
+        for (name, _, fault) in crate::compile::root_verdicts(&ws, &tc) {
+            assert_ne!(
+                fault,
+                Fault::Compiler,
+                "{label}: `{name}` hit a compiler capability gap, so the term \
+                 route could not express it"
+            );
+        }
         let compiled = compile_checked(&ws, &tc);
         assert!(
             compiled.queries.iter().any(|q| q.result.is_ok()),
             "{label} produced no query: {:?}",
             compiled.diagnostics
         );
-        let discarded = crate::normalize::discarded_gaps();
-        assert!(
-            discarded.is_empty(),
-            "{label} was built by the source walk; the term route declined it: {discarded:?}"
-        );
     }
 }
 
 /// The normalized route must handle **everything**, not just the examples.
 ///
-/// This is the gate that makes the normalized route a checked step. The earlier
-/// report measured `examples/` alone and came out at zero gaps, which is a much
-/// weaker claim than it looks: the examples are two files. This runs the route
-/// over every program shape the suite exercises and asserts that none needs a
-/// fallback that no longer exists.
-///
-/// A gap is now a hard compiler error rather than a silent revert to a second
-/// implementation, so a construct the term layer cannot express cannot pass this
-/// test quietly. The counter is what names it: without it, a failure would only
-/// say that some program stopped compiling, not which rule is missing. The
-/// counter is wired into the term bridge (`normalize::note_gap`), so this zero
-/// is a claim about expressions; a capability gap raised on the query path is
-/// reported to the caller but is not counted here.
+/// This is the gate that makes the normalized route a checked step: every
+/// expression shape the language has, over legal programs, must produce a query
+/// with no compiler capability gap. A construct the term layer could not express
+/// would surface as `Fault::Compiler` on the definition, which is what this
+/// asserts against — the signal the route raises itself, rather than a counter
+/// something else had to remember to increment.
 #[test]
 fn the_normalized_route_handles_every_construct() {
     const TABLES: &str = "users : query { id = int, name = string, age = int, active = bool } = \
@@ -760,58 +752,28 @@ fn the_normalized_route_handles_every_construct() {
         "q = users & where (inList [\"a\"] .name)\n",
         "q = users & select { x = ifThenElse .active \"y\" \"n\" }\n",
     ];
-    // Accumulate across every program. Resetting inside the loop would keep
-    // only the last program's gaps — and since the counter is a whole-process
-    // total, a single un-reset run is both simpler and strictly stronger.
-    crate::normalize::reset_gaps();
     for src in programs {
         let ws = Workspace::from_source(&format!("{TABLES}{src}"));
         let tc = crate::check::check(&ws);
         assert!(tc.errors().is_empty(), "{src}: {:?}", tc.errors());
-        // A fresh workspace each time, so nothing is served from a cache built
-        // by an earlier iteration — a cache hit would elaborate nothing and the
-        // counter would see no gaps for the wrong reason.
-        let compiled = crate::compile::compile_input(crate::compile::CompilerInput::new(&ws, &tc));
+        let gaps: Vec<String> = crate::compile::root_verdicts(&ws, &tc)
+            .into_iter()
+            .filter(|(_, _, fault)| *fault == Fault::Compiler)
+            .map(|(name, result, _)| {
+                format!(
+                    "`{name}`: {}",
+                    result.err().map(|d| d.message).unwrap_or_default()
+                )
+            })
+            .collect();
         assert!(
-            compiled.queries.iter().any(|q| q.result.is_ok()),
-            "{src} produced no query: {:?}",
-            compiled.diagnostics
+            gaps.is_empty(),
+            "the term layer could not express {} construct(s) in {src:?}; with no \
+             fallback left, each of these is a compiler gap for a real program:\n  {}",
+            gaps.len(),
+            gaps.join("\n  ")
         );
     }
-    let gaps = crate::normalize::gap_reasons();
-    let total_gaps: usize = gaps.iter().map(|(_, n)| n).sum();
-    for (reason, n) in &gaps {
-        eprintln!("gap {n:4}  {reason}");
-    }
-    assert_eq!(
-        total_gaps, 0,
-        "the term layer could not express {total_gaps} construct(s); with no \
-         fallback left, each of these is a compiler gap for a real program"
-    );
-}
-
-/// The fallback counter can actually observe a fallback.
-///
-/// A gate that cannot fail is worse than no gate: it reports "zero fallbacks"
-/// whether or not the route works. This drives the counter directly, so the
-/// instrument is proven independent of whether some construct happens to fall
-/// back today.
-#[test]
-fn the_fallback_counter_observes_gaps() {
-    crate::normalize::reset_gaps();
-    assert!(
-        crate::normalize::gap_reasons().is_empty(),
-        "the counter should start empty after a reset"
-    );
-    crate::normalize::note_gap("a deliberate gap, for this test");
-    let gaps = crate::normalize::gap_reasons();
-    assert_eq!(gaps.len(), 1, "{gaps:?}");
-    assert_eq!(gaps[0].1, 1, "the gap should be counted once: {gaps:?}");
-    crate::normalize::reset_gaps();
-    assert!(
-        crate::normalize::gap_reasons().is_empty(),
-        "reset should clear"
-    );
 }
 
 /// Every corpus program compiles through the normalized route.

@@ -143,13 +143,6 @@ pub enum Term {
         ty: crate::core::ScalarType,
         origin: Origin,
     },
-    /// An **already-elaborated** expression: a name bound by an enclosing
-    /// application.
-    ///
-    /// The value exists only in the elaboration environment, so there is nothing
-    /// to normalize or substitute — the work is already done, and re-deriving it
-    /// would duplicate the caller's.
-    Elaborated(crate::checked::CheckedExpr),
     /// A literal, already at the type the checker gave it.
     Lit {
         lit: crate::ir::Lit,
@@ -550,7 +543,7 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
         // this is the binder's own name, recorded by the checker, not a name to
         // be looked up.
         Term::Local { label, .. } if label == name => arg.clone(),
-        Term::Local { .. } | Term::Column { .. } | Term::Lit { .. } | Term::Elaborated(_) => term,
+        Term::Local { .. } | Term::Column { .. } | Term::Lit { .. } => term,
         Term::Template {
             sql,
             args,
@@ -926,10 +919,6 @@ pub trait Facts {
     /// An already-elaborated binding from the *elaboration environment*, if the
     /// name occurrence is bound by an enclosing application rather than the
     /// module.
-    fn local_binding(&self, _name: &str) -> Option<crate::checked::CheckedExpr> {
-        None
-    }
-
     /// The scalar type the checker gave the expression with this `ExprId`.
     ///
     /// `ScalarType::Unknown` when the checker recorded none, matching
@@ -1120,13 +1109,6 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
         // scoping requires. The check is against the *binder stack* rather
         // than the resolver, because the resolver answers about module-scope
         // names only.
-        // A name bound by an enclosing application: the environment holds the
-        // argument already elaborated, so this is a value rather than something
-        // to resolve, and it is asked before the module scope because a parameter
-        // shadows a top-level definition of the same name.
-        ExprKind::Name(n) if facts.local_binding(n).is_some() => Ok(Term::Elaborated(
-            facts.local_binding(n).expect("checked just above"),
-        )),
         ExprKind::Name(n) if cx.is_local(n) => Ok(Term::Local {
             id: e.id,
             label: n.clone(),
@@ -1408,9 +1390,10 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
             row: facts.use_row(module, e.id).map(std::sync::Arc::new),
             origin,
         }),
-        // Forms normalization has no rule for yet. Reported as a gap rather
-        // than guessed at, so the migration can proceed family by family and a
-        // missing family shows up as a named gap instead of a wrong term.
+        // A form normalization has no rule for. Reported as a gap rather than
+        // guessed at, so a newly added expression family shows up as a named
+        // compiler gap instead of a wrong term — and the corpus's
+        // `no_corpus_program_hits_a_compiler_gap` fails on it.
         other => Err(Gap::new(
             origin,
             format!(
@@ -1602,55 +1585,6 @@ pub fn elaborate_query_via_terms(
     lower_query(&term).map_err(to_error)
 }
 
-/// Normalize and lower, with the environment **and** the definition's hole
-/// assignment.
-///
-/// `holes` is the assignment the query path computed for the definition being
-/// elaborated: `cx.holes` in `elaborate.rs`, indexed by hole. A term's walk
-/// reaches those holes through the normalizer's stack, so the assignment is
-/// seeded there rather than left to `cx`.
-pub fn elaborate_with_holes(
-    input: crate::compile::CompilerInput<'_>,
-    module: usize,
-    owner: usize,
-    e: &cagara_syntax::ast::Expr,
-    env: &[(String, crate::checked::CheckedExpr)],
-    holes: &[(usize, usize)],
-    spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
-) -> Result<crate::checked::CheckedExpr, Gap> {
-    let facts = InputFacts::with_env(input, env.to_vec());
-    let body = Body {
-        module,
-        def: owner,
-        expr: e.clone(),
-    };
-    // The resolver reads the checker's record for this module. `Normalizer`
-    // calls it per name occurrence, so the borrow of `facts` must outlive the
-    // walk — hence the closure borrowing `facts` rather than `input`.
-    let resolve = |module: usize, id: u32| facts.resolution(module, id);
-    let mut cx = Normalizer::new(Box::new(resolve));
-    let term = match cx.in_module(module, |cx| {
-        cx.with_holes(holes.to_vec(), |cx| expression(&facts, cx, &body))
-    }) {
-        Ok(t) => t,
-        Err(g) => {
-            note_gap(&g.message);
-            return Err(g);
-        }
-    };
-    match lower_expr_with(&term, spec) {
-        Ok(lowered) => Ok(lowered),
-        Err(g) => {
-            // Counted too. The bridge and the lowering are two halves of one
-            // route, and a fallback caused by either means the source path is
-            // still load-bearing — so a counter that watched only the bridge
-            // would report zero while lowering quietly deferred.
-            note_gap(&g.message);
-            Err(g)
-        }
-    }
-}
-
 /// Lower a window specification term into the checked layer.
 ///
 /// The **field rules** are not restated here: which fields a spec may have is
@@ -1838,8 +1772,10 @@ pub fn lower_expr(t: &Term) -> Result<crate::checked::CheckedExpr, Gap> {
 /// *structure*, and this walk never reads it a second way.
 ///
 /// A caller with no window support passes a hook that refuses, which is what
-/// [`lower_expr`] does: an expression-only consumer gets a clear gap rather than
-/// a wrong node.
+/// [`lower_expr`] does. That is right for its callers: they lower a window's
+/// **specification** fields — partition expressions, order keys, frame bounds —
+/// where a nested window is not a thing the language allows, so a refusal is the
+/// correct answer rather than a gap to be filled in.
 pub fn lower_expr_with(
     t: &Term,
     spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
@@ -1867,7 +1803,6 @@ pub fn lower_expr_with(
             ty,
             origin,
         } => Ok(C::column(*side, name.clone(), ty.clone(), *origin)),
-        Term::Elaborated(e) => Ok(e.clone()),
         Term::Lit { lit, origin, .. } => Ok(C::lit(lit.clone(), *origin)),
         Term::Template {
             sql,
@@ -2025,7 +1960,6 @@ fn lower_primitive(
 /// A term's origin, for reporting a gap about a subterm.
 fn other_origin(t: &Term) -> Origin {
     match t {
-        Term::Elaborated(e) => e.origin(),
         Term::Local { origin, .. }
         | Term::Column { origin, .. }
         | Term::Lit { origin, .. }
@@ -2118,12 +2052,13 @@ fn lit_of(l: &cagara_syntax::ast::Lit) -> crate::ir::Lit {
     }
 }
 
-/// [`Facts`] backed by a real workspace, for tests and for the migration's
-/// differential check.
+/// [`Facts`] backed by a real workspace, for tests.
 ///
-/// Lives in the library rather than in `#[cfg(test)]` because the migration
-/// compares the bridge against the existing elaborator, and that comparison has
-/// to run the same code the production path would.
+/// Lives in the library rather than in `#[cfg(test)]` because integration tests
+/// under `tests/` are a separate crate: they need a [`Facts`] they can build from
+/// a [`Workspace`](crate::workspace::Workspace) and a
+/// [`TypeCheck`](crate::check::TypeCheck), and a `#[cfg(test)]` item is not
+/// visible to them. `lower_query_agreement` is the main user.
 pub struct WorkspaceFacts<'a> {
     pub ws: &'a crate::workspace::Workspace,
     pub tc: &'a crate::check::TypeCheck,
@@ -2144,24 +2079,11 @@ impl<'a> WorkspaceFacts<'a> {
 /// the compiler, which deliberately holds only a read-only input view.
 pub struct InputFacts<'a> {
     pub input: crate::compile::CompilerInput<'a>,
-    /// Names bound by an enclosing application, innermost last.
-    pub env: Vec<(String, crate::checked::CheckedExpr)>,
 }
 
 impl<'a> InputFacts<'a> {
     pub fn new(input: crate::compile::CompilerInput<'a>) -> Self {
-        Self {
-            input,
-            env: Vec::new(),
-        }
-    }
-
-    /// The same facts, with the elaboration environment attached.
-    pub fn with_env(
-        input: crate::compile::CompilerInput<'a>,
-        env: Vec<(String, crate::checked::CheckedExpr)>,
-    ) -> Self {
-        Self { input, env }
+        Self { input }
     }
 }
 
@@ -2174,14 +2096,6 @@ impl Facts for InputFacts<'_> {
     /// production never takes.
     fn holes_at(&self, (module, owner): (usize, usize), site: u32) -> Vec<(usize, usize)> {
         resolved_assignment(self.input.type_check(), module, owner, site)
-    }
-
-    fn local_binding(&self, name: &str) -> Option<crate::checked::CheckedExpr> {
-        self.env
-            .iter()
-            .rev()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.clone())
     }
 
     fn resolution(&self, module: usize, id: u32) -> Option<Resolved> {
@@ -2287,86 +2201,6 @@ impl Facts for WorkspaceFacts<'_> {
             _ => None,
         }
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Why terms fell back to the source path, counted for the migration report.
-    static GAP_REASONS: std::cell::RefCell<std::collections::BTreeMap<String, usize>> =
-        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
-}
-
-/// Record a gap, for the migration's progress report.
-pub fn note_gap(reason: &str) {
-    #[cfg(test)]
-    GAP_REASONS.with(|m| *m.borrow_mut().entry(reason.to_string()).or_default() += 1);
-    #[cfg(not(test))]
-    let _ = reason;
-}
-
-/// The reasons terms fell back, most frequent first.
-#[cfg(test)]
-pub fn gap_reasons() -> Vec<(String, usize)> {
-    GAP_REASONS.with(|m| m.borrow().iter().map(|(k, v)| (k.clone(), *v)).collect())
-}
-
-/// Clear the recorded gaps, so a caller can attribute them to one program.
-#[cfg(test)]
-pub fn reset_gaps() {
-    GAP_REASONS.with(|m| m.borrow_mut().clear());
-}
-
-/// A placeholder so the `gaps_since_reset` call site reads naturally.
-#[cfg(test)]
-pub fn gaps_since_reset() -> usize {
-    0
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Capability gaps a **fallback** discarded instead of reporting.
-    ///
-    /// Nothing discards any more: the source query walk is gone, so there is no
-    /// second reading for a failure to be hidden behind. The sieve survives as
-    /// the guard against one being *reintroduced* — a new fallback that sets a
-    /// failure aside without recording it would be invisible, and this is the
-    /// hook that makes recording the easy thing to do. It is a separate count
-    /// from `GAP_REASONS` because the two mean opposite things: that one is
-    /// non-zero when a rule is missing, this one when a failure is being
-    /// swallowed.
-    static DISCARDED_GAPS: std::cell::RefCell<std::collections::BTreeMap<String, usize>> =
-        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
-}
-
-/// Record a capability gap a fallback is about to discard.
-///
-/// Deliberately **not** wired into [`note_gap`]: the term bridge's counter means
-/// "no expression needed a rule that is missing", and it asserts zero. Folding
-/// these in would make that gate fail on discarded *attempts* that are not
-/// expressions at all.
-///
-/// The *reason* is recorded rather than only a count, so an assertion over this
-/// names the fallback that ran instead of saying a number changed. With the
-/// source walk gone there is no caller, which is the intended state: the
-/// function exists so that a future fallback has an obvious place to declare
-/// itself, and the gate over it fails loudly the moment one does not.
-pub fn note_discarded_gap(reason: &str) {
-    #[cfg(test)]
-    DISCARDED_GAPS.with(|m| *m.borrow_mut().entry(reason.to_string()).or_default() += 1);
-    #[cfg(not(test))]
-    let _ = reason;
-}
-
-/// The query-path capability gaps a fallback discarded, most frequent first.
-#[cfg(test)]
-pub fn discarded_gaps() -> Vec<(String, usize)> {
-    DISCARDED_GAPS.with(|m| m.borrow().iter().map(|(k, v)| (k.clone(), *v)).collect())
-}
-
-/// Clear the discarded-gap sieve, so a caller can attribute gaps to one program.
-#[cfg(test)]
-pub fn reset_discarded_gaps() {
-    DISCARDED_GAPS.with(|m| m.borrow_mut().clear());
 }
 
 #[cfg(test)]
@@ -2710,7 +2544,6 @@ mod bridge_tests {
                 ty,
                 origin: blank,
             },
-            Term::Elaborated(e) => Term::Elaborated(e),
             Term::Lit { lit, ty, .. } => Term::Lit {
                 lit,
                 ty,

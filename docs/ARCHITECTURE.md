@@ -159,21 +159,30 @@ The current checked layer supports local, testable claims:
   There is no fallback route, for expressions or for queries.
 
   This is the claim the architecture is built to make, so it is worth saying how
-  it is held rather than only that it is asserted. `compile::tests` gates it from
-  two directions: `the_normalized_route_handles_every_construct` counts the gaps
-  over every program shape the suite exercises and requires zero, and
-  `every_query_is_built_by_the_term_route` requires that a representative program
-  per construct reaches the term route while the discarded-gap sieve stays empty.
+  it is held rather than only that it is asserted. Three gates, all on the signal
+  the compiler raises itself — `Fault::Compiler`, which means a construct reached
+  the language without a rule:
 
-  The second half of that gate has an honest limit, and stating it is the point
-  of this paragraph. The sieve is empty when nothing **records** a discard, so the
-  gate catches a fallback that declares itself and a construct the term route
-  rejects — tested by making a definition record a discard, which fails with the
-  reason and a count. It would not catch a *silent* misroute: a second route that
-  built a query without declining anything and without recording. Nothing in this
-  crate does that — `elaborate_def` calls the term route and returns its result,
-  with no branch — but the gate is evidence about the fallbacks that exist, not a
-  proof that none could.
+  * `the_normalized_route_handles_every_construct` runs a program per expression
+    shape and requires no compiler gap on any of them;
+  * `every_query_is_built_by_the_term_route` does the same for a program per
+    *stage*: filter, projection, join, set operation, aggregate, window, named
+    stage, composed stage, inline lambda, `case`, pipeline;
+  * `no_corpus_program_hits_a_compiler_gap` extends it to every shipped example
+    and every corpus case.
+
+  These replaced two counters — a gap tally and a discarded-gap sieve — that had
+  become **vacuous**: when the source walk was deleted, nothing wrote to either,
+  so both read zero whether the route worked or not. That is not a hypothetical.
+  Breaking one lowering case made the counter-based gate *pass* while
+  `no_corpus_program_hits_a_compiler_gap` failed and named the program. A counter
+  is only evidence while something increments it; a fault is raised by the code
+  under test.
+
+  The honest limit that remains: these gates say the constructs they exercise
+  have a rule, not that every construct does. The corpus is the defence against
+  the second — adding a language feature without a lowering case fails it, because
+  the case for that feature would be written before the rule.
 
   Until recently the second half was not true: a definition whose body was a
   query was built by re-walking its source, and that layer could report a

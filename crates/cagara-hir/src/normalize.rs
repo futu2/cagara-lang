@@ -2909,12 +2909,13 @@ mod prelude_covers_the_bridge {
 ///
 /// `spec` completes window applications, as in the expression lowering.
 pub fn lower_query(t: &Term) -> Result<crate::checked::CheckedQuery, Gap> {
-    lower_query_with(t, &|_| {
-        Err(Gap::new(
-            Origin::new(0, cagara_syntax::ast::Span::default()),
-            "a window specification has no lowering here",
-        ))
-    })
+    // A query lowering **must** complete window specifications: a window is
+    // written in a `select`'s field, so it is reached through this walk rather
+    // than beside it. `lower_winspec` is the same hook the production expression
+    // path passes, so the spec's rules — which fields exist, that an order key
+    // must name a column, what a frame bound may be — keep one implementation
+    // instead of growing a second reading here.
+    lower_query_with(t, &lower_winspec)
 }
 
 /// Lower a query term, completing window specs with `spec`.

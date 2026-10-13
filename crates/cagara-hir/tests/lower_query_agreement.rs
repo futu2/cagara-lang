@@ -181,6 +181,27 @@ fn both_paths_build_the_same_query() {
             "a join then a filter",
             "q = users & innerJoin orders (.<id == .>uid) & where (.amount > 1.0)\n",
         ),
+        // Windows. These are the one construct that reaches the lowering from
+        // *inside* a stage's field rather than as a stage of its own, so they
+        // exercise the spec hook: the term carries the spec's structure and
+        // `lower_winspec` decides what a partition, an order key and a frame
+        // bound mean.
+        (
+            "a window with an order",
+            "q = users & select { r = rowNumber {order = [asc .age]} }\n",
+        ),
+        (
+            "a window with a partition",
+            "q = orders & select { s = sumOver {partition = [.uid]} .amount }\n",
+        ),
+        (
+            "a window with a full spec",
+            "q = orders & select { s = sumOver {partition = [.uid], order = [asc .id], frame = runningFrame} .amount }\n",
+        ),
+        (
+            "a window over an aggregate's output",
+            "q = orders & agg { k = group .uid, n = count } & select { .k, r = rowNumber {order = [desc .n]} }\n",
+        ),
     ];
 
     let mut compared = 0usize;
@@ -203,7 +224,7 @@ fn both_paths_build_the_same_query() {
         );
         compared += 1;
     }
-    assert!(compared >= 29, "only {compared} cases ran");
+    assert!(compared >= 33, "only {compared} cases ran");
 }
 
 /// A **stage value** applied to an input lowers like the inline spelling.

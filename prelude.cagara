@@ -64,8 +64,25 @@ select : expr r (row s) -> query r -> query s = primitive "__select"
 # does not have is appended. Columns not listed are passed through.
 update : expr r (row s) -> query r -> query (merge r s) = primitive "__update"
 
-# `omit "k"` drops one column. The checker needs no rule of its own for this:
-# it is the row equation `input ~ { k : t | output }`.
+# `omit "k"` drops one column: the row equation `input ~ { k : t | output }`,
+# solved by the unifier's generic leftover rule rather than by a rule of its
+# own.
+#
+# The two rows are spelled `r` and `s` — seemingly unrelated — because the
+# relation between them *cannot* be written in a type. Which column is dropped
+# is read from the application (`omit "a"` vs `omit "b"`), so both calls have
+# the same type and no type-level former could tell them apart. Compare
+# `prefix`, which can say `keyMap m r` precisely because its affix is carried
+# in the type. `select` and `agg` are spelled the same way for the same
+# reason: their result row is built from an expression, not from the input.
+#
+# The relation is enforced, not assumed — `t & omit "a" & select { .a }` is
+# rejected with `no column `a`; available: b`.
+#
+# Unlike the projection stages, this signature is *not* compared against the
+# primitive's internal type: `omit` is not a projection, so the annotation is
+# descriptive. The constraint above is what actually types the stage, which is
+# why writing something weaker here (or even wrong) changes no result.
 omit : key_omit -> query r -> query s = primitive "__omit"
 
 # `mapValue "w"` transforms all field types using a wrapper: `"nullable"`

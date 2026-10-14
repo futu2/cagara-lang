@@ -1739,14 +1739,23 @@ cagara lsp
 | Flag | Effect |
 |---|---|
 | `--dialect NAME` | target a SQL dialect (`postgres`, `mysql`, `sqlite`, `duckdb`, `tsql`, `bigquery`, `snowflake`, `trino`, `spark`, ...) |
-| `--only DEF` | compile just the named query definition |
+| `--only DEF` | compile the named definition instead of `main` |
 | `--types` | print inferred types instead of SQL |
 | `--pretty` | pretty-print the generated SQL |
 | `--optimize` | run the SQL optimizer |
 
-Without `--only`, every query definition in the file is compiled. Diagnostics
-are printed as `file:line:col` with the offending source line underlined, and
-the process exits non-zero when there are errors.
+A file is compiled for its **entry point**, the definition named `main`:
+that is the one statement printed, so helpers do not bury the answer, and a
+module of table declarations does not dump its whole schema. `--only DEF`
+reads a different definition, which is how a helper is inspected.
+
+A file with no `main` is a library: it prints nothing and exits 0, because
+compiling it succeeded. It is still checked as a whole — a broken helper in a
+library is still a broken file, and is reported with a non-zero exit even
+though nothing was printed.
+
+Diagnostics are printed as `file:line:col` with the offending source line
+underlined, and the process exits non-zero when there are errors.
 
 Dialect support varies in *depth*, and the distinction matters. Some dialects
 have Cagara's date, string, and integer-arithmetic operations rewritten and are

@@ -242,19 +242,82 @@ fn queries_are_labelled_and_terminated() {
     assert!(text.trim_end().ends_with(';'), "{text}");
 }
 
-/// Several queries are separated by a blank line, so the output stays
-/// readable when it is pasted into a client.
+/// A file is compiled for its `main`, not for every definition in it.
+///
+/// Helpers are not answers: printing them buried the one statement the file
+/// was written for, and made reading a module of table declarations dump its
+/// whole schema.
 #[test]
-fn queries_are_separated_by_a_blank_line() {
-    let dir = TempDir::new("sep");
+fn only_main_is_printed() {
+    let dir = TempDir::new("mainonly");
     let f = dir.write(
         "t.cagara",
         "t : query { a = int } = table \"s\" \"t\"\n\
-         one = t & select { x = .a }\n\
-         two = t & select { y = .a }\n",
+         helper = t & select { x = .a }\n\
+         main = t & select { y = .a }\n",
     );
     let text = stdout(&run(&f));
-    assert!(text.contains(";\n\n-- two"), "queries run together: {text}");
+    assert!(text.contains("-- main"), "{text}");
+    assert!(text.contains("AS y"), "{text}");
+    assert!(
+        !text.contains("-- helper") && !text.contains("AS x"),
+        "a helper was printed as an answer: {text}"
+    );
+}
+
+/// A file with no `main` is a library, so it compiles and prints nothing —
+/// and, being a successful compile, says so with exit code 0.
+#[test]
+fn a_file_without_main_prints_nothing_and_succeeds() {
+    let dir = TempDir::new("nomain");
+    let f = dir.write(
+        "lib.cagara",
+        "t : query { a = int } = table \"s\" \"t\"\n\
+         helper = t & select { x = .a }\n",
+    );
+    let out = run(&f);
+    assert_eq!(stdout(&out), "", "a library printed SQL");
+    assert_eq!(stderr(&out), "", "silence is not a diagnostic");
+    assert!(out.status.success(), "a library is not a failure");
+}
+
+/// Printing nothing must not mean checking nothing: a broken helper in a
+/// library is still a broken file, and a silently-green build would hide it.
+#[test]
+fn a_broken_helper_is_reported_even_when_nothing_is_printed() {
+    let dir = TempDir::new("brokenlib");
+    let f = dir.write(
+        "lib.cagara",
+        "t : query { a = int } = table \"s\" \"t\"\n\
+         broken = t & select { .nonexistent }\n",
+    );
+    let out = run(&f);
+    let err = stderr(&out);
+    assert_eq!(stdout(&out), "", "nothing to print, so nothing printed");
+    assert!(
+        err.contains("nonexistent"),
+        "the error was swallowed: {err}"
+    );
+    assert!(!out.status.success(), "a broken library must exit non-zero");
+}
+
+/// `--only` still reads one helper, which is how a definition that is not the
+/// entry point is inspected.
+#[test]
+fn only_reads_a_definition_that_is_not_main() {
+    let dir = TempDir::new("onlyhelper");
+    let f = dir.write(
+        "t.cagara",
+        "t : query { a = int } = table \"s\" \"t\"\n\
+         helper = t & select { x = .a }\n\
+         main = t & select { y = .a }\n",
+    );
+    let text = stdout(&run_with(&f, &["--only", "helper"]));
+    assert!(
+        text.contains("-- helper") && text.contains("AS x"),
+        "{text}"
+    );
+    assert!(!text.contains("AS y"), "{text}");
 }
 
 // ── dialects ──────────────────────────────────────────────────────────────

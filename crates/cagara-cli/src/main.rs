@@ -18,6 +18,12 @@ const USAGE: &str =
        cagara fmt [--check] <files...>   format files in place (`-` for stdin to stdout)
        cagara lsp    run the language server over stdio";
 
+/// The definition a file is compiled for, unless `--only` names another.
+///
+/// `main` is the entry point by convention, and the only definition whose SQL
+/// is printed by default. A file that does not define one prints nothing.
+const ENTRY_POINT: &str = "main";
+
 fn main() -> ExitCode {
     match main_inner() {
         Ok(code) => code,
@@ -204,41 +210,77 @@ fn report_types(
     Ok(done(failed))
 }
 
-/// The default mode: one SQL statement per selected root query.
+/// The default mode: the SQL for a file's entry point, which is the definition
+/// named `main`.
+///
+/// A file is a *program*, not a bag of queries: it defines helpers, and `main`
+/// says which one is the answer. Printing every root definition meant a module
+/// of table declarations — `lib/icbase` is 737 of them — dumped its whole
+/// schema as SQL, and a file that was being read for its one entry point
+/// buried it among the helpers.
+///
+/// So a file with no `main` prints nothing, and that is a normal outcome
+/// rather than an error: a library is a file with no entry point. It is still
+/// loaded, checked and reported on, so a mistake in it is not hidden by its
+/// silence. `--only` names a different definition, for reading one helper.
 fn report_sql(
     ws: &Workspace,
     tc: &cagara_hir::TypeCheck,
     opts: &Options,
     mut failed: bool,
 ) -> std::io::Result<ExitCode> {
-    let mut printed = 0;
+    let mut printed = false;
+    // The entry point, unless `--only` named another definition.
+    let wanted = opts.only.as_deref().unwrap_or(ENTRY_POINT);
     // One failing helper is reported both as itself and through every query
     // that uses it, so the same diagnostic can arrive more than once. Print
     // each distinct one once, in the order it first appears.
     let mut seen: HashSet<String> = HashSet::new();
-    for query in compile_checked(ws, tc).queries {
+    let compiled = compile_checked(ws, tc);
+    // Every root definition that failed is reported, whether or not it is the
+    // one being printed. A file is checked as a whole even when one definition
+    // is the answer: a broken helper is a broken program, and reporting only
+    // what was printed would let a library fail in silence — which is exactly
+    // what printing nothing must not come to mean.
+    for query in &compiled.queries {
+        if let Err(d) = &query.result {
+            let e = if query.name == wanted {
+                d.to_string()
+            } else {
+                format!("{}: error in `{}`: {d}", opts.file.display(), query.name)
+            };
+            failed = true;
+            if seen.insert(e.clone()) {
+                eprintln!("{e}");
+            }
+        }
+    }
+    for query in compiled.queries {
         let name = query.name;
-        let result = query.result;
-        if opts.only.as_deref().is_some_and(|o| o != name) {
+        if name != wanted {
             continue;
         }
-        match result.map_err(|d| d.to_string()).and_then(|rel| {
-            cagara_sql::compile(
-                &rel,
-                cagara_sql::Options {
-                    dialect: opts.dialect,
-                    pretty: opts.pretty,
-                    optimize: opts.optimize,
-                },
-            )
-            .map_err(|m| format!("{}: error in `{name}`: {m}", opts.file.display()))
-        }) {
+        // Already reported above, in the same words.
+        let Ok(rel) = query.result else {
+            continue;
+        };
+        match cagara_sql::compile(
+            &rel,
+            cagara_sql::Options {
+                dialect: opts.dialect,
+                pretty: opts.pretty,
+                optimize: opts.optimize,
+            },
+        )
+        .map_err(|m| format!("{}: error in `{name}`: {m}", opts.file.display()))
+        {
             Ok(sql) => {
-                if printed > 0 {
-                    out("")?;
-                }
+                // One statement per run: `main`, or the one `--only` named.
+                // Nothing separates it from anything, because there is nothing
+                // else — the blank line this used to print between queries has
+                // no second query to sit between.
                 out(&format!("-- {name}\n{sql};"))?;
-                printed += 1;
+                printed = true;
             }
             Err(e) => {
                 failed = true;
@@ -248,7 +290,9 @@ fn report_sql(
             }
         }
     }
-    if let (Some(o), 0, false) = (&opts.only, printed, failed) {
+    // A file without a `main` is a library and says nothing. Asking for a
+    // definition by name is a request that can be missed, so that is reported.
+    if let (Some(o), false, false) = (&opts.only, printed, failed) {
         eprintln!("no query definition named `{o}`");
         failed = true;
     }

@@ -16,14 +16,14 @@ ungrouped fields in an aggregate, or `null` misuse before any SQL runs.
 orders : query { id = int, user_id = int, amount = float, status = string } =
   table "public" "orders"
 
-revenue = orders
+main = orders
   & where (.status == "paid")
   & agg { user_id = group .user_id, revenue = sum .amount, n = count }
   & where (.n >= 5)
   & order [desc .revenue]
 ```
 
-`cagara report.cagara --only revenue` compiles it to:
+`cagara report.cagara` compiles `main` — the file's entry point — to:
 
 ```sql
 SELECT user_id, revenue, n
@@ -43,6 +43,7 @@ ORDER BY revenue DESC NULLS LAST;
 - Multi-way conditionals: `case { cond => value; ...; true => default }`, which compiles to one searched `CASE`.
 - Modules via `import "file.cagara"`, plus a standard library written in Cagara (`prelude.cagara`).
 - ANSI SQL by default, with dialect support and test coverage described in [`docs/SQL-DIALECTS.md`](docs/SQL-DIALECTS.md).
+- A file's entry point is the definition named `main`, and that is the one statement `cagara` prints; a file without one is a library and prints nothing.
 - A formatter (`cagara fmt`) and a language server (`cagara lsp`) with diagnostics, hover, go-to-definition and completion.
 
 Cagara is intentionally a query language rather than a general-purpose

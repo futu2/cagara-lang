@@ -2,7 +2,6 @@
 
 use crate::db::ModuleInput;
 use crate::lower::parse_module;
-use crate::primitive::PRIMS;
 use crate::workspace::Binding;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,22 +31,21 @@ pub fn module_own(db: &dyn salsa::Database, input: ModuleInput) -> Arc<HashMap<S
     )
 }
 
-/// Names visible in a module: the prelude (or, in the prelude, the `__`
-/// primitives), then its imports, then its own definitions (which shadow).
+/// Names visible in a module: the prelude (unless the module opted out of it),
+/// then its imports, then its own definitions (which shadow).
 #[salsa::tracked(returns(ref))]
 pub fn module_scope(db: &dyn salsa::Database, input: ModuleInput) -> Arc<HashMap<String, Binding>> {
     let mut scope = HashMap::new();
-    match input.prelude(db) {
-        None => {
-            for (n, p) in PRIMS {
-                scope.insert(n.to_string(), Binding::Prim(*p));
-            }
-        }
-        Some(p) => scope.extend(
+    // The prelude, then the imports, then the module's own definitions. There
+    // is no privileged case: the `__` vocabulary belongs to the `primitive`
+    // body form, not to any module's scope, so the prelude's own body needs no
+    // injection to write `where = primitive "__where"`.
+    if let Some(p) = input.prelude(db) {
+        scope.extend(
             module_own(db, *p)
                 .iter()
                 .map(|(n, b)| (n.clone(), b.clone())),
-        ),
+        );
     }
     for (alias, t) in input.imports(db) {
         match alias {

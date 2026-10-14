@@ -5,7 +5,6 @@ use crate::compile::Compilation;
 use crate::db::{Database, ModuleInput, SourceFile};
 use crate::incremental::CachedCompilation;
 use crate::lower::{parse_module, ParsedModule};
-use crate::primitive::Prim;
 use crate::resolve::{module_own, module_scope};
 use cagara_syntax::ast::{Import, Module, Span};
 use salsa::Setter;
@@ -18,6 +17,23 @@ use std::sync::Arc;
 pub const PRELUDE_SRC: &str = include_str!("../../../prelude.cagara");
 pub(crate) const PRELUDE_PATH: &str = "<prelude>";
 
+/// The first line that turns the implicit prelude import off.
+///
+/// A comment rather than a directive, because there is no pragma syntax to
+/// hang it on, and it is matched **exactly** — the whole first line, no
+/// leading whitespace, nothing after it but an optional `\r`. Anything looser
+/// would let an ordinary comment mentioning the phrase opt a file out by
+/// accident, and the failure would be a hundred unknown-name errors rather
+/// than a diagnostic about the marker.
+const NO_PRELUDE: &str = "# no prelude";
+
+fn opts_out_of_prelude(text: &str) -> bool {
+    text.lines()
+        .next()
+        .map(|l| l.trim_end_matches('\r'))
+        .is_some_and(|l| l == NO_PRELUDE)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Binding {
     /// (module index, definition index)
@@ -26,8 +42,6 @@ pub enum Binding {
     /// one candidate per use. (module index, definition indices)
     Overloads(usize, Vec<usize>),
     Module(usize),
-    /// `__` primitives; visible only inside the prelude.
-    Prim(Prim),
 }
 
 pub struct LoadedModule {
@@ -234,7 +248,13 @@ impl Workspace {
         self.files.insert(path.clone(), file);
         let parsed = parse_module(&self.db, file).clone();
 
-        let prelude = if self.modules.is_empty() {
+        // The prelude is imported implicitly — unless the file opts out with
+        // `# no prelude` on its first line. Opting out removes the *names*
+        // only: the grammar is the compiler's, so `1 + 2` still parses and
+        // `_+_` is simply a name this module has not defined. That is what
+        // makes a user's own prelude possible: turn the implicit one off and
+        // import whatever you like.
+        let prelude = if self.modules.is_empty() || opts_out_of_prelude(&text) {
             None
         } else {
             Some(self.inputs[0])
@@ -445,26 +465,6 @@ fn file_diags(
             )
         })
         .collect();
-    // An operator's fixity is a property of the language, not of one module:
-    // the table is built once, from the prelude. A declaration anywhere else
-    // would silently do nothing (the file it appears in is already parsed by
-    // the time it could be read), so say so instead.
-    if path != Path::new(PRELUDE_PATH) {
-        for d in &parsed.module.operators {
-            out.push(make_diag_indexed(
-                path,
-                text,
-                &starts,
-                d.span.start as usize,
-                d.span.start as usize,
-                format!(
-                    "operator `{}` must be declared in `prelude.cagara`, where \
-                     `_{}_` would be the name it desugars to",
-                    d.spelling, d.spelling
-                ),
-            ));
-        }
-    }
     let mut missing: Vec<(usize, &str)> = Vec::new();
     for (name, b) in own {
         if let Binding::Overloads(_, is) = b {
@@ -693,23 +693,127 @@ mod tests {
         }
     }
 
-    /// An operator's fixity is a property of the language, read from the
-    /// prelude when the table is built. A declaration anywhere else parses but
-    /// cannot take effect, so it is reported rather than silently ignored.
+    /// Fixity cannot be declared, because the table is fixed.
+    ///
+    /// `infixl` and `infixr` are no longer part of the language, so a line
+    /// that reads like a declaration is an ordinary definition — and one that
+    /// cannot shadow an operator, because the table is not built from source
+    /// at all.
     #[test]
-    fn an_operator_declaration_outside_the_prelude_is_reported() {
-        let ws = Workspace::from_source("infixl 1 &^\nq = 1\n");
+    fn fixity_is_not_declarable() {
+        // `infixl` is an ordinary name here, so this is a definition of it.
+        let ws = Workspace::from_source("infixl = 1\nq = 1\n");
+        assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+
+        // A spelling outside the table still cannot be used as an operator.
+        let ws = Workspace::from_source("q = a ~= b\n");
         assert!(
-            ws.diags
-                .iter()
-                .any(|d| d.message.contains("must be declared in `prelude.cagara`")),
+            ws.diags.iter().any(|d| d.message.contains("unknown operator")),
             "{:?}",
             ws.diags
         );
-        // The declaration is not a definition, so it produces no other error.
-        assert_eq!(ws.diags.len(), 1, "{:?}", ws.diags);
-        // And an ordinary file is unaffected.
-        let ws = Workspace::from_source("q = 1\n");
-        assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    }
+
+    /// `# no prelude` on the first line removes the implicit import, and with
+    /// it every name the prelude defines — but not the grammar.
+    ///
+    /// That split is the whole point: `&`, `where` and `+` are the compiler's
+    /// syntax, so they still parse, while `_&_`, `where` and `_+_` are names
+    /// the module no longer has. A user prelude is then just a module to
+    /// import.
+    #[test]
+    fn the_prelude_can_be_turned_off() {
+        // Unknown names are a *checker* result, not a load diagnostic, so the
+        // assertions below ask the checker.
+        let msgs = |src: &str| -> Vec<String> {
+            let ws = Workspace::from_source(src);
+            let load: Vec<String> = ws.diags.iter().map(|d| d.message.clone()).collect();
+            let tc = crate::check::check(&ws);
+            load.into_iter()
+                .chain(tc.errors().iter().map(|e| e.diag.message.clone()))
+                .collect()
+        };
+
+        let errors = msgs("# no prelude\nq = table \"s\" \"t\"\n");
+        assert!(
+            errors.iter().any(|m| m.contains("unknown name `table`")),
+            "{errors:?}"
+        );
+        // No syntax error: the pipeline grammar does not depend on the prelude.
+        assert!(
+            !errors.iter().any(|m| m.contains("syntax error")),
+            "the grammar must survive turning the prelude off: {errors:?}"
+        );
+
+        // A module that opts out can define the names itself — including the
+        // `primitive` form, which needs no import because it is a body form
+        // rather than a name.
+        let errors = msgs(
+            "# no prelude\n\
+             table : string -> string -> query r = primitive \"__table\"\n\
+             t : query { a = int } = table \"s\" \"t\"\n",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    /// The `__` vocabulary belongs to the `primitive` body form, not to any
+    /// module's scope, so it is not a name a module can refer to.
+    #[test]
+    fn primitives_are_not_names_in_scope() {
+        for src in [
+            // In the prelude itself: the form is spelled, not the name.
+            "q = __where\n",
+            // And in a module that opted out.
+            "# no prelude\nq = __where\n",
+        ] {
+            let ws = Workspace::from_source(src);
+            let tc = crate::check::check(&ws);
+            assert!(
+                tc.errors()
+                    .iter()
+                    .any(|e| e.diag.message.contains("unknown name `__where`")),
+                "{src:?}: {:?}",
+                tc.errors()
+            );
+        }
+    }
+
+    /// The exact marker, and only it, turns the prelude off.
+    ///
+    /// The check is textual, so it has to be strict: a loose match would let
+    /// an ordinary comment disable the prelude by accident, and the symptom
+    /// would be a hundred unknown names rather than a word about the marker.
+    #[test]
+    fn the_opt_out_marker_is_exact() {
+        for src in [
+            // Leading whitespace, or anything after it, is not the marker.
+            " # no prelude\nq = 1\n",
+            "# no prelude \nq = 1\n",
+            "# no prelude, please\nq = 1\n",
+            // Not on the first line.
+            "# a comment\n# no prelude\nq = 1\n",
+        ] {
+            // `upper` is the prelude's, so it resolving proves the prelude is
+            // still there.
+            let ws = Workspace::from_source(&format!("{src}r : expr r string -> expr r string = upper\n"));
+            let tc = crate::check::check(&ws);
+            assert!(
+                !tc.errors()
+                    .iter()
+                    .any(|e| e.diag.message.contains("unknown name `upper`")),
+                "{src:?} opted out but should not have: {:?}",
+                tc.errors()
+            );
+        }
+        // A trailing `\r` from a CRLF file is the one thing tolerated.
+        let ws = Workspace::from_source("# no prelude\r\nq = table \"s\" \"t\"\n");
+        let tc = crate::check::check(&ws);
+        assert!(
+            tc.errors()
+                .iter()
+                .any(|e| e.diag.message.contains("unknown name `table`")),
+            "CRLF must still opt out: {:?}",
+            tc.errors()
+        );
     }
 }

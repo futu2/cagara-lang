@@ -126,7 +126,7 @@ impl DefinitionFacts {
                         def: *def,
                     }))
             }
-            Some(Binding::Prim(_) | Binding::Module(_)) | None => {}
+            Some(Binding::Module(_)) | None => {}
         }
     }
 }

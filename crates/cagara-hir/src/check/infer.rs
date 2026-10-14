@@ -220,28 +220,18 @@ impl<'w> Checker<'w> {
             // and describes the primitive's behavior.
             return match ann {
                 Some(t) => {
-                    // Projection primitives expose `expr r (row s)` (or, for
-                    // the aggregate stage, `agg (expr r (row s))`) at the
-                    // surface. Their internal type carries the row of field
+                    // A **projection** primitive exposes `expr r (row s)` (or,
+                    // for the aggregate stage, `agg (expr r (row s))`) at the
+                    // surface, while its internal type carries the row of field
                     // expressions separately so the constraint solver can
-                    // validate and lower the stage.
+                    // validate and lower the stage. Every other primitive's
+                    // signature *is* its type, and forcing the internal form on
+                    // one of those is a type error — which is why this asks the
+                    // table rather than mapping every name through it.
                     let internal = match &def.body.kind {
-                        ExprKind::Primitive(name) => {
-                            let p = match name.as_str() {
-                                "__where" => Some(Prim::Where),
-                                "__select" => Some(Prim::Select),
-                                "__agg" => Some(Prim::AggStage),
-                                "__update" => Some(Prim::Update),
-                                "__innerJoin" => Some(Prim::Join(JoinKind::Inner)),
-                                "__leftJoin" => Some(Prim::Join(JoinKind::Left)),
-                                "__rightJoin" => Some(Prim::Join(JoinKind::Right)),
-                                "__fullJoin" => Some(Prim::Join(JoinKind::Full)),
-                                "__semiJoin" => Some(Prim::Join(JoinKind::Semi)),
-                                "__antiJoin" => Some(Prim::Join(JoinKind::Anti)),
-                                _ => None,
-                            };
-                            p.map(|p| self.prim_type(p, def.body.span))
-                        }
+                        ExprKind::Primitive(name) => crate::primitive::prim_of(name)
+                            .filter(|p| p.is_projection())
+                            .map(|p| self.prim_type(p, def.body.span)),
                         _ => None,
                     };
                     if let Some(internal) = internal {
@@ -1628,7 +1618,6 @@ impl<'w> Checker<'w> {
         match binding {
             Some(Binding::Def(dm, di)) => self.def_type(dm, di, site, sp),
             Some(Binding::Overloads(om, is)) => Ok(self.overload_type(n, om, &is, site, sp)),
-            Some(Binding::Prim(p)) => Ok(self.prim_type(p, sp)),
             Some(Binding::Module(_)) => Err(format!(
                 "`{n}` is a module; refer to a definition as `{n}.name`"
             )),

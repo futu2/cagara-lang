@@ -687,7 +687,6 @@ impl Resolved {
                 module: *m,
                 defs: defs.clone(),
             }),
-            crate::workspace::Binding::Prim(_) => Some(Resolved::Primitive),
             crate::workspace::Binding::Module(_) => None,
         }
     }

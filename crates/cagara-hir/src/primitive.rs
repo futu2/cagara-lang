@@ -36,6 +36,16 @@ pub enum Prim {
     Following,
 }
 
+/// The `__` vocabulary of `primitive "..."`.
+///
+/// This is the **only** place a primitive's name is spelled, and it is a table
+/// the `primitive` body form reads — not a set of names in any module's scope.
+/// `primitive "__where"` is like `sql "UPPER($1)"`: a built-in form whose
+/// argument happens to be a word, resolved by the form rather than by import.
+///
+/// Keeping it out of scope is what makes the prelude an ordinary module. Its
+/// `where = primitive "__where"` line is a definition like any other, and a
+/// module that never imports the prelude simply has no `where`.
 pub const PRIMS: &[(&str, Prim)] = &[
     ("__table", Prim::Table),
     ("__where", Prim::Where),
@@ -73,7 +83,32 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__following", Prim::Following),
 ];
 
+/// The primitive `name` stands for, if it names one.
+///
+/// The single lookup the `primitive` body form uses. A second, partial copy of
+/// this mapping used to live in the checker, so a primitive could be listed
+/// here and still be rejected there; reading one table is the point.
+pub fn prim_of(name: &str) -> Option<Prim> {
+    PRIMS.iter().find(|(n, _)| *n == name).map(|(_, p)| *p)
+}
+
 impl Prim {
+    /// Does this primitive's signature differ from its internal type?
+    ///
+    /// A projection takes a `row` of field expressions, which the checker
+    /// carries separately from the surface `expr r (row s)` so the constraint
+    /// solver can validate and lower the stage. Its signature therefore
+    /// *describes* the internal type rather than being it, and the checker has
+    /// to reconcile the two. Every other primitive's signature is its type.
+    ///
+    /// The set is declared here rather than as a second list of names in the
+    /// checker, so a new projection cannot be added to one and forgotten in
+    /// the other.
+    pub fn is_projection(self) -> bool {
+        use Prim::*;
+        matches!(self, Where | Select | Update | AggStage | Join(_))
+    }
+
     pub fn arity(self) -> usize {
         use Prim::*;
         match self {

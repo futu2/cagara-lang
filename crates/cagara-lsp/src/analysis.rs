@@ -271,7 +271,6 @@ pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
                 ws.modules[*t].path.display()
             ))
         }
-        Binding::Prim(_) => vec![(name, "primitive")],
     };
     let general = defs
         .iter()
@@ -605,7 +604,7 @@ fn name_completion(ws: &Workspace, offset: usize) -> Vec<CompletionItem> {
     let mut items: Vec<CompletionItem> = md
         .scope
         .iter()
-        .filter(|(n, b)| is_name(n) && !shadowed.contains(*n) && !matches!(b, Binding::Prim(_)))
+        .filter(|(n, _)| is_name(n) && !shadowed.contains(*n))
         .map(|(n, b)| item(ws, &tc, n, b))
         .collect();
     items.extend(locals);
@@ -640,7 +639,6 @@ fn item(ws: &Workspace, tc: &TypeCheck, name: &str, b: &Binding) -> CompletionIt
             format!("module {}", ws.modules[*t].path.display()),
             CompletionItemKind::MODULE,
         ),
-        Binding::Prim(_) => ("primitive".into(), CompletionItemKind::FUNCTION),
     };
     CompletionItem {
         label: name.to_string(),

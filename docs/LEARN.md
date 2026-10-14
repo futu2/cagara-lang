@@ -411,6 +411,31 @@ q = orders & agg { k = group .user_id, b = case { count > 3 => coalesce 0.0 (sum
 Casts are named by their **result** type: `toInt`, `toFloat`, `toBool`,
 `toString`. There is no implicit conversion between ordinary expressions.
 
+A name is **overloaded by its source**, so `toInt` accepts either a `float`
+(a narrowing) or a `string` (a parse) — the same destination reached from
+different places. Each `to*` also has a `from*` spelling that names the source
+instead, which reads better where the column's type is the surprising part:
+`fromString .man_grade` says the value is text being read as a number. They are
+the same function.
+
+`toDecimal precision scale x` gives a value an exact SQL type —
+`toDecimal 18 2 .amount` is `CAST(amount AS DECIMAL(18, 2))`. The language type
+stays `float` (there is no separate decimal scalar), but the SQL type is exact,
+which matters for money: binary floating point cannot represent it.
+
+A cast that cannot be performed **fails the query**. Where the value may not be
+convertible — a `string` column holding a code, say — use the `try*` forms
+instead: `tryInt`, `tryFloat`, `tryDecimal`. They return `maybe`, because the
+NULL has to be handled somewhere:
+
+```haskell
+q = t & select { n = coalesce 0 (tryInt .code) }
+```
+
+This is not available on SQLite, which has no `TRY_CAST` and casts
+unparseable text to `0` rather than failing; see
+[SQL dialect support](SQL-DIALECTS.md).
+
 ### Identifiers are quoted when needed
 
 A column name that is not a lowercase word, or that collides with a reserved
@@ -1174,7 +1199,7 @@ error messages.
 **Nulls:** `coalesce` `??` `just` `nullIf` `isNull` `isNotNull` `isTrue`
 `whereTrue` `eqMaybe`
 
-**Casts:** `toInt` `toFloat` `toBool` `toString`
+**Casts:** `toInt` `toFloat` `toBool` `toString` `toDecimal` `tryInt` `tryFloat` `tryDecimal` (`from*` spellings: `fromString`, `fromInt`, `fromFloat`)
 
 **Conditionals:** `ifThenElse` (alias `caseWhen`), `case { cond => value; ...; true => default }`
 

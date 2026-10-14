@@ -2069,3 +2069,56 @@ fn alias_normalization_keeps_shape_but_not_numbers() {
     // String literals are not touched.
     assert_eq!(normalize_aliases("WHERE s = 't1'"), "WHERE s = 't1'");
 }
+
+/// A decimal cast carries its precision and scale, and stays a `float` in the
+/// language.
+///
+/// `DECIMAL($1, $2)` cannot be written in a template: the text is re-parsed
+/// after substitution, and a type's precision is syntax rather than an
+/// expression. The intrinsic therefore takes them as separate arguments and
+/// builds the type itself. The language has no decimal scalar, so the result
+/// is `float` and only the SQL type is exact — which is the point, because
+/// binary floating point cannot represent money exactly.
+#[test]
+fn a_decimal_cast_carries_its_precision() {
+    let s = sql(
+        "t : query { a = string } = table \"s\" \"t\"\n\
+         q = t & select { v = toDecimal 18 2 .a }\n",
+        "q",
+    );
+    assert!(s.contains("CAST(a AS DECIMAL(18, 2)) AS v"), "{s}");
+}
+
+/// `try*` emits a real `TRY_CAST`, not a `CAST`.
+///
+/// This is a regression test with teeth: sqlglot's parser reads
+/// `TRY_CAST(x AS INT)` as a plain `Cast`, so a `sql` template spelling loses
+/// the "try" and the cast fails on the first unparseable row instead of
+/// yielding NULL. The intrinsic builds `Expr::TryCast` directly for that
+/// reason, and this asserts the two spellings do not collapse into one.
+#[test]
+fn try_cast_is_not_a_plain_cast() {
+    let s = sql(
+        "t : query { a = string } = table \"s\" \"t\"\n\
+         q = t & select { v = tryInt .a }\n",
+        "q",
+    );
+    assert!(s.contains("TRY_CAST(a AS INT)"), "{s}");
+    assert!(!s.contains("SELECT CAST(a AS INT)"), "{s}");
+}
+
+/// A cast that fails is worth failing on; a `try*` cast is not.
+///
+/// The two exist side by side on purpose. `icbase` types tens of thousands of
+/// coded columns as `string`, and `tryInt` is what keeps one unparseable row
+/// from failing the whole query — at the cost of a `maybe`, which the caller
+/// has to handle.
+#[test]
+fn a_try_cast_yields_a_maybe() {
+    let s = sql(
+        "t : query { a = string } = table \"s\" \"t\"\n\
+         q = t & select { v = coalesce 0 (tryInt .a) }\n",
+        "q",
+    );
+    assert!(s.contains("COALESCE((TRY_CAST(a AS INT)), 0) AS v"), "{s}");
+}

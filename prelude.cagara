@@ -322,10 +322,50 @@ toString : expr r int -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r float -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r date -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r timestamp -> expr r string = sql "CAGARA_TO_STRING($1)"
-toInt : expr r float -> expr r int = sql "CAST($1 AS INTEGER)"
+
+# Casts are named for the type they produce. Overloading picks the one that
+# fits, so `toInt` applied to a `float` is a narrowing and `toInt` applied to a
+# `string` is a parse -- the same destination reached from different sources.
+#
+# `INT` and `INTEGER` are the same SQL type, so both spellings of the source
+# produce the same cast.
+toInt : expr r float -> expr r int = sql "CAST($1 AS INT)"
+toInt : expr r string -> expr r int = sql "CAST($1 AS INT)"
 toFloat : expr r int -> expr r float = sql "CAST($1 AS FLOAT)"
+toFloat : expr r string -> expr r float = sql "CAST($1 AS FLOAT)"
 toBool : expr r int -> expr r bool = sql "CAST($1 AS BOOLEAN)"
 toBool : expr r float -> expr r bool = sql "CAST($1 AS BOOLEAN)"
+
+# `toDecimal precision scale x` gives a value an exact SQL type. Money is the
+# reason: plain `FLOAT` is binary floating point, so sums of it drift, while
+# `DECIMAL(18, 2)` is exact. The *language* type stays `float` -- there is no
+# separate decimal scalar -- so this changes the SQL type without adding one.
+toDecimal : expr r int -> expr r int -> expr r string -> expr r float =
+  sql "CAGARA_TO_DECIMAL($3, $1, $2)"
+toDecimal : expr r int -> expr r int -> expr r int -> expr r float =
+  sql "CAGARA_TO_DECIMAL($3, $1, $2)"
+toDecimal : expr r int -> expr r int -> expr r float -> expr r float =
+  sql "CAGARA_TO_DECIMAL($3, $1, $2)"
+
+# A `from*` name says where the value came from rather than where it is going,
+# which is the more useful reading at a call site: `fromString .man_grade` says
+# the column is text and is being read as a number. Each is the `to*` above,
+# so there is one implementation and two ways to name it.
+fromString : expr r string -> expr r int = toInt
+fromString : expr r string -> expr r float = toFloat
+fromString : expr r string -> expr r date = toDate
+fromInt : expr r int -> expr r float = toFloat
+fromFloat : expr r float -> expr r int = toInt
+
+# The casts above fail on a value they cannot convert. For a column typed
+# `string` that holds a code -- and `icbase` has tens of thousands of those --
+# one bad row would otherwise fail the whole query, so the `try*` forms yield
+# NULL instead. They return `maybe`, because that NULL has to be handled
+# somewhere: `coalesce 0 (tryInt .x)`.
+tryInt : expr r string -> expr r (maybe int) = sql "CAGARA_TRY_INT($1)"
+tryFloat : expr r string -> expr r (maybe float) = sql "CAGARA_TRY_FLOAT($1)"
+tryDecimal : expr r int -> expr r int -> expr r string -> expr r (maybe float) =
+  sql "CAGARA_TRY_DECIMAL($3, $1, $2)"
 
 # ── dates and timestamps ───────────────────────────────────────────────────
 # String literals widen to `date` / `timestamp`: `.created_at >= "2024-01-01"`.

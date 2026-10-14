@@ -89,6 +89,13 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
         _ => None,
     };
     let ts = |i: usize| lit(i).map(|k| k == "TIMESTAMP");
+    // A precision or scale has to be a literal: the type it builds is part of
+    // the statement's syntax, so it cannot be an expression the backend is
+    // still computing.
+    let num = |i: usize| match a.get(i) {
+        Some(Expr::Number(v)) => v.parse::<u32>().ok(),
+        _ => None,
+    };
     Some(match (name, a.len()) {
         ("CAGARA_ADD", 4) => add(ts(0)?, &lit(1)?, a[2].clone(), a[3].clone(), f)?,
         ("CAGARA_TRUNC", 3) => trunc(ts(0)?, &lit(1)?, a[2].clone(), f)?,
@@ -119,6 +126,38 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
             Fam::Spark => cast(a[0].clone(), DataType::String),
             _ => cast(a[0].clone(), DataType::Text),
         },
+        // `CAGARA_TO_DECIMAL(x, precision, scale)`. The precision and scale
+        // are separate arguments rather than being written into the type in
+        // the template: `CAST(x AS DECIMAL($1, $2))` cannot be parsed, because
+        // the template is re-read after substitution and a type's precision is
+        // syntax, not an expression.
+        //
+        // The result stays `float` in the language -- there is no distinct
+        // decimal scalar type -- so this is how a money column is given an
+        // exact SQL type without adding one.
+        ("CAGARA_TO_DECIMAL", 3) => cast(
+            a[0].clone(),
+            DataType::Decimal {
+                precision: num(1),
+                scale: num(2),
+            },
+        ),
+        // `TRY_CAST` cannot be spelled as a template: sqlglot's parser reads
+        // `TRY_CAST(x AS INT)` as `Cast`, dropping the "try" before the
+        // backend ever sees it, so a template would silently become a hard
+        // cast that fails on the first unparseable row. The node has to be
+        // built here instead. SQLite has no equivalent; see `try_cast`.
+        ("CAGARA_TRY_INT", 1) => try_cast(a[0].clone(), DataType::Int),
+        ("CAGARA_TRY_FLOAT", 1) => try_cast(a[0].clone(), DataType::Float),
+        ("CAGARA_TRY_DATE", 1) => try_cast(a[0].clone(), DataType::Date),
+        ("CAGARA_TRY_TIMESTAMP", 1) => try_cast(a[0].clone(), timestamp()),
+        ("CAGARA_TRY_DECIMAL", 3) => try_cast(
+            a[0].clone(),
+            DataType::Decimal {
+                precision: num(1),
+                scale: num(2),
+            },
+        ),
         ("CAGARA_LEFT", 2) => match f {
             Fam::Sqlite | Fam::Trino => func("SUBSTR", vec![a[0].clone(), n("1"), a[1].clone()]),
             _ => func("LEFT", a.to_vec()),
@@ -593,6 +632,27 @@ fn neg(e: Expr) -> Expr {
 
 fn cast(e: Expr, data_type: DataType) -> Expr {
     Expr::Cast {
+        expr: Box::new(atomic(e)),
+        data_type,
+    }
+}
+
+/// `TRY_CAST`, which yields NULL instead of failing.
+///
+/// This cannot come from a `sql` template: sqlglot's parser reads
+/// `TRY_CAST(x AS INT)` as a plain `Cast`, so the "try" is gone before the
+/// backend sees the text and the cast fails on the first bad row. Building the
+/// node here is the only way to keep the semantics.
+///
+/// SQLite has no `TRY_CAST` and no equivalent, so the node is emitted as-is
+/// and the target rejects it. Emulating it is deliberately not attempted:
+/// measured, `CAST('abc' AS INT)` is `0` there rather than an error, so a
+/// `NULLIF` guard would only catch the empty string and would turn every other
+/// unparseable value into a silent `0` -- the exact failure `TRY_CAST` exists
+/// to prevent. A loud error at the engine is the honest outcome. See
+/// `docs/SQL-DIALECTS.md`, which tracks the per-dialect gaps this way.
+fn try_cast(e: Expr, data_type: DataType) -> Expr {
+    Expr::TryCast {
         expr: Box::new(atomic(e)),
         data_type,
     }

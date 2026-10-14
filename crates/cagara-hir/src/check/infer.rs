@@ -542,6 +542,18 @@ impl<'w> Checker<'w> {
                         let r = self.conv_with_kind(&args[1], phase, names, Kind::Row)?;
                         Ok(Ty::Merge(Box::new(l), Box::new(r)))
                     }
+                    // `removeKey k r` — drop the column named by the label `k`
+                    // from row `r`. The label is a type (a `symbol k` variable
+                    // or a `Sym` literal), so the signature links `k` to the
+                    // result. It reduces at once when both are known.
+                    "removeKey" => {
+                        let k = self.conv(&args[0], phase, names)?;
+                        let r = self.conv_with_kind(&args[1], phase, names, Kind::Row)?;
+                        match reduce_removekey(&k, &r) {
+                            Some(reduced) => Ok(reduced),
+                            None => Ok(Ty::RemoveKey(Box::new(k), Box::new(r))),
+                        }
+                    }
                     // `mapValue w r` — wrap every field type of `r` with the
                     // wrapper `w`. The wrapper is read at the application, so a
                     // variable here is not a value wrapper the checker can use.
@@ -566,6 +578,20 @@ impl<'w> Checker<'w> {
                             Kind::ValueMap
                         };
                         Ok(self.rigid_with_kind(head, names, kind))
+                    }
+                    // `symbol k` — a column label. It is carried as a `keyLabel`
+                    // marker around a `Type` variable, so `infer_app` can
+                    // recognise a key parameter the way it does `prefixAffix`.
+                    // The call site binds the variable to the literal's `Sym`.
+                    "symbol" => {
+                        let TypeExpr::App { head, args, .. } = &args[0] else {
+                            return Err("`symbol` needs a type variable".into());
+                        };
+                        if !args.is_empty() {
+                            return Err("`symbol` needs a bare type variable".into());
+                        }
+                        let k = self.rigid(head, names);
+                        Ok(Ty::Con("keyLabel", vec![k]))
                     }
                     "agg" | "win" => match &args[0] {
                         TypeExpr::App {
@@ -780,6 +806,33 @@ impl<'w> Checker<'w> {
                 };
                 Ok(km.to_ty())
             }
+            // `prependSym k` / `appendSym k` — a prefix or suffix mapper whose
+            // label is a `symbol k` variable. It stays open until the call site
+            // binds `k` to a literal, then `resolve_mapper` turns it into the
+            // concrete `KeyAffix`. Unlike `prefix "x"`, no literal is needed.
+            "prependSym" | "appendSym" => {
+                let [label] = args.as_slice() else {
+                    return Err(format!("`{head}` takes one symbol argument"));
+                };
+                let TypeExpr::App {
+                    head: lh,
+                    args: la,
+                    ..
+                } = label
+                else {
+                    return Err(format!("`{head}` needs a symbol variable"));
+                };
+                if !la.is_empty() {
+                    return Err(format!("`{head}` needs a bare symbol variable"));
+                }
+                let k = self.rigid(lh, names);
+                let tag = if head == "prependSym" {
+                    "labelPrefix"
+                } else {
+                    "labelSuffix"
+                };
+                Ok(Ty::Con(tag, vec![k]))
+            }
             "compose" => {
                 let [f, g] = args.as_slice() else {
                     return Err("`compose` takes two key mappers".into());
@@ -905,7 +958,11 @@ impl<'w> Checker<'w> {
                 Box::new(self.inst(&right, map, gens)),
             ),
             Ty::MapValue(vm, row) => Ty::MapValue(vm, Box::new(self.inst(&row, map, gens))),
-            t @ (Ty::Var(_) | Ty::Rigid(..) | Ty::Empty) => t,
+            Ty::RemoveKey(k, row) => Ty::RemoveKey(
+                Box::new(self.inst(&k, map, gens)),
+                Box::new(self.inst(&row, map, gens)),
+            ),
+            t @ (Ty::Var(_) | Ty::Rigid(..) | Ty::Empty | Ty::Sym(_)) => t,
         }
     }
 
@@ -948,6 +1005,7 @@ impl<'w> Checker<'w> {
                 Ty::Gen(k)
             }
             Ty::KeyAffix(n, s) => Ty::KeyAffix(n, s.clone()),
+            Ty::Sym(s) => Ty::Sym(s),
             Ty::Con(n, args) => Ty::Con(n, args.iter().map(|a| self.gen(a, map, gens)).collect()),
             Ty::Fun(a, b) => fun(self.gen(&a, map, gens), self.gen(&b, map, gens)),
             Ty::Row(fs, tail) => {
@@ -969,6 +1027,10 @@ impl<'w> Checker<'w> {
                 Box::new(self.gen(&right, map, gens)),
             ),
             Ty::MapValue(vm, row) => Ty::MapValue(vm, Box::new(self.gen(&row, map, gens))),
+            Ty::RemoveKey(k, row) => Ty::RemoveKey(
+                Box::new(self.gen(&k, map, gens)),
+                Box::new(self.gen(&row, map, gens)),
+            ),
             t @ (Ty::Gen(_) | Ty::Empty) => t,
         }
     }
@@ -1310,6 +1372,11 @@ impl<'w> Checker<'w> {
                     (Ty::Con("suffixAffix", args), _) if args.len() == 1 => {
                         Some((KeyMarker::Suffix, Some(args[0].clone())))
                     }
+                    // `symbol k` is the label parameter of `omit`: it reads the
+                    // literal the same way `omit "k"` does.
+                    (Ty::Con("keyLabel", args), _) if args.len() == 1 => {
+                        Some((KeyMarker::Omit, None))
+                    }
                     (_, Some(m)) => Some((m, None)),
                     _ => None,
                 };
@@ -1359,6 +1426,17 @@ impl<'w> Checker<'w> {
                             self.deferred_keys.push(marker);
                         }
                         (_, Some(s)) => {
+                            // A `symbol k` parameter is bound to the literal's
+                            // type, so the signature's `k` (and the `removeKey`
+                            // result that uses it) resolves to `"s"`.
+                            if let Ty::Con("keyLabel", inner) = &*p {
+                                self.unify(&inner[0], &Ty::Sym(s.clone())).map_err(|msg| {
+                                    TyErr {
+                                        span: arg.span,
+                                        msg: format!("`omit` label mismatch: {msg}"),
+                                    }
+                                })?;
+                            }
                             if let Some(m) = carried {
                                 self.affix_mappers.push((marker, m));
                             }

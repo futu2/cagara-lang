@@ -83,7 +83,7 @@ update : expr r (row s) -> query r -> query (merge r s) = primitive "__update"
 # primitive's internal type: `omit` is not a projection, so the annotation is
 # descriptive. The constraint above is what actually types the stage, which is
 # why writing something weaker here (or even wrong) changes no result.
-omit : key_omit -> query r -> query s = primitive "__omit"
+omit : symbol k -> query r -> query (removeKey k r) = primitive "__omit"
 
 # `mapValue "w"` transforms all field types using a wrapper: `"nullable"`
 # wraps each in `maybe`, `"list"` wraps each in `list`. The wrapper is read at

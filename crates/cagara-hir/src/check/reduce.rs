@@ -163,10 +163,12 @@ pub(crate) fn kind_of(t: &Ty, vars: &[VarInfo]) -> Kind {
         Ty::Var(v) => vars[*v as usize].kind,
         Ty::Rigid(v, _) => vars[*v as usize].kind,
         Ty::Gen(_) => Kind::Type, // schemes handle their own kinding
+        // A literal type is an ordinary type: it unifies only with itself.
+        Ty::Sym(_) => Kind::Type,
         // `prefixAffix` / `suffixAffix` are string-valued affix parameters;
         // their KeyMap argument is metadata tying the argument to its row map.
         Ty::Con("prefixAffix" | "suffixAffix", _) => Kind::Type,
-        Ty::Con("KeyMapId" | "KeyMapCompose", _) => Kind::KeyMap,
+        Ty::Con("KeyMapId" | "KeyMapCompose" | "labelPrefix" | "labelSuffix", _) => Kind::KeyMap,
         Ty::Con(_, _) => Kind::Type,
         Ty::Fun(_, _) => Kind::Type,
         Ty::Row(_, _) => Kind::Row,
@@ -174,6 +176,7 @@ pub(crate) fn kind_of(t: &Ty, vars: &[VarInfo]) -> Kind {
         Ty::MapKey(_, _) => Kind::Row,
         Ty::Merge(_, _) => Kind::Row,
         Ty::MapValue(_, _) => Kind::Row,
+        Ty::RemoveKey(_, _) => Kind::Row,
         // A key affix is a `KeyMap`-kinded symbol: the argument of `keyMap`.
         Ty::KeyAffix(_, _) => Kind::KeyMap,
     }
@@ -229,6 +232,17 @@ pub(crate) const CONS: &[(&str, usize)] = &[
     // wrapper marker, read at the application like a key.
     ("mapValue", 2),
     ("valuemapper", 1),
+    // `symbol k` — a column label, read at the application like a key. The
+    // literal name is what `omit`/`prefix`/`suffix` take as their argument.
+    ("symbol", 1),
+    // `removeKey k r` — the row former for dropping one column. `k` is a
+    // label type (`Sym` or a `symbol` variable); see `reduce_removekey`.
+    ("removeKey", 2),
+    // `prependSym k` / `appendSym k` — label-driven prefix and suffix mappers.
+    ("prependSym", 1),
+    ("appendSym", 1),
+    ("labelPrefix", 1),
+    ("labelSuffix", 1),
 ];
 
 /// Returns the expected kinds for each type constructor's arguments.
@@ -317,4 +331,134 @@ pub(crate) fn op_name(n: &str) -> &str {
 
 pub(crate) fn is_join(t: &Ty) -> bool {
     matches!(t, Ty::Con("join", _))
+}
+
+/// Reduce `removeKey k row` when `row` is closed. Removes the field named `k`
+/// and keeps the order of the rest. Returns `None` while the row is open, or
+/// when `k` is absent: the caller reports that as a missing column.
+pub(crate) fn reduce_removekey(label: &Ty, row: &Ty) -> Option<Ty> {
+    // The label is a type-level literal. A variable label is not known yet,
+    // so the term waits.
+    let Ty::Sym(k) = label else {
+        return None;
+    };
+    match row {
+        Ty::Empty => None,
+        Ty::Row(fields, tail) if matches!(tail.as_ref(), Ty::Empty) => {
+            if !fields.iter().any(|(n, _)| n == k) {
+                return None;
+            }
+            let kept = fields.iter().filter(|(n, _)| n != k).cloned().collect();
+            Some(Ty::Row(kept, Box::new(Ty::Empty)))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod removekey_tests {
+    use super::*;
+
+    fn row3() -> Ty {
+        row_or_tail(
+            vec![
+                ("a".into(), con("int")),
+                ("b".into(), con("string")),
+                ("c".into(), con("float")),
+            ],
+            Ty::Empty,
+        )
+    }
+
+    #[test]
+    fn removes_the_named_field_and_keeps_order() {
+        let out = reduce_removekey(&Ty::Sym("b".into()), &row3()).expect("b is present");
+        let (fs, tail) = match out {
+            Ty::Row(fs, tail) => (fs, *tail),
+            other => panic!("expected a row, got {other:?}"),
+        };
+        let names: Vec<&str> = fs.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["a", "c"]);
+        assert_eq!(tail, Ty::Empty);
+    }
+
+    #[test]
+    fn absent_field_does_not_reduce() {
+        assert!(reduce_removekey(&Ty::Sym("zz".into()), &row3()).is_none());
+    }
+
+    #[test]
+    fn open_row_does_not_reduce() {
+        let open = row_or_tail(vec![("a".into(), con("int"))], Ty::Rigid(0, "t".into()));
+        assert!(reduce_removekey(&Ty::Sym("a".into()), &open).is_none());
+    }
+
+    #[test]
+    fn variable_label_does_not_reduce() {
+        // The label is still unknown, so the term must wait for it.
+        let var_label = Ty::Rigid(0, "k".into());
+        assert!(reduce_removekey(&var_label, &row3()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod keymap_baseline_tests {
+    use super::*;
+
+    fn row2() -> Ty {
+        row_or_tail(
+            vec![("id".into(), con("int")), ("name".into(), con("string"))],
+            Ty::Empty,
+        )
+    }
+
+    fn names(t: &Ty) -> Vec<String> {
+        match t {
+            Ty::Row(fs, _) => fs.iter().map(|(n, _)| n.clone()).collect(),
+            other => panic!("expected a row, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefix_renames_every_field_in_order() {
+        let km = KeyMap::Prefix("u_".into()).to_ty();
+        let out = reduce_mapkey(&km, &row2()).expect("closed row reduces");
+        assert_eq!(names(&out), vec!["u_id", "u_name"]);
+    }
+
+    #[test]
+    fn suffix_renames_every_field_in_order() {
+        let km = KeyMap::Suffix("_v2".into()).to_ty();
+        let out = reduce_mapkey(&km, &row2()).expect("closed row reduces");
+        assert_eq!(names(&out), vec!["id_v2", "name_v2"]);
+    }
+
+    #[test]
+    fn variable_mapper_does_not_reduce() {
+        let km = Ty::Rigid(0, "m".into());
+        assert!(reduce_mapkey(&km, &row2()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod label_mapper_tests {
+    use super::*;
+
+    #[test]
+    fn bound_label_decodes_to_prefix() {
+        let t = Ty::Con("labelPrefix", vec![Ty::Sym("u_".into())]);
+        assert_eq!(KeyMap::of_label_ty(&t), Some(KeyMap::Prefix("u_".into())));
+    }
+
+    #[test]
+    fn bound_label_decodes_to_suffix() {
+        let t = Ty::Con("labelSuffix", vec![Ty::Sym("_v2".into())]);
+        assert_eq!(KeyMap::of_label_ty(&t), Some(KeyMap::Suffix("_v2".into())));
+    }
+
+    #[test]
+    fn open_label_does_not_decode() {
+        let t = Ty::Con("labelPrefix", vec![Ty::Rigid(0, "k".into())]);
+        assert_eq!(KeyMap::of_label_ty(&t), None);
+    }
 }

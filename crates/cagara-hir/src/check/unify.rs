@@ -64,6 +64,17 @@ impl<'w> Checker<'w> {
         resolved
     }
 
+    /// A mapper resolved to its concrete form. A label-driven witness
+    /// (`labelPrefix (Sym s)`) becomes the `KeyAffix` it stands for once its
+    /// label is bound; anything else is returned as it resolves.
+    pub(crate) fn resolve_mapper(&self, km: &Ty) -> Ty {
+        let km = self.resolve(km);
+        match KeyMap::of_label_ty(&km) {
+            Some(mapper) => mapper.to_ty(),
+            None => km,
+        }
+    }
+
     /// Whether a `keyMap` term survives on the *spine* of `t` once bound
     /// variables are followed. A term on the spine renames the row it is part
     /// of, so that row is still constrainable by a later signature.
@@ -102,7 +113,7 @@ impl<'w> Checker<'w> {
     pub(crate) fn row_open(&self, t: &Ty) -> bool {
         matches!(
             self.flatten(t).1,
-            Ty::Var(_) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..)
+            Ty::Var(_) | Ty::MapKey(..) | Ty::Merge(..) | Ty::MapValue(..) | Ty::RemoveKey(..)
         )
     }
 
@@ -121,7 +132,7 @@ impl<'w> Checker<'w> {
                     // pipeline often binds the mapper and inner row through
                     // separate applications, so leaving either child as a
                     // variable makes an otherwise closed term look open.
-                    let km = self.resolve(&km);
+                    let km = self.resolve_mapper(&km);
                     let (rf, rt) = self.flatten(&row);
                     let row = row_or_tail(rf, rt);
                     if let Some(reduced) = reduce_mapkey(&km, &row) {
@@ -129,6 +140,19 @@ impl<'w> Checker<'w> {
                     } else {
                         // Cannot reduce yet; return MapKey as tail
                         return (fs, Ty::MapKey(Box::new(km), Box::new(row)));
+                    }
+                }
+                Ty::RemoveKey(k, row) => {
+                    // Resolve the label and the inner row before reducing. The
+                    // label is usually a variable bound at the call site.
+                    let k = self.zonk(&k);
+                    let (rf, rt) = self.flatten(&row);
+                    let row = row_or_tail(rf, rt);
+                    if let Some(reduced) = reduce_removekey(&k, &row) {
+                        cur = reduced;
+                    } else {
+                        // Still open, or the column is absent: keep the term.
+                        return (fs, Ty::RemoveKey(Box::new(k), Box::new(row)));
                     }
                 }
                 Ty::Merge(left, right) => {
@@ -180,7 +204,7 @@ impl<'w> Checker<'w> {
                 // been an unbound variable when the term was built and bound
                 // since (that is how a deferred `prefix p` becomes concrete),
                 // so passing the unresolved `km` here would miss the reduction.
-                let km = self.zonk(&km);
+                let km = self.resolve_mapper(&self.zonk(&km));
                 let row = self.zonk(&row);
                 // The reduced form is *not* zonked recursively: a row whose
                 // tail is still a `keyMap` would otherwise re-enter this arm on
@@ -209,6 +233,14 @@ impl<'w> Checker<'w> {
                     Ty::MapValue(vm, Box::new(row))
                 }
             }
+            Ty::RemoveKey(k, row) => {
+                let k = self.zonk(&k);
+                let row = self.zonk(&row);
+                match reduce_removekey(&k, &row) {
+                    Some(reduced) => self.zonk(&reduced),
+                    None => Ty::RemoveKey(Box::new(k), Box::new(row)),
+                }
+            }
             o => o,
         }
     }
@@ -222,6 +254,7 @@ impl<'w> Checker<'w> {
             Ty::MapKey(_, row) => self.occurs(v, &row),
             Ty::Merge(left, right) => self.occurs(v, &left) || self.occurs(v, &right),
             Ty::MapValue(_, row) => self.occurs(v, &row),
+            Ty::RemoveKey(_, row) => self.occurs(v, &row),
             _ => false,
         }
     }
@@ -334,7 +367,7 @@ impl<'w> Checker<'w> {
         // Only a *concrete* mapper can reduce. A variable mapper has no
         // transformation to apply, and trying anyway is how a deferred term
         // turns into a cycle.
-        let km = self.resolve(km);
+        let km = self.resolve_mapper(km);
         KeyMap::of_ty(&km)?;
         let shallow = self.resolve(row);
         let reduced = match reduce_mapkey(&km, &shallow) {
@@ -437,6 +470,9 @@ impl<'w> Checker<'w> {
             // the same literal — `prefix "u_"` with `prefix "u_"`. Different
             // affixes are a genuine mismatch, reported as such.
             (Ty::KeyAffix(ca, sa), Ty::KeyAffix(cb, sb)) if ca == cb && sa == sb => Ok(()),
+            // A literal type unifies only with the same literal: `symbol k`
+            // bound to `"k"` and nothing else.
+            (Ty::Sym(sa), Ty::Sym(sb)) if sa == sb => Ok(()),
             // Two symbolic row terms unify componentwise. This must be checked
             // before the one-sided reduction arm below: otherwise the wildcard
             // would swallow this case and leave the mapper variables unrelated.
@@ -480,6 +516,10 @@ impl<'w> Checker<'w> {
                     _ => Ok(()),
                 }
             }
+            // `removeKey` is a row former like `merge`: an unreduced term is
+            // compared through its flattened row, so it waits until its inner
+            // row is known instead of being read as final.
+            (Ty::RemoveKey(..), _) | (_, Ty::RemoveKey(..)) => self.unify_rows(&a, &e),
             (
                 Ty::Row(..),
                 Ty::Row(..) | Ty::Empty | Ty::Rigid(..) | Ty::Merge(..) | Ty::MapValue(..),

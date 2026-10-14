@@ -37,6 +37,15 @@ pub(crate) enum Ty {
     Merge(Box<Ty>, Box<Ty>),
     /// Value mapping over a row: applies a uniform type wrapper to every field type.
     MapValue(ValueMap, Box<Ty>),
+    /// Remove one named field from a row: `removeKey k r`. The label is a type
+    /// (normally `Sym`), so a signature's `k` links to the result. It reduces
+    /// once the label is a `Sym`, `r` is closed, and `r` contains the label;
+    /// the missing-column error is reported by the stage that registered it.
+    RemoveKey(Box<Ty>, Box<Ty>),
+    /// A string literal used as a type: the type of `"k"` in `symbol k`. It
+    /// unifies only with the identical literal, so `symbol k` is an ordinary
+    /// `Type` variable that the call site binds to `Sym("k")`.
+    Sym(String),
 }
 
 /// Key mapping witnesses: closed, first-order transformations on field names.
@@ -86,6 +95,27 @@ impl KeyMap {
                 )
                 .normalize(),
             ),
+            _ => None,
+        }
+    }
+
+    /// Decode a label-driven mapper, `labelPrefix (Sym s)` / `labelSuffix
+    /// (Sym s)`, once its label is a literal. This is the form `prependSym k`
+    /// / `appendSym k` take while `k` is still a variable: it becomes an
+    /// ordinary prefix or suffix mapper when the label is bound.
+    ///
+    /// `None` while the label is open, so the term stays retained exactly as a
+    /// variable mapper does.
+    pub(crate) fn of_label_ty(t: &Ty) -> Option<KeyMap> {
+        match t {
+            Ty::Con("labelPrefix", a) if a.len() == 1 => match &a[0] {
+                Ty::Sym(s) => Some(KeyMap::Prefix(s.clone())),
+                _ => None,
+            },
+            Ty::Con("labelSuffix", a) if a.len() == 1 => match &a[0] {
+                Ty::Sym(s) => Some(KeyMap::Suffix(s.clone())),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -312,7 +342,7 @@ pub(crate) fn ty_to_scalar(t: &Ty) -> ScalarType {
     match t {
         // A variable that reaches here was never solved. "Unknown" is the
         // honest answer: the rest of the definition is already reported.
-        Ty::Var(_) | Ty::Rigid(..) | Ty::Gen(_) => ScalarType::Unknown,
+        Ty::Var(_) | Ty::Rigid(..) | Ty::Gen(_) | Ty::Sym(_) => ScalarType::Unknown,
         Ty::Con(name, args) => match (*name, args.len()) {
             ("int", 0) => ScalarType::Int,
             ("float", 0) => ScalarType::Float,
@@ -328,7 +358,7 @@ pub(crate) fn ty_to_scalar(t: &Ty) -> ScalarType {
         Ty::Fun(..) | Ty::Row(..) | Ty::Empty | Ty::MapKey(..) | Ty::KeyAffix(..) => {
             ScalarType::Unknown
         }
-        Ty::Merge(..) | Ty::MapValue(..) => ScalarType::Unknown,
+        Ty::Merge(..) | Ty::MapValue(..) | Ty::RemoveKey(..) => ScalarType::Unknown,
     }
 }
 
@@ -408,7 +438,8 @@ pub(crate) fn scheme_view(t: &Ty) -> SchemeView {
                 .collect(),
         },
         Ty::Fun(..) => SchemeView::Function,
-        Ty::Merge(..) | Ty::MapValue(..) | Ty::MapKey(..) | Ty::KeyAffix(..) => {
+        Ty::Sym(_) => SchemeView::Open,
+        Ty::Merge(..) | Ty::MapValue(..) | Ty::MapKey(..) | Ty::KeyAffix(..) | Ty::RemoveKey(..) => {
             let fields = ty_fields(t);
             if fields.is_empty() {
                 SchemeView::Open

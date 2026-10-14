@@ -10,8 +10,25 @@ resolved.
 | Type term | Meaning |
 |---|---|
 | `keyMap m r` | Apply a key mapper to every field name in `r` |
+| `removeKey k r` | Drop the field named `k` from `r`; `k` is a label type (`symbol k`) |
 | `mapValue w r` | Apply a value wrapper to every field type in `r` |
 | `merge r s` | Overlay `s` on `r`; right-hand fields replace same-name fields |
+
+`removeKey` takes its label as a type. A signature names it with `symbol k`,
+which the call site binds to the literal: `omit "name"` binds `k` to `"name"`,
+so `omit : symbol k -> query r -> query (removeKey k r)` gives the output row
+with that column removed. A missing column is still reported by the `omit`
+stage's constraint (`Cons::Omit`), not by the reducer.
+
+**Status and remaining work.** The label-driven mapper witnesses
+`labelPrefix`/`labelSuffix` (built by `prependSym k` / `appendSym k`) exist and
+decode once their label is bound. `prefix` and `suffix` still use the literal
+`prefixAffix` / `suffixAffix` path. Moving them to labels needs one change
+that is not yet made: a `symbol` parameter must take its stage from the result
+type's mapper, so `key_stage` can handle `removeKey` and the label-driven
+`keyMap` stages. Until then the prelude keeps `prefix`/`suffix` as they are.
+`Cons::Omit` remains the source of the missing-column error; removing it needs
+a fallible reducer.
 
 Key mappers are first-order witnesses: `id`, `prefix "x"`, `suffix "x"`, and
 composition. `prefix` and `suffix` read their literal argument at the call

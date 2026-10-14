@@ -42,6 +42,7 @@ impl Printer {
         match t {
             Ty::Var(v) => self.var(*v),
             Ty::Rigid(_, n) => n.clone(),
+            Ty::Sym(s) => format!("{s:?}"),
             Ty::Gen(k) => match self.gens.get(*k as usize).cloned().flatten() {
                 Some(n) => n,
                 None => {
@@ -84,6 +85,9 @@ impl Printer {
             }
             Ty::MapValue(vm, row) => {
                 format!("mapValue({:?}, {})", vm, self.ty(row, 2))
+            }
+            Ty::RemoveKey(k, row) => {
+                format!("removeKey({}, {})", self.ty(k, 2), self.ty(row, 2))
             }
             Ty::Fun(a, b) => {
                 let s = format!("{} -> {}", self.ty(a, 1), self.ty(b, 0));

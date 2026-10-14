@@ -74,6 +74,11 @@ impl<'w> Checker<'w> {
 
     pub(crate) fn fingerprint_into(&self, t: &Ty, out: &mut String) {
         match self.resolve(t) {
+            Ty::Sym(s) => {
+                out.push_str("sym(");
+                out.push_str(&format!("{s:?}"));
+                out.push(')');
+            }
             Ty::Var(v) => {
                 out.push('v');
                 out.push_str(&v.to_string());
@@ -124,6 +129,13 @@ impl<'w> Checker<'w> {
                 out.push_str(&format!("{:?}", m));
                 out.push(',');
                 self.fingerprint_into(&r, out);
+                out.push(')');
+            }
+            Ty::RemoveKey(k, row) => {
+                out.push_str("removeKey(");
+                self.fingerprint_into(&k, out);
+                out.push(',');
+                self.fingerprint_into(&row, out);
                 out.push(')');
             }
             Ty::Merge(left, right) => {

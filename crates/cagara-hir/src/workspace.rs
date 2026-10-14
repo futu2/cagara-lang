@@ -708,7 +708,9 @@ mod tests {
         // A spelling outside the table still cannot be used as an operator.
         let ws = Workspace::from_source("q = a ~= b\n");
         assert!(
-            ws.diags.iter().any(|d| d.message.contains("unknown operator")),
+            ws.diags
+                .iter()
+                .any(|d| d.message.contains("unknown operator")),
             "{:?}",
             ws.diags
         );
@@ -795,7 +797,9 @@ mod tests {
         ] {
             // `upper` is the prelude's, so it resolving proves the prelude is
             // still there.
-            let ws = Workspace::from_source(&format!("{src}r : expr r string -> expr r string = upper\n"));
+            let ws = Workspace::from_source(&format!(
+                "{src}r : expr r string -> expr r string = upper\n"
+            ));
             let tc = crate::check::check(&ws);
             assert!(
                 !tc.errors()

@@ -275,11 +275,6 @@ impl<'a> Parser<'a> {
         self.finish();
     }
 
-    /// `infixl` / `infixr` are no longer part of the language: fixity is fixed
-    /// in the core ([`crate::ops`]), so there is nothing for a declaration to
-    /// say. The words are ordinary names now, and a line that reads like a
-    /// declaration is an ordinary definition missing its `=`.
-
     fn import(&mut self) {
         self.start(K::ImportDecl);
         self.bump();
@@ -1154,7 +1149,7 @@ mod tests {
     /// expression parses.
     #[test]
     fn the_fixed_table_groups_expressions_as_before() {
-        let ops = Ops::new();
+        let ops = Ops::default();
         // Left-associative.
         assert_eq!(
             body_with("q = a + b + c", &ops),

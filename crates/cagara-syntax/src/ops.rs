@@ -156,15 +156,21 @@ pub struct Ops {
     map: HashMap<String, Fixity>,
 }
 
-impl Ops {
+impl Default for Ops {
     /// The language's operator table. There is exactly one, fixed at build
     /// time: nothing in a source file can add to it or re-fix it.
-    pub fn new() -> Self {
+    ///
+    /// A `Default` rather than a `new`, because there is nothing to choose —
+    /// the table *is* the language, and an empty or partial one is not a
+    /// meaningful thing to ask for.
+    fn default() -> Self {
         Ops {
             map: FIXITY.iter().map(|(s, f)| (s.to_string(), *f)).collect(),
         }
     }
+}
 
+impl Ops {
     /// The fixity of an operator, by spelling. Every infix operator is one of
     /// these, `&` and `&+` included: they differ only in precedence and
     /// associativity.
@@ -228,7 +234,7 @@ impl Ops {
 /// has not defined, like any other.
 pub fn ops() -> &'static Ops {
     static OPS: OnceLock<Ops> = OnceLock::new();
-    OPS.get_or_init(Ops::new)
+    OPS.get_or_init(Ops::default)
 }
 
 /// The name a spelling desugars to: `+` is `_+_`, `&?` is `_&?_`.
@@ -249,7 +255,7 @@ mod tests {
 
     #[test]
     fn operators_have_the_documented_fixity() {
-        let ops = Ops::new();
+        let ops = Ops::default();
         // Left-assoc, right-assoc, and the tightest expression operator.
         assert_eq!(ops.find("+").unwrap().precedence(), (17, 18));
         assert_eq!(ops.find("??").unwrap().precedence(), (22, 21));
@@ -267,7 +273,7 @@ mod tests {
     /// so.
     #[test]
     fn the_prelude_parses_against_the_fixed_table() {
-        let (_module, errors) = crate::ast::lower_with(PRELUDE_SRC, &Ops::new());
+        let (_module, errors) = crate::ast::lower_with(PRELUDE_SRC, &Ops::default());
         assert!(errors.is_empty(), "{errors:?}");
     }
 
@@ -358,7 +364,7 @@ mod tests {
     /// at their own looser level.
     #[test]
     fn being_a_stage_is_only_a_question_of_where_you_sit() {
-        let ops = Ops::new();
+        let ops = Ops::default();
         let pipe = ops.pipe_fixity().expect("`&` is the pipeline");
         for s in ops.spellings() {
             assert_eq!(
@@ -482,7 +488,7 @@ mod tests {
     fn fixity_cannot_be_declared_in_source() {
         // The words are ordinary names, not keywords, so a line beginning with
         // one parses as a definition.
-        let (_module, errors) = crate::ast::lower_with("infixl = 1\n", &Ops::new());
+        let (_module, errors) = crate::ast::lower_with("infixl = 1\n", &Ops::default());
         assert!(errors.is_empty(), "{errors:?}");
     }
 }

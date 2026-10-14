@@ -47,6 +47,76 @@
           "scope": "machine-overridable",
           "description": "Path to the cagara executable; the extension runs `cagara lsp`. When empty, the server bundled in the extension is used if this build carries one, then target/release or target/debug in a trusted workspace, then cagara on PATH."
         },
+        "cagara.dialect": {
+          "type": "string",
+          "default": "ansi",
+          "scope": "resource",
+          "enum": [
+            "ansi",
+            "postgres",
+            "mysql",
+            "sqlite",
+            "duckdb",
+            "tsql",
+            "bigquery",
+            "snowflake",
+            "trino",
+            "presto",
+            "athena",
+            "spark",
+            "databricks",
+            "doris",
+            "starrocks",
+            "singlestore",
+            "redshift",
+            "oracle",
+            "hive",
+            "clickhouse",
+            "teradata"
+          ],
+          "enumDescriptions": [
+            "The compiler's default. Standard SQL.",
+            "PostgreSQL",
+            "MySQL",
+            "SQLite. No TRY_CAST and no LPAD, and CAST of a bad value yields 0 rather than NULL.",
+            "DuckDB",
+            "T-SQL (SQL Server)",
+            "BigQuery",
+            "Snowflake",
+            "Trino",
+            "Presto",
+            "Amazon Athena",
+            "Apache Spark",
+            "Databricks",
+            "Apache Doris",
+            "StarRocks",
+            "SingleStore",
+            "Amazon Redshift",
+            "Oracle",
+            "Apache Hive",
+            "ClickHouse",
+            "Teradata"
+          ],
+          "markdownDescription": "SQL dialect to compile to when copying SQL. The names are the ones `cagara --dialect` accepts, and the choice is the same one the CLI makes: dialects differ in how Cagara's date, string and integer operations are rewritten, and a few cannot express some operations at all."
+        },
+        "cagara.copyOnSave": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Compile SQL and copy it to the clipboard every time a .cagara file is saved."
+        },
+        "cagara.showSqlOnSave": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "markdownDescription": "When SQL is copied on save, also open it beside the source. Off by default so saving does not move the editor; the clipboard is still filled either way. The \"Cagara: Copy SQL\" command always opens it, since running it is a request to see the SQL."
+        },
+        "cagara.extraArgs": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Extra arguments to pass to `cagara` when compiling, split on whitespace (e.g. `--pretty` or `--optimize`)."
+        },
         "cagara.trace.server": {
           "type": "string",
           "enum": [
@@ -60,6 +130,10 @@
       }
     },
     "commands": [
+      {
+        "command": "cagara.copySql",
+        "title": "Cagara: Copy SQL"
+      },
       {
         "command": "cagara.restartServer",
         "title": "Cagara: Restart Language Server"

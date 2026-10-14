@@ -34,6 +34,13 @@ try {
 /**
  * The most recently modified file the server is built from, or undefined.
  * Used only to warn about a build that predates the sources.
+ *
+ * `tests/` is skipped because a test never reaches the binary: editing one
+ * left the guard insisting the build was stale while cargo reported it up to
+ * date, so a package that was in fact current could not be produced. An
+ * `examples/` or `benches/` directory would be the same. What remains is the
+ * source that is compiled into the server, plus the prelude, which is
+ * `include_str!`d into it.
  */
 function newestSource(root) {
   let newest;
@@ -45,7 +52,12 @@ function newestSource(root) {
   };
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === "target" || entry.name === "node_modules" || entry.name.startsWith(".")) {
+      if (
+        entry.name === "target" ||
+        entry.name === "node_modules" ||
+        entry.name === "tests" ||
+        entry.name.startsWith(".")
+      ) {
         continue;
       }
       const candidate = join(dir, entry.name);

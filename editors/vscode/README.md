@@ -48,6 +48,34 @@ release does. Step 3 is the fallback for a package that carries no server, and
 searches upward, so a build in the repository root serves a nested workspace
 such as `examples/`.
 
+## Compiling to SQL
+
+The extension can run `cagara <file>` for you and put the result on the
+clipboard, so SQL does not have to be fetched from a terminal.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `cagara.copyOnSave` | `false` | Compile and copy on every save of a `.cagara` file. |
+| `cagara.dialect` | `ansi` | Dialect to compile to. The names are the ones `cagara --dialect` accepts. |
+| `cagara.showSqlOnSave` | `false` | Also open the SQL beside the source. Off, saving only fills the clipboard. |
+| `cagara.extraArgs` | `""` | Extra `cagara` arguments, split on whitespace, e.g. `--pretty` or `--optimize`. |
+
+**Cagara: Copy SQL** in the command palette does the same for the active file
+and always opens the SQL, since running it is a request to see the result.
+Both paths use the compiler the extension already runs as a language server,
+so `cagara.path` applies.
+
+The SQL is compiled from the **file on disk**, which is why saving is the
+natural trigger: the compiler reads the file, not the editor's buffer. Running
+the command on a file with unsaved edits asks you to save first rather than
+copying SQL that does not match what is on screen.
+
+A file whose entry point is `main` produces one statement. A file with no
+`main` is a library, so there is nothing to copy and the extension says so
+instead of putting an empty string on the clipboard. A compile error opens a
+notification with the diagnostic, which the language server also underlines in
+the editor.
+
 ## Setup from source
 
 Build `cagara` from the repository root:

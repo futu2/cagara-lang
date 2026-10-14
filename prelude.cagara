@@ -285,6 +285,23 @@ lower : expr r string -> expr r string = sql "LOWER($1)"
 trim : expr r string -> expr r string = sql "TRIM($1)"
 ltrim : expr r string -> expr r string = sql "LTRIM($1)"
 rtrim : expr r string -> expr r string = sql "RTRIM($1)"
+# `lpad 12 "0" s`: `s` padded on the left to width 12 with copies of `"0"`.
+#
+# The width comes first, then what to pad with, then the string — the same
+# argument order as `left` / `right` / `substring`, which take their position
+# or length before the string, so `lpad 12 "0"` is a reusable "pad to twelve".
+# It is the reverse of SQL's own `LPAD(s, 12, '0')`, which is what the
+# template below rearranges.
+#
+# A value already at least `n` wide is returned whole, not truncated.
+#
+# Unlike `length`, this needs no `CAGARA_*` rewrite: sqlglot passes `LPAD`
+# through unchanged for every dialect. SQLite has no `LPAD` and will reject it
+# at run time, which is the same gap `try*` has there — emitting the call is
+# more honest than guessing at a `substr`/`printf` spelling, and the engine
+# says so loudly.
+lpad : expr r int -> expr r string -> expr r string -> expr r string = sql "LPAD($2, $1, $3)"
+rpad : expr r int -> expr r string -> expr r string -> expr r string = sql "RPAD($2, $1, $3)"
 length : expr r string -> expr r int = sql "CAGARA_LENGTH($1)"
 like : expr r string -> expr r string -> expr r bool = sql "$2 LIKE $1"
 ilike : expr r string -> expr r string -> expr r bool = sql "$2 ILIKE $1"
@@ -362,6 +379,12 @@ tryDecimal : expr r int -> expr r int -> expr r string -> expr r (maybe float) =
 currentDate : expr r date = sql "CURRENT_DATE"
 currentTimestamp : expr r timestamp = sql "CAGARA_NOW()"
 now : expr r timestamp = currentTimestamp
+
+# The day before today. The most common partition date there is: a table
+# partitioned by day is read for the day that has finished, and `yesterday`
+# says that in one word at a use site where `addDays (-1) currentDate` is a
+# parenthesised expression in the middle of a pipeline.
+yesterday : expr r date = addDays (-1) currentDate
 
 toDate : expr r timestamp -> expr r date = sql "CAGARA_TO_DATE($1)"
 toDate : expr r string -> expr r date = sql "CAGARA_TO_DATE($1)"

@@ -1213,10 +1213,11 @@ error messages.
 **Arithmetic:** `+` `-` `*` `/` `%` `negate` (int and float), `<>` / `concat`
 
 **Strings:** `upper` `lower` `trim` `ltrim` `rtrim` `length` `like` `ilike`
-`substring start len s` `left n s` `right n s` `replaceAll from to s`
-`strpos sub s` `contains sub s` `startsWith prefix s` `endsWith suffix s`
+`substring start len s` `left n s` `right n s` `lpad n fill s` `rpad n fill s`
+`replaceAll from to s` `strpos sub s` `contains sub s` `startsWith prefix s`
+`endsWith suffix s`
 
-**Dates and timestamps:** `currentDate` `now` `toDate` `toTimestamp` `toString`
+**Dates and timestamps:** `currentDate` `yesterday` `now` `toDate` `toTimestamp` `toString`
 `addDays` `addWeeks` `addMonths` `addQuarters` `addYears` `addHours`
 `addMinutes` `addSeconds`; `truncYear` `truncQuarter` `truncMonth` `truncWeek`
 `truncDay` `truncHour` `truncMinute`; `year` `quarter` `month` `day`
@@ -1265,6 +1266,7 @@ makes partial application work. The argument order is therefore:
 | `length s` | number of characters, as `int` | `LENGTH(s)` |
 | `substring start len s` | `len` characters from `start` | `SUBSTRING(s, start, len)` |
 | `left n s`, `right n s` | first / last `n` characters | `LEFT(s, n)` |
+| `lpad n fill s`, `rpad n fill s` | pad to width `n` with copies of `fill` | `LPAD(s, n, fill)` |
 | `replaceAll from to s` | every occurrence of `from` | `REPLACE(s, from, to)` |
 | `strpos sub s` | 1-based position of `sub`, `0` if absent | `STRPOS(s, sub)` |
 | `contains sub s` | is `sub` in `s`? | `STRPOS(s, sub) > 0` |
@@ -1346,7 +1348,7 @@ literals widen to *either*, depending on what the surrounding context expects.
 
 | Function | `date` | `timestamp` | Result |
 |---|---|---|---|
-| `currentDate` (no argument) | — | — | `date` |
+| `currentDate`, `yesterday` (no argument) | — | — | `date` |
 | `now` / `currentTimestamp` (no argument) | — | — | `timestamp` |
 | `year`, `quarter`, `month`, `day`, `dayOfWeek`, `dayOfYear` | ✓ | ✓ | `int` |
 | `hour`, `minute` | ✗ | ✓ | `int` |

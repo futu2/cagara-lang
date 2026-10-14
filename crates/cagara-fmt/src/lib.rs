@@ -210,6 +210,25 @@ fn token(e: Option<&SyntaxElement>, k: K) -> Result<SyntaxToken, Bail> {
     }
 }
 
+/// A record or row-type field name, which may be a reserved word.
+///
+/// `{case = .x}` and `{sql = string}` are legal, and the parser keeps the
+/// word's own token kind, so the name is the first token that can be one
+/// rather than necessarily an `Ident`.
+fn field_name_tok(e: &SyntaxElement) -> Result<SyntaxToken, Bail> {
+    match e.as_token() {
+        Some(t)
+            if matches!(
+                t.kind(),
+                K::Ident | K::SqlKw | K::CaseKw | K::PrimitiveKw | K::ImportKw | K::AsKw
+            ) =>
+        {
+            Ok(t.clone())
+        }
+        _ => Err(Bail),
+    }
+}
+
 fn node(e: Option<&SyntaxElement>) -> Result<SyntaxNode, Bail> {
     e.and_then(|e| e.as_node()).cloned().ok_or(Bail)
 }
@@ -680,8 +699,10 @@ impl Fmt<'_> {
         let [name, eq, v] = els.as_slice() else {
             return Err(Bail);
         };
+        // The name is reprinted from its own token, so a reserved word used as
+        // a field name (`{case = .x}`) survives formatting unchanged.
         Ok(concat(vec![
-            self.tok(&token(Some(name), K::Ident)?),
+            self.tok(&field_name_tok(name)?),
             text(" "),
             self.tok(&token(Some(eq), K::Eq)?),
             value(&node(Some(v))?)?,

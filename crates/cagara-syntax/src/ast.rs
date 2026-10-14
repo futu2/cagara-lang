@@ -154,6 +154,25 @@ fn token(n: &SyntaxNode, k: K) -> Option<crate::SyntaxToken> {
         .find(|t| t.kind() == k)
 }
 
+/// The name of a record field or row-type field.
+///
+/// A field name may be a reserved word (`{case = .x}`, `{sql = string}`), and
+/// the parser keeps the word's own token kind rather than rewriting it. The
+/// name is the text either way, so find the first token that can be one. The
+/// value follows the `=`, and the shorthand `.name` is a `Field` token, which
+/// the callers handle themselves.
+fn field_name(n: &SyntaxNode) -> Option<String> {
+    n.children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| {
+            matches!(
+                t.kind(),
+                K::Ident | K::SqlKw | K::CaseKw | K::PrimitiveKw | K::ImportKw | K::AsKw
+            )
+        })
+        .map(|t| t.text().to_string())
+}
+
 /// The text of a string literal, with its escapes resolved.
 ///
 /// Only `\n`, `\t`, `\\` and `\"` are escapes. Every other backslash is kept
@@ -307,7 +326,7 @@ impl Lower<'_> {
                     .children()
                     .filter(|c| c.kind() == K::TyField)
                     .filter_map(|f| {
-                        let name = token(&f, K::Ident)?.text().to_string();
+                        let name = field_name(&f)?;
                         let t = f.children().next().map(|t| self.ty(&t))?;
                         Some((name, t))
                     })
@@ -474,7 +493,7 @@ impl Lower<'_> {
                             let v = self.mk(sp, ExprKind::Field(Side::Single, name.clone()));
                             return Some((name, v));
                         }
-                        let name = token(&f, K::Ident)?.text().to_string();
+                        let name = field_name(&f)?;
                         let v = f.children().next()?;
                         Some((name, self.expr(&v)))
                     })

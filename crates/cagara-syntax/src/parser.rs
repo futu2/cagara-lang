@@ -136,6 +136,28 @@ impl<'a> Parser<'a> {
         self.at(t) && !self.at_boundary()
     }
 
+    /// A record or row-type field name.
+    ///
+    /// Field name is a position where only a name can appear (`name =` or
+    /// `name = ty`), so a reserved word is an ordinary name there, exactly as
+    /// it is inside an expression. Requiring `Ident` made a schema unable to
+    /// describe a table with a `case` or `sql` column, and both are real
+    /// columns in `icbase` (`gcm` 事由, `pbm` 查询语句). The word keeps its
+    /// spelling, so the field name is the SQL column name and needs no escape.
+    fn at_field_name(&self) -> bool {
+        self.at_inner(Token::Ident)
+            || matches!(
+                self.peek(),
+                Some(
+                    Token::SqlKw
+                        | Token::CaseKw
+                        | Token::PrimitiveKw
+                        | Token::ImportKw
+                        | Token::AsKw
+                )
+            )
+    }
+
     /// Tokens that close or separate an enclosing construct: recovery stops
     /// in front of them instead of swallowing them.
     fn at_closer(&self) -> bool {
@@ -408,7 +430,7 @@ impl<'a> Parser<'a> {
             Some(Token::LBrace) => {
                 self.start(K::TyRecord);
                 self.bump();
-                while self.at_inner(Token::Ident) {
+                while self.at_field_name() {
                     self.start(K::TyField);
                     self.bump();
                     self.expect(Token::Eq, "`=` in record type");
@@ -702,7 +724,7 @@ impl<'a> Parser<'a> {
                      // A field is `name = expr`, or the shorthand `.name` for
                      // `name = .name`, so `select {.id, .name}` chooses columns
                      // without naming each one twice.
-        while self.at_inner(Token::Ident) || self.at(Token::Field) {
+        while self.at_field_name() || self.at(Token::Field) {
             self.start(K::RecordField);
             // `.name` is the shorthand; `name = expr` is the long form.
             let shorthand = self.at(Token::Field);
@@ -971,6 +993,29 @@ mod tests {
             .unwrap();
         assert!(ann.descendants().any(|n| n.kind() == K::TyFun));
         assert!(ann.descendants().any(|n| n.kind() == K::TyRecord));
+    }
+
+    /// A reserved word is an ordinary field name.
+    ///
+    /// A schema has to describe the table it names, and real tables have
+    /// columns called `case` (`gcm` 事由) and `sql` (`pbm` 查询语句). A field
+    /// name is a position where only a name can appear, so there is nothing
+    /// for the word to be confused with: the parser keeps its spelling and the
+    /// SQL backend quotes it when the dialect reserves it.
+    #[test]
+    fn a_reserved_word_is_a_field_name() {
+        for word in ["case", "sql", "import", "as", "primitive"] {
+            let src = format!("t : query {{ {word} = string }} = table \"s\" \"t\"\n");
+            let p = parse(&src);
+            assert!(p.errors.is_empty(), "{word} in a row type: {:?}", p.errors);
+
+            let src = format!("q = t & select {{ {word} = 1 }}\n");
+            let p = parse(&src);
+            assert!(p.errors.is_empty(), "{word} in a record: {:?}", p.errors);
+        }
+        // The word still introduces its own form where that form is expected.
+        assert!(parse("q = case { true => 1 }\n").errors.is_empty());
+        assert!(parse("q = 1\nr : expr r int = sql \"1\"\n").errors.is_empty());
     }
 
     #[test]

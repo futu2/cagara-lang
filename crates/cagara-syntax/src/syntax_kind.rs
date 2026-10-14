@@ -223,8 +223,23 @@ kind_table! {
         Colon #[token(":")],
         Semicolon #[token(";")],
 
-        /// `.name` — column of the single input row
-        Field #[regex(r"\.[a-zA-Z_][a-zA-Z0-9_]*")],
+        /// `.name` — column of the single input row, or a qualified name
+        /// (`m.users`, and `m._+_` for an operator, whose definition name is
+        /// `_+_` like any other identifier).
+        ///
+        /// The second alternative mirrors [`Token::Ident`]'s operator form —
+        /// `_`, a run of punctuation, `_` — because a qualified name has to
+        /// reach everything an unqualified one can. Without it `m._+_` lexes
+        /// as `m` `.` `_` `+` `_` and reports a definition `_` that does not
+        /// exist.
+        ///
+        /// `<` and `>` are ordinary operator characters (`_>_` is a
+        /// definition), and they are also how the join-side fields below
+        /// start. The two forms differ at the character after the dot: a
+        /// join-side field is `.` then `<` or `>` then a name, while an
+        /// operator name is `.` then `_`. Matching on that keeps them apart
+        /// with no lookahead.
+        Field #[regex(r"\.[a-zA-Z_][a-zA-Z0-9_]*")] #[regex(r"\._[^a-zA-Z0-9_\s]+_")],
         /// `.<name` — column of the left join input
         LeftField #[regex(r"\.<[a-zA-Z_][a-zA-Z0-9_]*")],
         /// `.>name` — column of the right join input

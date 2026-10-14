@@ -388,6 +388,47 @@ mod tests {
         }
     }
 
+    /// A qualified name reaches everything an unqualified one can, operators
+    /// included.
+    ///
+    /// An operator is defined as `_+_`, so `m._+_` is an ordinary qualified
+    /// name and has to lex as one. It did not: `Field` matched only word
+    /// characters after the dot, so `m._+_` lexed as `m` `.` `_` `+` `_` and
+    /// reported a definition `_` that does not exist — which made a user
+    /// prelude impossible to import by alias, the one thing `# no prelude` is
+    /// for.
+    ///
+    /// `<` and `>` are the delicate case, being both operator characters and
+    /// the start of the join-side fields. The two differ at the character
+    /// after the dot, and this pins that they stay apart.
+    #[test]
+    fn a_qualified_name_reaches_operators() {
+        let kinds = |s: &str| -> Vec<(crate::lexer::Token, std::string::String)> {
+            crate::lexer::lex(s)
+                .into_iter()
+                .filter(|l| !l.kind.is_trivia())
+                .map(|l| (l.kind, l.text.to_string()))
+                .collect()
+        };
+        use crate::lexer::Token::*;
+        // An operator name after a dot is one `Field`, not `Field` + operator.
+        for (src, op) in [("m._+_", "._+_"), ("m._>_", "._>_"), ("m._<_", "._<_")] {
+            assert_eq!(
+                kinds(src),
+                vec![(Ident, "m".into()), (Field, op.into())],
+                "{src} must be a qualified name, not a field and an operator"
+            );
+        }
+        // The join-side fields still win their own spellings.
+        for (src, tok, text) in [
+            (".<k", LeftField, ".<k"),
+            (".>k", RightField, ".>k"),
+            (".k", Field, ".k"),
+        ] {
+            assert_eq!(kinds(src), vec![(tok, text.into())], "{src}");
+        }
+    }
+
     /// `SyntaxKind::is_op_symbol` is what makes the parser look up a fixity
     /// instead of reporting an unexpected token, and it is a third list of the
     /// operator spellings. Every spelling this table knows — including the ones
@@ -441,8 +482,7 @@ mod tests {
     fn fixity_cannot_be_declared_in_source() {
         // The words are ordinary names, not keywords, so a line beginning with
         // one parses as a definition.
-        let (_module, errors) =
-            crate::ast::lower_with("infixl = 1\n", &Ops::new());
+        let (_module, errors) = crate::ast::lower_with("infixl = 1\n", &Ops::new());
         assert!(errors.is_empty(), "{errors:?}");
     }
 }

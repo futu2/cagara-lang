@@ -963,7 +963,9 @@ mod tests {
         }
         // The word still introduces its own form where that form is expected.
         assert!(parse("q = case { true => 1 }\n").errors.is_empty());
-        assert!(parse("q = 1\nr : expr r int = sql \"1\"\n").errors.is_empty());
+        assert!(parse("q = 1\nr : expr r int = sql \"1\"\n")
+            .errors
+            .is_empty());
     }
 
     #[test]

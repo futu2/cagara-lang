@@ -1092,6 +1092,20 @@ impl<'w> Checker<'w> {
             ExprKind::Lambda(..) => self.check_lambda(env, e, expected),
             // A list literal's element type comes from the expected `list t`.
             ExprKind::List(..) => self.check_list(env, e, expected),
+            // A string literal checked against a `symbol k` label parameter
+            // binds `k` to the literal's `Sym`. Only a `keyLabel` expectation
+            // takes this path; every other string keeps its `string` type.
+            ExprKind::Lit(ast::Lit::Str(s)) if matches!(
+                self.resolve(expected),
+                Ty::Con("keyLabel", ref a) if a.len() == 1
+            ) => {
+                let Ty::Con("keyLabel", inner) = self.resolve(expected) else {
+                    unreachable!("matched a keyLabel expectation")
+                };
+                self.unify(&inner[0], &Ty::Sym(s.clone()))
+                    .map_err(at(e.span))?;
+                Ok(Ty::Sym(s.clone()))
+            }
             _ => {
                 let actual = self.infer(env, e)?;
                 self.coerce(&actual, expected).map_err(at(e.span))?;

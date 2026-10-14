@@ -1939,6 +1939,46 @@ fn deeply_nested_stages_are_a_diagnostic_not_a_stack_overflow() {
     assert!(err.contains("nests more than"), "n={n}: {err}");
 }
 
+/// A stage costs one level of the depth budget, not two.
+///
+/// Erasure stamps every node with a transparent `Rel::At`, so a lowerer that
+/// charged depth before looking through the wrapper counted each stage twice
+/// and tripped the bound at seven stages instead of fifteen. That halved budget
+/// is what made a ten-stage pipeline — five `leftJoin`s, the `update`s that
+/// materialize their join keys, and a projection — report "nests more than 16
+/// stages deep; split it with a named definition between the parts", advice
+/// that cannot work because a named definition does not reset the counter.
+///
+/// Seven stages is the depth the old, doubled accounting accepted; it is
+/// therefore the regression's lower bound. Fifteen is the bound the constant
+/// promises, and sixteen must still be refused, so the fix cannot have removed
+/// the diagnostic rather than corrected it.
+#[test]
+fn a_stage_costs_one_level_of_the_depth_budget() {
+    let updates = |n: usize| {
+        let mut src = "t : query { a = int, b = int } = table \"s\" \"t\"\nbig = t".to_string();
+        for i in 0..n {
+            src.push_str(&format!(" & update {{ k{i} = .a }}"));
+        }
+        src
+    };
+    // The depth the doubled accounting allowed: a fix must not regress here.
+    assert!(run(&updates(7)).iter().all(|(_, r)| r.is_ok()));
+    // The depth `MAX_LOWER_DEPTH` actually promises. Ten is the shape that
+    // blocked the port, so it is asserted exactly rather than approached.
+    for n in [10, 15] {
+        let out = run(&updates(n));
+        let bad: Vec<_> = out.iter().filter(|(_, r)| r.is_err()).collect();
+        assert!(bad.is_empty(), "{n} stages must lower: {bad:?}");
+    }
+    // The bound still exists; at sixteen the diagnostic is unchanged.
+    let err = run(&updates(16))
+        .into_iter()
+        .find_map(|(_, r)| r.err())
+        .expect("expected a depth diagnostic at 16");
+    assert!(err.contains("nests more than"), "{err}");
+}
+
 /// The bare-name and operator spellings of a set operation put the piped query
 /// on **opposite** sides, and both are correct.
 ///

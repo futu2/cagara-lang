@@ -249,6 +249,15 @@ impl Lowerer {
     }
 
     fn rel_inner(&mut self, rel: &Rel) -> Result<Stage, String> {
+        // `Rel::At` is a transparent location wrapper, not a stage: erasure
+        // stamps one on every node, so charging it would count each stage
+        // twice and halve the real budget. Look through the wrappers before
+        // the depth is charged. A node is stamped at most once (`erase`'s
+        // `at` leaves an already-located node alone), so this loop is short.
+        let mut rel = rel;
+        while let Rel::At(_, inner) = rel {
+            rel = inner;
+        }
         // The recursion below costs stack per `Rel` node. Common filter chains
         // are peeled before reaching this function, while parenthesized
         // relational expressions can still multiply the remaining depth, so
@@ -263,6 +272,31 @@ impl Lowerer {
         self.depth = depth;
         let out = self.rel_peeled(rel);
         self.depth = depth - 1;
+        out
+    }
+
+    /// Lower a subtree that sits *beside* the current pipeline rather than
+    /// continuing it, with the depth counter starting fresh.
+    ///
+    /// `depth` bounds the left spine of one pipeline: every stage that folds
+    /// into the stage below it adds a level, and the bound is what keeps that
+    /// recursion off the stack. A join's right operand and a set operation's
+    /// two branches are not the continuation of the spine — they become their
+    /// own `SELECT`, each with its own spine — so charging them against the
+    /// caller's budget measured two unrelated things with one number. A
+    /// ten-stage hierarchy on the right of a join and a two-stage union on the
+    /// left tripped a bound of sixteen, and the diagnostic's advice ("split it
+    /// with a named definition") cannot help, because a definition is inlined
+    /// and the counter never resets.
+    ///
+    /// The recursion is still bounded: each subtree gets the same budget, so a
+    /// tree of `n` sibling pipelines may use `n * MAX_LOWER_DEPTH` stack in
+    /// total, which is what the stack actually costs, and no single spine may
+    /// exceed the bound.
+    fn rel_beside(&mut self, rel: &Rel) -> Result<Stage, String> {
+        let outer = std::mem::replace(&mut self.depth, 0);
+        let out = self.rel(rel);
+        self.depth = outer;
         out
     }
 
@@ -568,7 +602,7 @@ impl Lowerer {
             // right relation only decides whether a matching row
             // exists.
             let left_stage = self.rel(left)?;
-            let right_stage = self.rel(right)?;
+            let right_stage = self.rel_beside(right)?;
             let left = self.derived(left_stage);
             let right = self.derived(right_stage);
             let predicate = lower_expr(on, &|side, n| match side {
@@ -630,7 +664,9 @@ impl Lowerer {
             JoinKind::Semi | JoinKind::Anti => unreachable!(),
         };
         let l = self.rel(left)?;
-        let r = self.rel(right)?;
+        // The right input is lowered beside the left spine, not as part of it:
+        // it becomes its own `SELECT` and has its own stage budget.
+        let r = self.rel_beside(right)?;
         let l = self.join_input(l, left_ok, left_null);
         // The right input must be a single table or derived table.
         let r = match self.join_input(r, right_ok, right_null) {
@@ -676,8 +712,11 @@ impl Lowerer {
     }
 
     fn lower_set(&mut self, kind: &SetKind, left: &Rel, right: &Rel) -> Result<Stage, String> {
-        let left = self.rel(left)?;
-        let right = self.rel(right)?;
+        // Both branches are siblings of the enclosing pipeline, not its
+        // continuation: each becomes a `SELECT` on its own side of the set
+        // operator, so each gets its own stage budget.
+        let left = self.rel_beside(left)?;
+        let right = self.rel_beside(right)?;
         let names = left.names();
         let op = match kind {
             SetKind::Union => SetOperationType::Union,

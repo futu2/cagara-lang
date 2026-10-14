@@ -282,6 +282,27 @@ impl<'w> Checker<'w> {
             self.coerce(&t, a)
                 .map_err(|msg| format!("`{}` does not match its signature: {msg}", def.name))
                 .map_err(at(def.body.span))?;
+            // A literal body keeps the default kind `infer` recorded for it.
+            // `coerce` accepts `"x"` against `date` because a string literal
+            // widens, but widening is not a *type* the literal was recorded
+            // with, so
+            //
+            //     userInputDate : date = "2025-12-31"
+            //
+            // read the literal back as `string` -- the definition said `date`
+            // and its own body disagreed. `check` re-records a literal at the
+            // type its expectation demands (see the note there); a definition
+            // body reaches its type by `coerce` instead, so it re-records the
+            // same way here, against the signature.
+            if let ast::ExprKind::Lit(l) = &def.body.kind {
+                let lifted = match self.resolve(a) {
+                    Ty::Con("expr", args) if args.len() == 3 => args[2].clone(),
+                    other => other,
+                };
+                self.uses.retain(|(id, ..)| *id != def.body.id);
+                self.uses
+                    .push((def.body.id, def.body.span, lifted, Some(lit_name(l))));
+            }
         }
         self.solve()?;
         let t = ann.unwrap_or(t);

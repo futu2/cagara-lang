@@ -968,6 +968,28 @@ mod tests {
         assert!(h.contains("1 : int"), "{h}");
     }
 
+    /// A literal body is shown at the type its definition's signature gives it,
+    /// not at the default kind it was inferred with.
+    ///
+    /// `infer` records `"2025-12-31"` as `string`; the signature is what lifts
+    /// it to `date`. A definition body reaches its type by `coerce` rather than
+    /// through `check`, so the lift went unrecorded and the definition said
+    /// `date` while its own body said `string`. The same literal against a
+    /// `date` column already read back as `date`, which is what made the
+    /// disagreement visible.
+    #[test]
+    fn hover_shows_a_literal_at_its_signature_type() {
+        let src = "d : date = \"2025-12-31\"\nf : float = 18\nq = 1\n";
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        let at = |needle: &str, within: usize| {
+            hover(&ws, at_in(src, needle, within)).unwrap_or_default()
+        };
+        let h = at("\"2025-12-31\"", 3);
+        assert!(h.contains("\"2025-12-31\" : date"), "{h}");
+        let h = at("= 18", 2);
+        assert!(h.contains("18 : float"), "{h}");
+    }
+
     /// A `case` arm is walked like any other expression, so hover and
     /// navigation work inside both halves of an arm — the condition and the
     /// value it selects.

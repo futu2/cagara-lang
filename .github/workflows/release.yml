@@ -203,7 +203,29 @@ jobs:
               mode = (info.external_attr >> 16) & 0o777
               if not mode & 0o111:
                   sys.exit(f"{vsix}: {entry} is not executable (mode {mode:o})")
-              print(f"{vsix}: {entry} mode {mode:o}, {info.file_size} bytes")
+              # The server inside the VSIX must be the binary this job just
+              # downloaded, byte for byte. A bundled server outranks
+              # `cagara.path`, a workspace build and PATH, so shipping an
+              # older one makes every user run that compiler with nothing on
+              # their machine able to override it -- and the symptom is bogus
+              # diagnostics, not anything that says "stale". Presence alone
+              # would not catch a stale copy, so compare the bytes.
+              import hashlib
+              import pathlib
+
+              staged = pathlib.Path(f"editors/vscode/bin/{target}/{exe}")
+              if not staged.is_file():
+                  sys.exit(f"{vsix}: staged {staged} is not a file")
+              digest = lambda b: hashlib.sha256(b).hexdigest()
+              packed = digest(archive.read(entry))
+              on_disk = digest(staged.read_bytes())
+              if packed != on_disk:
+                  sys.exit(
+                      f"{vsix}: {entry} is not the binary that was built\n"
+                      f"  in vsix: {packed}\n"
+                      f"  staged:  {on_disk}"
+                  )
+              print(f"{vsix}: {entry} mode {mode:o}, {info.file_size} bytes, matches the build")
           PY
       - uses: actions/upload-artifact@v4
         with:

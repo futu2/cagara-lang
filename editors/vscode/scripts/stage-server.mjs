@@ -69,7 +69,12 @@ function newestSource(root) {
   return newest;
 }
 
-const target = vscodeTarget(process.platform, process.arch);
+// `npm run package -- --target <t>` sets this, because cross-packaging has to
+// fill the directory for the target being packaged rather than the one this
+// machine happens to be. F5 and `npm run stage:server` leave it unset and get
+// this machine's target.
+const forcedTarget = process.env.CAGARA_STAGE_TARGET?.trim();
+const target = forcedTarget || vscodeTarget(process.platform, process.arch);
 if (!target) {
   // Nothing is built for this machine, so leave bin/ alone and let the
   // extension fall back to a workspace build or PATH.
@@ -80,13 +85,45 @@ if (!target) {
   process.exit(0);
 }
 
-const exe = process.platform === "win32" ? "cagara.exe" : "cagara";
+// The executable name follows the *target*, not the host: packaging a Windows
+// VSIX from Linux has to produce `cagara.exe`.
+const exe = target.startsWith("win32") || process.env.CAGARA_STAGE_EXE === "cagara.exe"
+  ? "cagara.exe"
+  : "cagara";
 const profile = process.env.CAGARA_STAGE_PROFILE ?? "release";
 const source = join(repoRoot, "target", profile, exe);
+
+// Set by `npm run package`. F5 wants a staged server even from a build that is
+// a few seconds behind the sources -- you are iterating. A VSIX is different:
+// it is copied around, installed elsewhere, and its bundled server outranks
+// every other candidate, so shipping one that predates the sources bakes a
+// compiler bug into the extension with nothing on the user's machine able to
+// correct it. That is worth refusing rather than warning about.
+const strict = process.env.CAGARA_STAGE_STRICT === "1";
+
 if (!existsSync(source)) {
   console.error(
     `cagara: no ${profile} build at ${source}.\n` +
-      `Run \`cargo build --release\` in ${repoRoot}, then launch again.`,
+      (strict
+        ? `Refusing to package a VSIX with no compiler in it. Build one first:\n` +
+          `  cargo build --release`
+        : `Run \`cargo build --release\` in ${repoRoot}, then launch again.`),
+  );
+  process.exit(1);
+}
+
+// Checked before staging, so a refusal leaves the previous staging intact
+// rather than replacing a good copy with an old one.
+const built = statSync(source).mtimeMs;
+const newest = newestSource(repoRoot);
+const stale = newest && newest.mtimeMs > built;
+if (stale && strict) {
+  console.error(
+    `cagara: the ${profile} build at ${source} is older than ${newest.path}.\n` +
+      `Refusing to package a VSIX with a stale compiler: the bundled server\n` +
+      `outranks every other candidate, so the extension would run the older\n` +
+      `one and no setting on the user's machine could correct it.\n` +
+      `Run \`cargo build --release\` and package again.`,
   );
   process.exit(1);
 }
@@ -104,9 +141,7 @@ console.log(`cagara: staged ${source} -> ${dest}`);
 
 // A staged server outranks a build in the workspace, so a `cargo build` after
 // this point would be shadowed silently. Say so at launch instead.
-const built = statSync(source).mtimeMs;
-const newest = newestSource(repoRoot);
-if (newest && newest.mtimeMs > built) {
+if (stale) {
   console.warn(
     `cagara: warning: the staged ${profile} build is older than ${newest.path}.\n` +
       `Run \`cargo build --release\` to rebuild, or the extension keeps running the older server.`,

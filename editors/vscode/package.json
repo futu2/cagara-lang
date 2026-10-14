@@ -73,7 +73,7 @@
     "stage:server": "npm run compile && node scripts/stage-server.mjs",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
-    "package": "vsce package --skip-license"
+    "package": "node scripts/package.mjs"
   },
   "dependencies": {
     "vscode-languageclient": "10.1.2"

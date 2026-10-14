@@ -90,7 +90,34 @@ the build sitting above an opened `examples/`.
 
 Packaging expects a server per VS Code target under `bin/`, for example
 `bin/linux-x64/cagara`; `bin/` is gitignored, and the release workflow fills
-it from the binaries it builds. `npm run package -- --target linux-x64` packs
-a platform-specific VSIX, which `code --install-extension` installs. A
-target-less `npm run package` carries no server by design, so remove `bin/`
-(or package with `--target`) if you want a build of that shape locally.
+it from the binaries it builds.
+
+`npm run package -- --target linux-x64` packs a platform-specific VSIX, which
+`code --install-extension` installs. It stages the compiler itself before
+packing, so there is no separate copy step and no way to forget one — and it
+**refuses** a build that is older than the sources rather than shipping it:
+
+```
+cagara: the release build at target/release/cagara is older than
+crates/cagara-syntax/src/parser.rs.
+Refusing to package a VSIX with a stale compiler: ...
+```
+
+That refusal is deliberate. A bundled server outranks `cagara.path`, a
+workspace build and `PATH` alike, so a VSIX carrying an old compiler makes
+every user of it run that compiler, with nothing on their machine able to
+override it — the symptom is bogus diagnostics, not anything that mentions a
+stale build. Build first, then package:
+
+```sh
+cargo build --release
+npm run package -- --target linux-x64
+```
+
+A target-less `npm run package` carries no server **by design**: it is the
+fallback for platforms no release builds for, and it relies on `PATH` or a
+workspace build. Staging would quietly turn it into a different artifact, so
+it is left alone. `--target` also decides the directory and the executable
+name, so a Windows VSIX can be packaged from Linux and still contain
+`cagara.exe`.
+

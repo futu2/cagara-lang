@@ -2,7 +2,7 @@
 //! into applications of their operator names (`a + b` => `_+_ a b`), so the
 //! core has no built-in knowledge of arithmetic or pipelines.
 
-use crate::ops::{op_name, Fixity, Ops};
+use crate::ops::{op_name, Ops};
 use crate::{ops, parse_with, ParseError, SyntaxKind as K, SyntaxNode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -15,20 +15,6 @@ pub struct Span {
 pub struct Module {
     pub imports: Vec<Import>,
     pub defs: Vec<Def>,
-    /// `infixl` / `infixr` / `stage` declarations, which give operators their
-    /// fixity. Only the prelude's are honoured (see `crate::ops`); elsewhere
-    /// they are reported by `cagara-hir`.
-    pub operators: Vec<OpDecl>,
-}
-
-/// One `infixl` / `infixr` line. There is no separate "stage" form: an
-/// operator is a pipeline link because of where it is declared, not because of
-/// how it is declared (see `crate::ops::Ops::is_stage`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpDecl {
-    pub spelling: String,
-    pub fixity: Fixity,
-    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,11 +228,6 @@ impl Lower<'_> {
                         m.defs.push(d);
                     }
                 }
-                K::OpDecl => {
-                    if let Some(d) = self.op_decl(&n) {
-                        m.operators.push(d);
-                    }
-                }
                 _ => {}
             }
         }
@@ -259,30 +240,6 @@ impl Lower<'_> {
     /// malformed one never takes effect: whatever the parser complained about
     /// (a missing level, a spelling that is not an operator) has already been
     /// reported, and an out-of-range level is refused here for the same
-    /// reason.
-    fn op_decl(&mut self, n: &SyntaxNode) -> Option<OpDecl> {
-        let keyword = token(n, K::Ident)?.text().to_string();
-        let spelling = n
-            .children_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind().is_op_symbol())?
-            .text()
-            .to_string();
-        let level = token(n, K::Int)
-            .and_then(|t| t.text().parse::<u8>().ok())
-            .filter(|n| (crate::ops::MIN_LEVEL..=crate::ops::MAX_LEVEL).contains(n))?;
-        let fixity = match keyword.as_str() {
-            "infixl" => Fixity::left(level),
-            "infixr" => Fixity::right(level),
-            _ => return None,
-        };
-        Some(OpDecl {
-            spelling,
-            fixity,
-            span: span(n),
-        })
-    }
-
     fn def(&mut self, n: &SyntaxNode) -> Option<Def> {
         let name = token(n, K::Ident)?.text().to_string();
         let ty = n

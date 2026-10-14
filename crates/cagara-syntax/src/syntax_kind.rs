@@ -256,7 +256,6 @@ kind_table! {
         ImportDecl,
         /// `infixl 1 &+` / `infixr 21 ??` — gives an operator its precedence
         /// and associativity. Only the prelude's declarations are honoured.
-        OpDecl,
         Definition,
         TypeAnn,
         /// `name arg arg` in a type (`query r`, `expr r bool`, `int`)
@@ -318,7 +317,7 @@ mod tests {
             AndAnd OrOr EqEq NotEq Diamond LtEq GtEq Lt Gt Plus Minus Star Slash Percent AmpOp Op \
             QuestionQuestion Question LtQuestion QuestionGt LtQuestionGt Dollar Bar LParen RParen \
             LBrace RBrace LBracket RBracket Comma Eq Colon Semicolon Field LeftField RightField \
-            Ident Int Float String UnterminatedString Error SourceFile ImportDecl OpDecl \
+            Ident Int Float String UnterminatedString Error SourceFile ImportDecl \
             Definition TypeAnn TyApp TyRecord TyField TyFun TyParen TyStr Lambda BinExpr App \
             NegExpr ParenExpr RecordExpr RecordField ListExpr NameRef Literal FieldExpr ProjExpr \
             SqlExpr PrimitiveExpr CaseExpr CaseArm ErrorNode";

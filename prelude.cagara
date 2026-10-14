@@ -27,12 +27,12 @@
 # composition written the other way round — the same pair as `&` and `$`.
 #
 # `&` doubles as the query pipeline, so its level is also the level the stage
-# shorthands are declared at — see below. Precedence runs from 0 (loosest) to
-# 250 (tightest); application itself is tighter than any operator.
-infixr 0 $
-infixl 1 &
-infixr 23 >>>
-infixr 23 <<<
+# shorthands sit at — see below.
+#
+# The fixities themselves live in the core (`cagara-syntax`'s `ops`), not here:
+# precedence is a parsing fact and has to be known before a file is read, so it
+# is not something a module — this one included — can declare. What this file
+# provides is each operator's *meaning*, as the `_&_` / `_$_` definitions below.
 
 _&_ : a -> (a -> b) -> b = x => f => f x
 _$_ : (a -> b) -> a -> b = f => x => f x
@@ -116,28 +116,19 @@ desc : expr r a -> sortkey r = primitive "__desc"
 
 group : expr r a -> agg (expr r a) = primitive "__group"
 
-# Stage shorthands. The first line of each pair declares a symbol; the second
-# defines what it means. Both halves live here, and that is the whole cost of a
+# Stage shorthands. Each is one definition, and that is the whole cost of a
 # shorthand — nothing in Rust knows about `&+`:
 #
-#   infixl 1 &^                  # declare: same level as `&`, so a stage
-#   _&^_ = q => fields => ...    # define: what the shorthand does
+#   _&^_ : query r -> query r -> query r = q => r => intersect q r
 #
-# Level 1 is where `&` itself is declared (above, with the other combinators),
-# and that is what makes these pipeline stages rather than ordinary operators:
-# the pipe level is not a special class of operator, it is `&`'s precedence, and
-# anything declared there chains like `&` and binds looser than every
-# expression operator.
-infixl 1 &?
-infixl 1 &=
-infixl 1 &+
-infixl 1 &*
-infixl 1 &.
-infixl 1 &-
-infixl 1 &|
-infixl 1 &!
-infixl 1 &^
-infixl 1 &~
+# The *spelling* is in the core's fixity table (`cagara-syntax`'s `ops`), which
+# is what makes `&^` lex as one operator and parse at the pipeline's level. A
+# spelling that is not there cannot be written, however it is defined here.
+#
+# The stage shorthands all sit at `&`'s own level, and that is what makes them
+# pipeline stages rather than ordinary operators: the pipe level is not a
+# special class of operator, it is `&`'s precedence, and anything at that level
+# chains like `&` and binds looser than every expression operator.
 
 _&?_ : query r -> expr r bool -> query r = q => pred => where pred q
 _&=_ : query r -> expr r (row s) -> query s = q => fields => select fields q
@@ -196,13 +187,10 @@ except : query r -> query r -> query r = primitive "__except"
 
 # Join operators, between `&` and every expression operator:
 # `users & teachers ? .<user_name == .>teacher_name`. The `<` / `>` mark the
-# side whose rows are all kept: `<?` left, `?>` right, `<?>` both. They are
-# declared like everything else; being at level 3 rather than `&`'s level 1 is
-# what makes them ordinary operators that build a query rather than stages.
-infixl 3 ?
-infixl 3 <?
-infixl 3 ?>
-infixl 3 <?>
+# side whose rows are all kept: `<?` left, `?>` right, `<?>` both. Their
+# spellings are in the core table like every other operator; being at level 3
+# rather than `&`'s level 1 is what makes them ordinary operators that build a
+# query rather than stages.
 
 _?_ : query s -> expr (join r s) bool -> query r -> query (merge r s) = innerJoin
 _<?_ : query s -> expr (join r s) bool -> query r -> query (merge r (mapValue (AsNullable) s)) =

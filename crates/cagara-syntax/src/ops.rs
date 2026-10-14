@@ -81,22 +81,49 @@ impl Fixity {
     }
 }
 
-/// The language's own expression operators: arithmetic, comparison, logic and
-/// concatenation. Their fixity belongs to the language rather than to the
-/// prelude's query syntax, so it is fixed here.
+/// The language's operators and their fixity.
 ///
-/// This list is also the *bootstrap*: the prelude is parsed with it alone in
-/// order to read the prelude's own declarations, so anything a prelude body
-/// uses has to be here. Today that is `*` (`n * 7`, `n * 3`). A test parses
-/// the prelude against this table alone, so a body that reaches for an
-/// operator missing from it fails loudly instead of silently dropping the
-/// declarations.
+/// Fixity is a **parsing** fact: `1 + 2 * 3` has to group as `1 + (2 * 3)`
+/// before any name is resolved, so the table must be known before a file is
+/// read and cannot come from a module. Meaning is a *resolution* fact:
+/// `1 + 2` desugars to `_+_ 1 2`, and `_+_` is an ordinary definition. A
+/// module that does not import one — or the prelude, which has it — gets an
+/// unknown name, exactly as it would for any other function.
 ///
-/// The function combinators are deliberately absent: `&`, `$` and `>>>` are
-/// defined in the prelude, so their fixity is declared beside them.
-const BUILTIN: &[(&str, Fixity)] = &[
-    ("||", Fixity::left(9)),  // or
-    ("&&", Fixity::left(11)), // and
+/// Keeping the two apart is what lets a file opt out of the prelude with the
+/// grammar intact.
+///
+/// The list is fixed: `infixl` / `infixr` are not part of Cagara source, so
+/// nothing a module writes can add to or re-fix it. Defining `_+_` gives `+`
+/// a meaning; it does not give it a precedence.
+///
+/// Ordering here is for reading only; [`Ops::find`] is the lookup.
+const FIXITY: &[(&str, Fixity)] = &[
+    // Loosest: function application, reversed.
+    ("$", Fixity::right(0)),
+    // The pipeline, and every stage shorthand beside it. An operator is a
+    // stage because it is declared at `&`'s level, so adding one here is what
+    // makes `&^` a stage rather than an ordinary operator.
+    ("&", Fixity::left(1)),
+    ("&!", Fixity::left(1)),
+    ("&*", Fixity::left(1)),
+    ("&+", Fixity::left(1)),
+    ("&-", Fixity::left(1)),
+    ("&.", Fixity::left(1)),
+    ("&=", Fixity::left(1)),
+    ("&?", Fixity::left(1)),
+    ("&^", Fixity::left(1)),
+    ("&|", Fixity::left(1)),
+    ("&~", Fixity::left(1)),
+    // Joins, between the pipeline and every expression operator.
+    ("?", Fixity::left(3)),
+    ("<?", Fixity::left(3)),
+    ("?>", Fixity::left(3)),
+    ("<?>", Fixity::left(3)),
+    // Logic.
+    ("||", Fixity::left(9)),
+    ("&&", Fixity::left(11)),
+    // Comparison.
     ("==", Fixity::left(13)),
     ("!=", Fixity::left(13)),
     ("<", Fixity::left(13)),
@@ -104,18 +131,23 @@ const BUILTIN: &[(&str, Fixity)] = &[
     (">", Fixity::left(13)),
     (">=", Fixity::left(13)),
     ("<>", Fixity::right(15)), // string concatenation
+    // Arithmetic.
     ("+", Fixity::left(17)),
     ("-", Fixity::left(17)),
     ("*", Fixity::left(19)),
     ("/", Fixity::left(19)),
     ("%", Fixity::left(19)),
-    ("??", Fixity::right(21)), // coalesce
+    // Null coalescing: `x ?? default`.
+    ("??", Fixity::right(21)),
+    // Tightest: composition, both directions.
+    (">>>", Fixity::right(23)),
+    ("<<<", Fixity::right(23)),
 ];
 
-/// The operator that *is* the pipeline. Its declared fixity defines the pipe
-/// level, and an operator declared at that same fixity is a pipeline link like
-/// it. This is the one name the core has to know, in the same way it knows
-/// that `sql` introduces a template: `&` is the pipeline.
+/// The operator that *is* the pipeline. Its fixity defines the pipe level, and
+/// an operator at that same fixity is a pipeline link like it. This is the one
+/// name the core has to know, in the same way it knows that `sql` introduces a
+/// template: `&` is the pipeline.
 pub(crate) const PIPE: &str = "&";
 
 /// Spelling to fixity.
@@ -125,28 +157,12 @@ pub struct Ops {
 }
 
 impl Ops {
-    /// The built-in operators alone.
-    pub(crate) fn builtin() -> Self {
+    /// The language's operator table. There is exactly one, fixed at build
+    /// time: nothing in a source file can add to it or re-fix it.
+    pub fn new() -> Self {
         Ops {
-            map: BUILTIN.iter().map(|(s, f)| (s.to_string(), *f)).collect(),
+            map: FIXITY.iter().map(|(s, f)| (s.to_string(), *f)).collect(),
         }
-    }
-
-    /// The built-ins, plus whatever `src` declares. Applying the declarations
-    /// over the built-ins means a `sql` template or an expression operator can
-    /// be re-fixed (`infixr 19 *`) as well as a shorthand added.
-    pub fn with_declarations(src: &str) -> Self {
-        let mut ops = Ops::builtin();
-        // Parsed with the built-in table only: declarations are read from a
-        // source that cannot use the operators it declares. The prelude's
-        // bodies use arithmetic and comparison, never the pipeline, so one
-        // pass is enough. (`parse` would consult the global table, which is
-        // what this function is building.)
-        let (module, _errors) = crate::ast::lower_with(src, &ops);
-        for d in &module.operators {
-            ops.map.insert(d.spelling.clone(), d.fixity);
-        }
-        ops
     }
 
     /// The fixity of an operator, by spelling. Every infix operator is one of
@@ -204,15 +220,15 @@ impl Ops {
     }
 }
 
-/// The operator table of the language as compiled in: the built-ins plus the
-/// declarations in `prelude.cagara`.
+/// The operator table of the language.
 ///
-/// Built once. An operator's fixity is global, so this is not a per-module
-/// setting: declarations in any other module are reported rather than
-/// honoured (see `cagara-hir`'s `file_diags`).
+/// Fixed, so every file is parsed with the same grammar whether or not it
+/// imports the prelude. That is what lets a module opt out of the prelude and
+/// still write `1 + 2` — the operators parse, and `_+_` is simply a name it
+/// has not defined, like any other.
 pub fn ops() -> &'static Ops {
     static OPS: OnceLock<Ops> = OnceLock::new();
-    OPS.get_or_init(|| Ops::with_declarations(PRELUDE_SRC))
+    OPS.get_or_init(Ops::new)
 }
 
 /// The name a spelling desugars to: `+` is `_+_`, `&?` is `_&?_`.
@@ -232,32 +248,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtins_have_the_documented_fixity() {
-        let ops = Ops::builtin();
+    fn operators_have_the_documented_fixity() {
+        let ops = Ops::new();
         // Left-assoc, right-assoc, and the tightest expression operator.
         assert_eq!(ops.find("+").unwrap().precedence(), (17, 18));
         assert_eq!(ops.find("??").unwrap().precedence(), (22, 21));
         assert_eq!(ops.find("<>").unwrap().precedence(), (16, 15));
-        // `+` is an ordinary operator: nothing sits at level 1 yet, so nothing
-        // is a stage.
+        // `+` is an ordinary operator, not a stage.
         assert!(!ops.is_stage("+"));
-        assert_eq!(ops.pipe_fixity(), None);
-        // The combinators are declared in the prelude, not here.
-        assert!(ops.find("&").is_none());
-        assert!(ops.find("$").is_none());
-        assert!(ops.find(">>>").is_none());
     }
 
-    /// The built-in table is the bootstrap: the prelude is parsed with it alone
-    /// in order to read the prelude's own declarations. A body that reaches for
-    /// an operator missing from it would silently produce no declarations at
-    /// all, so this is a test rather than a comment.
+    /// The prelude parses against the fixed table, and its bodies use nothing
+    /// the table does not have.
+    ///
+    /// The table is no longer built *from* the prelude's declarations, so a
+    /// prelude body that reached for an undeclared operator would now fail to
+    /// parse rather than silently declare nothing. This is the test that says
+    /// so.
     #[test]
-    fn the_prelude_parses_with_the_builtin_table_alone() {
-        let (module, errors) = crate::ast::lower_with(PRELUDE_SRC, &Ops::builtin());
+    fn the_prelude_parses_against_the_fixed_table() {
+        let (_module, errors) = crate::ast::lower_with(PRELUDE_SRC, &Ops::new());
         assert!(errors.is_empty(), "{errors:?}");
-        // And the declarations really are readable that way.
-        assert!(!module.operators.is_empty());
     }
 
     /// The function combinators carry Haskell's fixities: `$` infixr 0, `&`
@@ -339,49 +350,35 @@ mod tests {
         assert_eq!(op_spelling("_"), None);
     }
 
-    /// A declaration may re-fix a built-in, and there is only one form: the
-    /// level decides everything, including whether the operator is a stage.
-    /// `&` has to be declared for there to be a pipe level to compare against.
+    /// A stage is nothing but an operator that sits at the pipe level.
+    ///
+    /// The level is fixed now, so this asserts the table's own shape: exactly
+    /// the operators written at `&`'s precedence are stages, and the joins --
+    /// which are also part of the query language -- are not, because they sit
+    /// at their own looser level.
     #[test]
-    fn declarations_apply_over_the_builtins() {
-        let src = "infixl 1 &\ninfixr 19 *\ninfixl 1 &^\ninfixl 3 ?\n";
-        let ops = Ops::with_declarations(src);
-        assert_eq!(ops.find("*").unwrap().precedence(), (20, 19));
-        assert_eq!(ops.find("&^").unwrap().precedence(), (1, 2));
-        assert_eq!(ops.find("?").unwrap().precedence(), (3, 4));
-        // Only the operators at `&`'s level are stages.
+    fn being_a_stage_is_only_a_question_of_where_you_sit() {
+        let ops = Ops::new();
+        let pipe = ops.pipe_fixity().expect("`&` is the pipeline");
+        for s in ops.spellings() {
+            assert_eq!(
+                ops.is_stage(s),
+                ops.find(s) == Some(pipe),
+                "`{s}` must be a stage exactly when it sits at the pipe level"
+            );
+        }
         assert!(ops.is_stage("&"));
-        assert!(ops.is_stage("&^"));
         assert!(!ops.is_stage("?"));
         assert!(!ops.is_stage("*"));
         assert!(!ops.is_stage("$"));
     }
 
-    /// Being a stage is nothing but sharing `&`'s precedence *and*
-    /// associativity: move an operator off that level, or flip its
-    /// associativity, and it is an ordinary operator again. There is no mark
-    /// to keep in step with the level.
-    #[test]
-    fn being_a_stage_is_only_a_question_of_where_you_sit() {
-        let cases = [
-            ("infixl 1 &^\n", true),
-            ("infixl 2 &^\n", false),
-            ("infixr 1 &^\n", false),
-            ("infixl 3 &^\n", false),
-        ];
-        for (decl, want) in cases {
-            // A `&` to define the pipe level, plus the operator under test.
-            let ops = Ops::with_declarations(&format!("infixl 1 &\n{decl}"));
-            assert_eq!(ops.is_stage("&^"), want, "{decl:?}");
-        }
-    }
-
-    /// Every built-in spelling must survive lexing as a single token, or the
+    /// Every operator spelling must survive lexing as a single token, or the
     /// fixity here would never be consulted. The lexer's named tokens and this
     /// table are two lists of the same fact, so pin them together.
     #[test]
     fn every_builtin_spelling_is_one_lexed_token() {
-        for (s, _) in BUILTIN {
+        for (s, _) in FIXITY {
             let mut lex = crate::lexer::lex(s)
                 .into_iter()
                 .filter(|l| !l.kind.is_trivia());
@@ -434,27 +431,18 @@ mod tests {
         );
     }
 
-    /// A declaration the parser rejects must not take effect either: the
-    /// syntax error already names the problem, and a stray operator on top of
-    /// it would be a second, silent one.
+    /// Fixity is not declarable: `infixl` and `infixr` are gone from the
+    /// language, so a line that looks like a declaration is an ordinary
+    /// definition that happens to be missing its `=`.
+    ///
+    /// This is the invariant that makes the table fixed — and therefore what
+    /// lets a module parse identically whether or not it imports the prelude.
     #[test]
-    fn a_rejected_declaration_does_not_take_effect() {
-        for src in [
-            "infixl 251 &^\n",
-            "infixl 1\n",
-            "infixl &^\n",
-            // `stage` is not a declaration form at all now, so it is just an
-            // ordinary name with a missing `=`.
-            "stage &^\n",
-        ] {
-            let ops = Ops::with_declarations(src);
-            assert!(ops.find("&^").is_none(), "{src:?} declared `&^`");
-            // The built-ins are untouched.
-            assert_eq!(ops.find("+").unwrap().precedence(), (17, 18), "{src:?}");
-        }
-        // Level 0 is a real level — `$` is declared there.
-        let ops = Ops::with_declarations("infixl 1 &\ninfixl 0 &^\n");
-        assert_eq!(ops.find("&^").unwrap().precedence(), (0, 1));
-        assert!(!ops.is_stage("&^"), "level 0 is not the pipe level");
+    fn fixity_cannot_be_declared_in_source() {
+        // The words are ordinary names, not keywords, so a line beginning with
+        // one parses as a definition.
+        let (_module, errors) =
+            crate::ast::lower_with("infixl = 1\n", &Ops::new());
+        assert!(errors.is_empty(), "{errors:?}");
     }
 }

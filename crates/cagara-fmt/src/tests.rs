@@ -49,12 +49,9 @@ fn every_construct_is_actually_reformatted() {
             "q=t&select{b=case{.a>1=>\"x\";true=>\"y\"}}\n",
             "q = t & select { b = case { .a > 1 => \"x\"; true => \"y\" } }\n",
         ),
-        // Operator declarations are items like any other, and a spelling the
-        // prelude has not declared still parses as a declaration.
-        (
-            "infixl   1   &^\ninfixr   21   ~>\n",
-            "infixl 1 &^\ninfixr 21 ~>\n",
-        ),
+        // `infixl` / `infixr` are ordinary names now, not declarations, so a
+        // line beginning with one is a plain definition and formats as one.
+        ("infixl=1\n", "infixl = 1\n"),
     ] {
         assert_eq!(fmt(src), want, "input: {src:?}");
         assert_ne!(fmt(src), src, "not reformatted at all: {src:?}");

@@ -207,19 +207,28 @@ the punctuation reads better.
 
 #### Where the shorthands come from
 
-A shorthand is not built into the compiler. It is two lines in
-`prelude.cagara` — one to *declare* the symbol, one to *define* what it means:
+A shorthand is one line in `prelude.cagara`, which says what it *means*:
 
 ```haskell
-infixl 1 &=                  # declare: same level as `&`, so a stage
-_&=_ = q => fields => select fields q   # define: `q &= f` is `select f q`
+_&=_ : query r -> expr r (row s) -> query s = q => fields => select fields q
 ```
 
-The parser reads the declarations to find out what an operator's precedence
-is, and the desugared call `_&=_ q fields` is an ordinary prelude definition
-like any other. So adding a shorthand to the language is those two lines and
-nothing else: the formatter, the error messages and the editor grammars all
-follow from the declaration.
+The *symbol* is in the compiler's operator table, which is where every
+operator's precedence lives. Spelling and meaning are two different facts and
+live in two different places: precedence has to be known before a file is
+read, so it cannot come from source, while what `&=` does is an ordinary
+definition like any other.
+
+There is no special form for a stage. `&`, `&+` and `+` are the same kind of
+thing — an infix operator with a precedence and an associativity — and the
+table covers all of them:
+
+```
+&     left  1     the pipeline
+&+    left  1     a stage shorthand, at the pipeline's own level
+?     left  3     the join operators, at their own level
++     left  17    arithmetic
+```
 
 The shorthand list is not arbitrary: `&` is the pipe, and a symbol after it
 names the stage it stands for. `&^` in particular means **intersect**, not
@@ -227,50 +236,37 @@ names the stage it stands for. `&^` in particular means **intersect**, not
 `offset` has no shorthand. Passing a number to `&^` is a type error, because it
 combines two queries.
 
-There is no special form for a stage. `&`, `&+` and `+` are the same kind of
-thing — an infix operator with a precedence and an associativity — and one
-declaration form covers all of them:
-
-```haskell
-infixl 1 &+     # left-associative, precedence 1 (same as `&`)
-infixr 21 ??    # right-associative, precedence 21
-infixl 3 ?      # the join operators, at their own level
-```
-
 What makes a shorthand a *pipeline stage* is only where it sits: an operator
-declared at `&`'s precedence and associativity is a stage, and one at any
-other level — the joins at 3, or `+` at 17 — is an ordinary operator. That is
-why `q &+ {..}` chains like `q &` while `q ? on` does not, and it is the only
-reason: nothing has to mark an operator as a stage, so nothing can disagree
-with the level.
+at `&`'s precedence and associativity is a stage, and one at any other level —
+the joins at 3, or `+` at 17 — is an ordinary operator. That is why `q &+ {..}`
+chains like `q &` while `q ? on` does not, and it is the only reason: nothing
+has to mark an operator as a stage, so nothing can disagree with the level.
 
-Precedence is a number from 1 (loosest) to 250. A symbol may be any operator
-spelling — `&?`, `~=`, `>>` — and declaring one that already exists changes
-its fixity rather than adding a second operator. Any operator you write must
-be declared, so a typo is a compile error pointing at the operator rather than
-a silently different parse:
+A symbol may be any operator spelling — `&?`, `~=`, `>>`. Every operator you
+*write* has to be in the table, so a typo is a compile error pointing at the
+operator rather than a silently different parse:
 
 ```haskell
-bad = users &>> 5   # unknown operator `&>>`; declare it in `prelude.cagara`
+bad = users &>> 5   # unknown operator `&>>`
 ```
 
-`&>>` is deliberately not declared. The example used to use `&~`, which *is* —
-it is `except` — so the snippet demonstrated a type error while claiming to show
-an unknown operator.
+`&>>` is deliberately not in the table. The example used to use `&~`, which
+*is* — it is `except` — so the snippet demonstrated a type error while claiming
+to show an unknown operator.
 
-Declarations are read from the prelude only, and may not appear in your own
-files: an operator's precedence is a property of the language, not of one
-module. The two words `infixl` and `infixr` are reserved where a definition
-may start.
+`infixl` and `infixr` are not part of the language: precedence is a property of
+the language, so it is fixed in the compiler and no module can declare or
+re-fix an operator. There is no `infixl 1 &^` line to write. Defining `_&^_`
+gives `&^` a meaning; the table gives it its place in the grammar.
 
 Note the spelling boundary. A shorthand is `&` followed by operator
 punctuation, and an ordinary operator is a run of operator characters, so both
 follow from a character class rather than a list of names. Those classes are
 `&` plus any of `= ! < > * / % | ? $ ^ ~ + - .`, and `= ! < > * / % | ? $ ^ ~`
-on their own. A shorthand built from characters already in the classes is free
-— `&^`, `&>>`, `~=` all work the moment they are declared. A character never
-used in an operator before needs one line in the lexer, after which every
-spelling made of those characters is free too.
+on their own. A shorthand built from characters already in the classes needs
+one line in the table; a character never used in an operator before needs one
+line in the lexer as well, after which every spelling made of those characters
+is free too.
 
 ---
 
@@ -321,17 +317,17 @@ b = t & select { l = .first <> " " <> .last }
 ```
 
 This table is a summary, not the definition: an operator's precedence is what
-its declaration says. Arithmetic, comparison, logic and the concatenation
-operators are the language's own and are fixed in the compiler; everything
-else — the pipeline, the joins, and the three combinators — is declared in the
-prelude (see [Shorthands](#shorthands)). The gaps in the numbering leave room
-for the operators Cagara has that Haskell does not.
+the table says. Every operator is fixed in the compiler — arithmetic,
+comparison, logic and concatenation, the pipeline, the joins, and the three
+combinators alike — and the prelude supplies their meanings (see
+[Shorthands](#shorthands)). The gaps in the numbering leave room for the
+operators Cagara has that Haskell does not.
 
 Two associativities differ from Haskell on purpose, both harmless: `&&` and
 `||` are `infixl` where Haskell writes `infixr` (both are associative, so the
 parse tree is the only difference), and the comparisons are `infixl` where
 Haskell writes `infix 4` (non-associative). Cagara's comparisons could be made
-non-associative too, but that needs a third declaration keyword, `infix`, and
+non-associative too, but that needs a third entry form in the table, and
 `a < b < c` is already rejected as a type error.
 
 `/` on `int` truncates toward zero and `%` keeps the dividend's sign in **every**
@@ -1076,8 +1072,38 @@ elements are still homogeneous, so `inList [1, 2.0] .id` is a type error.
 ## 12. Functions, types, and the prelude
 
 `prelude.cagara` is imported into every module automatically. It is ordinary
-Cagara built on a handful of `__` primitives from the Rust core — you can read
-it, and it is the best reference for what is available.
+Cagara — you can read it, and it is the best reference for what is available.
+It is built on the `sql "..."` and `primitive "..."` **body forms**, which are
+the whole of what the Rust core provides:
+
+```haskell
+table : string -> string -> query r = primitive "__table"
+upper : expr r string -> expr r string = sql "UPPER($1)"
+```
+
+A body form is syntax, not a name, so `primitive "__table"` needs no import —
+`__table` is the argument the form reads, in the same way `UPPER($1)` is the
+text `sql` reads. Nothing about it is in scope.
+
+### Turning the prelude off
+
+A module that wants none of it puts this on the **first line**:
+
+```haskell
+# no prelude
+table : string -> string -> query r = primitive "__table"
+t : query { a = int } = table "s" "t"
+```
+
+The implicit import goes; the grammar does not. `&`, `where` and `+` are the
+compiler's, so they still parse, while `_&_` and `where` are simply names the
+module no longer has — an unknown name, like any other. Write your own, or
+import a module that has. The marker must be the whole first line: a leading
+space, trailing text, or a later line is an ordinary comment.
+
+Operator *precedence* is not part of this. It is fixed in the compiler, so
+turning the prelude off changes which names exist and never how an expression
+groups.
 
 ### Functions and partial application
 

@@ -403,9 +403,6 @@ impl Fmt<'_> {
     fn item(&self, n: &SyntaxNode) -> R {
         match n.kind() {
             K::ImportDecl => self.spaced(n),
-            // `infixl 1 &+`: the keyword, an optional level, and the spelling,
-            // single-spaced.
-            K::OpDecl => self.spaced(n),
             K::Definition => self.def(n),
             _ => Err(Bail),
         }

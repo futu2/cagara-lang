@@ -121,17 +121,30 @@ fn documented() -> BTreeMap<String, String> {
 /// `prelude.cagara` also contains a commented-out example of exactly this form —
 /// a plain `find` over the text matches the comment first, which is how the
 /// `&^` row was read as `...` on the first attempt.
+/// The shorthands the language has, and what each means.
+///
+/// The **symbols** come from the core's fixity table, which is now the only
+/// place a shorthand's spelling lives; the prelude declares none. The
+/// **meaning** still comes from `prelude.cagara`, as the `_&^_` definition —
+/// spelling and meaning are two different facts and live in two places.
 fn declared() -> BTreeMap<String, String> {
     let text = std::fs::read_to_string(repo_root().join("prelude.cagara")).expect("prelude.cagara");
+    let ops = std::fs::read_to_string(repo_root().join("crates/cagara-syntax/src/ops.rs"))
+        .expect("ops.rs");
     let mut symbols: Vec<String> = Vec::new();
-    for line in text.lines() {
+    for line in ops.lines() {
+        // `("&|", Fixity::left(1)),` — a shorthand. Bare `&` is the pipe, and
+        // `&&` is logic rather than a shorthand, so the pipe level is what
+        // tells them apart: only shorthands sit at `&`'s own level.
         let t = line.trim();
-        // `infixl 1 &|` — a declaration. Bare `&` is the pipe, not a shorthand.
-        if let Some(rest) = t.strip_prefix("infixl 1 &") {
-            let sym = rest.trim();
-            if !sym.is_empty() && !sym.contains(char::is_whitespace) {
-                symbols.push(format!("&{sym}"));
-            }
+        let Some(rest) = t.strip_prefix("(\"") else {
+            continue;
+        };
+        let Some((sym, fixity)) = rest.split_once('"') else {
+            continue;
+        };
+        if sym.len() > 1 && sym.starts_with('&') && fixity.contains("left(1)") {
+            symbols.push(sym.to_string());
         }
     }
 
@@ -153,8 +166,7 @@ fn declared() -> BTreeMap<String, String> {
     }
     assert!(
         out.len() >= 10,
-        "the prelude parsed as {} shorthand(s), which means the parser is not \
-         looking at the declarations any more: {out:?}",
+        "read {} shorthand(s) from the fixity table and the prelude: {out:?}",
         out.len()
     );
     out

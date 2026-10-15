@@ -22,12 +22,30 @@ pub fn lex(input: &str) -> Vec<Lexeme<'_>> {
     while let Some(tok) = lexer.next() {
         let span = lexer.span();
         let kind = tok.unwrap_or(Token::Error);
+        // A `"` is claimed by no pattern, so it arrives as an `Error` of its own
+        // and the literal is scanned here. See [`scan_string`] for why it is not
+        // a `logos` pattern.
+        if kind == Token::Error && input[span.start..].starts_with('"') {
+            let (kind, end) = scan_string(input, span.start);
+            out.push(Lexeme {
+                kind,
+                text: &input[span.start..end],
+                offset: span.start,
+                line_start: starts_line(input, span.start),
+            });
+            // The lexer's cursor is just past the opening quote; move it past
+            // the whole literal so the scan is not redone as garbage tokens.
+            let consumed = end - span.start - 1;
+            if consumed > 0 {
+                lexer.bump(consumed);
+            }
+            continue;
+        }
         // The whitespace regex accepts a lone `\r`, so a line break is `\n`,
         // `\r\n`, or a bare `\r`. Testing only for `\n` gave a CR-only file no
         // line starts after the first, which silently merged its definitions
         // under the parser's column-0 layout rule.
-        let line_start = !kind.is_trivia()
-            && (span.start == 0 || matches!(input.as_bytes()[span.start - 1], b'\n' | b'\r'));
+        let line_start = !kind.is_trivia() && starts_line(input, span.start);
         out.push(Lexeme {
             kind,
             text: &input[span.clone()],
@@ -36,6 +54,41 @@ pub fn lex(input: &str) -> Vec<Lexeme<'_>> {
         });
     }
     out
+}
+
+/// Whether the byte at `offset` begins a line.
+fn starts_line(input: &str, offset: usize) -> bool {
+    offset == 0 || matches!(input.as_bytes()[offset - 1], b'\n' | b'\r')
+}
+
+/// Scan one string literal, returning its kind and the offset just past it.
+///
+/// The rule is the one the token's old pattern encoded, applied iteratively: a
+/// literal opens with `"`, ends at the next unescaped `"`, and a `\` escapes the
+/// character after it — including a `"`, which is why the scan cannot simply
+/// look for the next quote. A raw `\n` ends the line and therefore the literal,
+/// which is what keeps an unclosed quote from swallowing the rest of the file.
+///
+/// Bytes are matched rather than characters, which is safe here because every
+/// byte tested is ASCII and no UTF-8 continuation byte can equal one.
+fn scan_string(input: &str, start: usize) -> (Token, usize) {
+    let bytes = input.as_bytes();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => break,
+            b'\\' => {
+                // A trailing backslash escapes nothing; the literal is unclosed.
+                if i + 1 >= bytes.len() {
+                    break;
+                }
+                i += 2;
+            }
+            b'"' => return (Token::String, i + 1),
+            _ => i += 1,
+        }
+    }
+    (Token::UnterminatedString, i)
 }
 
 #[cfg(test)]
@@ -48,6 +101,38 @@ mod tests {
             .filter(|l| !l.kind.is_trivia())
             .map(|l| l.kind)
             .collect()
+    }
+
+    /// A string literal of any length is lexed without recursing.
+    ///
+    /// The token used to be a `logos` pattern with an escape alternation under a
+    /// star, which the derive compiles into code that recurses once per
+    /// character: a few hundred kilobytes of literal overflowed the stack and
+    /// aborted the process, so a file could kill the compiler (and the language
+    /// server) just by being long. The scan is iterative now, and this pins that
+    /// a megabyte is routine rather than fatal.
+    #[test]
+    fn a_long_string_literal_is_lexed_without_recursing() {
+        let src = format!("\"{}\"", "x".repeat(1_000_000));
+        let toks = lex(&src);
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].kind, Token::String);
+        assert_eq!(toks[0].text.len(), src.len());
+    }
+
+    /// Escapes still decide where a literal ends, at any length.
+    #[test]
+    fn an_escaped_quote_does_not_end_a_literal() {
+        let toks = lex(r#""a\"b" "c""#);
+        let kinds: Vec<_> = toks
+            .iter()
+            .filter(|l| !l.kind.is_trivia())
+            .map(|l| (l.kind, l.text))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![(Token::String, r#""a\"b""#), (Token::String, r#""c""#)]
+        );
     }
 
     #[test]

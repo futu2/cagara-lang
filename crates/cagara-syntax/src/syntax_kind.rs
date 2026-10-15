@@ -254,15 +254,28 @@ kind_table! {
 
         Int #[regex(r"[0-9]+")],
         Float #[regex(r"[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?")],
-        /// A string ends on its line: a missing `"` must not swallow the rest
-        /// of the file.
-        String #[regex(r#""([^"\\\n]|\\[^\n])*""#)],
+        /// A string literal. Both this and [`SyntaxKind::UnterminatedString`]
+        /// are produced by the lexer's own scanner
+        /// ([`crate::lexer::lex`]) rather than by a `logos` pattern, so neither
+        /// has one here.
+        ///
+        /// The pattern this used to carry was
+        /// `"([^"\\\n]|\\[^\n])*"`, and `logos` compiles an alternation under a
+        /// star into code that **recurses once per character**: a literal of a
+        /// few hundred kilobytes overflowed the stack and aborted the process,
+        /// with no diagnostic. `"([^"\n])*"` — the same pattern without escape
+        /// support — handles a megabyte without difficulty, so it is the escape
+        /// alternation that costs the stack, not the length. Scanning by hand is
+        /// iterative, so a literal of any length is bounded by memory rather than
+        /// by the stack.
+        String,
         /// `"...` with no closing quote before the end of the line. Distinct
         /// from [`SyntaxKind::Error`] so a consumer can tell a real,
         /// diagnosable token from an unlexable character.
-        UnterminatedString #[regex(r#""([^"\\\n]|\\[^\n])*"#)],
+        UnterminatedString,
 
-        /// An unlexable character.
+        /// An unlexable character. A `"` also lands here, because no pattern
+        /// claims it; the lexer recognises it and scans the literal itself.
         Error,
     }
 

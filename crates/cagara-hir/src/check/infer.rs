@@ -2701,21 +2701,31 @@ impl<'w> Checker<'w> {
                 // Cannot reduce yet (open row)
                 match itail {
                     Ty::Empty => {
-                        // Closed row but reduction failed: should not happen
-                        // for ValueMap since it has no validation errors
-                        unreachable!("reduce_mapvalue should succeed on closed rows")
+                        // A closed row that the reducer refused. It has no
+                        // validation errors of its own, so this is a compiler
+                        // gap rather than a user error; report it as one instead
+                        // of aborting the process.
+                        Err(format!(
+                            "`mapValue` could not reduce a closed row: {input_row:?}"
+                        ))
                     }
                     Ty::Var(_) => {
                         // Open variable tail: wait for it to be bound
                         Ok(false)
                     }
-                    Ty::Rigid(..) => {
-                        // Open rigid tail: defer as a MapValue term
+                    // `flatten` returns the row's **tail**, which is not
+                    // necessarily a variable: a deferred key stage leaves an
+                    // unreduced `keyMap`/`merge`/`removeKey`/`mapValue` term
+                    // there. Any such tail means the row is not yet known, which
+                    // is the same situation as a rigid tail — carry the wrapper
+                    // as a term and reduce it once the tail is resolved. This
+                    // used to be an `unreachable!`, and two lines of ordinary
+                    // user code reached it: `q & prefix p & mapValue "nullable"`.
+                    _ => {
                         let deferred = Ty::MapValue(vm, Box::new(input_row));
                         self.unify(&deferred, output)?;
                         Ok(true)
                     }
-                    _ => unreachable!("flatten only returns Empty, Var, or Rigid tails"),
                 }
             }
         }

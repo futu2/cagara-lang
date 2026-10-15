@@ -365,11 +365,35 @@ fn editing_one_definition_reuses_unchanged_root_definitions() {
     );
 }
 
-/// A stage argument that type-checks but is not the literal the elaborator
-/// needs (`limit (1 + 1)`) fails during source elaboration. Its diagnostic must
-/// describe the *user's* file: a hardcoded module index attributed it to the
-/// prelude, so it printed the prelude's first line and put the caret at the
-/// wrong column.
+/// An impossible window frame is reported, not lowered.
+///
+/// `rows (following 1) (preceding 1)` asks for a frame that starts after it
+/// ends. The checked layer has a constructor that knows this
+/// (`checked::frame`), but the normalizer built the IR struct directly and
+/// skipped it, so the query reached SQL as
+/// `ROWS BETWEEN 1 FOLLOWING AND 1 PRECEDING` — which the engines reject, at
+/// run time, in the one place the type checker exists to prevent.
+#[test]
+fn an_impossible_window_frame_is_reported() {
+    let ws = Workspace::from_source(
+        "users : query { id = int, age = int } = table \"s\" \"users\"\n\
+         q = users & select { s = sumOver { partition = [.id], order = [asc .age], \
+             frame = rows (following 1) (preceding 1) } .age }\n",
+    );
+    let diags: Vec<Diag> = compile(&ws)
+        .queries
+        .iter()
+        .filter_map(|q| q.result.as_ref().err().cloned())
+        .collect();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert!(
+        diags[0].message.contains("impossible window frame"),
+        "{}",
+        diags[0]
+    );
+}
+
+/// An elaboration error points at the *user's* file, not the prelude.
 #[test]
 fn an_elaboration_error_points_at_the_users_module_not_the_prelude() {
     let ws = Workspace::from_source("q : query { a = int } = table \"s\" \"t\" & limit (1 + 1)\n");

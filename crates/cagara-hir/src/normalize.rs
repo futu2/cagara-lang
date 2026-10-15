@@ -1888,10 +1888,14 @@ fn lower_frame(t: &Term) -> Result<crate::ir::Frame, Gap> {
     let [start, end] = args else {
         return Err(Gap::new(origin, "a frame needs two bounds"));
     };
-    Ok(crate::ir::Frame {
-        start: lower_bound(start)?,
-        end: lower_bound(end)?,
-    })
+    // Built through the checked constructor rather than as a bare struct: it is
+    // the one place that knows which frames are impossible, and assembling the
+    // IR directly here skipped that rule — `rows (following 1) (preceding 1)`
+    // reached SQL as `ROWS BETWEEN 1 FOLLOWING AND 1 PRECEDING`, which the
+    // engines reject. A rejection is the program's, not this phase's, so it is
+    // reported as one.
+    crate::checked::frame(lower_bound(start)?, lower_bound(end)?)
+        .map_err(|e| Gap::program(origin, e.message))
 }
 
 /// Lower one frame bound: `unboundedPreceding`, `currentRow`,

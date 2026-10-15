@@ -1,0 +1,3 @@
+users : query { id = int, name = string } = table "public" "users"
+two = p => q => q & omit "name" & prefix p
+main = users & two "b_"

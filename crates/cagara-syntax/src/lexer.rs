@@ -186,6 +186,30 @@ mod tests {
         assert_eq!(toks, vec!["a", "c"]);
     }
 
+    /// A comment ends at a bare `\r`, which is a line break here.
+    ///
+    /// The comment pattern used to stop only at `\n`, so in a CR-only file a
+    /// comment ran through the line ending and swallowed the whole next line.
+    /// The loss was silent: the definitions after it were inside the comment
+    /// token, so nothing was reported and the tree still round-tripped.
+    #[test]
+    fn a_comment_ends_at_a_bare_carriage_return() {
+        for src in ["a = 1 # c\rb = 2\r", "a = 1 # c\r\nb = 2\r\n"] {
+            let idents: Vec<_> = lex(src)
+                .into_iter()
+                .filter(|l| l.kind == Token::Ident)
+                .map(|l| l.text)
+                .collect();
+            assert_eq!(idents, vec!["a", "b"], "{src:?}");
+            // The comment keeps its own text, and only its own.
+            let comment = lex(src)
+                .into_iter()
+                .find(|l| l.kind == Token::Comment)
+                .expect("a comment");
+            assert_eq!(comment.text, "# c", "{src:?}");
+        }
+    }
+
     #[test]
     fn stage_join_and_coalesce_operators() {
         use Token::*;

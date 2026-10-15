@@ -160,7 +160,15 @@ kind_table! {
         /// lossless.
         Whitespace TRIVIA #[regex(r"[ \t\r\n]+")],
         /// A `#` comment, running to the end of the line.
-        Comment TRIVIA #[regex(r"#[^\n]*")],
+        ///
+        /// The class excludes `\r` as well as `\n` because a bare `\r` is a line
+        /// break everywhere else — the whitespace pattern accepts it, the lexer
+        /// marks a line start after it, and the parser's column-0 layout rule
+        /// ends a definition on it. A comment that ran through a `\r` swallowed
+        /// every definition on the following line, and did so **silently**: a
+        /// CR-only file reported one definition where it had two, with no error,
+        /// because the second was inside the comment token.
+        Comment TRIVIA #[regex(r"#[^\r\n]*")],
 
         ImportKw #[token("import")],
         AsKw #[token("as")],

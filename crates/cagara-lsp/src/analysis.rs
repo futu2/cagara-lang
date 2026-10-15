@@ -714,7 +714,14 @@ impl<'a> Positions<'a> {
             // end, where a per-unit walk would also stop.
             return Some(end);
         };
-        let mut offset = usize::from(self.idx.offset(lc)?);
+        // The byte offset is the line's start plus the UTF-8 column, added in
+        // `usize`. `LineIndex::offset` does the same sum in `u32` — the type
+        // LSP columns and `TextSize` are both made of — so a column near
+        // `u32::MAX` on any line but the first overflowed it: a panic in a debug
+        // build, and in release a *wrapped* offset that landed on an earlier
+        // line and answered about the wrong text. Saturating here leaves the
+        // clamp below to do its job.
+        let mut offset = usize::from(line.start()).saturating_add(lc.col as usize);
         // `to_utf8` does not clamp the column to the line: a column past the
         // end would land in the next line or past the text.
         if offset > end {
@@ -842,6 +849,29 @@ mod tests {
         Range {
             start: pos(line, start),
             end: pos(line, end),
+        }
+    }
+
+    /// A column far past the line is clamped, not overflowed.
+    ///
+    /// The byte offset is the line's start plus the column, and the sum used to
+    /// be done in `u32` — the type LSP columns are made of. A column near
+    /// `u32::MAX` on any line but the first overflowed it: a panic in a debug
+    /// build, and in release a *wrapped* offset that pointed at an earlier line,
+    /// so hover answered about text the cursor was nowhere near. An editor can
+    /// send such a column, so the request must be clamped like any other
+    /// out-of-range position.
+    #[test]
+    fn a_column_past_the_line_end_is_clamped() {
+        let positions = Positions::new(SRC);
+        let last = u32::MAX;
+        for line in [1u32, 2, 5] {
+            let end = positions.offset(pos(line, u32::MAX - 1)).expect("a line");
+            // Whatever the column, the offset is on *this* line, at its end.
+            let got = positions.position(end);
+            assert_eq!(got.line, line, "line {line} with column {last}");
+            let clamped = positions.offset(pos(line, last)).expect("a line");
+            assert_eq!(clamped, end, "line {line} with column {last}");
         }
     }
 

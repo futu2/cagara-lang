@@ -543,11 +543,24 @@ impl<'a> Parser<'a> {
     }
 
     /// `f a b` — juxtaposition; a single atom is not wrapped.
+    ///
+    /// The number of arguments is budgeted the way a binary chain is. The tree
+    /// is **flat** here — one `App` node however many atoms — so `depth` never
+    /// rises and the limit that catches nested expressions does not apply. A
+    /// flat application of a few thousand atoms then cost the checker minutes
+    /// and, past that, overflowed its stack: `id id id … 1` is not a program
+    /// anyone writes, and a budget says so instead of dying on it.
     fn app(&mut self) {
         let cp = self.checkpoint();
         self.atom();
         let mut applied = false;
+        let mut chain = 0usize;
         while self.atom_start() {
+            chain += 1;
+            if self.depth + chain >= MAX_DEPTH {
+                self.bail("application is too long");
+                break;
+            }
             self.atom();
             applied = true;
         }
@@ -1070,6 +1083,34 @@ mod tests {
             assert!(
                 p.errors[0].message.contains("too long")
                     || p.errors[0].message.contains("too deeply"),
+                "n={n}: {:?}",
+                p.errors
+            );
+            // The tree stays lossless, so the editor can still work on it.
+            assert_eq!(p.syntax().text().to_string(), src);
+        }
+    }
+
+    /// A flat application is budgeted like a binary chain.
+    ///
+    /// `f a b c …` is **one** `App` node however many atoms it holds, so the
+    /// nesting budget never rises and nothing else bounded it. The checker then
+    /// spent minutes on a few thousand atoms and overflowed its stack past that;
+    /// `id id id … 1` is not a program anyone writes, and the budget says so
+    /// rather than dying on it.
+    #[test]
+    fn an_application_past_the_expression_budget_is_a_diagnostic_not_a_crash() {
+        let applied = |n: usize| format!("q = {}1\n", "id ".repeat(n));
+        // Comfortably inside: accepted.
+        assert!(parse(&applied(1)).errors.is_empty());
+        assert!(parse(&applied(20)).errors.is_empty());
+        // Past the shared expression budget: one diagnostic, not a hang.
+        for n in [128, 1000, 5000] {
+            let src = applied(n);
+            let p = parse(&src);
+            assert_eq!(p.errors.len(), 1, "n={n}: {:?}", p.errors);
+            assert!(
+                p.errors[0].message.contains("too long"),
                 "n={n}: {:?}",
                 p.errors
             );

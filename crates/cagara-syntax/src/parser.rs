@@ -40,7 +40,7 @@ pub fn parse_with(input: &str, ops: &Ops) -> Parse {
         end: input.len(),
         depth: 0,
         bailed: false,
-        arm_start: false,
+        arm_depth: None,
         ops,
     };
     p.file();
@@ -63,10 +63,12 @@ struct Parser<'a> {
     /// The rest of it has been consumed, so every enclosing construct would
     /// otherwise add its own "expected ..." error while unwinding.
     bailed: bool,
-    /// Set while the token at the cursor begins a `case` arm's condition, so
-    /// `cond => value` is not mistaken for a lambda (see
-    /// [`Parser::at_lambda_operand`]).
-    arm_start: bool,
+    /// The expression-nesting depth a `case` arm's condition sits at, while one
+    /// is being parsed, so `cond => value` is not mistaken for a lambda (see
+    /// [`Parser::at_lambda_operand`]). A *depth* rather than a flag because the
+    /// exception is about the arm's own level: a lambda nested inside the
+    /// condition — in parentheses, in an argument — is a lambda like any other.
+    arm_depth: Option<usize>,
     ops: &'a Ops,
 }
 
@@ -423,9 +425,14 @@ impl<'a> Parser<'a> {
         !self.at_arm() && self.at_lambda()
     }
 
-    /// Is the cursor on the first token of a `case` arm's condition?
+    /// Is the cursor at the arm's **own** level of its condition?
+    ///
+    /// `arm` records the depth it sits at, and the condition's own `expr` frame
+    /// is one deeper than that (it is the frame `descend` charges), so equality
+    /// with `arm_depth + 1` is "at the arm's level" and anything deeper is a
+    /// nested construct, where `=>` means a lambda again.
     fn at_arm(&self) -> bool {
-        self.arm_start
+        self.arm_depth.is_some_and(|d| self.depth == d + 1)
     }
 
     fn expr(&mut self) {
@@ -748,14 +755,19 @@ impl<'a> Parser<'a> {
     }
 
     /// One `cond => value` arm. The separator is `=>`, the same token a lambda
-    /// uses, so no new punctuation is introduced — which is why the condition
-    /// is parsed with `arm_start` set: it must not be treated as a lambda's
-    /// parameter list.
+    /// uses, so no new punctuation is introduced — which is why the condition is
+    /// parsed with `arm_depth` set: at the arm's own level it must not be
+    /// treated as a lambda's parameter list.
+    ///
+    /// The marker is saved and restored rather than cleared, because an arm may
+    /// contain another `case` — including in its condition — and the inner arm
+    /// must not leave the outer one unmarked.
     fn arm(&mut self) {
         self.start(K::CaseArm);
-        self.arm_start = true;
+        let outer = self.arm_depth;
+        self.arm_depth = Some(self.depth);
         self.expr();
-        self.arm_start = false;
+        self.arm_depth = outer;
         if self.expect(
             Token::FatArrow,
             "`=>` between a case's condition and its value",
@@ -854,6 +866,39 @@ mod tests {
         // An empty `case` parses; whether it has an `else` is the checker's
         // question, so the parser does not turn it into a syntax error.
         assert_eq!(body("x = case {}"), "(CaseExpr)");
+    }
+
+    /// A lambda nested inside a `case` arm's condition is a lambda.
+    ///
+    /// The arm/`=>` exception is about the arm's **own** level: `cond => value`
+    /// and `p => body` are the same two tokens, so at that level the first `=>`
+    /// belongs to the arm. The marker used to apply to the whole condition
+    /// subtree instead, so a lambda one level down — in parentheses, in an
+    /// argument — was read as an arm condition and the arm's own `=>` was then
+    /// reported missing.
+    #[test]
+    fn a_lambda_inside_a_case_condition_is_a_lambda() {
+        assert_eq!(
+            body("x = case { f (y => 1) => 2; true => 3 }"),
+            "(CaseExpr (CaseArm (App (NameRef f) (ParenExpr (Lambda y (Literal 1)))) (Literal 2)) (CaseArm (NameRef true) (Literal 3)))"
+        );
+        assert_eq!(
+            body("x = case { (y => 1) => 2; true => 3 }"),
+            "(CaseExpr (CaseArm (ParenExpr (Lambda y (Literal 1))) (Literal 2)) (CaseArm (NameRef true) (Literal 3)))"
+        );
+    }
+
+    /// An arm may hold another `case`, including in its own condition.
+    ///
+    /// The marker used to be a plain flag cleared on the way out of an inner
+    /// arm, so the outer arm was left unmarked and its `=>` was parsed as a
+    /// lambda's — `case { case { true => 1 } & b => c }` lost its arm.
+    #[test]
+    fn a_nested_case_keeps_the_outer_arms_marker() {
+        assert_eq!(
+            body("x = case { case { true => 1 } & b => c }"),
+            "(CaseExpr (CaseArm (BinExpr (CaseExpr (CaseArm (NameRef true) (Literal 1))) (NameRef b)) (NameRef c)))"
+        );
     }
 
     /// The reason for `{ ... ; ... }` rather than a comma-separated form: a

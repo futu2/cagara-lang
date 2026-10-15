@@ -750,14 +750,16 @@ impl Lowerer {
         ))
     }
 
-    /// One branch of a set operation. A branch with its own LIMIT / OFFSET
-    /// cannot be written as a bare SELECT: the set operator's own tail would
-    /// apply to the whole operation instead, and `SELECT ... LIMIT 3 UNION
-    /// SELECT ... LIMIT 2` is rejected by every engine. Put such a branch
-    /// behind a derived table, which is portable. A plain branch is emitted
-    /// as is, so the common case stays flat.
+    /// One branch of a set operation. A branch that carries its own LIMIT,
+    /// OFFSET or ORDER BY cannot be written as a bare SELECT: the set operator's
+    /// own tail would apply to the whole operation instead, and
+    /// `SELECT ... LIMIT 3 UNION SELECT ... LIMIT 2` is rejected by every engine
+    /// while `SELECT ... ORDER BY x UNION SELECT ...` is rejected by SQLite with
+    /// "ORDER BY clause should come after UNION not before". Put such a branch
+    /// behind a derived table, which is portable. A branch with none of the three
+    /// is emitted as is, so the common case stays flat.
     fn branch(&mut self, st: Stage) -> Statement {
-        if st.limit.is_none() && st.offset.is_none() {
+        if st.limit.is_none() && st.offset.is_none() && st.order_by.is_empty() {
             return Statement::Select(st.into_statement());
         }
         let alias = self.alias();

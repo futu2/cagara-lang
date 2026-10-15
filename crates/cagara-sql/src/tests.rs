@@ -472,6 +472,33 @@ fn every_set_operation_has_a_pipe_stage() {
     }
 }
 
+/// A branch of a set operation that carries its own `order` is wrapped.
+///
+/// The set operator's tail belongs to the whole operation, so an `ORDER BY`
+/// written inside one branch cannot be emitted flat: SQLite rejects
+/// `SELECT … ORDER BY x UNION SELECT …` with "ORDER BY clause should come after
+/// UNION not before", and the other engines read it as the operation's own
+/// ordering rather than the branch's. Only `limit`/`offset` used to force the
+/// wrap, so an ordering-only branch produced SQL no engine accepts.
+#[test]
+fn a_set_branch_with_its_own_order_is_wrapped() {
+    let s = sql_admins(
+        "q = union (users & order [asc .id]) (admins & select { .id, .name, .age, .active })\n",
+        "q",
+    );
+    // The ordering must sit inside a derived table, not beside the set operator.
+    let union = s.find("UNION").expect("a UNION");
+    let order = s.find("ORDER BY").expect("an ORDER BY");
+    assert!(
+        order < union,
+        "the branch's ORDER BY must be inside its own SELECT: {s}"
+    );
+    assert!(
+        s[..union].contains("(SELECT"),
+        "the ordered branch must be a derived table: {s}"
+    );
+}
+
 #[test]
 fn union_all_preserves_duplicates() {
     let s = sql("q = unionAll users users\n", "q");

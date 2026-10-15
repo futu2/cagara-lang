@@ -365,6 +365,37 @@ fn editing_one_definition_reuses_unchanged_root_definitions() {
     );
 }
 
+/// A definition that expands past the term budget is reported, not emitted.
+///
+/// Inlining is substitution, so a definition that mentions its argument twice
+/// doubles it at every level. Eighteen levels of `dup` is about a quarter of a
+/// million nodes from 350 bytes of source — eight megabytes of SQL, ten seconds
+/// of work — and each further level doubles both. The budget refuses it as a
+/// *program* fault, since the program's shape is what expands.
+#[test]
+fn a_definition_that_expands_past_the_budget_is_reported() {
+    let mut expr = String::from("1");
+    for _ in 0..20 {
+        expr = format!("dup ({expr})");
+    }
+    let ws = Workspace::from_source(&format!(
+        "users : query {{ id = int }} = table \"s\" \"users\"\n\
+         dup : expr r int -> expr r int = x => ifThenElse true x x\n\
+         q = users & select {{ y = {expr} }}\n"
+    ));
+    let diags: Vec<Diag> = compile(&ws)
+        .queries
+        .iter()
+        .filter_map(|q| q.result.as_ref().err().cloned())
+        .collect();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert!(
+        diags[0].message.contains("expands to more than"),
+        "{}",
+        diags[0]
+    );
+}
+
 /// An impossible window frame is reported, not lowered.
 ///
 /// `rows (following 1) (preceding 1)` asks for a frame that starts after it

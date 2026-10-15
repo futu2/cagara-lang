@@ -899,6 +899,21 @@ pub struct Normalizer<'a> {
 /// reported, never silent.
 pub const MAX_INLINE_DEPTH: usize = 200;
 
+/// How many nodes one definition's normal form may hold.
+///
+/// A guard on *expansion*, not on the source: inlining is substitution, so a
+/// definition that mentions its argument more than once multiplies the work, and
+/// nesting those multiplies it again. Measured: `dup = x => ifThenElse true x x`
+/// nested eighteen deep expands to about a quarter of a million nodes, which is
+/// eight megabytes of SQL and ten seconds of work from 350 bytes of source; the
+/// next two levels would be a minute and thirty-two megabytes. The bound is far
+/// above any query written by hand — a large one is thousands of nodes — and
+/// hitting it is reported, never silent.
+///
+/// It is checked on the finished term, so it bounds the lowering and the SQL
+/// rather than the expansion that produced them; see the note at the check.
+pub const MAX_TERM_NODES: usize = 200_000;
+
 impl<'a> Normalizer<'a> {
     pub fn new(resolver: Box<Resolver<'a>>) -> Self {
         Self {
@@ -1776,7 +1791,69 @@ pub fn elaborate_query_via_terms(
     let term = cx
         .in_module(module, |cx| expression(&facts, cx, &body))
         .map_err(to_error)?;
+    // Inlining substitutes a definition's body for each of its uses, so a
+    // definition that mentions its argument twice doubles it, and nesting those
+    // doubles it again: `dup = x => ifThenElse true x x` nested eighteen deep
+    // builds a term of a quarter of a million nodes from about 350 bytes of
+    // source, and ten seconds and eight megabytes of SQL come out.
+    //
+    // The budget is a *program* fault — the program's shape is what expands.
+    // It bounds what is **emitted**, and it catches a moderate expansion
+    // immediately; it does not bound the expansion itself, which happens while
+    // the term is built and before this runs. A deeply nested doubling chain
+    // therefore still spends its time and is refused at the end of it. Bounding
+    // the construction means charging the budget inside the reduction —
+    // `substitute` is where the copying happens — which needs a failure channel
+    // through `Term::apply`; see `docs/PLAN.md`.
+    check_term_size(&term).map_err(to_error)?;
     lower_query(&term).map_err(to_error)
+}
+
+/// Refuse a normal form larger than [`MAX_TERM_NODES`].
+///
+/// Counted with an explicit stack rather than recursively: the terms this
+/// rejects are exactly the deep and wide ones, and a walk that recursed over
+/// them would overflow the stack while reporting that the term is too big.
+fn check_term_size(t: &Term) -> Result<(), Gap> {
+    let mut stack = vec![t];
+    let mut nodes = 0usize;
+    while let Some(t) = stack.pop() {
+        nodes += 1;
+        if nodes > MAX_TERM_NODES {
+            return Err(Gap::program(
+                other_origin(t),
+                format!(
+                    "this definition expands to more than {MAX_TERM_NODES} operations; \
+                     a definition that uses its argument more than once doubles the work \
+                     at every level"
+                ),
+            ));
+        }
+        match t {
+            Term::Lambda { body, .. } => stack.push(body),
+            Term::Apply { head, args, .. } => {
+                stack.push(head);
+                stack.extend(args);
+            }
+            Term::Template { args, .. }
+            | Term::Primitive { args, .. }
+            | Term::List { items: args, .. } => stack.extend(args),
+            Term::Window { spec, args, .. } => {
+                stack.push(spec);
+                stack.extend(args);
+            }
+            Term::Case { arms, default, .. } => {
+                for (c, v) in arms {
+                    stack.push(c);
+                    stack.push(v);
+                }
+                stack.push(default);
+            }
+            Term::Record { fields, .. } => stack.extend(fields.iter().map(|(_, v)| v)),
+            Term::Local { .. } | Term::Column { .. } | Term::Lit { .. } => {}
+        }
+    }
+    Ok(())
 }
 
 /// Lower a window specification term into the checked layer.

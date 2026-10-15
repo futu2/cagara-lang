@@ -87,6 +87,12 @@ correctness, not as an optimization.
 - Expressions and deeply nested relational trees have defensive compiler
   budgets to keep compiler and language-server stacks bounded. Common filter
   pipelines are lowered iteratively and have no separate ten-stage limit.
+  Inlining is bounded by depth (200 links) and a definition's normal form by
+  size (200 000 nodes), but the size budget is checked on the **finished** term:
+  a chain of definitions that each use their argument twice still pays for the
+  expansion before being refused. Bounding the expansion itself means charging
+  the budget inside the reduction, where `substitute` does the copying, which
+  needs a failure channel through `Term::apply`.
 - Some join combinations require extra derived tables because parenthesized
   joins are not yet represented directly.
 - `--optimize` is opt-in; it runs sqlglot optimization after Cagara lowering.

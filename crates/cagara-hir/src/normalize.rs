@@ -982,12 +982,21 @@ impl<'a> Normalizer<'a> {
     ///
     /// `None` means a cycle, and the caller reports it — the same verdict
     /// `enter` produces, so both routes agree on what recursion is.
+    ///
+    /// A definition's body is **closed**: the only binders in scope inside it
+    /// are the lambdas written in it, so the caller's binders are set aside for
+    /// the duration. Leaving them in place made a top-level name that happened
+    /// to match an enclosing lambda parameter read as that parameter — `n = 5`,
+    /// `g = n + 1`, `f = n => g`, `f 1` normalized `n` to the argument and
+    /// emitted `1 + 1` where the answer is `6`.
     pub fn inlining<T>(&mut self, id: DefId, f: impl FnOnce(&mut Self) -> T) -> Option<T> {
         if self.active.contains(&id) {
             return None;
         }
         self.active.push(id);
+        let outer = std::mem::take(&mut self.binders);
         let out = f(self);
+        self.binders = outer;
         self.active.pop();
         Some(out)
     }
@@ -2608,6 +2617,59 @@ mod bridge_tests {
         let resolved = |module: usize, id: u32| facts.resolution(module, id);
         let mut cx = Normalizer::new(Box::new(resolved));
         cx.in_module(ws.root, |cx| expression(&facts, cx, &body))
+    }
+
+    /// A top-level definition inlined inside a lambda is not read as that
+    /// lambda's parameter, even when the names match.
+    ///
+    /// A definition's body is closed, so the caller's binders are not in scope
+    /// in it. Leaving them on the binder stack made `n = 5`, `g = n + 1`,
+    /// `f = n => g`, `f 1` normalize `n` to the argument: the emitted SQL was
+    /// `1 + 1` where the answer is `6`.
+    #[test]
+    fn an_inlined_body_does_not_see_the_callers_binders() {
+        let t = term_of(
+            "n = 5\n\
+             g = n\n\
+             f = n => g\n\
+             main = users & select { y = f 1 }\n",
+            "f",
+        )
+        .unwrap();
+        // `f` is a function whose body is the inlined `g`, i.e. the top-level
+        // `n`. Reading that `n` as `f`'s own parameter is the capture this test
+        // pins; the body must hold a literal instead.
+        let Term::Lambda { body, .. } = t else {
+            panic!("`f` is a function");
+        };
+        assert!(
+            !mentions_local(&body),
+            "the parameter `n` was captured by the inlined body: {body:?}"
+        );
+    }
+
+    /// Whether a term mentions any [`Term::Local`].
+    fn mentions_local(t: &Term) -> bool {
+        match t {
+            Term::Local { .. } => true,
+            Term::Lambda { body, .. } => mentions_local(body),
+            Term::Apply { head, args, .. } => {
+                mentions_local(head) || args.iter().any(mentions_local)
+            }
+            Term::Template { args, .. }
+            | Term::Primitive { args, .. }
+            | Term::List { items: args, .. } => args.iter().any(mentions_local),
+            Term::Window { spec, args, .. } => {
+                mentions_local(spec) || args.iter().any(mentions_local)
+            }
+            Term::Case { arms, default, .. } => {
+                arms.iter()
+                    .any(|(c, v)| mentions_local(c) || mentions_local(v))
+                    || mentions_local(default)
+            }
+            Term::Record { fields, .. } => fields.iter().any(|(_, v)| mentions_local(v)),
+            Term::Column { .. } | Term::Lit { .. } => false,
+        }
     }
 
     /// A definition whose body is a column reference normalizes to that column,

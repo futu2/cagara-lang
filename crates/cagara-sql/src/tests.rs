@@ -1963,7 +1963,7 @@ fn deeply_nested_stages_are_a_diagnostic_not_a_stack_overflow() {
         Err(e) => e,
         Ok(_) => panic!("expected a depth diagnostic at {n}"),
     };
-    assert!(err.contains("nests more than"), "n={n}: {err}");
+    assert!(err.contains("folds more than"), "n={n}: {err}");
 }
 
 /// A stage costs one level of the depth budget, not two.
@@ -1972,9 +1972,10 @@ fn deeply_nested_stages_are_a_diagnostic_not_a_stack_overflow() {
 /// charged depth before looking through the wrapper counted each stage twice
 /// and tripped the bound at seven stages instead of fifteen. That halved budget
 /// is what made a ten-stage pipeline — five `leftJoin`s, the `update`s that
-/// materialize their join keys, and a projection — report "nests more than 16
-/// stages deep; split it with a named definition between the parts", advice
-/// that cannot work because a named definition does not reset the counter.
+/// materialize their join keys, and a projection — report "folds more than 16
+/// stages into one SELECT", whose advice used to be to split the query with a
+/// named definition: advice that cannot work, because a definition is inlined
+/// and the counter never resets.
 ///
 /// Seven stages is the depth the old, doubled accounting accepted; it is
 /// therefore the regression's lower bound. Fifteen is the bound the constant
@@ -2003,7 +2004,7 @@ fn a_stage_costs_one_level_of_the_depth_budget() {
         .into_iter()
         .find_map(|(_, r)| r.err())
         .expect("expected a depth diagnostic at 16");
-    assert!(err.contains("nests more than"), "{err}");
+    assert!(err.contains("folds more than"), "{err}");
 }
 
 /// The bare-name and operator spellings of a set operation put the piped query

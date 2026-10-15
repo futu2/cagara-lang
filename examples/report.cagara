@@ -12,7 +12,10 @@ adults = users
   & order [asc .label]
   & limit 10
 
-# Aggregation: a filter over an aggregate becomes `HAVING`.
+# Aggregation: a filter after an aggregate wraps a derived table, since SQL
+# cannot filter an aggregate's own result in the same SELECT. Folding it into a
+# `HAVING` is a query-shape optimization this compiler does not perform; see
+# "Aggregate filters and `HAVING`" in docs/PLAN.md.
 revenue = orders
   & where (.status == "paid")
   & agg { user_id = group .user_id, revenue = sum .amount, n = count }

@@ -1,8 +1,10 @@
 //! Relational IR to a sqlglot SELECT. Each IR node either fuses into the
 //! current stage or wraps it in a derived table when fusing would change
 //! meaning (e.g. filtering after windows or LIMIT). A filter over an aggregate
-//! fuses as `HAVING` instead, which is the same query without the derived
-//! table.
+//! is one of the wrapping cases: it becomes an ordinary `WHERE` outside a
+//! derived table rather than a `HAVING` on the aggregate. See `docs/PLAN.md`,
+//! "Aggregate filters and `HAVING`", for why that fold is deliberately absent
+//! and what reinstating it would take.
 
 use crate::stage::{and_all, col, ident_style, lower_expr, qualify, Fuse, Stage};
 use cagara_hir::ir::{Expr as IrExpr, JoinKind, Rel, SetKind, Side};
@@ -264,9 +266,14 @@ impl Lowerer {
         // retain a defensive diagnostic for those trees.
         let depth = self.depth + 1;
         if depth > MAX_LOWER_DEPTH {
+            // The advice used to be "split it with a named definition between
+            // the parts", which cannot help: a definition is inlined, so the
+            // counter never resets and the split query is exactly as deep. The
+            // message now says what the limit is and what actually shortens the
+            // spine — fewer stages folding into one another.
             return Err(format!(
-                "this query nests more than {MAX_LOWER_DEPTH} stages deep; \
-                 split it with a named definition between the parts"
+                "this query folds more than {MAX_LOWER_DEPTH} stages into one SELECT; \
+                 a stage that cannot fold (an aggregate, a window, a limit) starts a new one"
             ));
         }
         self.depth = depth;

@@ -561,8 +561,6 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         use_types: HashMap::new(),
         use_tys: HashMap::new(),
         resolutions: HashMap::new(),
-        deferred_keys: Vec::new(),
-        affix_mappers: Vec::new(),
         unify_depth: 0,
     };
     for i in 0..c.env.defs.len() {

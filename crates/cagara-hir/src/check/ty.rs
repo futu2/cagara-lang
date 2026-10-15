@@ -754,18 +754,9 @@ pub(crate) struct Checker<'w> {
     /// and re-deriving it by looking the name up again is a second answer
     /// waiting to disagree with this one.
     pub(crate) resolutions: HashMap<(usize, u32), Resolved>,
-    /// Key stages whose affix was not a literal, in the order their key
-    /// arguments were read. `key_stage` consumes one per deferred argument to
-    /// build a term with a fresh mapper variable instead of a concrete affix,
-    /// which is what lets `prefix p` appear in a helper.
-    pub(crate) deferred_keys: Vec<KeyMarker>,
-    /// Mappers named by an `affix m` parameter, one per key argument read.
-    /// `key_stage` consumes one to build the stage's term, so the witness in
-    /// the result type and the mapper the affix names are the same variable.
     /// Recursion depth of `unify`, to turn a cyclic reduction into a
     /// diagnostic instead of a stack overflow.
     pub(crate) unify_depth: usize,
-    pub(crate) affix_mappers: Vec<(KeyMarker, Ty)>,
 }
 
 pub(crate) fn missing(l: &str, have: &[(String, Ty)]) -> String {

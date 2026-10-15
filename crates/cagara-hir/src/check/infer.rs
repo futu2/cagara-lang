@@ -1455,7 +1455,6 @@ impl<'w> Checker<'w> {
                                 msg: format!("{}: {msg}", marker.literal_msg()),
                             })?;
                             keys.push((marker.tag(), String::new()));
-                            self.deferred_keys.push(marker);
                         }
                         (_, Some(s)) => {
                             // A `symbol k` parameter is bound to the literal's
@@ -1481,7 +1480,6 @@ impl<'w> Checker<'w> {
                                 msg: format!("{}: {m}", marker.literal_msg()),
                             })?;
                             keys.push((marker.tag(), String::new()));
-                            self.deferred_keys.push(marker);
                         }
                     }
                     ft = *r;
@@ -1966,29 +1964,27 @@ impl<'w> Checker<'w> {
                 // witness never decoded and the two sides were reported as an
                 // affix mismatch.
                 let sig_key = self.resolve_mapper(&sig_key);
-                // Tie the mappers together. `sig_key` is the mapper named in the
-                // *result* type (`query (keyMap m s)`), and the queued one is
-                // what the *parameter* named (`affix m`). They are the same
-                // variable in a well-formed signature, but a literal affix
-                // replaces `key` with a concrete witness — so the result-side
-                // mapper must be bound too, or the row term stays symbolic at
-                // the very place it is now known.
-                let mut mappers = Vec::new();
-                if let Some(pos) = self
-                    .affix_mappers
-                    .iter()
-                    .rposition(|(queued, _)| Some(*queued) == stage_marker)
-                {
-                    let (_, m) = self.affix_mappers.remove(pos);
-                    mappers.push(m);
-                }
-                mappers.push(sig_key);
-                for m in mappers {
-                    self.unify(&m, &key).map_err(|msg| TyErr {
-                        span: self.span,
-                        msg: format!("affix mismatch: {msg}"),
-                    })?;
-                }
+                // Tie the result-side mapper to the witness. `sig_key` is the
+                // mapper named in the *result* type (`query (keyMap m s)`), and
+                // `key` is the one the argument denotes. A literal affix replaces
+                // `key` with a concrete witness, so the result-side mapper must
+                // be bound too — otherwise the row term stays symbolic at the
+                // very place it is now known.
+                //
+                // There used to be a second, queued mapper here, kept in an
+                // `affix_mappers` list and looked up by stage direction. The
+                // commit that moved the parameter to `symbol k` removed both
+                // push sites but left the lookup, so the list was always empty
+                // and the branch was dead: the parameter's label and the
+                // result's mapper are the *same* variable now, and unifying
+                // `sig_key` with `key` is the whole tie. Deleting the dead list
+                // also deletes a trap — matching a queued mapper on direction
+                // alone would pair the wrong application as soon as a body held
+                // two stages of the same direction.
+                self.unify(&sig_key, &key).map_err(|msg| TyErr {
+                    span: self.span,
+                    msg: format!("affix mismatch: {msg}"),
+                })?;
                 // Register the equation and let the solver discharge it. The
                 // input row is usually still an unbound variable here (the
                 // stage's argument is checked after it), so reducing now would

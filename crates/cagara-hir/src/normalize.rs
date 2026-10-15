@@ -880,7 +880,24 @@ pub struct Normalizer<'a> {
     /// being expanded. It used to mirror an equivalent stack in the elaborator,
     /// which no longer exists.
     active: Vec<DefId>,
+    /// Whether the inline depth limit was hit, so the caller reports
+    /// "too deep" rather than the cycle message `inlining` also returns `None`
+    /// for. Two reasons for one `None` would otherwise be indistinguishable.
+    too_deep: bool,
 }
+
+/// How many definitions may be inlined on top of one another before the walk
+/// gives up.
+///
+/// A guard on the shape of the *input*, not on the shape of the answer: a chain
+/// of definitions that merely name each other, or a few hundred chained
+/// `where` stages, recurses once per link in this pass and in the SQL lowering
+/// that follows it. Measured: 300 chained stages compiled, 600 overflowed the
+/// stack and aborted the process with no diagnostic at all. The limit is set
+/// well above any query written by hand — a 200-link chain is deep enough to
+/// catch the accident while leaving real programs untouched — and hitting it is
+/// reported, never silent.
+pub const MAX_INLINE_DEPTH: usize = 200;
 
 impl<'a> Normalizer<'a> {
     pub fn new(resolver: Box<Resolver<'a>>) -> Self {
@@ -891,7 +908,16 @@ impl<'a> Normalizer<'a> {
             current_module: 0,
             hole_stack: Vec::new(),
             active: Vec::new(),
+            too_deep: false,
         }
+    }
+
+    /// Whether the inline depth limit has been hit during this walk.
+    ///
+    /// Read after the walk: the term built under a definition that hit the
+    /// limit is incomplete, so the caller discards it and reports the fault.
+    pub fn hit_depth_limit(&self) -> bool {
+        self.too_deep
     }
 
     /// The candidate assigned to hole `k` of the definition being walked.
@@ -989,8 +1015,22 @@ impl<'a> Normalizer<'a> {
     /// to match an enclosing lambda parameter read as that parameter — `n = 5`,
     /// `g = n + 1`, `f = n => g`, `f 1` normalized `n` to the argument and
     /// emitted `1 + 1` where the answer is `6`.
+    ///
+    /// Inlining is also **bounded**. `active` catches a cycle, but a long *chain*
+    /// of distinct definitions is not a cycle and still recurses once per link:
+    /// a few hundred chained `where` stages — or an alias chain, where each
+    /// definition simply names the next — exhausted the stack and aborted the
+    /// process. A depth limit turns that into a diagnostic the user can act on.
+    /// The bound is deliberately generous; it is a stack guard, not a style rule.
     pub fn inlining<T>(&mut self, id: DefId, f: impl FnOnce(&mut Self) -> T) -> Option<T> {
         if self.active.contains(&id) {
+            return None;
+        }
+        // `active` holds the whole inline stack, so its length *is* the depth.
+        // The nested check is what keeps a term that needs one more frame from
+        // being built at all, rather than being reported after the fact.
+        if self.active.len() >= MAX_INLINE_DEPTH {
+            self.too_deep = true;
             return None;
         }
         self.active.push(id);
@@ -1612,7 +1652,7 @@ fn inline_resolved(
             // calls a prelude helper resolve the helper's own names correctly.
             cx.in_module(dm, |cx| {
                 cx.inlining((dm, dd), |cx| expression(facts, cx, &inner))
-                    .unwrap_or_else(|| Err(recursion_gap(origin, display)))
+                    .unwrap_or_else(|| Err(inline_limit_gap(cx, origin, display)))
             })
         }
         // An overloaded name: the checker picked one candidate **for this use**,
@@ -1685,7 +1725,7 @@ fn inline_resolved(
             })?;
             cx.in_module(om, |cx| {
                 cx.inlining((om, chosen), |cx| expression(facts, cx, &inner))
-                    .unwrap_or_else(|| Err(recursion_gap(origin, display)))
+                    .unwrap_or_else(|| Err(inline_limit_gap(cx, origin, display)))
             })
         }
         Some(Resolved::Primitive) => Ok(Term::Primitive {
@@ -2138,6 +2178,28 @@ fn recursion_gap(origin: Origin, name: &str) -> Gap {
         origin,
         format!("`{name}` refers to itself; recursion is not supported"),
     )
+}
+
+/// The gap for an inline that did not happen: a cycle or the depth limit.
+///
+/// `inlining` returns `None` for both, so the two are told apart by the flag the
+/// depth check sets. Reporting a chain as "refers to itself" would be a lie the
+/// user cannot act on — a chain is not a cycle, and the fix is to shorten it
+/// rather than to remove a self-reference. The depth limit is a **program**
+/// fault for the same reason: the program's shape is what is too deep, so it is
+/// reported as the user's to fix rather than as an internal error.
+fn inline_limit_gap(cx: &Normalizer<'_>, origin: Origin, name: &str) -> Gap {
+    if cx.hit_depth_limit() {
+        Gap::program(
+            origin,
+            format!(
+                "`{name}` is more than {MAX_INLINE_DEPTH} definitions deep; \
+                 split the pipeline into shorter stages"
+            ),
+        )
+    } else {
+        recursion_gap(origin, name)
+    }
 }
 
 /// A short human name for an expression form, for a gap message.

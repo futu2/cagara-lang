@@ -198,13 +198,17 @@ impl Workspace {
         ws.overlays.entry(root.clone()).or_insert(text.clone());
         let root_text = ws.overlays.get(&root).cloned().unwrap_or(text);
         ws.root = ws.add(root.clone(), root_text);
-        let remaining: Vec<(PathBuf, String)> = ws
+        // Every overlay is loaded, whether or not the root reaches it, so
+        // another open document can become the root without rebuilding the
+        // server's state. `add` returns the module already loaded for a path, so
+        // a buffer pulled in as an import of an earlier one is not loaded a
+        // second time.
+        let overlays: Vec<(PathBuf, String)> = ws
             .overlays
             .iter()
-            .filter(|(p, _)| !ws.by_path.contains_key(*p))
             .map(|(p, text)| (p.clone(), text.clone()))
             .collect();
-        for (p, text) in remaining {
+        for (p, text) in overlays {
             ws.add(p, text);
         }
         ws.rebuild_diags();
@@ -242,7 +246,19 @@ impl Workspace {
         Self::open_with_buffers(&root, self.modules[self.root].text.clone(), &buffers)
     }
 
+    /// Load one file as a module, or return the module already loaded for that
+    /// path.
+    ///
+    /// Loading a path twice used to create two modules for one file. `by_path`
+    /// then pointed at the *second*, while the importers that pulled the first
+    /// in kept a `ModuleInput` referring to it — so an edit through
+    /// `set_source` or `module_for_path` updated a copy nobody was reading, and
+    /// the analysis went stale with no error. A path identifies a file, so a
+    /// second load is the same module.
     fn add(&mut self, path: PathBuf, text: String) -> usize {
+        if let Some(&existing) = self.by_path.get(&path) {
+            return existing;
+        }
         self.stack.push(path.clone());
         let file = SourceFile::new(&self.db, text.clone());
         self.files.insert(path.clone(), file);
@@ -560,6 +576,14 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
+    /// The loaded paths, for a failure message that says which modules exist.
+    fn paths(ws: &Workspace) -> Vec<String> {
+        ws.modules
+            .iter()
+            .map(|m| m.path.display().to_string())
+            .collect()
+    }
+
     #[test]
     fn open_buffers_override_imports_and_share_a_graph() {
         let root = PathBuf::from("/tmp/cagara-shared/root.cagara");
@@ -576,6 +600,51 @@ mod tests {
             .module_for_path(Path::new("/tmp/cagara-shared/lib.cagara"))
             .is_some());
         assert_eq!(ws.modules[ws.root].module.defs[0].name, "q");
+    }
+
+    /// One file is one module, however many buffers name it.
+    ///
+    /// When several documents are open and neither of the other two is the
+    /// root, the root imports one of them and the loader also visits both as
+    /// buffers. The buffer list used to be filtered *before* the loop, so a
+    /// document already pulled in as an import was loaded a second time: two
+    /// modules for one path, with `by_path` pointing at the copy the importers
+    /// did not use. An edit then went to the copy nobody read, and the analysis
+    /// silently kept the old text.
+    #[test]
+    fn a_buffer_reached_as_an_import_is_not_loaded_twice() {
+        let root = PathBuf::from("/tmp/cagara-dup/root.cagara");
+        let middle = PathBuf::from("/tmp/cagara-dup/b.cagara");
+        let leaf = PathBuf::from("/tmp/cagara-dup/c.cagara");
+        let buffers = HashMap::from([
+            (
+                root.clone(),
+                "import \"b.cagara\" as b\nq = b.value\n".to_string(),
+            ),
+            (
+                middle.clone(),
+                "import \"c.cagara\" as c\nvalue = c.value\n".to_string(),
+            ),
+            (leaf.clone(), "value = 1\n".to_string()),
+        ]);
+        let mut ws = Workspace::open_with_buffers(&root, buffers[&root].clone(), &buffers);
+
+        // One module per path — the prelude is module 0, then the three files,
+        // each exactly once.
+        assert_eq!(ws.modules.len(), 4, "{:?}", paths(&ws));
+        for p in [&root, &middle, &leaf] {
+            let seen = paths(&ws)
+                .iter()
+                .filter(|s| s.ends_with(p.file_name().unwrap().to_str().unwrap()))
+                .count();
+            assert_eq!(seen, 1, "one module for {p:?}: {:?}", paths(&ws));
+        }
+        let leaf_module = ws.module_for_path(&leaf).expect("the leaf is loaded");
+
+        // And an edit reaches the copy its importer reads.
+        assert!(ws.set_source(leaf_module, "value = 2\n".into()));
+        assert!(crate::check::check(&ws).errors().is_empty());
+        assert_eq!(ws.modules[leaf_module].text, "value = 2\n");
     }
 
     #[test]

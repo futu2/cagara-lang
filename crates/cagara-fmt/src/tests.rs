@@ -657,3 +657,29 @@ fn the_shape_guard_reports_a_changed_program() {
     // The correct output passes.
     assert!(verify_shape(&root, src).is_ok());
 }
+
+/// A file full of unparseable items is formatted in time proportional to its
+/// size, not to its size times its item count.
+///
+/// Every item the formatter cannot lay out is printed verbatim, and `verbatim`
+/// sliced the **root's** text once per item. `SyntaxText::slice` walks the green
+/// children from the node it hangs off, so each slice cost a walk of the whole
+/// file: 20 000 broken items took 46 seconds where parsing them took
+/// milliseconds, and the language server's Format Document inherits it. Slicing
+/// the item's own text instead made the same file 1.2 seconds.
+///
+/// The bound is deliberately loose — it is here to catch a return to quadratic
+/// behaviour, not to measure the machine.
+#[test]
+fn a_file_of_unparseable_items_is_formatted_in_linear_time() {
+    let src: String = (0..20_000).map(|i| format!("d{i} =\n")).collect();
+    let start = std::time::Instant::now();
+    let out = format(&src).expect("verbatim output still round-trips");
+    let elapsed = start.elapsed();
+    assert_eq!(out.text.lines().count(), 20_000);
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "formatting 20 000 broken items took {elapsed:?}; it was 46s when \
+         `verbatim` sliced the root once per item"
+    );
+}

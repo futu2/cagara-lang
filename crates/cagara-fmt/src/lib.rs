@@ -388,15 +388,22 @@ impl Fmt<'_> {
     }
 
     /// The item's source from its first to its last token.
+    ///
+    /// Sliced from the **item's** text, not the root's. `SyntaxText::slice`
+    /// walks the green children from the node it hangs off, so slicing the root
+    /// once per item made formatting a file of unparseable items quadratic:
+    /// 20 000 dirty items took 44 seconds where parsing them took 5
+    /// milliseconds. Both endpoints are descendants of `item`, so the same
+    /// range expressed relative to it is the same text.
     fn verbatim(&self, item: &SyntaxNode) -> Doc {
         let mut toks = sig_tokens(item);
         let (Some(first), last) = (toks.next(), toks.last()) else {
             return concat(vec![]);
         };
         let last = last.unwrap_or_else(|| first.clone());
+        let base = item.text_range().start();
         let (start, end) = (first.text_range().start(), last.text_range().end());
-        let root = item.ancestors().last().unwrap_or_else(|| item.clone());
-        let src = root.text().slice(start..end).to_string();
+        let src = item.text().slice((start - base)..(end - base)).to_string();
         concat(vec![text(src), self.trailing(&last)])
     }
 

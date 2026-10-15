@@ -530,19 +530,132 @@ fn apply_type_and_span(
 
 /// Replace every free reference to `name` in `term` with `arg`.
 ///
-/// A capture-avoiding substitution is not needed here, and that is worth
-/// stating rather than leaving implicit: binders in the normal form are
-/// **unique** (each came from a distinct source binder, and shadowing was
-/// resolved by the checker, not by name), so an argument can never be captured
-/// by an inner binder that happens to share a name. If that invariant is ever
-/// violated, this function is where it must be detected.
+/// Substitution is **capture-avoiding**, and it has to be. An earlier version
+/// of this function asserted the opposite — that binders in the normal form are
+/// unique, so an argument could never be captured by an inner binder sharing a
+/// name. That invariant does not hold, because inlining puts the binders of two
+/// definitions into one term and the *use site* of one can be a binder of the
+/// other:
+///
+/// ```text
+/// wrap = p => (q => p)      -- binds `q`
+/// h    = q => wrap q        -- binds `q` too, and passes it in
+/// main = h 1 2              -- must be 1, was 2
+/// ```
+///
+/// `h 1` substitutes `1` for `h`'s `q`, but the argument's text sits under
+/// `wrap`'s own `q`, which captured it. The fix is the standard one: a binder
+/// that occurs free in the argument is renamed first, which restores the
+/// uniqueness the old comment assumed. See [`rewrite_local`].
 fn substitute(term: Term, name: &str, arg: &Term) -> Term {
+    rewrite_local(term, name, &|_| arg.clone(), &free_locals(arg))
+}
+
+/// A binder name that no source file can spell.
+///
+/// The lexer's identifier rule is `[a-zA-Z_][a-zA-Z0-9_]*`, so `$` cannot occur
+/// in a name the parser produced and a generated one can never collide with a
+/// user's. The counter keeps two renames of the same source name apart, which
+/// is what makes the renaming in [`rewrite_local`] safe when it happens twice
+/// in one term.
+fn fresh_binder(name: &str) -> String {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    format!("{name}${}", NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// The labels of the [`Term::Local`]s in `term` that no binder inside `term`
+/// binds — the names a substitution of `term` would have to avoid capturing.
+fn free_locals(term: &Term) -> Vec<String> {
+    fn walk(term: &Term, bound: &mut Vec<String>, out: &mut Vec<String>) {
+        match term {
+            Term::Local { label, .. } => {
+                if !bound.iter().any(|b| b == label) && !out.iter().any(|o| o == label) {
+                    out.push(label.clone());
+                }
+            }
+            Term::Lambda { params, body, .. } => {
+                let depth = bound.len();
+                bound.extend(params.iter().cloned());
+                walk(body, bound, out);
+                bound.truncate(depth);
+            }
+            Term::Template { args, .. } | Term::Primitive { args, .. } => {
+                for a in args {
+                    walk(a, bound, out);
+                }
+            }
+            Term::Apply { head, args, .. } => {
+                walk(head, bound, out);
+                for a in args {
+                    walk(a, bound, out);
+                }
+            }
+            Term::Window { spec, args, .. } => {
+                walk(spec, bound, out);
+                for a in args {
+                    walk(a, bound, out);
+                }
+            }
+            Term::Case { arms, default, .. } => {
+                for (c, v) in arms {
+                    walk(c, bound, out);
+                    walk(v, bound, out);
+                }
+                walk(default, bound, out);
+            }
+            Term::Record { fields, .. } => {
+                for (_, v) in fields {
+                    walk(v, bound, out);
+                }
+            }
+            Term::List { items, .. } => {
+                for i in items {
+                    walk(i, bound, out);
+                }
+            }
+            Term::Column { .. } | Term::Lit { .. } => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(term, &mut Vec::new(), &mut out);
+    out
+}
+
+/// Rename one binder's references in `term`, stopping where an inner binder of
+/// the same name shadows it — those references belong to the inner binder.
+fn rename_binder(term: Term, from: &str, to: &str) -> Term {
+    rewrite_local(
+        term,
+        from,
+        &|local| match local {
+            Term::Local { id, ty, origin, .. } => Term::Local {
+                id,
+                label: to.to_string(),
+                ty,
+                origin,
+            },
+            other => other,
+        },
+        &[],
+    )
+}
+
+/// Replace every free reference to `name` in `term` with `replace` applied to
+/// that reference.
+///
+/// `avoid` is the set of names the replacement introduces: a lambda parameter
+/// that is one of them would capture the replacement, so it is renamed out of
+/// the way before the walk descends. Renaming is conservative — only parameters
+/// actually named in `avoid` are touched — so a substitution that cannot
+/// capture is still a plain copy.
+fn rewrite_local(term: Term, name: &str, replace: &dyn Fn(Term) -> Term, avoid: &[String]) -> Term {
     match term {
         // A local reference is replaced when it is the binder. Matching on the
-        // *label* here is safe precisely because resolution already happened:
-        // this is the binder's own name, recorded by the checker, not a name to
-        // be looked up.
-        Term::Local { label, .. } if label == name => arg.clone(),
+        // *label* here is safe because resolution already happened — this is the
+        // binder's own name — and because `avoid` has just removed every binder
+        // that could capture the replacement.
+        Term::Local { ref label, .. } if label == name => replace(term),
         Term::Local { .. } | Term::Column { .. } | Term::Lit { .. } => term,
         Term::Template {
             sql,
@@ -552,7 +665,10 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
             origin,
         } => Term::Template {
             sql,
-            args: args.into_iter().map(|a| substitute(a, name, arg)).collect(),
+            args: args
+                .into_iter()
+                .map(|a| rewrite_local(a, name, replace, avoid))
+                .collect(),
             kind,
             ty,
             origin,
@@ -565,7 +681,10 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
             origin,
         } => Term::Primitive {
             name: pname,
-            args: args.into_iter().map(|a| substitute(a, name, arg)).collect(),
+            args: args
+                .into_iter()
+                .map(|a| rewrite_local(a, name, replace, avoid))
+                .collect(),
             ty,
             row,
             origin,
@@ -577,9 +696,7 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
             origin,
         } => {
             // Shadowing: an inner binder of the same name stops the
-            // substitution, exactly as lexical scope requires. The checker
-            // resolves shadowing, so this arm is a correctness guard rather
-            // than a case that should arise.
+            // substitution, exactly as lexical scope requires.
             if params.iter().any(|p| p == name) {
                 Term::Lambda {
                     params,
@@ -588,9 +705,27 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
                     origin,
                 }
             } else {
+                // Capture-avoidance: a parameter the replacement mentions free
+                // would capture it. Rename those binders — and their references,
+                // and only theirs — before substituting under them.
+                let mut renamed = Vec::with_capacity(params.len());
+                let mut pairs = Vec::new();
+                for p in params {
+                    if avoid.iter().any(|a| a == &p) {
+                        let fresh = fresh_binder(&p);
+                        pairs.push((p, fresh.clone()));
+                        renamed.push(fresh);
+                    } else {
+                        renamed.push(p);
+                    }
+                }
+                let mut body = *body;
+                for (from, to) in &pairs {
+                    body = rename_binder(body, from, to);
+                }
                 Term::Lambda {
-                    params,
-                    body: Box::new(substitute(*body, name, arg)),
+                    params: renamed,
+                    body: Box::new(rewrite_local(body, name, replace, avoid)),
                     source,
                     origin,
                 }
@@ -600,8 +735,11 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
         // arguments, then retry the reduction. Retrying matters — substituting
         // for the head is exactly what makes `f x` reduce when `f` arrives.
         Term::Apply { head, args, origin } => {
-            let head = substitute(*head, name, arg);
-            let args: Vec<Term> = args.into_iter().map(|a| substitute(a, name, arg)).collect();
+            let head = rewrite_local(*head, name, replace, avoid);
+            let args: Vec<Term> = args
+                .into_iter()
+                .map(|a| rewrite_local(a, name, replace, avoid))
+                .collect();
             reduce_application(head, args, origin)
         }
         Term::Window {
@@ -612,8 +750,11 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
             origin,
         } => Term::Window {
             sql,
-            spec: Box::new(substitute(*spec, name, arg)),
-            args: args.into_iter().map(|a| substitute(a, name, arg)).collect(),
+            spec: Box::new(rewrite_local(*spec, name, replace, avoid)),
+            args: args
+                .into_iter()
+                .map(|a| rewrite_local(a, name, replace, avoid))
+                .collect(),
             ty,
             origin,
         },
@@ -625,23 +766,28 @@ fn substitute(term: Term, name: &str, arg: &Term) -> Term {
         } => Term::Case {
             arms: arms
                 .into_iter()
-                .map(|(c, v)| (substitute(c, name, arg), substitute(v, name, arg)))
+                .map(|(c, v)| {
+                    (
+                        rewrite_local(c, name, replace, avoid),
+                        rewrite_local(v, name, replace, avoid),
+                    )
+                })
                 .collect(),
-            default: Box::new(substitute(*default, name, arg)),
+            default: Box::new(rewrite_local(*default, name, replace, avoid)),
             ty,
             origin,
         },
         Term::Record { fields, origin } => Term::Record {
             fields: fields
                 .into_iter()
-                .map(|(k, v)| (k, substitute(v, name, arg)))
+                .map(|(k, v)| (k, rewrite_local(v, name, replace, avoid)))
                 .collect(),
             origin,
         },
         Term::List { items, origin } => Term::List {
             items: items
                 .into_iter()
-                .map(|i| substitute(i, name, arg))
+                .map(|i| rewrite_local(i, name, replace, avoid))
                 .collect(),
             origin,
         },
@@ -2336,6 +2482,29 @@ mod tests {
         assert!(applied.is_function());
         let inner = applied.apply(local("inner_arg")).unwrap();
         assert_eq!(inner, local("inner_arg"));
+    }
+
+    /// A binder that the argument mentions free is renamed, so the argument is
+    /// not captured by it.
+    ///
+    /// `substitute` matches binders by name, which is only sound while no two
+    /// binders in one term share a name. Inlining breaks that: two definitions
+    /// inlined into one term can each bind `q`, and the use site of one can be a
+    /// binder of the other. Without the rename, `wrap 1` under `h`'s own `q`
+    /// captured the argument and `h 1 2` reduced to `2` instead of `1`.
+    #[test]
+    fn an_argument_is_not_captured_by_a_binder_of_the_same_name() {
+        // `wrap = p => (q => p)`, inlined at a site whose own binder is `q`.
+        let wrap = lam(&["p"], lam(&["q"], local("p")));
+        let applied = wrap.apply(local("q")).unwrap();
+        // `applied` is `q => q`, but its `q` is `wrap`'s — renaming keeps it
+        // from being confused with the caller's `q`.
+        let caller = lam(&["q"], applied);
+        let step = caller.apply(local("first")).unwrap();
+        // The caller's `q` was captured by nothing: the inner lambda still
+        // stands for `wrap`'s parameter, so applying it yields `first`.
+        let done = step.apply(local("second")).unwrap();
+        assert_eq!(done, local("first"));
     }
 
     /// Normal forms compare structurally regardless of how they were built.

@@ -93,6 +93,26 @@ correctness, not as an optimization.
   expansion before being refused. Bounding the expansion itself means charging
   the budget inside the reduction, where `substitute` does the copying, which
   needs a failure channel through `Term::apply`.
+- A definition whose body applies **two** key stages — `prefix`, `suffix` — fails
+  to check when either affix is a helper's parameter rather than a literal:
+
+  ```haskell
+  two = p => q => q & prefix p & prefix p   -- infinite type: (keyMap((prefix "b_"), a))
+  two = p => q => q & prefix p & prefix "z_" -- the outer stage is lost from the type
+  ```
+
+  Two literal affixes work, and so does a single deferred one, so the fault is
+  the interaction between a deferred stage and a second key stage. The cause is
+  in `step_map_key` (`crates/cagara-hir/src/check/infer.rs`): it reads the
+  result row as **one** `keyMap` layer over the stage's input, which is what
+  `prefix`'s own signature says, but a definition that renames twice has
+  `keyMap (m, keyMap (m, r))` and the row beneath the outer mapper is not the
+  input. The constraint then asks `keyMap (m, r) ~ r`, which the occurs check
+  refuses. Walking to the innermost row and reducing the layers inside-out is
+  the shape of the fix, but doing only that regresses the cases that work today
+  (two literal affixes among them), because the layers are also tied to the
+  input by the ordinary inference around the constraint. It needs the
+  `Cons::MapKey` equation to carry the whole chain rather than one layer.
 - Some join combinations require extra derived tables because parenthesized
   joins are not yet represented directly.
 - `--optimize` is opt-in; it runs sqlglot optimization after Cagara lowering.

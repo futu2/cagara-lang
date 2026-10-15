@@ -2632,6 +2632,22 @@ impl<'w> Checker<'w> {
                 }
             }
         }
+        // The result row is read as **one** `keyMap` layer over the stage's
+        // input, which is what `prefix`'s own signature says:
+        // `query r -> query (keyMap m r)`. That reading is wrong for a
+        // definition whose body renames more than once — there the result is
+        // `keyMap (m, keyMap (m, r))`, and the row beneath the outer mapper is
+        // not the input — and the two rows are then asked to be equal:
+        //
+        //     two = p => q => q & prefix p & prefix p
+        //     main = users & two "b_"
+        //     -- infinite type: a type would contain itself (keyMap((prefix "b_"), a))
+        //
+        // Reducing the chain inside-out instead is the fix, and it is *not*
+        // just a matter of walking to the innermost row here: that was tried and
+        // broke the cases that work today (two literal affixes among them),
+        // because the layers are tied to the input by the ordinary inference
+        // around this constraint as well. See `docs/PLAN.md`.
         if let Ty::MapKey(mapper, row) = output_ty.clone() {
             self.unify(&mapper, &key)?;
             self.unify(&row, &input)?;

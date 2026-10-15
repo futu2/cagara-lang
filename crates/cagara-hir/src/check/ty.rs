@@ -439,7 +439,11 @@ pub(crate) fn scheme_view(t: &Ty) -> SchemeView {
         },
         Ty::Fun(..) => SchemeView::Function,
         Ty::Sym(_) => SchemeView::Open,
-        Ty::Merge(..) | Ty::MapValue(..) | Ty::MapKey(..) | Ty::KeyAffix(..) | Ty::RemoveKey(..) => {
+        Ty::Merge(..)
+        | Ty::MapValue(..)
+        | Ty::MapKey(..)
+        | Ty::KeyAffix(..)
+        | Ty::RemoveKey(..) => {
             let fields = ty_fields(t);
             if fields.is_empty() {
                 SchemeView::Open

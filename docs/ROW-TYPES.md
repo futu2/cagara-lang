@@ -20,15 +20,30 @@ so `omit : symbol k -> query r -> query (removeKey k r)` gives the output row
 with that column removed. A missing column is still reported by the `omit`
 stage's constraint (`Cons::Omit`), not by the reducer.
 
-**Status and remaining work.** The label-driven mapper witnesses
-`labelPrefix`/`labelSuffix` (built by `prependSym k` / `appendSym k`) exist and
-decode once their label is bound. `prefix` and `suffix` still use the literal
-`prefixAffix` / `suffixAffix` path. Moving them to labels needs one change
-that is not yet made: a `symbol` parameter must take its stage from the result
-type's mapper, so `key_stage` can handle `removeKey` and the label-driven
-`keyMap` stages. Until then the prelude keeps `prefix`/`suffix` as they are.
-`Cons::Omit` remains the source of the missing-column error; removing it needs
-a fallible reducer.
+`prefix` and `suffix` use the same label parameter, and their result names the
+label-driven mapper built from it:
+
+```haskell
+prefix : symbol k -> query r -> query (keyMap (prependSym k) r)
+suffix : symbol k -> query r -> query (keyMap (appendSym k) r)
+```
+
+The `k` bound at the call site is the same variable the result's mapper carries,
+so the mapping cannot come from an unrelated witness. `prependSym k` /
+`appendSym k` decode into an ordinary `prefix "s"` / `suffix "s"` mapper
+(`labelPrefix`/`labelSuffix` in the type representation) once `k` is bound; while
+`k` is still open — inside a helper — the term is retained exactly as a variable
+mapper is.
+
+Two consequences are load-bearing. First, the stage is read from the parameter's
+*result* (`query (keyMap …)` is a rename, anything else an `omit`), which is what
+lets `symbol k` serve both `omit` and the renames. Second, a `symbol` position
+lifts a string literal to `Ty::Sym` rather than to `string`, so the helper's
+parameter is generalized with its label marker intact and the literal binds the
+label at the use site.
+
+`Cons::Omit` remains the source of the missing-column error; removing it needs a
+fallible reducer.
 
 Key mappers are first-order witnesses: `id`, `prefix "x"`, `suffix "x"`, and
 composition. `prefix` and `suffix` read their literal argument at the call

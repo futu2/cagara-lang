@@ -581,8 +581,9 @@ impl<'w> Checker<'w> {
                     }
                     // `symbol k` — a column label. It is carried as a `keyLabel`
                     // marker around a `Type` variable, so `infer_app` can
-                    // recognise a key parameter the way it does `prefixAffix`.
-                    // The call site binds the variable to the literal's `Sym`.
+                    // recognise a key parameter and read the stage off the
+                    // result. The call site binds the variable to the literal's
+                    // `Sym`.
                     "symbol" => {
                         let TypeExpr::App { head, args, .. } = &args[0] else {
                             return Err("`symbol` needs a type variable".into());
@@ -688,9 +689,9 @@ impl<'w> Checker<'w> {
         expected_kind: Kind,
     ) -> Result<Ty, String> {
         // Mapper arguments use their own surface grammar (`id`, `prefix
-        // "..."`, `suffix "..."`, `compose ...`), rather than ordinary type
-        // constructors. This is needed for concrete affix witnesses such as
-        // `prefixAffix (prefix "u_")`.
+        // "..."`, `suffix "..."`, `prependSym k`, `compose ...`), rather than
+        // ordinary type constructors, so they are converted by their own
+        // routine.
         if expected_kind == Kind::KeyMap {
             return self.conv_keymap(t, names);
         }
@@ -815,9 +816,7 @@ impl<'w> Checker<'w> {
                     return Err(format!("`{head}` takes one symbol argument"));
                 };
                 let TypeExpr::App {
-                    head: lh,
-                    args: la,
-                    ..
+                    head: lh, args: la, ..
                 } = label
                 else {
                     return Err(format!("`{head}` needs a symbol variable"));
@@ -1095,10 +1094,12 @@ impl<'w> Checker<'w> {
             // A string literal checked against a `symbol k` label parameter
             // binds `k` to the literal's `Sym`. Only a `keyLabel` expectation
             // takes this path; every other string keeps its `string` type.
-            ExprKind::Lit(ast::Lit::Str(s)) if matches!(
-                self.resolve(expected),
-                Ty::Con("keyLabel", ref a) if a.len() == 1
-            ) => {
+            ExprKind::Lit(ast::Lit::Str(s))
+                if matches!(
+                    self.resolve(expected),
+                    Ty::Con("keyLabel", ref a) if a.len() == 1
+                ) =>
+            {
                 let Ty::Con("keyLabel", inner) = self.resolve(expected) else {
                     unreachable!("matched a keyLabel expectation")
                 };
@@ -1368,28 +1369,24 @@ impl<'w> Checker<'w> {
             // cannot name a column, so it is refused rather than
             // deferred. See docs/ROW-TYPES.md.
             if let Ty::Fun(p, r) = self.resolve(&ft) {
-                // A directional affix parameter is a string that names
-                // the mapper `m`, which the result type uses
-                // (`query (keyMap m r)`). Carrying the mapper is what
-                // lets `prefix p` stay tied to the row it produces —
-                // the argument's type is what binds `m`.
+                // A key parameter carries a marker so the stage can be read
+                // where the argument still is: `symbol k` for `omit` and for
+                // the renames, whose *result* decides which of the two it is.
                 let marker = match (&*p, KeyMarker::of(&p)) {
-                    (Ty::Con("prefixAffix", args), _) if args.is_empty() => {
-                        Some((KeyMarker::Prefix, None))
-                    }
-                    (Ty::Con("suffixAffix", args), _) if args.is_empty() => {
-                        Some((KeyMarker::Suffix, None))
-                    }
-                    (Ty::Con("prefixAffix", args), _) if args.len() == 1 => {
-                        Some((KeyMarker::Prefix, Some(args[0].clone())))
-                    }
-                    (Ty::Con("suffixAffix", args), _) if args.len() == 1 => {
-                        Some((KeyMarker::Suffix, Some(args[0].clone())))
-                    }
-                    // `symbol k` is the label parameter of `omit`: it reads the
-                    // literal the same way `omit "k"` does.
+                    // `symbol k` is the label parameter of a key stage: `omit`,
+                    // and now `prefix`/`suffix`, whose result names the
+                    // label-driven mapper `prependSym k` / `appendSym k`. The
+                    // stage is read from the result: a `keyMap` whose mapper is
+                    // a label-driven witness is a prefix or suffix stage; any
+                    // other `symbol` parameter (`omit`) is an omit stage.
+                    //
+                    // The label variable is carried through as the marker's
+                    // payload, so binding it to the literal's `Sym` reaches both
+                    // `removeKey k r` and the result's mapper
+                    // `(labelPrefix k)` / `(labelSuffix k)`: they are the same
+                    // variable.
                     (Ty::Con("keyLabel", args), _) if args.len() == 1 => {
-                        Some((KeyMarker::Omit, None))
+                        Some((self.keylabel_stage(&r), Some(args[0].clone())))
                     }
                     (_, Some(m)) => Some((m, None)),
                     _ => None,
@@ -1419,40 +1416,61 @@ impl<'w> Checker<'w> {
                             });
                         }
                         (KeyMarker::Prefix | KeyMarker::Suffix, None) => {
-                            // Deferred affix: the argument's type is a
-                            // string naming the mapper, so the stage
-                            // stays symbolic until that string is
-                            // known.
+                            // Deferred affix: the argument is not a literal at
+                            // *this* application, so the stage stays symbolic.
+                            // That is the helper case `addPrefix = p => q => q &
+                            // prefix p`, where `p` is a lambda parameter whose
+                            // label the use site supplies.
                             let at_ = self.infer(env, arg)?;
-                            let m = carried.unwrap_or_else(|| {
-                                Ty::Var(self.fresh_with(false, true, Kind::KeyMap))
-                            });
-                            self.unify(&at_, &directional_string_kind(marker, m.clone()))
-                                .map_err(|msg| TyErr {
+                            // A key stage's parameter is always `symbol k`, so
+                            // the argument's type *is* the label: tie `k` to it.
+                            // That is what keeps the result's `labelPrefix k`
+                            // tied to the parameter, so instantiating the helper
+                            // at a use site binds the label there — which is how
+                            // `addPrefix "u_"` reduces its row.
+                            //
+                            // The argument must be a label, not a computed string
+                            // expression: `prefix (upper "u")` cannot name a
+                            // column. Two things count as a label — a literal
+                            // (the use-site form, handled by the `Some(s)` arm
+                            // below) and a bare name (the helper's own parameter,
+                            // still unknown here). Anything else is refused.
+                            let is_label = matches!(
+                                arg.kind,
+                                ExprKind::Lit(ast::Lit::Str(_)) | ExprKind::Name(_)
+                            );
+                            if !is_label {
+                                return Err(TyErr {
                                     span: arg.span,
-                                    msg: format!("{}: {msg}", marker.literal_msg()),
-                                })?;
-                            // Remember which mapper this stage's affix
-                            // names, so the constraint built next uses
-                            // it instead of inventing a fresh one.
-                            self.affix_mappers.push((marker, m));
+                                    msg: marker.literal_msg(),
+                                });
+                            }
+                            // The whole `keyLabel k` is what the parameter means:
+                            // keeping the wrapper (rather than `k` alone) is what
+                            // carries the marker into the helper's generalized
+                            // scheme, so a use site can recognise the position as
+                            // a label and bind the literal to `Sym`.
+                            self.unify(&at_, &p).map_err(|msg| TyErr {
+                                span: arg.span,
+                                msg: format!("{}: {msg}", marker.literal_msg()),
+                            })?;
                             keys.push((marker.tag(), String::new()));
                             self.deferred_keys.push(marker);
                         }
                         (_, Some(s)) => {
                             // A `symbol k` parameter is bound to the literal's
-                            // type, so the signature's `k` (and the `removeKey`
-                            // result that uses it) resolves to `"s"`.
-                            if let Ty::Con("keyLabel", inner) = &*p {
-                                self.unify(&inner[0], &Ty::Sym(s.clone())).map_err(|msg| {
-                                    TyErr {
+                            // type, so the signature's `k` resolves to `"s"`:
+                            // in `removeKey k r` for `omit`, and in the
+                            // label-driven mapper `(labelPrefix k)` /
+                            // `(labelSuffix k)` that `prefix`/`suffix` name in
+                            // their result.
+                            if let Ty::Con("keyLabel", _) = &*p {
+                                let label = carried.clone().unwrap_or_else(|| self.fresh());
+                                self.unify(&label, &Ty::Sym(s.clone()))
+                                    .map_err(|msg| TyErr {
                                         span: arg.span,
-                                        msg: format!("`omit` label mismatch: {msg}"),
-                                    }
-                                })?;
-                            }
-                            if let Some(m) = carried {
-                                self.affix_mappers.push((marker, m));
+                                        msg: format!("key label mismatch: {msg}"),
+                                    })?;
                             }
                             keys.push((marker.tag(), s));
                         }
@@ -1840,6 +1858,38 @@ impl<'w> Checker<'w> {
         Ok(())
     }
 
+    /// The stage a `symbol` parameter belongs to, read from its function's
+    /// result: `query (keyMap (labelPrefix k) r)` is a prefix stage, and
+    /// `query (keyMap (labelSuffix k) r)` is a suffix stage. Anything else is
+    /// an omit stage.
+    fn keylabel_stage(&self, result: &Ty) -> KeyMarker {
+        // The parameter's *result* is what names the stage, and `infer_app`
+        // passes the whole function type here (the callee's type is still
+        // `symbol k -> query r -> query (keyMap …)` at this point), so peel
+        // the remaining `-> …` spine down to the final result first.
+        let mut result = self.resolve(result);
+        loop {
+            match result {
+                Ty::Fun(_, r) => result = self.resolve(&r),
+                other => {
+                    result = other;
+                    break;
+                }
+            }
+        }
+        let Ty::Con("query", out) = result else {
+            return KeyMarker::Omit;
+        };
+        let Ty::MapKey(km, _) = self.resolve(&out[0]) else {
+            return KeyMarker::Omit;
+        };
+        match self.resolve(&km) {
+            Ty::Con("labelPrefix", _) => KeyMarker::Prefix,
+            Ty::Con("labelSuffix", _) => KeyMarker::Suffix,
+            _ => KeyMarker::Omit,
+        }
+    }
+
     /// Register a key stage's constraint once its key arguments have been read
     /// and the remaining function is `query input -> query output`. Called
     /// after each key argument, so a partial application still gets its
@@ -1894,7 +1944,7 @@ impl<'w> Checker<'w> {
                 // the affix parameter's type named — which is what lets the
                 // deferred term reduce at a use site, where the argument's type
                 // binds that variable.
-                let mut key = sig_key.clone();
+                let mut key = self.resolve_mapper(&sig_key);
                 // A literal affix names its own witness, read here where the
                 // syntax still is. That is what keeps the mapping on the type
                 // side: the checker builds the `KeyMap` from the literal instead
@@ -1907,6 +1957,15 @@ impl<'w> Checker<'w> {
                     };
                     key = km.normalize().to_ty();
                 }
+                // A label-driven mapper (`labelPrefix (Sym s)`) is a signature
+                // detail, not the witness: `prefix`/`suffix` now take `symbol k`
+                // and name `prependSym k` / `appendSym k` in their result. Once
+                // the literal above has bound that label, resolve the witness to
+                // the `KeyAffix` it denotes. This must happen *after* the
+                // binding: resolving earlier left the label a variable, so the
+                // witness never decoded and the two sides were reported as an
+                // affix mismatch.
+                let sig_key = self.resolve_mapper(&sig_key);
                 // Tie the mappers together. `sig_key` is the mapper named in the
                 // *result* type (`query (keyMap m s)`), and the queued one is
                 // what the *parameter* named (`affix m`). They are the same
@@ -2047,28 +2106,11 @@ impl<'w> Checker<'w> {
                 ));
                 fun(query(left), fun(query(right), query(out)))
             }
-            Prefix => {
-                let (r, m) = (
-                    self.fresh_row(),
-                    Ty::Var(self.fresh_with(false, false, Kind::KeyMap)),
-                );
-                let out = Ty::MapKey(Box::new(m.clone()), Box::new(r.clone()));
-                fun(
-                    directional_string_kind(KeyMarker::Prefix, m),
-                    fun(query(r), query(out)),
-                )
-            }
-            Suffix => {
-                let (r, m) = (
-                    self.fresh_row(),
-                    Ty::Var(self.fresh_with(false, false, Kind::KeyMap)),
-                );
-                let out = Ty::MapKey(Box::new(m.clone()), Box::new(r.clone()));
-                fun(
-                    directional_string_kind(KeyMarker::Suffix, m),
-                    fun(query(r), query(out)),
-                )
-            }
+            // `Prefix`/`Suffix` are not projections, so their signatures come
+            // from the prelude's annotations rather than from here: a
+            // `__prefix`/`__suffix` use without one is rejected before this
+            // point. They fall to the same catch-all as the other
+            // non-projection primitives.
             Order => {
                 let (req, r) = (self.fresh(), self.fresh_row());
                 self.pending.push((
@@ -2158,6 +2200,15 @@ impl<'w> Checker<'w> {
             Rows => fun(con("bound"), fun(con("bound"), con("frame"))),
             UnboundedPreceding | UnboundedFollowing | CurrentRow => con("bound"),
             Preceding | Following => fun(i, con("bound")),
+            // `prefix`/`suffix` are not projections, so their signature comes
+            // from the prelude's own annotation (`symbol k -> query r -> query
+            // (keyMap (prependSym k) r)`) and never from here: `prim_type` is
+            // only consulted for the projections. Reaching this would mean a
+            // `__prefix`/`__suffix` use that should have been rejected for
+            // lacking a signature.
+            Prefix | Suffix => {
+                unreachable!("`prefix`/`suffix` take their signature from the prelude")
+            }
         }
     }
 

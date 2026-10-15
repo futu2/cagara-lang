@@ -69,6 +69,17 @@ impl<'w> Checker<'w> {
     /// label is bound; anything else is returned as it resolves.
     pub(crate) fn resolve_mapper(&self, km: &Ty) -> Ty {
         let km = self.resolve(km);
+        // The label lives *inside* the constructor, where `resolve`'s
+        // top-level substitution does not reach: `prependSym k` is stored as
+        // `labelPrefix α`, and α is bound to `Sym "u_"` at the call site. Follow
+        // that argument explicitly, or `of_label_ty` sees an open label, returns
+        // `None`, and the symbolic form reaches the stage as an affix mismatch.
+        let km = match &km {
+            Ty::Con(name @ ("labelPrefix" | "labelSuffix"), a) if a.len() == 1 => {
+                Ty::Con(name, vec![self.resolve(&a[0])])
+            }
+            other => other.clone(),
+        };
         match KeyMap::of_label_ty(&km) {
             Some(mapper) => mapper.to_ty(),
             None => km,
@@ -466,6 +477,47 @@ impl<'w> Checker<'w> {
             (_, Ty::Var(v)) => self.bind(*v, a.clone()),
             (Ty::Rigid(x, _), Ty::Rigid(y, _)) if x == y => Ok(()),
             (Ty::Empty, Ty::Empty) => Ok(()),
+            // A mapper written as a label-driven witness on one side and as a
+            // concrete affix on the other are the *same* mapper once the label
+            // is bound: `prefix`'s signature names `prependSym k` (stored as
+            // `labelPrefix α`) in its result, while the literal at the call site
+            // builds `KeyMapPrefix "u_"`. Decode before the affix arms, or the
+            // two spellings of one mapper are reported as a mismatch.
+            //
+            // An *open* label does not decode, and that is the deferred case —
+            // `prefix p` in a helper leaves the label a variable, so the term is
+            // retained. Such a label still has to unify with its own kind
+            // (the same variable on both sides, or one that is still a free
+            // variable), so fall through to a structural comparison rather than
+            // reporting a mismatch.
+            (
+                Ty::Con("labelPrefix" | "labelSuffix", aa),
+                Ty::Con("labelPrefix" | "labelSuffix", bb),
+            ) if !aa.is_empty() && !bb.is_empty() => {
+                let (da, de) = (self.resolve_mapper(&a), self.resolve_mapper(&e));
+                if da == a && de == e {
+                    // Neither side decoded: the labels are still open, which is
+                    // the deferred case. Compare them as ordinary types so the
+                    // same variable matches itself and a free one can be bound.
+                    let (la, lb) = (aa[0].clone(), bb[0].clone());
+                    return self.unify(&la, &lb);
+                }
+                self.unify(&da, &de)
+            }
+            (Ty::Con("labelPrefix" | "labelSuffix", aa), _) if !aa.is_empty() => {
+                let da = self.resolve_mapper(&a);
+                if da == a {
+                    return Err(self.mismatch(&a, &e));
+                }
+                self.unify(&da, &e)
+            }
+            (_, Ty::Con("labelPrefix" | "labelSuffix", bb)) if !bb.is_empty() => {
+                let de = self.resolve_mapper(&e);
+                if de == e {
+                    return Err(self.mismatch(&a, &e));
+                }
+                self.unify(&a, &de)
+            }
             // Two affixes unify when they are the same constructor applied to
             // the same literal — `prefix "u_"` with `prefix "u_"`. Different
             // affixes are a genuine mismatch, reported as such.
@@ -534,19 +586,6 @@ impl<'w> Checker<'w> {
                     self.unify(p, q)?;
                 }
                 Ok(())
-            }
-            // Directional affix parameters are strings at the surface. The
-            // mapper they carry is metadata used to type the result row.
-            (Ty::Con("prefixAffix" | "suffixAffix", _), Ty::Con("string", _))
-            | (Ty::Con("string", _), Ty::Con("prefixAffix" | "suffixAffix", _)) => Ok(()),
-            (Ty::Con(ca, am), Ty::Con(cb, bm))
-                if matches!(*ca, "prefixAffix" | "suffixAffix")
-                    && matches!(*cb, "prefixAffix" | "suffixAffix")
-                    && ca == cb
-                    && am.len() == 1
-                    && bm.len() == 1 =>
-            {
-                self.unify(&am[0], &bm[0])
             }
             (Ty::Fun(a1, r1), Ty::Fun(a2, r2)) => {
                 let (a1, r1, a2, r2) = (a1.clone(), r1.clone(), a2.clone(), r2.clone());

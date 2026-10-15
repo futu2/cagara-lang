@@ -92,23 +92,26 @@ mapValue : value_wrapper -> query r -> query s = primitive "__mapValue"
 
 # `prefix "s"` prepends a literal string to every column name.
 #
-# A key stage reads its affix from the application, where the text still is
-# (`key_prefix`), so the parameter carries a marker rather than a type. The
-# checker builds the type-level witness `keyMap (prefix "s") r` and reduces it
+# The affix is a label, not an ordinary expression: `symbol k` is the same
+# parameter `omit` takes, and the literal at the application is what binds `k`.
+# That one binding reaches both sides of the signature — `removeKey k r` here,
+# and the label-driven mapper `prependSym k` in the result. The checker decodes
+# that mapper into the type-level witness `keyMap (prefix "s") r` and reduces it
 # against the input row: `users & prefix "u_"` gives
 #
 #     query (keyMap (prefix "u_") { id = int, name = string })
 #   ⟹ query { u_id = int, u_name = string }
 #
-# `m` is the same KeyMap witness carried by the affix argument and the result;
-# it is not an unrelated row variable. When the input row is still open the
-# term is *retained* rather than rejected, so the stage stays usable where the
-# row is not yet known.
-prefix : prefixAffix m -> query r -> query (keyMap m r) = primitive "__prefix"
+# The witness in the result is the same label the argument named, so a stage's
+# output row cannot come from an unrelated mapping. When the input row is still
+# open — or the affix is a lambda parameter, as in `addPrefix = p => q => q &
+# prefix p` — the term is *retained* rather than rejected, and reduces once the
+# row and the label are known.
+prefix : symbol k -> query r -> query (keyMap (prependSym k) r) = primitive "__prefix"
 
 # `suffix "s"` appends a literal string to every column name. It shares the
-# affix witness with its result in the same way as `prefix`.
-suffix : suffixAffix m -> query r -> query (keyMap m r) = primitive "__suffix"
+# label-driven witness with its result in the same way as `prefix`.
+suffix : symbol k -> query r -> query (keyMap (appendSym k) r) = primitive "__suffix"
 
 # `merge left right` combines two queries; fields from right overwrite duplicates from left.
 merge : query r -> query s -> query (merge r s) = primitive "__merge"

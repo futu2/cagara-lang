@@ -135,15 +135,6 @@ pub(crate) fn reduce_mapvalue(mapper: &ValueMap, row: &Ty) -> Option<Ty> {
     }
 }
 
-pub(crate) fn directional_string_kind(marker: KeyMarker, m: Ty) -> Ty {
-    let name = match marker {
-        KeyMarker::Prefix => "prefixAffix",
-        KeyMarker::Suffix => "suffixAffix",
-        _ => unreachable!("only prefix and suffix stages carry a mapper"),
-    };
-    Ty::Con(name, vec![m])
-}
-
 /// The string a type-position literal denotes, if it is one.
 ///
 /// Used for the affix of `(prefix "u_")` / `(suffix "_v2")`. A mapper's string
@@ -165,9 +156,6 @@ pub(crate) fn kind_of(t: &Ty, vars: &[VarInfo]) -> Kind {
         Ty::Gen(_) => Kind::Type, // schemes handle their own kinding
         // A literal type is an ordinary type: it unifies only with itself.
         Ty::Sym(_) => Kind::Type,
-        // `prefixAffix` / `suffixAffix` are string-valued affix parameters;
-        // their KeyMap argument is metadata tying the argument to its row map.
-        Ty::Con("prefixAffix" | "suffixAffix", _) => Kind::Type,
         Ty::Con("KeyMapId" | "KeyMapCompose" | "labelPrefix" | "labelSuffix", _) => Kind::KeyMap,
         Ty::Con(_, _) => Kind::Type,
         Ty::Fun(_, _) => Kind::Type,
@@ -212,16 +200,10 @@ pub(crate) const CONS: &[(&str, usize)] = &[
     // mapper variable of kind KeyMap.
     ("keyMap", 2),
     ("keymapper", 1),
-    // The affix marker carries the concrete KeyMap witness selected by the
-    // application. Keeping that witness in the argument is what ties
-    // `prefix`/`suffix` to the mapper in their result row.
-    ("prefixAffix", 1),
-    ("suffixAffix", 1),
     // The key-parameter markers. A key stage reads its key from the
     // application, where the literal still is, so its parameter carries a
-    // marker (and prefix/suffix also carry their KeyMap witness) instead of a
-    // value type; `key_stage` recognises it and records the literal in the
-    // stage's constraint or witness.
+    // marker instead of a value type; `key_stage` recognises it and records the
+    // literal in the stage's constraint or witness.
     ("key_omit", 0),
     ("key_prefix", 0),
     ("key_suffix", 0),
@@ -254,7 +236,6 @@ pub(crate) fn expected_arg_kinds(con: &str) -> Vec<Kind> {
         "winspec" => vec![Kind::Row],
         "sortkey" => vec![Kind::Row],
         "expr" => vec![Kind::Row, Kind::Type],
-        "prefixAffix" | "suffixAffix" => vec![Kind::KeyMap],
         "maybe" | "list" => vec![Kind::Type],
         "agg" | "win" => vec![Kind::Type], // These are handled specially in conv
         _ => vec![],

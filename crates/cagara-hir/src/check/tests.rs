@@ -1512,17 +1512,20 @@ fn key_map_rejects_a_non_mapper() {
 
 #[test]
 fn directional_affix_witness_is_shared_with_result_mapper() {
-    // The affix parameter and the result row must mention the same mapper.
+    // The label parameter and the result row must mention the same mapper.
     // Otherwise a signature could claim that `prefix` changes a row with an
     // unrelated mapping witness.
+    //
+    // The witness is a label now, so the mismatch is between two label
+    // variables: `symbol k` is the parameter's, while the result names
+    // `prependSym m`. Tying them is what the `keyLabel` path does, so this
+    // asserts on the specific disagreement rather than on any error at all.
     let e = err(
-        "bad : prefixAffix m -> query r -> query (keyMap n r) = prefix\n",
+        "bad : symbol k -> query r -> query (keyMap (prependSym m) r) = prefix\n",
         "bad",
     );
-    assert!(
-        e.contains("rigid") || e.contains("mismatch") || e.contains("type"),
-        "{e}"
-    );
+    assert!(e.contains("type mismatch"), "{e}");
+    assert!(e.contains("expected m") && e.contains("found k"), "{e}");
 }
 
 #[test]

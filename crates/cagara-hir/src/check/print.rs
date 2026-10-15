@@ -53,14 +53,28 @@ impl Printer {
                         .clone()
                 }
             },
-            // Omit/value-wrapper markers are string positions. Directional
-            // affixes retain their mapper witness in the printed type so the
-            // row transformation is visible and cannot look unrelated.
+            // Omit/value-wrapper markers are string positions. A directional
+            // affix stage is a `symbol k` parameter now, printed by the
+            // `keyLabel` arm below.
             Ty::Con("key_omit" | "key_pattern" | "key_replacement" | "value_wrapper", _) => {
                 "string".into()
             }
-            Ty::Con(n @ ("prefixAffix" | "suffixAffix"), args) if args.len() == 1 => {
-                format!("{n} {}", self.ty(&args[0], 2))
+            // A `symbol k` parameter: print the surface form, not the internal
+            // `keyLabel` marker, so a helper's signature reads the way it is
+            // written.
+            Ty::Con("keyLabel", args) if args.len() == 1 => {
+                format!("symbol {}", self.ty(&args[0], 2))
+            }
+            // The label-driven mappers are spelled `prependSym k` / `appendSym k`
+            // at the source; the internal names would leak a representation
+            // detail into a signature.
+            Ty::Con(n @ ("labelPrefix" | "labelSuffix"), args) if args.len() == 1 => {
+                let surface = if *n == "labelPrefix" {
+                    "prependSym"
+                } else {
+                    "appendSym"
+                };
+                format!("{surface} {}", self.ty(&args[0], 2))
             }
             Ty::Empty => "{}".into(),
             Ty::Row(fs, tail) => {
@@ -119,7 +133,6 @@ impl Printer {
             }
             // A zero-argument marker is kept for compatibility with older
             // schemes; new directional signatures always carry one witness.
-            Ty::Con("prefixAffix" | "suffixAffix", _) => "string".into(),
             Ty::Con("KeyMapId", args) if args.is_empty() => "id".into(),
             Ty::Con("KeyMapCompose", args) if args.len() == 2 => {
                 let f = self.ty(&args[0], 2);

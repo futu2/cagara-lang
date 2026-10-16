@@ -392,18 +392,24 @@ fn lower_composed_helper(
     if helper_stages.is_empty() {
         return Ok(None);
     }
-    if helper_stages.iter().any(|stage| {
-        !matches!(
-            stage.kind,
-            RowStage::Where
-                | RowStage::Order
-                | RowStage::Limit
-                | RowStage::Offset
-                | RowStage::Distinct
-                | RowStage::Select
-                | RowStage::Update
-        ) || matches!(stage.kind, RowStage::Select | RowStage::Update) && helper_stages.len() != 1
-    }) {
+    let projections = helper_stages
+        .iter()
+        .filter(|stage| matches!(stage.kind, RowStage::Select | RowStage::Update))
+        .count();
+    if projections > 1
+        || helper_stages.iter().any(|stage| {
+            !matches!(
+                stage.kind,
+                RowStage::Where
+                    | RowStage::Order
+                    | RowStage::Limit
+                    | RowStage::Offset
+                    | RowStage::Distinct
+                    | RowStage::Select
+                    | RowStage::Update
+            )
+        })
+    {
         let mut source = TypedQuery::new();
         let Some((root, _)) = lower_helper_expr(input, module, def, expr, &mut source)? else {
             return Ok(None);
@@ -423,6 +429,9 @@ fn lower_composed_helper(
         .typed_node(module, expr.id)
         .and_then(|node| node.row())
         .map(Row::new);
+    if projections > 0 && helper_output.is_none() {
+        return Ok(None);
+    }
     for stage in helper_stages {
         let origin = Origin::new(
             helper_module,
@@ -2015,6 +2024,23 @@ mod tests {
         assert!(typed
             .nodes()
             .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));
+
+        let (typed, _) = lower_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             orders : query { uid = int, amount = float } = table \"s\" \"orders\"\n\
+             projected = q => q & where (.amount > 1.0) & select { .uid, .amount } & order [asc .uid]\n\
+             q = users & innerJoin (orders & projected) (.<id == .>uid)\n",
+            "q",
+        );
+        assert!(typed
+            .nodes()
+            .any(|node| matches!(node.kind(), QueryNodeKind::Where)));
+        assert!(typed
+            .nodes()
+            .any(|node| matches!(node.kind(), QueryNodeKind::Select)));
+        assert!(typed
+            .nodes()
+            .any(|node| matches!(node.kind(), QueryNodeKind::Order)));
     }
 
     #[test]

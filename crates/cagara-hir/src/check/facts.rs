@@ -82,27 +82,12 @@ pub(crate) fn definition_facts(
                         facts.binding(module_own(db, imported).get(field));
                     }
                 }
-                pending.push(base);
             }
-            ExprKind::App(function, args) => {
-                pending.extend(args.iter().rev());
-                pending.push(function);
-            }
-            ExprKind::Lambda(_, body) => pending.push(body),
-            ExprKind::Record(fields) => pending.extend(fields.iter().rev().map(|(_, value)| value)),
-            ExprKind::List(values) => pending.extend(values.iter().rev()),
-            ExprKind::Case(arms) => {
-                for (cond, value) in arms.iter().rev() {
-                    pending.push(value);
-                    pending.push(cond);
-                }
-            }
-            ExprKind::Lit(_)
-            | ExprKind::Field(_, _)
-            | ExprKind::Sql(_)
-            | ExprKind::Primitive(_)
-            | ExprKind::Error => {}
+            _ => {}
         }
+        // Pushed in reverse so the stack pops them in source order, which is
+        // the order [`child_exprs`] states once.
+        pending.extend(child_exprs(e).into_iter().rev());
     }
     facts
         .dependencies
@@ -131,6 +116,39 @@ impl DefinitionFacts {
     }
 }
 
+/// The sub-expressions of one expression, in source order.
+///
+/// One rule, in one place, and an exhaustive match: a new `ExprKind` is a
+/// compile error here rather than a child silently left unvisited. The facts
+/// walk above reads it, and a typed tree built from source must visit the same
+/// children in the same order or the two disagree about which node a fact
+/// belongs to.
+pub(crate) fn child_exprs(e: &cagara_syntax::ast::Expr) -> Vec<&cagara_syntax::ast::Expr> {
+    use cagara_syntax::ast::ExprKind;
+    match &e.kind {
+        ExprKind::App(function, args) => {
+            let mut out = Vec::with_capacity(args.len() + 1);
+            out.push(function.as_ref());
+            out.extend(args.iter());
+            out
+        }
+        ExprKind::Lambda(_, body) => vec![body],
+        ExprKind::Record(fields) => fields.iter().map(|(_, value)| value).collect(),
+        ExprKind::List(values) => values.iter().collect(),
+        ExprKind::Case(arms) => arms
+            .iter()
+            .flat_map(|(cond, value)| [cond, value])
+            .collect(),
+        ExprKind::Proj(base, _) => vec![base],
+        ExprKind::Name(_)
+        | ExprKind::Lit(_)
+        | ExprKind::Field(_, _)
+        | ExprKind::Sql(_)
+        | ExprKind::Primitive(_)
+        | ExprKind::Error => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static FACT_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -139,6 +157,48 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_exprs_visits_every_sub_expression_in_source_order() {
+        use cagara_syntax::ast::ExprKind;
+        // An application: the callee, then the arguments as written.
+        let ws = Workspace::from_source("q = f 1 2\n");
+        let body = &ws.modules[ws.root].module.defs[0].body;
+        let ExprKind::App(function, args) = &body.kind else {
+            panic!("the body should be an application");
+        };
+        let children = child_exprs(body);
+        assert_eq!(children.len(), 3, "callee and two arguments");
+        assert_eq!(children[0].id, function.id);
+        assert_eq!(children[1].id, args[0].id);
+        assert_eq!(children[2].id, args[1].id);
+
+        // A `case`: each arm's condition before its value, arms in order.
+        // Arms are `;`-separated (see `cagara-syntax`'s `case_arms_are_semicolon_separated`).
+        let ws = Workspace::from_source("q = case { a => 1; b => 2 }\n");
+        let body = &ws.modules[ws.root].module.defs[0].body;
+        let ExprKind::Case(arms) = &body.kind else {
+            panic!("the body should be a case");
+        };
+        let children = child_exprs(body);
+        assert_eq!(children.len(), 4, "two arms, a condition and a value each");
+        assert_eq!(children[0].id, arms[0].0.id);
+        assert_eq!(children[1].id, arms[0].1.id);
+        assert_eq!(children[2].id, arms[1].0.id);
+        assert_eq!(children[3].id, arms[1].1.id);
+
+        // A projection's base is its only child; a leaf has none. `.a` is a
+        // `Field` — a leaf — while `base.a` is the `Proj` that has a base.
+        let ws = Workspace::from_source("q = users.id\n");
+        let body = &ws.modules[ws.root].module.defs[0].body;
+        assert_eq!(child_exprs(body).len(), 1, "a projection's base");
+        let leaf = child_exprs(body)[0];
+        assert!(child_exprs(leaf).is_empty(), "a name has no children");
+
+        let ws = Workspace::from_source("q = .a\n");
+        let body = &ws.modules[ws.root].module.defs[0].body;
+        assert!(child_exprs(body).is_empty(), "a field is a leaf");
+    }
 
     #[test]
     fn facts_are_memoized_and_compare_checked_types_and_locations() {

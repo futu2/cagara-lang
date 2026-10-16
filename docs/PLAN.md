@@ -214,10 +214,11 @@ aggregates carry the checker's recorded output row. A direct typed `where` node
 now also carries its checked predicate, and direct typed `order` nodes carry
 their checked sort keys in source order. Projection fields, aggregate
 expressions, and payloads in composed/helper stages still use the normalized
-expression bridge, and the checked relational result is still supplied by the
-term route and compared with the typed skeleton. This slice moves two
-expression facts onto the typed graph; completing the payload bridge and
-removing the term route remain later work.
+expression bridge. Direct `select`, `update`, and `agg` nodes now also retain
+their checked output field expressions. The checked relational result is still
+supplied by the term route and compared with the typed skeleton. This slice
+moves projection payloads onto the typed graph; completing the remaining
+payload bridge and removing the term route remain later work.
 
 `TypedQuery` now has ordered multi-input edges for joins and set operations, and
 records each child's checked output row. Typed lowering constructs those nodes

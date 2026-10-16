@@ -250,6 +250,48 @@ impl CheckedQuery {
         visit(self, &mut out);
         out
     }
+
+    /// The input-to-root walk, retaining fields owned by `select`, `update`,
+    /// and `agg` nodes.
+    pub(crate) fn node_chain_projection_fields(
+        &self,
+    ) -> Vec<(QueryKind, Option<Vec<(String, CheckedExpr)>>)> {
+        fn visit(
+            query: &CheckedQuery,
+            out: &mut Vec<(QueryKind, Option<Vec<(String, CheckedExpr)>>)>,
+        ) {
+            match &query.node {
+                CheckedQueryNode::Table { .. } => {}
+                CheckedQueryNode::Where { input, .. }
+                | CheckedQueryNode::Select { input, .. }
+                | CheckedQueryNode::Update { input, .. }
+                | CheckedQueryNode::Omit { input, .. }
+                | CheckedQueryNode::Rename { input, .. }
+                | CheckedQueryNode::MapValue { input, .. }
+                | CheckedQueryNode::Agg { input, .. }
+                | CheckedQueryNode::Order { input, .. }
+                | CheckedQueryNode::Limit { input, .. }
+                | CheckedQueryNode::Offset { input, .. } => visit(input, out),
+                CheckedQueryNode::Distinct(input) => visit(input, out),
+                CheckedQueryNode::Join { left, right, .. }
+                | CheckedQueryNode::Set { left, right, .. } => {
+                    visit(left, out);
+                    visit(right, out);
+                }
+            }
+            let fields = match &query.node {
+                CheckedQueryNode::Select { fields, .. }
+                | CheckedQueryNode::Update { fields, .. }
+                | CheckedQueryNode::Agg { fields, .. } => Some(fields.clone()),
+                _ => None,
+            };
+            out.push((query.kind(), fields));
+        }
+
+        let mut out = Vec::new();
+        visit(self, &mut out);
+        out
+    }
     /// A table, with its columns known.
     ///
     /// `columns` is the table's closed row: the checker gives a `table`

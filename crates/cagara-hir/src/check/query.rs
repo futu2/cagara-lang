@@ -248,6 +248,8 @@ struct TypedQueryNode {
     predicate: Option<CheckedExpr>,
     /// The checked sort keys owned by an `order` node.
     order_keys: Option<Vec<(CheckedExpr, bool)>>,
+    /// The checked output fields owned by a projection or aggregate node.
+    projection_fields: Option<Vec<(String, CheckedExpr)>>,
 }
 
 /// A read-only view of one typed query node.
@@ -320,6 +322,11 @@ impl<'a> QueryNode<'a> {
     /// The checked sort keys owned by an `order` node, in source order.
     pub fn order_keys(&self) -> Option<&[(CheckedExpr, bool)]> {
         self.node.order_keys.as_deref()
+    }
+
+    /// The checked output fields owned by `select`, `update`, or `agg`.
+    pub fn projection_fields(&self) -> Option<&[(String, CheckedExpr)]> {
+        self.node.projection_fields.as_deref()
     }
 }
 
@@ -477,6 +484,7 @@ impl TypedQuery {
             origin,
             predicate: None,
             order_keys: None,
+            projection_fields: None,
         };
         Ok(self.push(node))
     }
@@ -510,6 +518,7 @@ impl TypedQuery {
             origin,
             predicate: None,
             order_keys: None,
+            projection_fields: None,
         };
         if !kind.recomputes_row() {
             return Err(QueryErr::new(
@@ -567,7 +576,7 @@ impl TypedQuery {
         origin: Origin,
         predicate: Option<CheckedExpr>,
     ) -> Result<NodeId, QueryErr> {
-        self.keep_row_with_payload(site, kind, input, origin, predicate, None)
+        self.keep_row_with_payload(site, kind, input, origin, predicate, None, None)
     }
 
     /// A row-preserving stage with checked expression payloads.
@@ -579,6 +588,7 @@ impl TypedQuery {
         origin: Origin,
         predicate: Option<CheckedExpr>,
         order_keys: Option<Vec<(CheckedExpr, bool)>>,
+        projection_fields: Option<Vec<(String, CheckedExpr)>>,
     ) -> Result<NodeId, QueryErr> {
         let row = self.raw(input).output_row.clone();
         let node = TypedQueryNode {
@@ -590,11 +600,13 @@ impl TypedQuery {
             origin,
             predicate,
             order_keys,
+            projection_fields,
         };
         if kind.arity() != 1
             || kind.recomputes_row()
             || (node.predicate.is_some() && kind != QueryNodeKind::Where)
             || (node.order_keys.is_some() && kind != QueryNodeKind::Order)
+            || node.projection_fields.is_some()
         {
             return Err(QueryErr::new(
                 &node,
@@ -619,6 +631,7 @@ impl TypedQuery {
         input: NodeId,
         output_row: Option<Row>,
         origin: Origin,
+        projection_fields: Option<Vec<(String, CheckedExpr)>>,
     ) -> Result<NodeId, QueryErr> {
         let input_row = self.raw(input).output_row.clone();
         let node = TypedQueryNode {
@@ -630,6 +643,7 @@ impl TypedQuery {
             origin,
             predicate: None,
             order_keys: None,
+            projection_fields,
         };
         if !matches!(
             kind,
@@ -667,6 +681,7 @@ impl TypedQuery {
             origin,
             predicate: None,
             order_keys: None,
+            projection_fields: None,
         };
         if kind.arity() != 2 || !matches!(kind, QueryNodeKind::Join(_) | QueryNodeKind::Set(_)) {
             return Err(QueryErr::new(
@@ -787,8 +802,15 @@ mod tests {
             "`prefix` is a rewrite, not a row-preserving stage"
         );
         assert!(
-            q.project(site(0, 0, 4), QueryNodeKind::Table, base, None, origin())
-                .is_err(),
+            q.project(
+                site(0, 0, 4),
+                QueryNodeKind::Table,
+                base,
+                None,
+                origin(),
+                None,
+            )
+            .is_err(),
             "a table is not a projection"
         );
     }

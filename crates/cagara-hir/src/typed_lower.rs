@@ -467,6 +467,7 @@ fn lower_composed_helper(
                     child,
                     projected_row,
                     origin,
+                    None,
                 )
                 .map_err(query_error)?,
             _ => typed_keep_stage(target, child, stage.kind, stage.node, origin)?,
@@ -549,6 +550,7 @@ fn lower_composed_stage(
                 child,
                 output_row,
                 origin,
+                None,
             )
             .map_err(query_error)?,
         RowStage::Where
@@ -770,6 +772,7 @@ fn copy_typed_graph(source: &TypedQuery, target: &mut TypedQuery) -> Result<Node
                         child,
                         node.output_row().cloned(),
                         node.origin(),
+                        node.projection_fields().map(<[_]>::to_vec),
                     )
                     .map_err(query_error)?
             }
@@ -883,6 +886,18 @@ fn lower_expression_pipeline(
         .into_iter()
         .filter(|(kind, _)| *kind == crate::checked::QueryKind::Order)
         .map(|(_, keys)| keys);
+    let mut projection_payloads = checked
+        .node_chain_projection_fields()
+        .into_iter()
+        .filter(|(kind, _)| {
+            matches!(
+                kind,
+                crate::checked::QueryKind::Select
+                    | crate::checked::QueryKind::Update
+                    | crate::checked::QueryKind::Agg
+            )
+        })
+        .map(|(_, fields)| fields);
 
     for stage in stages {
         let input_row = Row::new(stage.input.clone().expect("checked above"));
@@ -920,6 +935,7 @@ fn lower_expression_pipeline(
                     child,
                     Some(output_row.clone()),
                     origin,
+                    projection_payloads.next().flatten(),
                 )
                 .map_err(query_error)?,
             RowStage::Where
@@ -949,6 +965,7 @@ fn lower_expression_pipeline(
                     } else {
                         None
                     },
+                    None,
                 )
                 .map_err(query_error)?,
         };
@@ -1429,6 +1446,7 @@ fn apply_helper(
                     child,
                     projected_row,
                     origin,
+                    None,
                 )
                 .map_err(query_error)?,
         };
@@ -2111,6 +2129,31 @@ mod tests {
         assert_eq!(order_keys.len(), 1);
         assert_eq!(order_keys[0].0.kind(), crate::checked::ExprKind::Column);
         assert!(order_keys[0].1, "the source key is ascending");
+        let update_node = typed
+            .chain()
+            .into_iter()
+            .map(|id| typed.node(id))
+            .find(|node| node.kind() == QueryNodeKind::Update)
+            .expect("typed pipeline has an update node");
+        let update_fields = update_node
+            .projection_fields()
+            .expect("update carries checked fields");
+        assert_eq!(update_fields.len(), 1);
+        assert_eq!(update_fields[0].0, "older");
+        assert_eq!(update_fields[0].1.kind(), crate::checked::ExprKind::Column);
+        let select_node = typed
+            .chain()
+            .into_iter()
+            .map(|id| typed.node(id))
+            .find(|node| node.kind() == QueryNodeKind::Select)
+            .expect("typed pipeline has a select node");
+        assert_eq!(
+            select_node
+                .projection_fields()
+                .expect("select carries checked fields")
+                .len(),
+            2
+        );
 
         let (typed, checked) = lower_source(
             "users : query { id = int, age = int } = table \"s\" \"users\"\n\
@@ -2119,6 +2162,13 @@ mod tests {
         );
         assert_eq!(typed.root_kind(), QueryNodeKind::Agg);
         assert_eq!(checked.row().names(), &["age", "n"]);
+        let agg_node = typed.node(typed.root());
+        let agg_fields = agg_node
+            .projection_fields()
+            .expect("aggregate carries checked fields");
+        assert_eq!(agg_fields.len(), 2);
+        assert_eq!(agg_fields[0].0, "age");
+        assert_eq!(agg_fields[1].0, "n");
     }
 
     #[test]

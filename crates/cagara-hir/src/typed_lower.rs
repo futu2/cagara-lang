@@ -394,7 +394,12 @@ fn lower_composed_helper(
     }
     let projections = helper_stages
         .iter()
-        .filter(|stage| matches!(stage.kind, RowStage::Select | RowStage::Update))
+        .filter(|stage| {
+            matches!(
+                stage.kind,
+                RowStage::Select | RowStage::Update | RowStage::Agg
+            )
+        })
         .count();
     if projections > 1
         || helper_stages.iter().any(|stage| {
@@ -407,6 +412,7 @@ fn lower_composed_helper(
                     | RowStage::Distinct
                     | RowStage::Select
                     | RowStage::Update
+                    | RowStage::Agg
             )
         })
     {
@@ -438,12 +444,13 @@ fn lower_composed_helper(
             syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
         );
         let id = match stage.kind {
-            RowStage::Select | RowStage::Update => target
+            RowStage::Select | RowStage::Update | RowStage::Agg => target
                 .project(
                     stage.node,
                     match stage.kind {
                         RowStage::Select => QueryNodeKind::Select,
                         RowStage::Update => QueryNodeKind::Update,
+                        RowStage::Agg => QueryNodeKind::Agg,
                         _ => unreachable!(),
                     },
                     child,
@@ -2041,6 +2048,20 @@ mod tests {
         assert!(typed
             .nodes()
             .any(|node| matches!(node.kind(), QueryNodeKind::Order)));
+
+        let (typed, _) = lower_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             orders : query { uid = int, amount = float } = table \"s\" \"orders\"\n\
+             grouped = q => q & agg { uid = group .uid, n = count }\n\
+             q = users & innerJoin (orders & grouped) (.<id == .>uid)\n",
+            "q",
+        );
+        assert!(typed
+            .nodes()
+            .any(|node| matches!(node.kind(), QueryNodeKind::Agg)));
+        assert!(typed
+            .nodes()
+            .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));
     }
 
     #[test]

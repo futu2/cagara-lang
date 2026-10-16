@@ -88,8 +88,9 @@ to the table above, which used slower hardware.
 Two increases, both attributable to a single deliberate change each.
 
 **Cold type check, +10%.** The checker now stores each node's *deeply* resolved
-type (`use_tys.insert((m, id), self.zonk(&t))`) where it previously chased one
-variable chain and stopped (`self.resolve(&t)`). That is the whole diff in
+type (`self.zonk(&t)` in `check/infer.rs`, where the tree's facts are recorded)
+where it previously chased one variable chain and stopped (`self.resolve(&t)`).
+That is the whole diff in
 `check/infer.rs` — `git diff a2b1773 70eb285` shows it as one line. It is not an
 oversight: with a shallow resolve, an application's `query r` kept `r` as a
 variable, so a `table`'s columns were recorded and then unreachable, and every

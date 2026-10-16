@@ -13,10 +13,11 @@
 //! states the order once.
 //!
 //! Facts live in one place — the node — and the indexes hold only integers, so
-//! nothing here is a second copy of a fact. That is the point: `use_tys`,
-//! `resolutions`, and `use_types` can go once their last reader reads this
-//! instead. The two indexes are the questions a reader arrives with: an
-//! `ExprId` (`by_id`) or the span a use was filed under (`by_span`).
+//! nothing here is a second copy of a fact. That is what let the maps go:
+//! `use_tys`, `resolutions`, `choices`, `holes`, and `use_types` were each
+//! deleted once its last reader read this instead. The two indexes are the
+//! questions a reader arrives with: an `ExprId` (`by_id`) or the span a use was
+//! filed under (`by_span`).
 
 use super::child_exprs;
 use super::*;

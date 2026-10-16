@@ -280,12 +280,12 @@ impl TypeCheck {
     }
 
     /// Printed type of the name use whose expression spans `span` in `module`.
+    ///
+    /// Read off the node the checker filed that span under. The tree keeps the
+    /// last write for a repeated key span, which is the tie-break the map this
+    /// replaces used, so the answer is the same one.
     pub fn use_type(&self, module: usize, span: Span) -> Option<&str> {
-        self.modules
-            .get(module)?
-            .use_types
-            .get(&(module, span.start, span.end))
-            .map(String::as_str)
+        Some(self.typed_node_at(module, span)?.shown.as_str())
     }
 
     /// The scalar type the checker gave the expression with this `ExprId`, as
@@ -399,9 +399,8 @@ impl TypeCheck {
     /// The scalar type a definition *returns*, with arguments stripped and any
     /// `expr r a` unwrapped to `a`.
     ///
-    /// This is what a call site needs. `TypeCheck::use_ty` answers for a leaf
-    /// expression; an application has no recorded entry, so its type comes from
-    /// the callee signature.
+    /// This is what a call site needs: a definition's scheme is where its
+    /// result is declared.
     pub fn result_scalar(&self, module: usize, def: usize) -> Option<ScalarType> {
         let s = self.modules.get(module)?.schemes.get(&(module, def))?;
         scheme_result_scalar(&s.ty)
@@ -542,7 +541,6 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         errors,
         types: out.types,
         probe_fields: out.probe_fields,
-        use_types: out.use_types,
         row_stages: out.row_stages,
         typed: out.typed,
         typed_index: out.typed_index,
@@ -571,8 +569,6 @@ struct ModuleOutput {
     errors: Vec<RawTypeError>,
     types: HashMap<(usize, usize), String>,
     probe_fields: Option<(usize, Vec<(String, String)>)>,
-    use_types: HashMap<(usize, u32, u32), String>,
-    /// What each module-scope name occurrence resolved to, by `ExprId`.
     /// The stage nodes each definition recorded, by `(module, def)`.
     row_stages: HashMap<(usize, usize), Vec<RowStageView>>,
     /// Each definition's body as a typed tree, by `(module, def)`.
@@ -601,13 +597,6 @@ struct ModuleCheck {
     errors: Vec<TypeError>,
     types: HashMap<(usize, usize), String>,
     probe_fields: Option<(usize, Vec<(String, String)>)>,
-    use_types: HashMap<(usize, u32, u32), String>,
-    /// What each module-scope name occurrence resolved to, by `ExprId`.
-    ///
-    /// The counterpart of `use_tys` for *identity* rather than type: that map
-    /// answers "what type did this expression get", this one answers "what did
-    /// this name refer to". A consumer expanding a call needs the second and
-    /// cannot recover it from the first.
     /// The stage nodes each definition recorded, by `(module, def)`.
     row_stages: HashMap<(usize, usize), Vec<RowStageView>>,
     /// Each definition's body as a typed tree, by `(module, def)`.
@@ -655,8 +644,6 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         probe: None,
         probe_fields: None,
         uses: Vec::new(),
-        use_types: HashMap::new(),
-        use_tys: HashMap::new(),
         resolutions: HashMap::new(),
         row_stages: Vec::new(),
         holes: HashMap::new(),
@@ -675,7 +662,6 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         .map(|(k, s)| (*k, c.show_scheme(s)))
         .collect();
     let probe_fields = c.probe_fields.map(|fs| (m, fs));
-    let use_types = c.use_types;
     let row_stages = c.row_stage_nodes;
     let typed = c.typed_bodies;
     let mut typed_index: Vec<(u32, usize, usize)> = Vec::new();
@@ -697,7 +683,6 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         errors: c.errors,
         types,
         probe_fields,
-        use_types,
         row_stages,
         typed,
         typed_index,

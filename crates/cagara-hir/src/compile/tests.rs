@@ -189,19 +189,21 @@ fn collect_cagara(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// The typed tree agrees with the maps, node for node.
+/// The accessors answer what the typed nodes hold, over every shipped program.
 ///
-/// The tree is meant to replace `use_tys`, `use_types`, and `resolutions`, so
-/// before anything reads it the two accounts have to be shown to be the same
-/// account. Every node of every shipped program is compared: its scalar type
-/// against `use_ty`, its row against `use_row`, its printed type against
-/// `use_type`, and its resolution against `resolution`.
+/// The tree replaced the side maps, so this is the check that the boundary a
+/// consumer reads through — `use_ty`, `use_scheme`, `use_type`, `resolution`,
+/// `choice`, `choices_of`, `holes` — says what the nodes say. Every node of
+/// every shipped program is compared: its scalar type against `use_ty`, its row
+/// against `use_scheme`, its printed type against `use_type`, its resolution
+/// against `resolution`, and its choices against `choice`.
 ///
 /// The node *set* is compared too, against a walk of the AST using the same
 /// child order the tree was built with — a tree that quietly dropped a node
-/// would otherwise pass every per-node check.
+/// would otherwise pass every per-node check. That walk is the one comparison
+/// here with a source outside the tree.
 #[test]
-fn the_typed_tree_agrees_with_the_maps_on_every_shipped_program() {
+fn the_accessors_answer_what_the_typed_nodes_hold() {
     let mut files = Vec::new();
     for dir in [
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus"),

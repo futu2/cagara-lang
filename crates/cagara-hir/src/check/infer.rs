@@ -116,13 +116,14 @@ impl<'w> Checker<'w> {
         let saved_stages = std::mem::take(&mut self.row_stages);
         let r = self.check_def(i);
         self.depth -= 1;
-        // Use types as far as checking got, even if it failed later on.
+        // Use types as far as checking got, even if it failed later on. The
+        // three maps below are the typed tree's inputs: the facts keyed by
+        // `ExprId`, the printed form, and where each use was filed.
         let mut typed_facts: HashMap<u32, Ty> = HashMap::new();
         let mut shown_by_id: HashMap<u32, String> = HashMap::new();
-        // Where each use was filed, and when: the key of the span map below,
-        // plus the position in the recording order that map's last-write
-        // tie-break needs. A node recorded twice keeps its last entry, which is
-        // also the `shown` its `shown_by_id` entry holds.
+        // The filing span, plus the position in the recording order the tree's
+        // last-write tie-break needs. A node recorded twice keeps its last
+        // entry, which is also the `shown` its `shown_by_id` entry holds.
         let mut recorded_by_id: HashMap<u32, (Span, usize)> = HashMap::new();
         for (write, (id, sp, t, lit)) in std::mem::replace(&mut self.uses, saved_uses)
             .into_iter()
@@ -132,26 +133,21 @@ impl<'w> Checker<'w> {
                 (Some(l), Ty::Var(_)) => l.to_string(),
                 _ => self.show(&t),
             };
-            self.use_types.insert((m, sp.start, sp.end), shown.clone());
             shown_by_id.insert(id, shown);
             recorded_by_id.insert(id, (sp, write));
-            // The same facts keyed by `ExprId`, which is what a phase building a
-            // typed tree from source needs: it walks the AST and asks "what type
-            // did *this* node get?". The span map above cannot answer that — it
-            // is keyed by location, and the type has already been flattened to a
-            // string by then.
+            // The type as the node got it, which is what the tree stores. A
+            // phase that walks the AST asks "what type did *this* node get?";
+            // the printed form above cannot answer that — it is a string.
             //
             // **Deeply** resolved, not just at the top. `resolve` chases a
             // variable chain and stops, so `query r` came back with `r` still a
-            // variable while the printed map showed `query { id = int }` — the
+            // variable while the printed form showed `query { id = int }` — the
             // row was recorded and then unreachable, which is how a `table`'s
             // columns became something a consumer had to recover from the
             // definition's signature instead of reading off the node. `zonk`
             // resolves inside constructors, rows, and function arrows, so what
             // is stored here is the type the node actually got.
-            let zonked = self.zonk(&t);
-            self.use_tys.insert((m, id), zonked.clone());
-            typed_facts.insert(id, zonked);
+            typed_facts.insert(id, self.zonk(&t));
         }
         // Whatever the definition learned about the probe's row, even if it
         // failed later on. Only the definition that actually referenced the
@@ -1216,10 +1212,11 @@ impl<'w> Checker<'w> {
     /// information the expression cannot produce on its own.
     ///
     /// Each subexpression is visited **exactly once** on every path. That is
-    /// load-bearing, not stylistic: the type of every expression is recorded in
-    /// `use_tys` under its `ExprId`, and elaboration and the incremental facts
-    /// both read that map. Synthesizing a node and *then* re-visiting its
-    /// children to check them would record each child twice.
+    /// load-bearing, not stylistic: the type of every expression is recorded
+    /// under its `ExprId`, and the typed tree — which elaboration and the
+    /// incremental facts both read — is built from those records. Synthesizing
+    /// a node and *then* re-visiting its children to check them would record
+    /// each child twice.
     pub(crate) fn check(
         &mut self,
         env: &mut Vec<(String, Ty)>,

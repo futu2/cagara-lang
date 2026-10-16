@@ -1,4 +1,4 @@
-use super::{check, RowStage, Span};
+use super::{check, RowStage};
 use crate::core::ScalarType;
 use crate::workspace::Workspace;
 use std::collections::HashMap;
@@ -2322,7 +2322,7 @@ mod bidirectional {
 /// The checker does record the whole type per `ExprId`, but it stored
 /// `self.resolve(&t)` — a *shallow* resolve that chases a top-level variable and
 /// stops. `query r` therefore came back with `r` still a variable, so the row
-/// was recorded and unreachable at the same time: `use_types` printed
+/// was recorded and unreachable at the same time: the printed form said
 /// `query { id = int }` while the structured read said `None`.
 ///
 /// That is what forced a consumer to recover a `table`'s columns from the
@@ -2387,19 +2387,20 @@ fn every_node_records_its_whole_type() {
     }
 }
 
-/// The tree answers every span-keyed use type the map answers.
+/// A typed node answers by the span it was filed under, and an untyped one not
+/// at all.
 ///
-/// `use_types` is the last published side map. It is keyed by the span the
-/// checker *filed* a use under — not by the node — and a repeated key span
-/// keeps the last write. The tree now carries that key on the node and
-/// resolves the tie-break while it is built, so before the map goes the two
-/// accounts are compared key by key: every key the map has, the tree answers
-/// with the map's value, and the tree holds no key the map lacks. A program
-/// that fails partway is included on purpose — a partial tree is exactly where
-/// a span index built from "every node" rather than "every typed node" would
-/// grow an entry the map never had.
+/// `use_type` is keyed by span rather than by node, and the typed tree is what
+/// answers it now. Two directions matter, and a program that fails partway is
+/// included on purpose because that is where the two sets differ:
+///
+/// * a node the checker typed is reachable by its span, through the same node
+///   the `ExprId` index reaches, and answers with that node's printed form;
+/// * a node it did not type is not reachable — an untyped node that published
+///   itself would hand a caller a type the checker never recorded, which is the
+///   shape the `use_ids` regression had.
 #[test]
-fn the_tree_answers_every_span_keyed_use_type() {
+fn a_typed_node_answers_by_the_span_it_was_filed_under() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let mut programs: Vec<(String, Workspace)> = vec![
         (
@@ -2432,34 +2433,47 @@ fn the_tree_answers_every_span_keyed_use_type() {
         programs.push((f.to_string(), Workspace::open(&dir.join(f))));
     }
 
-    let mut compared = 0usize;
+    let (mut typed, mut untyped) = (0usize, 0usize);
     for (what, ws) in &programs {
         let tc = check(ws);
         for m in 0..ws.modules.len() {
-            let map = &tc.modules[m].use_types;
-            let keys = &tc.modules[m].typed_spans;
-            assert_eq!(
-                keys.len(),
-                map.len(),
-                "{what}: module {m} has {} span-keyed uses and the tree {} keys",
-                map.len(),
-                keys.len()
-            );
-            for ((_, start, end), want) in map {
-                let span = Span {
-                    start: *start,
-                    end: *end,
+            for i in 0..ws.modules[m].module.defs.len() {
+                let Some(tree) = tc.typed_body(m, i) else {
+                    continue;
                 };
-                assert_eq!(
-                    tc.typed_node_at(m, span).map(|n| n.shown.as_str()),
-                    Some(want.as_str()),
-                    "{what}: module {m}, span {start}..{end}"
-                );
-                compared += 1;
+                for node in tree.nodes() {
+                    let span = node.key_span;
+                    let answer = tc.use_type(m, span);
+                    if node.view.is_some() {
+                        assert_eq!(
+                            tc.typed_node_at(m, span).map(|n| n.id),
+                            Some(node.id),
+                            "{what}: module {m}, node {} is filed under {span:?}",
+                            node.id
+                        );
+                        assert_eq!(
+                            answer,
+                            Some(node.shown.as_str()),
+                            "{what}: module {m}, node {} printed type",
+                            node.id
+                        );
+                        typed += 1;
+                    } else {
+                        assert_eq!(
+                            answer, None,
+                            "{what}: module {m}, untyped node {} published a type",
+                            node.id
+                        );
+                        untyped += 1;
+                    }
+                }
             }
         }
     }
-    assert!(compared > 0, "no span-keyed use types were compared");
+    assert!(
+        typed > 0 && untyped > 0,
+        "the programs must exercise both a typed and an untyped node: {typed} typed, {untyped} untyped"
+    );
 }
 
 /// Every expression in a body, for a test locating a node by its source text.

@@ -519,13 +519,11 @@ pub(crate) fn scheme_result_expr(t: &Ty) -> Option<(Phase, ScalarType)> {
     }
 }
 
-/// The result type of a scheme, with the arguments stripped and any `expr r a`
+/// A definition's result type, with the arguments stripped and any `expr r a`
 /// wrapper unwrapped to `a`.
 ///
-/// A call site needs the type the callee *returns*. The checker records types
-/// for leaves only (`Field`, `Lit`, `Name`) — an application is not in
-/// `use_tys` — so reading the callee's signature is the right source rather
-/// than plucking a type off the use site. `_>_` is
+/// A call site needs the type the callee *returns*, and a definition's scheme
+/// is where that is declared: `_>_` is
 /// `expr r a -> expr r a -> expr r bool`, and the call's type is the `bool`
 /// inside the final `expr`.
 ///
@@ -744,21 +742,15 @@ pub(crate) struct Checker<'w> {
     /// cannot do that job: two expressions can share a span, and a span is not
     /// what a choice was recorded against.
     pub(crate) uses: Vec<(ast::ExprId, Span, Ty, Option<&'static str>)>,
-    pub(crate) use_types: HashMap<(usize, u32, u32), String>,
-    /// The same facts keyed by `ExprId`, as the checker resolved them.
-    ///
-    /// This is what a source-level elaboration needs: it walks the AST and asks
-    /// "what type did this node get?", which the span-keyed `use_types` above
-    /// cannot answer. `Ty` never leaves the crate — `TypeCheck::use_ty`
-    /// converts at the boundary.
-    pub(crate) use_tys: HashMap<(usize, u32), Ty>,
     /// What each module-scope name occurrence resolved to, by `ExprId`.
     ///
-    /// The identity counterpart of `use_tys`: that map says what *type* an
-    /// expression got, this one says what a name *referred to*. A consumer
+    /// The identity counterpart of the type recorded for a use: the type says
+    /// what an expression *is*, this says what a name *referred to*. A consumer
     /// expanding a call needs the second and cannot recover it from the first,
     /// and re-deriving it by looking the name up again is a second answer
-    /// waiting to disagree with this one.
+    /// waiting to disagree with this one. Read while checking — a stage
+    /// application looks up its callee through it — and copied onto the typed
+    /// tree, which is where readers outside the checker get it.
     pub(crate) resolutions: HashMap<(usize, u32), Resolved>,
     /// The stage applications of the definition being checked, in order.
     pub(crate) row_stages: Vec<PendingRowStage>,

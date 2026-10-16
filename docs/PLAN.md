@@ -117,50 +117,43 @@ correctness, not as an optimization.
 - `--optimize` is opt-in; it runs sqlglot optimization after Cagara lowering.
 - A few loader, template qualification, reserved-word, and deep-recursion edge
   cases remain documented in the issue tracker and tests.
-- The checker still hands its per-expression facts to elaboration through side
-  maps rather than through a typed tree: `use_tys` (a `Ty` per `ExprId`),
-  `resolutions` (what a name referred to), `choices` (the overload candidate at
-  a site), `holes`, and the span-keyed `use_types` (the same use types rendered
-  for hover). They are not duplicates of one another — each answers a question
-  the others cannot — but they are keyed by `ExprId` and read back by a second
-  walk of the AST, which is the shape `docs/TYPE-SYSTEM-REDESIGN.md` step 4
-  exists to replace.
+- The checker's per-expression facts reach elaboration through the typed tree
+  rather than through side maps. `use_tys` (a `Ty` per `ExprId`), `resolutions`
+  (what a name referred to), `choices` (the overload candidate at a site),
+  `holes`, and the span-keyed `use_types` (the same use types rendered for
+  hover) are all gone; the tree carries the type, row, choices, resolution, and
+  printed form of every expression, and `holes` on the body.
   The seam is one trait: `normalize::Facts` has seven methods (`use_ty`,
   `use_row`, `def_result_ty`, `def_body`, `def_template`, `resolution`,
-  `choice`, `holes_at`) and everything downstream reads facts through it, so a
-  typed tree is an alternative *implementation* of that trait rather than a
-  rewrite of the normalizer. What the tree must carry is exactly what the maps
-  carry today; the order to migrate is the one the design doc gives — stage
-  nodes first (done: `check/stage.rs` records each application's operation and
-  both rows), then use types, then resolutions and choices, deleting each map
-  only once its last reader is gone. `use_types` cannot be deleted by
-  re-rendering at the boundary, because its value folds in the literal fallback
-  (`(Some(lit), Ty::Var(_)) => lit`) and the printer needs a resolver; it should
-  go last, with the others already tree-backed.
-  Four of the five are gone: the typed tree carries the type, row, choices, and
-  resolution of every expression, and `use_tys`, `resolutions`, `choices`, and
-  `holes` are no longer published. `use_types` is the last one, and it is not a
-  straight move: it is keyed by the span the checker *recorded* for a use, which
-  is not always the node's own span (a deferred literal records its argument's),
-  so the tree would have to carry that key span as well as the printed form.
-  Two uses can also share a key span, and the map keeps the last one written —
-  reproducing it means preserving that tie-break, which is the checker's
-  recording order rather than the tree's arena order. Neither is hard; both are
-  the reason this one is not simply deleted.
-  `holes` — the count of overloads a definition leaves open — is the one map
+  `choice`, `holes_at`) and everything downstream reads facts through it, which
+  is why each map could be deleted once its last reader read the tree instead.
+  What remains of the migration is the walk, not the facts: production still
+  walks the AST and asks the tree per node, and
+  `docs/TYPE-SYSTEM-REDESIGN.md` step 4 is about feeding `CheckedQuery` from
+  the tree directly. Stage metadata is the piece that must move with it —
+  `check/stage.rs` records each application's operation and both rows, but on
+  `(module, def)` rather than on the node — before the walk can go.
+  Two properties of `use_types` are worth keeping in mind because they are not
+  obvious from the tree: it was keyed by the span the checker *filed* a use
+  under, which is the node's own span in every program measured but is carried
+  as `TypedExpr::key_span` rather than assumed; and a repeated key span kept the
+  last write, which `TypedBody::by_span` resolves while the tree is built, when
+  the recording order is still known. `TypeCheck::use_type` and
+  `TypeCheck::typed_node_at` read that index.
+  `holes` — the count of overloads a definition leaves open — is the one fact
   that might be a projection of `choices` rather than a fact of its own. An
   overload constraint is born at a site (`overload.rs`), becomes
   `Origin::Hole` when stored in a scheme, and becomes a site of the *using*
   definition again when that scheme is instantiated, so the two agree on the
   application path; `compile::tests::an_inherited_hole_is_recorded_against_the_definition_that_inherits_it`
-  pins that re-attribution. The path that keeps the map is overload
+  pins that re-attribution. The path that keeps the count is overload
   *resolution*: a candidate is a definition, `cand_scheme` returns its checked
   scheme with its constraints, and `step_overload` instantiates it with no site
   (`infer.rs`), so a candidate's own open overloads keep `Origin::Hole` into
   the caller's leftovers — where the count sees them and `choices` records
   nothing. `check/tests.rs::overload_candidates_resolve_their_own_overloads`
   shows the solver resolving them when they are literals; whether one can
-  survive unresolved is not proven either way, so the count stays a map of its
+  survive unresolved is not proven either way, so the count stays a fact of its
   own until someone proves that path closed.
 
 ## Roadmap

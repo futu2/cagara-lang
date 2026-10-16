@@ -10,10 +10,12 @@ can no longer tell which `keyMap` layer belongs to it. It either identifies the
 wrong row and fails an occurs check, or accepts a row that does not represent the
 stage's result.
 
-The checker also leaves facts in several maps (`use_tys`, resolutions, overload
+The checker used to leave facts in several maps (`use_tys`, resolutions, overload
 choices, schemes) for normalization and elaboration to recover in later passes.
-That design has been made safer over time, but a type fact and the checked node
-it justifies can still get out of step. The redesign should make the typed
+Those maps are gone — the typed tree carries the facts, keyed by `ExprId` or by
+the span a use was filed under — but the recovery is still a second pass:
+production walks the AST and asks the tree per node. A fact and the checked node
+it justifies can still get out of step, so the redesign should make the typed
 relational result the product of checking, with stage boundaries represented
 explicitly from the moment the stage is inferred.
 

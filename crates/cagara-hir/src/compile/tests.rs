@@ -137,6 +137,78 @@ fn production_stage_check_handles_repeated_helpers_and_imports() {
     );
 }
 
+/// A stage's identity is the **node that applied it**, and it survives inlining.
+///
+/// This is the property the stage check now rests on. The check used to compare
+/// spans: it asked whether a record's node span lay inside the lowered stage's
+/// span. That works by accident on the programs measured, and the accidents are
+/// exactly what this test removes:
+///
+/// * **A helper's stage keeps the helper's identity.** `helper = q => q & prefix
+///   "h_"` records a stage inside `helper`'s own body. When `helper` is inlined
+///   into `via_helper`, the reduced term still carries that identity, naming
+///   `helper` and the application node inside it — not the caller and not the
+///   caller's span. So the caller's check does not claim the helper's stage, and
+///   the helper's own definition is where it is checked.
+/// * **Two stages in one pipeline are two identities**, even though the second
+///   application's span encloses the first's — the case an interval test cannot
+///   separate by containment alone.
+#[test]
+fn a_stage_identity_names_the_node_that_applied_it() {
+    let src = "users : query { id = int } = table \"s\" \"users\"\n\
+               helper = q => q & prefix \"h_\"\n\
+               repeated = users & prefix \"a_\" & prefix \"b_\"\n\
+               via_helper = users & helper\n";
+    let ws = Workspace::from_source(src);
+    let tc = crate::check::check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    let index = |name: &str| {
+        ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == name)
+            .unwrap_or_else(|| panic!("no definition `{name}`"))
+    };
+
+    // Two adjacent stages in one definition are two records, in application
+    // order, with distinct identities.
+    let repeated: Vec<_> = tc.row_stages(ws.root, index("repeated")).collect();
+    assert_eq!(repeated.len(), 2, "two stages: {repeated:?}");
+    assert_eq!(repeated[0].kind, crate::check::RowStage::Prefix);
+    assert_ne!(
+        repeated[0].node, repeated[1].node,
+        "two applications are two nodes, not one"
+    );
+    assert_eq!(
+        repeated[0].node.definition,
+        index("repeated"),
+        "each is attributed to the definition that applied it"
+    );
+
+    // The helper's own stage is recorded against `helper`, and the caller that
+    // inlines it records no stage of its own — a helper's use is not a stage
+    // application.
+    let helper_stages: Vec<_> = tc.row_stages(ws.root, index("helper")).collect();
+    assert_eq!(helper_stages.len(), 1, "the helper applies one stage");
+    assert_eq!(helper_stages[0].node.definition, index("helper"));
+    let caller_stages: Vec<_> = tc.row_stages(ws.root, index("via_helper")).collect();
+    assert!(
+        caller_stages.is_empty(),
+        "a helper's use records nothing against the caller: {caller_stages:?}"
+    );
+
+    // And the compiler accepts the program, which is where the ownership
+    // boundary is actually exercised: the caller's lowering carries the
+    // helper's identity, and the check does not mistake it for the caller's.
+    let compilation = compile_checked(&ws, &tc);
+    assert!(
+        compilation.diagnostics.is_empty(),
+        "the stage check rejected a valid helper program: {:?}",
+        compilation.diagnostics
+    );
+}
+
 /// The bridge visits every node the typed tree holds, except a projection's
 /// base.
 ///

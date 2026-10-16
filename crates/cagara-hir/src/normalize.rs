@@ -214,6 +214,19 @@ pub enum Term {
         args: Vec<Term>,
         ty: crate::core::ScalarType,
         row: Option<std::sync::Arc<Vec<(String, crate::core::ScalarType)>>>,
+        /// The stable identity of the application this primitive reduced to,
+        /// when the checker recorded a stage here. `None` for a primitive that
+        /// is not a stage (`table`, the joins, the set operations) and for a
+        /// primitive the checker recorded nothing against.
+        ///
+        /// This is the term layer's copy of [`crate::check::NodeRef`]: the
+        /// checker stamps the application node it recorded the stage at, and
+        /// the bridge carries the stamp onto the reduced term. It is **not**
+        /// derived from the term's shape or its span, so a substitution, an
+        /// instantiation or a saturation moves it without changing it — which is
+        /// what lets the lowering say *which* application it built rather than
+        /// where the text happened to be.
+        node_ref: Option<crate::check::NodeRef>,
         origin: Origin,
     },
     /// A definition whose normal form is a *function*: `params` are the binders
@@ -428,11 +441,19 @@ impl Term {
                 })
             }
             // A primitive accumulates the same way.
+            //
+            // The `node_ref` is deliberately **carried through**: it is the
+            // identity of the application the primitive stands for, and
+            // collecting more arguments is still that same application. A
+            // stage's primitive takes its one key argument and then its input,
+            // so the identity is already stamped when the key arrives and must
+            // survive the input arriving too.
             Term::Primitive {
                 name,
                 mut args,
                 ty,
                 row,
+                node_ref,
                 origin,
             } => {
                 args.push(arg);
@@ -441,6 +462,7 @@ impl Term {
                     args,
                     ty,
                     row,
+                    node_ref,
                     origin,
                 })
             }
@@ -501,10 +523,18 @@ pub fn reduce_application(head: Term, args: Vec<Term>, origin: Origin) -> Term {
 ///
 /// An unreduced `Apply` keeps its own origin for the same reason: it stands for
 /// the application a user wrote.
+///
+/// `node_ref` is the stable identity the checker recorded for this application,
+/// when it recorded a stage here. It is stamped on the reduced primitive so the
+/// lowering can name the application it built instead of matching spans; see
+/// [`Term::Primitive::node_ref`]. It is passed in rather than derived, because
+/// the only place that knows the application's `ExprId` *and* the definition it
+/// sits in is the checker's own record.
 fn apply_type_and_span(
     term: Term,
     ty: crate::core::ScalarType,
     row: Option<Vec<(String, crate::core::ScalarType)>>,
+    node_ref: Option<crate::check::NodeRef>,
     origin: Origin,
 ) -> Term {
     use crate::core::ScalarType;
@@ -538,6 +568,7 @@ fn apply_type_and_span(
             args,
             ty: current,
             row: current_row,
+            node_ref: current_ref,
             ..
         } => Term::Primitive {
             name,
@@ -547,6 +578,14 @@ fn apply_type_and_span(
             // carried: a primitive that is not a table keeps `None`, and a
             // saturated table takes the row of the node that saturated it.
             row: row.map(Arc::new).or(current_row),
+            // The application's identity when the checker recorded a stage
+            // here, otherwise whatever the primitive already carried. The
+            // fallback matters for a stage reached through a helper: the
+            // callee's primitive was stamped when *its* key argument arrived,
+            // inside the helper's own body, and this application is the helper's
+            // use — which is not a stage and records nothing. Overwriting with
+            // `None` would lose the identity the inner application owns.
+            node_ref: node_ref.or(current_ref),
             origin,
         },
         other => other,
@@ -703,6 +742,7 @@ fn rewrite_local(term: Term, name: &str, replace: &dyn Fn(Term) -> Term, avoid: 
             args,
             ty,
             row,
+            node_ref,
             origin,
         } => Term::Primitive {
             name: pname,
@@ -712,6 +752,13 @@ fn rewrite_local(term: Term, name: &str, replace: &dyn Fn(Term) -> Term, avoid: 
                 .collect(),
             ty,
             row,
+            // Substitution rewrites a binder's *references*; it never rewrites
+            // which application a node is. Carried through verbatim, which is
+            // what makes the identity stable across an inline: the callee's body
+            // is substituted into the caller, and the stage nodes inside it keep
+            // the identity they were recorded with — the callee's definition and
+            // the callee's `ExprId`.
+            node_ref,
             origin,
         },
         Term::Lambda {
@@ -1178,6 +1225,29 @@ pub trait Facts {
         let _ = (module, id);
         None
     }
+
+    /// The stable identity of the stage the checker recorded at this
+    /// application, if it recorded one.
+    ///
+    /// `owner` is the definition the application was *written in* — the pair
+    /// `(module, def)` the walk is currently inside — and `site` is the
+    /// application node's `ExprId`. Both together name one node of one
+    /// definition, which is exactly what [`crate::check::NodeRef`] is.
+    ///
+    /// This is what lets the bridge stamp a reduced stage with the identity the
+    /// checker gave it, so a later pass can match a lowered stage to its record
+    /// by **node identity** rather than by comparing spans. A span is where the
+    /// user wrote the text; the identity is which node applied the operation,
+    /// and the two come apart as soon as a definition is inlined at two sites
+    /// or two stages share a span.
+    ///
+    /// The default answers "the checker recorded no stage here", which is the
+    /// truthful answer for a caller with no checker to consult — a helper's use
+    /// is genuinely not a stage application, so nothing is recorded at it.
+    fn stage_at(&self, owner: (usize, usize), site: u32) -> Option<crate::check::NodeRef> {
+        let _ = (owner, site);
+        None
+    }
 }
 
 /// The three questions a definition's typed tree can answer.
@@ -1534,6 +1604,14 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                     reduced,
                     facts.use_ty(module, e.id),
                     facts.use_row(module, e.id),
+                    // The checker's own record of the stage at this
+                    // application, read by **node identity** — the definition
+                    // the application was written in, and the application's
+                    // `ExprId`. `None` when this application is not a stage
+                    // (a helper's use, a table, a join), which is a fact rather
+                    // than a gap: `apply_type_and_span` then keeps whatever
+                    // identity the reduced primitive already carried.
+                    facts.stage_at((module, body.def), e.id),
                     origin,
                 ))
             };
@@ -1617,6 +1695,11 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
             args: Vec::new(),
             ty: facts.use_ty(module, e.id),
             row: facts.use_row(module, e.id).map(std::sync::Arc::new),
+            // A bare `primitive "__x"` is the stage's *callee*, not the
+            // application: the checker records a stage when the key argument
+            // arrives, and the identity is stamped on the reduced application
+            // by `apply_type_and_span`. Nothing is known here yet.
+            node_ref: None,
             origin,
         }),
         // A form normalization has no rule for. Reported as a gap rather than
@@ -1768,6 +1851,10 @@ fn inline_resolved(
             args: Vec::new(),
             ty: facts.use_ty(module, id),
             row: facts.use_row(module, id).map(std::sync::Arc::new),
+            // The callee, as above: a stage's identity is stamped by the
+            // application that saturates it, not by the name it was reached
+            // through.
+            node_ref: None,
             origin,
         }),
         None => Err(Gap::new(
@@ -2150,6 +2237,7 @@ pub fn lower_expr_with(
             args,
             ty: _,
             row: _,
+            node_ref: _,
             origin,
         } => lower_primitive(name, args, *origin, spec),
         Term::Case {
@@ -2472,6 +2560,16 @@ impl Facts for InputFacts<'_> {
         }
         .use_row(module, id)
     }
+
+    /// The stage identity the checker recorded at this application.
+    ///
+    /// Reads the definition's own stage list and finds the entry whose `site`
+    /// is this node. `TypeCheck::stage_node` does exactly that against the
+    /// tree's stage index, so the answer is the checker's and cannot drift from
+    /// what `row_stages` reports.
+    fn stage_at(&self, (module, def): (usize, usize), site: u32) -> Option<crate::check::NodeRef> {
+        self.input.type_check().stage_node(module, def, site)
+    }
 }
 
 impl Facts for WorkspaceFacts<'_> {
@@ -2523,6 +2621,12 @@ impl Facts for WorkspaceFacts<'_> {
 
     fn use_row(&self, module: usize, id: u32) -> Option<Vec<(String, crate::core::ScalarType)>> {
         TreeFacts { tc: self.tc }.use_row(module, id)
+    }
+
+    /// The stage identity the checker recorded at this application; the same
+    /// answer the compiler's adapter gives, from the same accessor.
+    fn stage_at(&self, (module, def): (usize, usize), site: u32) -> Option<crate::check::NodeRef> {
+        self.tc.stage_node(module, def, site)
     }
 }
 
@@ -2966,12 +3070,18 @@ mod bridge_tests {
                 args,
                 ty,
                 row,
+                node_ref,
                 ..
             } => Term::Primitive {
                 name,
                 args: args.iter().map(strip_origins).collect(),
                 ty,
                 row,
+                // Kept, not blanked: `strip_origins` exists so two *spellings*
+                // of one program compare equal, and a stage's identity is a
+                // property of the program rather than of where it was written.
+                // Blanking it would make the comparison weaker than the claim.
+                node_ref,
                 origin: blank,
             },
             Term::Apply { head, args, .. } => Term::Apply {
@@ -3234,6 +3344,19 @@ pub fn lower_query(t: &Term) -> Result<crate::checked::CheckedQuery, Gap> {
 pub struct LoweredStage {
     pub kind: RowStage,
     pub origin: Origin,
+    /// The application this stage was built from, as the checker identified it.
+    ///
+    /// This is the whole point of the report: the checker stamped the
+    /// application node with a [`crate::check::NodeRef`] when it recorded the
+    /// stage, the bridge carried that stamp onto the term, and this says which
+    /// application the lowering actually built. [`check_stage_records`] compares
+    /// the two **by identity**, so a matching stage is the same node rather than
+    /// a node whose span happens to lie inside another's.
+    ///
+    /// `None` for a stage whose application the checker recorded no identity
+    /// for — a stage reached through a term built by hand, or a primitive the
+    /// checker never stamped.
+    pub node_ref: Option<crate::check::NodeRef>,
     pub input: Option<Vec<(String, crate::core::ScalarType)>>,
     pub output: Option<Vec<(String, crate::core::ScalarType)>>,
 }
@@ -3268,6 +3391,7 @@ pub fn lower_query_with(
         name,
         args,
         row,
+        node_ref,
         origin,
         ..
     } = t
@@ -3297,6 +3421,11 @@ pub fn lower_query_with(
         stages.push(LoweredStage {
             kind,
             origin: *origin,
+            // The identity the checker stamped on this application, carried
+            // onto the term by the bridge and preserved by every reduction
+            // since. This is what makes the comparison below an identity match:
+            // the lowering names the node it built rather than a location.
+            node_ref: *node_ref,
             input,
             output: Some(built.row().columns.clone()),
         });
@@ -3317,17 +3446,24 @@ pub fn lower_query_with(
 /// sides read the same checker facts — so it is an assertion rather than a
 /// diagnostic, like the stage invariant in `check::stage`.
 ///
-/// Matched through the node the record names. A record's own `span` is the
-/// *callee's* — `where` in `where (.age > 1)` — while the tree node at its
-/// `site` carries the application's span. The normalized primitive carries the
-/// span of the whole reduced pipeline application, which encloses that node;
-/// the interval comparison below uses that relationship and avoids relying on
-/// a lossy span equality.
+/// Matched by **node identity**, not by span.
 ///
-/// A stage reached through an inlined helper is recorded in the helper's own
-/// tree, so its application lies outside this definition's body and it is not
-/// this definition's record to check; the helper is checked when its own body
-/// is lowered, if it is a query.
+/// The checker stamps every stage application with a [`crate::check::NodeRef`]
+/// — the definition the application was written in, and the application node's
+/// `ExprId` inside it — the bridge carries that stamp onto the term the
+/// application reduced to, and the lowering reports it back on the
+/// [`LoweredStage`]. So the comparison is "is this the same application?", which
+/// has a yes-or-no answer, rather than "does this span lie inside that span?",
+/// which is a heuristic that happens to work on the programs measured and
+/// breaks the moment two applications share a span or a definition is inlined
+/// at two sites.
+///
+/// A stage reached through an inlined helper is recorded in the **helper's** own
+/// tree, so its identity names the helper's definition rather than this one. It
+/// is not this definition's record to check — the helper is checked when its own
+/// body is lowered — and identity says so directly: the record's `definition`
+/// differs from `def`, and the lowering's `node_ref` says the same. The old
+/// interval test had to approximate this with `stage.origin.module != module`.
 ///
 /// A recorded row of `None` means the checker left it open — a helper's stage
 /// applied to a parameter — and there is nothing to compare, which is the same
@@ -3339,44 +3475,36 @@ fn check_stage_records(
     lowered: &[LoweredStage],
 ) {
     let recorded: Vec<&RowStageView> = tc.row_stages(module, def).collect();
-    let mut matched = vec![false; recorded.len()];
-    for stage in lowered {
-        if stage.origin.module != module {
-            continue;
-        }
-        let Some(at) = recorded.iter().enumerate().find_map(|(at, r)| {
-            (!matched[at]
-                && r.kind == stage.kind
-                && tc.typed_node(module, r.site).is_some_and(|node| {
-                    // The normalized primitive is stamped with the span of
-                    // the whole pipeline application (`users & prefix "u_"`),
-                    // while the checker records the stage at the callee
-                    // application (`prefix "u_"`). The latter is therefore
-                    // contained in the former. Matching the interval, rather
-                    // than just its end or a single span, also keeps adjacent
-                    // stages distinct.
-                    stage.origin.span.start <= node.span.start
-                        && node.span.end <= stage.origin.span.end
-                }))
-            .then_some(at)
-        }) else {
-            continue;
-        };
-        let r = recorded[at];
-        matched[at] = true;
+    // The lowering built each stage from a term the bridge stamped, so a stage
+    // is only this definition's to check when the stamp names this definition.
+    // The rest belong to whatever definition applied them — an inlined helper,
+    // or a stage the helper's own body recorded.
+    let mine: Vec<(&LoweredStage, &RowStageView)> = lowered
+        .iter()
+        .filter_map(|stage| {
+            let node = stage.node_ref?;
+            if node.definition_module != module || node.definition != def {
+                return None;
+            }
+            let r = recorded.iter().find(|r| r.node == node)?;
+            Some((stage, *r))
+        })
+        .collect();
+
+    for (stage, r) in &mine {
         assert_eq!(
             stage.kind, r.kind,
-            "the lowering built {:?} where the checker recorded {:?} at {:?}",
-            stage.kind, r.kind, stage.origin.span
+            "the lowering built {:?} where the checker recorded {:?} at {}",
+            stage.kind, r.kind, r.node.expr_id
         );
         if let Some(input) = &r.input {
             assert_eq!(
                 stage.input.as_ref(),
                 Some(input),
                 "the lowering read a different input row than the checker recorded for \
-                 {:?} at {:?}",
+                 {:?} at {}",
                 r.kind,
-                stage.origin.span
+                r.node.expr_id
             );
         }
         if let Some(output) = &r.output {
@@ -3384,21 +3512,57 @@ fn check_stage_records(
                 stage.output.as_ref(),
                 Some(output),
                 "the lowering produced a different output row than the checker recorded for \
-                 {:?} at {:?}",
+                 {:?} at {}",
                 r.kind,
-                stage.origin.span
+                r.node.expr_id
             );
         }
     }
+
+    // Every stage this definition recorded must have been built, exactly once,
+    // and nothing else under this definition's identity.
+    //
+    // Identity is what makes "one record, one build" a real statement: two
+    // stages are two records because their `ExprId`s differ, and two lowered
+    // stages are the same application exactly when their `NodeRef`s agree — so
+    // counting is a comparison of two accounts rather than a coincidence of
+    // non-overlapping spans.
+    let mut built = vec![0usize; recorded.len()];
+    for stage in lowered {
+        let Some(node) = stage.node_ref else { continue };
+        if let Some(at) = recorded.iter().position(|r| r.node == node) {
+            built[at] += 1;
+        }
+    }
+    let mismatched: Vec<_> = recorded
+        .iter()
+        .zip(&built)
+        .filter(|(_, n)| **n != 1)
+        .map(|(r, n)| (r.kind, r.node.expr_id, *n))
+        .collect();
     assert!(
-        matched.iter().all(|m| *m),
-        "the checker recorded a stage the lowering never built in module {module} def {def}: {:?}",
-        recorded
-            .iter()
-            .zip(&matched)
-            .filter(|(_, m)| !**m)
-            .map(|(r, _)| (r.kind, r.span))
-            .collect::<Vec<_>>()
+        mismatched.is_empty(),
+        "the checker recorded these stages in module {module} def {def} and the lowering built \
+         a different number of each: {mismatched:?}"
+    );
+    // A lowered stage that names this definition but matches no record is a
+    // stage built from a term the checker never stamped — the other half of the
+    // one-to-one correspondence, and the half a count of the records cannot see.
+    let stray: Vec<_> = lowered
+        .iter()
+        .filter(|stage| {
+            stage.node_ref.is_some_and(|node| {
+                node.definition_module == module
+                    && node.definition == def
+                    && !recorded.iter().any(|r| r.node == node)
+            })
+        })
+        .map(|stage| (stage.kind, stage.node_ref.map(|n| n.expr_id)))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "the lowering built a stage under this definition's identity that the checker never \
+         recorded in module {module} def {def}: {stray:?}"
     );
 }
 

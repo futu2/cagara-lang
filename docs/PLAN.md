@@ -144,6 +144,23 @@ correctness, not as an optimization.
   worth remembering: a chain is recorded as it is applied, while the arena
   follows source order, so `users & prefix "u_" & suffix "_v2"` applies the
   prefix first but writes the suffix application outermost.
+  Each stage record also carries a **stable identity**
+  (`check::NodeRef` — the definition the application was written in, and the
+  application node's `ExprId` in it), which travels from the checker through
+  normalization onto the reduced term and is preserved by saturation, inlining
+  and substitution. The production stage check
+  (`normalize::check_stage_records`) matches the lowering's report to the
+  checker's record by that identity, having previously asked whether one span
+  contained another; the identity is what tells a helper's stage from the
+  caller's when the helper is inlined, since the caller records nothing at the
+  use and the callee's stage names the callee.
+  `check::query::TypedQuery` is the other half of that step: the query skeleton
+  as its own arena, where a node carries its identity, its operation, a link to
+  its typed child, and the rows the checker closed for it — so a later pass can
+  read a stage's boundary instead of recovering it from a composed result type.
+  It is not yet on the production path; `docs/TYPE-SYSTEM-REDESIGN.md` step 6
+  lists the slices, and `check::query`'s own tests include the check that every
+  fact its nodes need is available from the checker where a stage is applied.
   Two properties of `use_types` are worth keeping in mind because they are not
   obvious from the tree: it was keyed by the span the checker *filed* a use
   under, which is the node's own span in every program measured but is carried
@@ -166,21 +183,100 @@ correctness, not as an optimization.
   shows the solver resolving them when they are literals; whether one can
   survive unresolved is not proven either way, so the count stays a fact of its
   own until someone proves that path closed.
-  `holes` — the count of overloads a definition leaves open — is the one fact
-  that might be a projection of `choices` rather than a fact of its own. An
-  overload constraint is born at a site (`overload.rs`), becomes
-  `Origin::Hole` when stored in a scheme, and becomes a site of the *using*
-  definition again when that scheme is instantiated, so the two agree on the
-  application path; `compile::tests::an_inherited_hole_is_recorded_against_the_definition_that_inherits_it`
-  pins that re-attribution. The path that keeps the count is overload
-  *resolution*: a candidate is a definition, `cand_scheme` returns its checked
-  scheme with its constraints, and `step_overload` instantiates it with no site
-  (`infer.rs`), so a candidate's own open overloads keep `Origin::Hole` into
-  the caller's leftovers — where the count sees them and `choices` records
-  nothing. `check/tests.rs::overload_candidates_resolve_their_own_overloads`
-  shows the solver resolving them when they are literals; whether one can
-  survive unresolved is not proven either way, so the count stays a fact of its
-  own until someone proves that path closed.
+
+## Query elaboration migration: plan and status
+
+The end state is the one in [`TYPE-SYSTEM-REDESIGN.md`](TYPE-SYSTEM-REDESIGN.md):
+`CheckedQuery` built from the checker's typed query skeleton rather than from a
+normalized term, with no source walk and no `Facts` in the query path. The
+sections above describe the code as it is; this one states the ordered plan and
+how far it has got, so the next session does not have to reconstruct either from
+the diffs.
+
+| # | Step | Status |
+|---|---|---|
+| 1 | Stable `NodeRef` on normalized stage info; match by identity | **Done** |
+| 2 | Internal typed query representation (`TypedQueryNode`) | **Done** |
+| 3 | First typed lowering slice: table, prefix, suffix, omit, mapValue | Not started |
+| 4 | Run both routes; compare rows, stages, origins, relations, SQL | Not started |
+| 5 | Typed instantiation: helpers, aliases, imports, overloads, repeats | Not started |
+| 6 | Remaining constructs: joins/sets → select/update/agg → windows → expressions | Not started |
+| 7 | Remove the source walk: `lower_query_recorded`, `check_stage_records`, `Facts` | Not started |
+
+### Step 1, done
+
+`check::NodeRef` is `(definition_module, definition, expr_id)`: the definition a
+stage application was written in, and the application node's `ExprId` inside it.
+It is **stamped where the stage is recorded, never derived from the term**, which
+is what makes it survive saturation, inlining and substitution — see the
+known-gaps entry above for the mechanism and the code path.
+
+The production stage check (`normalize::check_stage_records`) now matches the
+lowering's report to the checker's record by that identity and asserts a strict
+one-to-one correspondence in both directions: every record is built exactly once,
+and nothing is built under this definition's identity that was never recorded.
+The span-interval test it replaced asked whether one span *contained* another,
+which is a heuristic that holds on the programs measured and breaks as soon as
+two applications share a span or a definition is inlined at two sites.
+
+Witness: `compile::tests::a_stage_identity_names_the_node_that_applied_it` pins
+the three properties the match rests on — two adjacent stages are two distinct
+identities, a helper's stage keeps the *helper's* identity when the helper is
+inlined, and a caller records nothing for a helper's use — and
+`production_stage_check_handles_repeated_helpers_and_imports` keeps the
+helper/import ownership boundary as regression coverage.
+
+### Step 2, done
+
+`check::query::TypedQuery` is the query skeleton as its own arena. A
+`TypedQueryNode` carries its `NodeRef`, its `QueryNodeKind`, a link to its
+**typed child** by `NodeId`, and the rows it read and produced as the checker
+closed them. `QueryNodeKind` covers table, the four row rewrites, the
+row-preserving stages, and the projections — every relational operation the
+checked layer's `QueryKind` names.
+
+Two invariants are enforced by the constructors rather than documented:
+a rewrite refuses an input whose output row is not the row the stage read, and a
+kind cannot be built through the constructor for a group it does not belong to.
+Nothing in the type consults a final query type to work out a row.
+
+Its constructors are deliberately partial in the same way the slices are: an
+operation whose builder has not landed is a kind nothing constructs, not a kind
+with a guess in it. The module carries a scoped `#![allow(dead_code)]` for that
+reason, documented at the use site.
+
+### Step 3, what it needs
+
+Slice 1 is a **builder** that walks a definition's stage records and populates
+the arena, then a `CheckedQuery` constructed from the tree. The feasibility claim
+behind it is already pinned:
+`check::query::tests::the_checker_supplies_every_fact_a_typed_query_node_needs`
+asserts, off the checker's own records, that a stage's identity is a `NodeRef`,
+that both of its rows are closed, and that its **input query is a typed child in
+the same definition's tree** whose recorded row equals the stage's input row —
+which is the link the builder follows and `TypedQuery::rewrite` validates.
+
+Two things to know before starting it:
+
+- **The expression arguments stay on the bridge.** A `where`'s predicate, a
+  `select`'s fields, a join's `on` are `CheckedExpr`s built by the existing term
+  lowering. Slice 1 reads operations, rows, resolutions and origins from typed
+  nodes and takes its expressions from the bridge, exactly as step 6's slice 1
+  says. The expression path is migrated last (step 6, group 4).
+- **`TypeCheck::stage_node` is a linear scan** over a definition's stage list,
+  which the bridge calls once per application. That is fine at the current call
+  rate and a builder walking a whole chain should index the list instead of
+  scanning it per node.
+
+### Step 4, the oracle
+
+Until the new slice passes the corpus and the incremental-compilation tests, the
+term route stays authoritative. The comparison is over output rows, stage order,
+each stage's input/output rows, origins, checked relation structure, and
+generated SQL — the last of which the corpus snapshot
+(`cagara-hir/tests/corpus/snapshots/`, driven by `cagara-sql/tests/corpus.rs`)
+already pins byte-for-byte, and which is why a change that silently alters
+emitted SQL fails there rather than passing a structural comparison.
 
 ## Roadmap
 

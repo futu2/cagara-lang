@@ -51,6 +51,7 @@ mod facts;
 mod infer;
 mod overload;
 mod print;
+mod query;
 mod reduce;
 mod row;
 mod stage;
@@ -72,6 +73,24 @@ pub(crate) use ty::*;
 pub(crate) use facts::{child_exprs, definition_facts, DefinitionFacts};
 /// The query stage a definition is, and one stage application's rows.
 pub use stage::{RowStage, RowStageView};
+/// The stable identity of one checked node, for matching a lowered stage to the
+/// record the checker made of it.
+///
+/// Crate-private on purpose: it is an internal handle between the checker and
+/// the lowering, and its spelling (arena positions, parser `ExprId`s) is free
+/// to change. [`RowStageView::node`] is a public field of that type, so the
+/// type has to be reachable from outside the crate's *code* — it is `pub` in
+/// `check::stage`, and re-exported here for the crate's own modules.
+pub(crate) use stage::NodeRef;
+/// The typed query: the relational skeleton a definition's stages build, with
+/// each node owning the rows its operation read and produced.
+///
+/// Re-exported now so the module's own tests and the slices that consume it name
+/// these types from one place, the way every other sibling module's items are
+/// reached. Nothing outside `check` reads them yet, which is what the allowance
+/// records.
+#[allow(unused_imports)]
+pub(crate) use query::{NodeId, QueryErr, QueryNodeKind, Row, TypedQuery};
 pub use ty::Choice;
 /// What shape a definition's scheme has.
 ///
@@ -237,6 +256,24 @@ impl TypeCheck {
             .into_iter()
             .flat_map(TypedBody::stages)
             .filter_map(|node| node.stage.as_ref())
+    }
+
+    /// The stable identity of the stage this definition recorded at `site`.
+    ///
+    /// `site` is an [`ExprId`](cagara_syntax::ast::ExprId) of an application node
+    /// inside `(module, def)`. The answer names the node the checker recorded
+    /// the application at, so a consumer holding a lowered stage can ask whether
+    /// it is *the same application* rather than whether the two spans overlap.
+    ///
+    /// `None` when the definition records no stage at that node — a helper's
+    /// use, a `table`, a join — which is a fact and not a failure.
+    ///
+    /// Read from the same stage list [`TypeCheck::row_stages`] yields, so the
+    /// two cannot disagree about which applications exist.
+    pub(crate) fn stage_node(&self, module: usize, def: usize, site: u32) -> Option<NodeRef> {
+        self.row_stages(module, def)
+            .find(|s| s.site == site)
+            .map(|s| s.node)
     }
 
     /// A definition's body as a typed tree, if the checker built one.

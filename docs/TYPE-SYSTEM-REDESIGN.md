@@ -219,7 +219,11 @@ What the tree *does* add is the query skeleton: a definition's stage
 applications, each with the operation it applied and the rows its own signature
 instance read and produced (`TypedExpr::stage`, ordered by `TypedBody::by_stage`).
 That is the boundary this step exists to make authoritative, instead of
-recovering it from a composed result type.
+recovering it from a composed result type. `check::query::TypedQuery` is that
+skeleton given its own shape — a chain of nodes linked to their typed children,
+each owning its rows — and `check::NodeRef` is the name that lets a lowered
+stage be matched to the application that produced it. See "What is already in
+place" below.
 
 #### The composition model
 
@@ -258,6 +262,40 @@ cannot answer "what stages does this query run" without it.
 4. **Delete the term route for queries**, and with it `Body`, `expression`,
    `lower_query`, and the `Facts` trait — or keep the trait as the *reader* of
    tree facts that the new path uses, which is smaller and loses nothing.
+
+#### What is already in place
+
+Two pieces of the machinery the slices need have landed, and they are the two
+the slices would otherwise have had to invent:
+
+* **Stable node identity.** `check::NodeRef` is `(module, definition, expr_id)`:
+  the definition a stage application was written in, and the application node's
+  `ExprId` inside it. The checker stamps it on every stage it records
+  (`PendingRowStage::node`), the bridge carries it onto the term the application
+  reduced to (`Term::Primitive::node_ref`), and every reduction — saturation,
+  inlining, substitution — moves it without rewriting it, because it is stamped
+  rather than derived. `check_stage_records` compares the lowering's report to
+  the checker's record **by identity** rather than by asking whether one span
+  contains another. That removes the last heuristic from the boundary: the
+  match is now "is this the same application?", which is a question with an
+  answer, instead of a containment test that worked on the programs measured.
+  A helper's stage keeps the helper's identity when it is inlined into a caller,
+  which is what makes the ownership boundary exact: the caller's check does not
+  claim a stage it did not apply.
+* **The typed query arena.** `check::query::TypedQuery` holds `TypedQueryNode`s
+  built *where the stage is applied*, each carrying its `NodeRef`, its kind
+  (`QueryNodeKind`: table, the four row rewrites, the row-preserving stages, and
+  the projections), a link to its **typed child** by `NodeId`, and the rows it
+  read and produced as the checker closed them. Nothing in it consults a final
+  query type to work out a row — `output_row` is the node's own answer, and the
+  constructor that builds a rewrite refuses an input whose output row is not the
+  row the stage read. The kinds and constructors cover every relational
+  operation the `QueryKind` enum names; slice 1 fills the projections' expression
+  arguments in from the bridge.
+
+The constructors are partial in exactly the way the slices are: an operation
+whose builder has not landed is a kind nothing constructs, not a kind with a
+guess in it.
 
 #### What must not change
 

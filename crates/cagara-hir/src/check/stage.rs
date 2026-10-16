@@ -18,6 +18,51 @@
 
 use super::*;
 
+/// The **stable identity** of one checked node, independent of where it was
+/// written.
+///
+/// A node's span is where the *user* wrote it, and it stops being an identity
+/// the moment a definition is inlined: the same body is instantiated at two use
+/// sites, and the stage applications inside it are the same nodes at both —
+/// `helper = q => q & prefix "h_"` applied twice applies one `prefix` twice.
+/// Two instantiations would collide on `(module, span)` and be told apart by
+/// nothing else, while a span-interval test silently matched whichever record
+/// happened to enclose the search span.
+///
+/// `definition` is the definition the application sits in — the `(module, def)`
+/// pair the checker was elaborating when it recorded the stage — and `expr_id`
+/// is the `ExprId` of the application node inside that definition's AST. An
+/// `ExprId` is unique per definition and is assigned by the parser, so the triple
+/// names one node of one definition and nothing else.
+///
+/// Deliberately **crate-private**: it is an internal handle between the checker
+/// and the lowering, and exposing it would publish a numbering (arena
+/// positions, parser ids) that a later refactor is free to change.
+///
+/// A `NodeRef` survives saturation, inlining and substitution because it is
+/// *not* derived from the term: the checker stamps it on the stage application
+/// it recorded, the bridge carries it on the term node the application reduced
+/// to, and substitution moves terms around without ever rewriting the stamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeRef {
+    /// The module the definition was written in.
+    pub definition_module: usize,
+    /// The source-order position of that definition within its module.
+    pub definition: usize,
+    /// The `ExprId` of the stage-application node inside that definition.
+    pub expr_id: u32,
+}
+
+impl NodeRef {
+    pub fn new(definition_module: usize, definition: usize, expr_id: u32) -> Self {
+        NodeRef {
+            definition_module,
+            definition,
+            expr_id,
+        }
+    }
+}
+
 /// The query stage a definition *is*, when its body is a `primitive`.
 ///
 /// The kind travels in the definition's [`Scheme`], so a use site can name the
@@ -95,6 +140,10 @@ pub(crate) struct PendingRowStage {
     pub(crate) kind: RowStage,
     /// The `ExprId` of the application, so a consumer can find the node.
     pub(crate) site: u32,
+    /// The stable identity of the application: which definition applied it, and
+    /// which node inside that definition. This is what a later pass matches on
+    /// instead of comparing spans.
+    pub(crate) node: NodeRef,
     pub(crate) span: Span,
     /// The operation's witness — the affix, the removed label, or the wrapper
     /// name — as a type: the `Sym` the use site bound the signature's label to.
@@ -113,6 +162,8 @@ pub(crate) struct PendingRowStage {
 pub struct RowStageView {
     pub kind: RowStage,
     pub site: u32,
+    /// The stable identity of the application; see [`PendingRowStage::node`].
+    pub node: NodeRef,
     pub span: Span,
     pub input: Option<Vec<(String, ScalarType)>>,
     pub output: Option<Vec<(String, ScalarType)>>,
@@ -161,9 +212,28 @@ impl<'w> Checker<'w> {
         else {
             return;
         };
+        // The stable identity of the application: the definition the checker is
+        // elaborating right now, and the application node's `ExprId` inside it.
+        // `active` is the definition being checked (`check_def` pushes it), so
+        // this is the one place the pair is known together with the `ExprId`.
+        //
+        // `active` is non-empty for every stage application — `record_row_stage`
+        // is reached from `infer_app`, which only runs inside a body, and the
+        // body belongs to the definition `check_def` pushed. The `None` arm is
+        // therefore unreachable, and it deliberately does **not** panic: a
+        // checker that abandoned the walk on an impossible state would turn a
+        // guard into the crash it exists to avoid. It gets an identity nothing
+        // else can collide with — `usize::MAX` is not a definition index — so a
+        // record made through it matches no record in any definition and is
+        // reported by the stage check rather than mistaken for a real one.
+        let node = match self.active.last() {
+            Some(&(module, def)) => NodeRef::new(module, def, site),
+            None => NodeRef::new(self.module, usize::MAX, site),
+        };
         self.row_stages.push(PendingRowStage {
             kind,
             site,
+            node,
             span,
             label,
             input: inp[0].clone(),
@@ -209,6 +279,7 @@ impl<'w> Checker<'w> {
             out.push(RowStageView {
                 kind: s.kind,
                 site: s.site,
+                node: s.node,
                 span: s.span,
                 input: self.closed_fields(&input),
                 output: self.closed_fields(&output),

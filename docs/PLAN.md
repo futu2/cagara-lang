@@ -286,13 +286,17 @@ the helper call, as in `affix => q => q & prefix affix` or
 `wrapper => q => q & mapValue wrapper`. The helper parameter is matched to the
 stage witness, and the literal has already been checked at the call site.
 
+Helpers with multiple supported row rewrites now instantiate each stage in
+order from the typed child's current row. This supplies per-stage boundaries
+when the helper's own rows are open, while checking any closed helper rows
+against the instantiated rows. Each witness can be a closed helper literal or a
+string literal passed to the corresponding helper parameter.
+
 The slice deliberately declines helpers with witnesses that cannot be tied to
 a supplied literal, unsupported relational stages, and overload-dependent
 bodies; those uses stay on the normalized term route. Repeated direct stages
 are already covered by the first slice. General overload selection still needs
-use-site substitutions in the typed graph before this step can close. In
-particular, a multi-stage helper whose own row records are open needs per-stage
-instantiated rows, not only the helper call's final row.
+use-site substitutions in the typed graph before this step can close.
 
 Slice 1 is a **builder** that walks a definition's stage records and populates
 the arena, then a `CheckedQuery` constructed from the tree. The feasibility claim

@@ -253,62 +253,11 @@ fn apply_helper(
     {
         return Ok(None);
     }
-    let open_witness = helper_stages.len() == 1 && helper_stages[0].label.is_none();
-    if helper_stages.iter().any(|stage| stage.label.is_none()) && !open_witness {
-        return Ok(None);
-    }
-    let instantiated_label = if open_witness {
-        let helper_body = &input.module(helper_module).def(helper_def).body;
-        let params = lambda_params(helper_body);
-        if params.iter().collect::<HashSet<_>>().len() != params.len() {
-            return Ok(None);
-        }
-        let mut syntax = HashMap::new();
-        index_exprs(helper_body, &mut syntax);
-        let Some(stage_expr) = syntax.get(&helper_stages[0].site) else {
-            return Ok(None);
-        };
-        let ExprKind::App(_, stage_args) = &stage_expr.kind else {
-            return Ok(None);
-        };
-        let Some(ExprKind::Name(parameter)) = stage_args.first().map(|arg| &arg.kind) else {
-            return Ok(None);
-        };
-        let Some(position) = params.iter().position(|name| name == parameter) else {
-            return Ok(None);
-        };
-        let Some(argument) = helper_args.get(position) else {
-            return Ok(None);
-        };
-        let Some(label) = string_literal(argument) else {
-            return Ok(None);
-        };
-        Some(label)
-    } else {
-        None
-    };
-    let open_row_instantiation = helper_stages.len() == 1
-        && helper_stages[0].input.is_none()
-        && helper_stages[0].output.is_none();
-    if helper_stages
-        .iter()
-        .any(|stage| stage.input.is_none() || stage.output.is_none())
-        && !open_row_instantiation
-    {
-        return Ok(None);
-    }
-    let instantiated_output = if open_row_instantiation {
-        let Some(columns) = tc
-            .typed_node(use_module, use_site)
-            .and_then(|node| node.row())
-        else {
-            return Ok(None);
-        };
-        Some(columns)
-    } else {
-        None
-    };
     let helper_syntax = &input.module(helper_module).def(helper_def).body;
+    let params = lambda_params(helper_syntax);
+    if params.iter().collect::<HashSet<_>>().len() != params.len() {
+        return Ok(None);
+    }
     let mut syntax = HashMap::new();
     index_exprs(helper_syntax, &mut syntax);
     for stage in helper_stages {
@@ -316,19 +265,15 @@ fn apply_helper(
             helper_module,
             syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
         );
-        let Some(input_columns) = stage.input.or_else(|| {
-            typed
-                .node(child)
-                .output_row()
-                .map(|row| row.columns().to_vec())
-        }) else {
+        let input_columns = checked.row().columns().to_vec();
+        if stage
+            .input
+            .as_deref()
+            .is_some_and(|expected| expected != input_columns)
+        {
             return Ok(None);
-        };
-        let Some(output_columns) = stage.output.or_else(|| instantiated_output.clone()) else {
-            return Ok(None);
-        };
+        }
         let input_row = Row::new(input_columns);
-        let output_row = Row::new(output_columns);
         let kind = match stage.kind {
             RowStage::Prefix => QueryNodeKind::Prefix,
             RowStage::Suffix => QueryNodeKind::Suffix,
@@ -336,17 +281,11 @@ fn apply_helper(
             RowStage::MapValue => QueryNodeKind::MapValue,
             _ => unreachable!(),
         };
-        let id = typed
-            .rewrite(
-                stage.node,
-                kind,
-                child,
-                Some(input_row),
-                Some(output_row.clone()),
-                origin,
-            )
-            .map_err(query_error)?;
-        let Some(label) = stage.label.or_else(|| instantiated_label.clone()) else {
+        let Some(label) = stage
+            .label
+            .clone()
+            .or_else(|| helper_witness(&stage, &syntax, &params, helper_args))
+        else {
             return Ok(None);
         };
         checked = match stage.kind {
@@ -357,14 +296,52 @@ fn apply_helper(
             _ => unreachable!(),
         }
         .map_err(|error| Error::unsupported(error.message).at(origin))?;
-        if checked.row().columns() != output_row.columns() {
-            return Err(
-                Error::unsupported("helper stage produced a different recorded row").at(origin),
-            );
+        let output_columns = checked.row().columns().to_vec();
+        if stage
+            .output
+            .as_deref()
+            .is_some_and(|expected| expected != output_columns.as_slice())
+        {
+            return Ok(None);
         }
+        let output_row = Row::new(output_columns);
+        let id = typed
+            .rewrite(
+                stage.node,
+                kind,
+                child,
+                Some(input_row),
+                Some(output_row.clone()),
+                origin,
+            )
+            .map_err(query_error)?;
         child = id;
     }
+    if tc
+        .typed_node(use_module, use_site)
+        .and_then(|node| node.row())
+        .is_some_and(|expected| expected != checked.row().columns())
+    {
+        return Ok(None);
+    }
     Ok(Some((child, checked)))
+}
+
+fn helper_witness(
+    stage: &crate::check::RowStageView,
+    syntax: &HashMap<u32, &Expr>,
+    params: &[String],
+    helper_args: &[Expr],
+) -> Option<String> {
+    let stage_expr = syntax.get(&stage.site)?;
+    let ExprKind::App(_, stage_args) = &stage_expr.kind else {
+        return None;
+    };
+    let Some(ExprKind::Name(parameter)) = stage_args.first().map(|arg| &arg.kind) else {
+        return None;
+    };
+    let position = params.iter().position(|name| name == parameter)?;
+    string_literal(helper_args.get(position)?)
 }
 
 fn copy_typed_chain(source: &TypedQuery, target: &mut TypedQuery) -> Result<NodeId, Error> {
@@ -955,6 +932,40 @@ mod tests {
                 "id".to_string(),
                 crate::core::ScalarType::Maybe(Box::new(crate::core::ScalarType::Int))
             )]
+        );
+    }
+
+    #[test]
+    fn multi_stage_helper_instantiates_each_open_row_boundary() {
+        let src = "users : query { id = int } = table \"s\" \"users\"\n\
+             helper = affix => ending => q => q & prefix affix & suffix ending\n\
+             q = users & helper \"h_\" \"_v2\"\n";
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let body = &ws.modules[ws.root].module.defs[def].body;
+        let input = CompilerInput::new(&ws, &tc);
+        let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
+        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        compare_with_terms(input, &typed, &checked, &terms).unwrap();
+        assert_eq!(checked.row().names(), &["h_id_v2"]);
+        let chain = typed.chain();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(typed.node(chain[0]).kind(), QueryNodeKind::Suffix);
+        assert_eq!(typed.node(chain[1]).kind(), QueryNodeKind::Prefix);
+        assert_eq!(
+            typed.node(chain[0]).input_row().unwrap().names(),
+            vec!["h_id"]
+        );
+        assert_eq!(
+            typed.node(chain[0]).output_row().unwrap().names(),
+            vec!["h_id_v2"]
         );
     }
 

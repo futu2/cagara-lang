@@ -92,25 +92,26 @@ pub(crate) fn reduce_merge(left: &Ty, right: &Ty) -> Option<Ty> {
         return None;
     }
 
-    // Right-wins merge: keep left field positions, replace collisions with right values,
-    // append right fields not in left
-    let mut result = left_fields.clone();
+    Some(Ty::Row(overlay(left_fields, right_fields), Box::new(Ty::Empty)))
+}
 
-    // Replace collisions
-    for (right_name, right_ty) in &right_fields {
-        if let Some(pos) = result.iter().position(|(n, _)| n == right_name) {
-            result[pos].1 = right_ty.clone();
+/// Overlay `right` on `left`: the left keeps its positions, a collision takes
+/// the right's value, and a name only the right has is appended, in the right's
+/// order.
+///
+/// One rule, in one place. The row reducer needs it at the type level and the
+/// scheme reader needs it at the closed level, and two spellings of "right
+/// wins" is how a signature and a query could come to disagree about which
+/// column a join or an `update` produces.
+pub(crate) fn overlay<T>(left: Vec<(String, T)>, right: Vec<(String, T)>) -> Vec<(String, T)> {
+    let mut out = left;
+    for (name, value) in right {
+        match out.iter_mut().find(|(n, _)| *n == name) {
+            Some(slot) => slot.1 = value,
+            None => out.push((name, value)),
         }
     }
-
-    // Append right-only fields
-    for (right_name, right_ty) in &right_fields {
-        if !left_fields.iter().any(|(n, _)| n == right_name) {
-            result.push((right_name.clone(), right_ty.clone()));
-        }
-    }
-
-    Some(Ty::Row(result, Box::new(Ty::Empty)))
+    out
 }
 
 /// The wrapper a `mapValue` label names, if it names one.

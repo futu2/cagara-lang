@@ -385,16 +385,8 @@ pub(crate) fn ty_fields(t: &Ty) -> Vec<(String, ScalarType)> {
             .map(|(n, t)| (n.clone(), ty_to_scalar(t)))
             .collect(),
         Ty::Con("query", args) if args.len() == 1 => ty_fields(&args[0]),
-        Ty::Merge(a, b) => {
-            let mut out = ty_fields(a);
-            for (n, t) in ty_fields(b) {
-                match out.iter_mut().find(|(o, _)| *o == n) {
-                    Some(slot) => slot.1 = t,
-                    None => out.push((n, t)),
-                }
-            }
-            out
-        }
+        // The merge rule is the reducer's, at the closed level.
+        Ty::Merge(a, b) => overlay(ty_fields(a), ty_fields(b)),
         // A wrapper is a label: a `Sym` names one, and an open label is not
         // known yet, so the columns are the input's until it is. The wrapping
         // itself is the mapper's own rule, at the closed level.

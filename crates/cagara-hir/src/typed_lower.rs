@@ -205,7 +205,16 @@ fn lower_helper_expr(
             let Some((helper_module, helper_def)) = helper_target(tc, module, body) else {
                 return Ok(None);
             };
-            return apply_helper(input, child, checked, helper_module, helper_def, typed);
+            return apply_helper(
+                input,
+                module,
+                body.id,
+                child,
+                checked,
+                helper_module,
+                helper_def,
+                typed,
+            );
         }
     }
 
@@ -214,6 +223,8 @@ fn lower_helper_expr(
 
 fn apply_helper(
     input: CompilerInput<'_>,
+    use_module: usize,
+    use_site: u32,
     mut child: NodeId,
     mut checked: CheckedQuery,
     helper_module: usize,
@@ -233,13 +244,32 @@ fn apply_helper(
             !matches!(
                 stage.kind,
                 RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
-            ) || stage.input.is_none()
-                || stage.output.is_none()
-                || stage.label.is_none()
+            ) || stage.label.is_none()
         })
     {
         return Ok(None);
     }
+    let open_row_instantiation = helper_stages.len() == 1
+        && helper_stages[0].input.is_none()
+        && helper_stages[0].output.is_none();
+    if helper_stages
+        .iter()
+        .any(|stage| stage.input.is_none() || stage.output.is_none())
+        && !open_row_instantiation
+    {
+        return Ok(None);
+    }
+    let instantiated_output = if open_row_instantiation {
+        let Some(columns) = tc
+            .typed_node(use_module, use_site)
+            .and_then(|node| node.row())
+        else {
+            return Ok(None);
+        };
+        Some(columns)
+    } else {
+        None
+    };
     let helper_syntax = &input.module(helper_module).def(helper_def).body;
     let mut syntax = HashMap::new();
     index_exprs(helper_syntax, &mut syntax);
@@ -248,8 +278,19 @@ fn apply_helper(
             helper_module,
             syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
         );
-        let input_row = Row::new(stage.input.expect("checked above"));
-        let output_row = Row::new(stage.output.expect("checked above"));
+        let Some(input_columns) = stage.input.or_else(|| {
+            typed
+                .node(child)
+                .output_row()
+                .map(|row| row.columns().to_vec())
+        }) else {
+            return Ok(None);
+        };
+        let Some(output_columns) = stage.output.or_else(|| instantiated_output.clone()) else {
+            return Ok(None);
+        };
+        let input_row = Row::new(input_columns);
+        let output_row = Row::new(output_columns);
         let kind = match stage.kind {
             RowStage::Prefix => QueryNodeKind::Prefix,
             RowStage::Suffix => QueryNodeKind::Suffix,
@@ -397,14 +438,20 @@ pub(crate) fn compare_with_terms(
             ),
             _ => return Err(fail("typed query route contains an unsupported stage")),
         };
+        let input_disagrees = expected_input
+            .is_some_and(|expected| node.input_row().map(|row| row.columns()) != Some(expected))
+            || (expected_input.is_none() && node.input_row().is_none());
+        let output_disagrees = expected_output
+            .is_some_and(|expected| node.output_row().map(|row| row.columns()) != Some(expected))
+            || (expected_output.is_none() && node.output_row().is_none());
         if node.site() != stage.node
             || node.kind() != expected_kind
             || node.origin().module != node.site().definition_module
             || syntax
                 .get(&stage.node.expr_id)
                 .is_none_or(|expr| node.origin().span != expr.span)
-            || node.input_row().map(|row| row.columns()) != expected_input
-            || node.output_row().map(|row| row.columns()) != expected_output
+            || input_disagrees
+            || output_disagrees
         {
             return Err(Error::unsupported(format!(
                 "typed and checker stage records disagree at {:?}",
@@ -710,6 +757,80 @@ mod tests {
         .unwrap();
         assert_eq!(typed.root_kind(), QueryNodeKind::Prefix);
         assert_eq!(checked.row().names(), &["h_id"]);
+    }
+
+    #[test]
+    fn row_polymorphic_helper_instantiates_its_use_site_row() {
+        let src = "users : query { id = int } = table \"s\" \"users\"\n\
+             helper = q => q & prefix \"h_\"\n\
+             q = users & helper\n";
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let input = CompilerInput::new(&ws, &tc);
+        let (typed, checked) = lower(
+            input,
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap()
+        .unwrap();
+        let terms = crate::normalize::elaborate_query_via_terms(
+            input,
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap();
+        compare_with_terms(input, &typed, &checked, &terms).unwrap();
+        assert_eq!(typed.root_kind(), QueryNodeKind::Prefix);
+        assert_eq!(
+            typed.node(typed.root()).input_row().unwrap().names(),
+            &["id"]
+        );
+        assert_eq!(checked.row().names(), &["h_id"]);
+    }
+
+    #[test]
+    fn one_open_row_helper_can_be_instantiated_repeatedly() {
+        let src = "users : query { id = int } = table \"s\" \"users\"\n\
+             helper = q => q & prefix \"h_\"\n\
+             q = users & helper & helper\n";
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let input = CompilerInput::new(&ws, &tc);
+        let (typed, checked) = lower(
+            input,
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap()
+        .unwrap();
+        let terms = crate::normalize::elaborate_query_via_terms(
+            input,
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap();
+        compare_with_terms(input, &typed, &checked, &terms).unwrap();
+        assert_eq!(typed.chain().len(), 3);
+        assert_eq!(checked.row().names(), &["h_h_id"]);
     }
 
     #[test]

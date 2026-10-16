@@ -275,12 +275,19 @@ Left-associated helper pipelines compose repeatedly, and imported helpers
 retain the imported definition module in each stage identity. Focused tests
 cover a signed helper, an alias followed by a helper, and an imported helper.
 
-The slice deliberately declines helpers with open row or witness information,
-unsupported relational stages, and overload-dependent bodies; those uses stay
-on the normalized term route. Repeated direct stages are already covered by
-the first slice. General polymorphic helper instantiation and overload
-selection still need use-site substitutions in the typed graph before this
-step can close.
+A single rewrite with an open helper row and a closed witness can use the
+caller's recorded result row as its instantiated output. This covers a
+row-polymorphic helper such as `q => q & prefix "h_"`, including repeated uses
+of the same helper in one pipeline; its input is checked against the typed
+child row and its result is still compared with the normalized route.
+
+The slice deliberately declines helpers with open witnesses, unsupported
+relational stages, and overload-dependent bodies; those uses stay on the
+normalized term route. Repeated direct stages are already covered by the first
+slice. General polymorphic helper instantiation and overload selection still
+need use-site substitutions in the typed graph before this step can close. In
+particular, a multi-stage helper whose own row records are open needs per-stage
+instantiated rows, not only the helper call's final row.
 
 Slice 1 is a **builder** that walks a definition's stage records and populates
 the arena, then a `CheckedQuery` constructed from the tree. The feasibility claim

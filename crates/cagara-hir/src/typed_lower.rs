@@ -202,7 +202,9 @@ fn lower_helper_expr(
             else {
                 return Ok(None);
             };
-            let Some((helper_module, helper_def)) = helper_target(tc, module, body) else {
+            let Some(((helper_module, helper_def), helper_args)) =
+                helper_application(tc, module, &args[1])
+            else {
                 return Ok(None);
             };
             return apply_helper(
@@ -213,6 +215,7 @@ fn lower_helper_expr(
                 checked,
                 helper_module,
                 helper_def,
+                &helper_args,
                 typed,
             );
         }
@@ -229,6 +232,7 @@ fn apply_helper(
     mut checked: CheckedQuery,
     helper_module: usize,
     helper_def: usize,
+    helper_args: &[Expr],
     typed: &mut TypedQuery,
 ) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
     let tc = input.type_check();
@@ -244,11 +248,45 @@ fn apply_helper(
             !matches!(
                 stage.kind,
                 RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
-            ) || stage.label.is_none()
+            )
         })
     {
         return Ok(None);
     }
+    let open_witness = helper_stages.len() == 1 && helper_stages[0].label.is_none();
+    if helper_stages.iter().any(|stage| stage.label.is_none()) && !open_witness {
+        return Ok(None);
+    }
+    let instantiated_label = if open_witness {
+        let helper_body = &input.module(helper_module).def(helper_def).body;
+        let params = lambda_params(helper_body);
+        if params.iter().collect::<HashSet<_>>().len() != params.len() {
+            return Ok(None);
+        }
+        let mut syntax = HashMap::new();
+        index_exprs(helper_body, &mut syntax);
+        let Some(stage_expr) = syntax.get(&helper_stages[0].site) else {
+            return Ok(None);
+        };
+        let ExprKind::App(_, stage_args) = &stage_expr.kind else {
+            return Ok(None);
+        };
+        let Some(ExprKind::Name(parameter)) = stage_args.first().map(|arg| &arg.kind) else {
+            return Ok(None);
+        };
+        let Some(position) = params.iter().position(|name| name == parameter) else {
+            return Ok(None);
+        };
+        let Some(argument) = helper_args.get(position) else {
+            return Ok(None);
+        };
+        let Some(label) = string_literal(argument) else {
+            return Ok(None);
+        };
+        Some(label)
+    } else {
+        None
+    };
     let open_row_instantiation = helper_stages.len() == 1
         && helper_stages[0].input.is_none()
         && helper_stages[0].output.is_none();
@@ -308,7 +346,9 @@ fn apply_helper(
                 origin,
             )
             .map_err(query_error)?;
-        let label = stage.label.expect("checked above");
+        let Some(label) = stage.label.or_else(|| instantiated_label.clone()) else {
+            return Ok(None);
+        };
         checked = match stage.kind {
             RowStage::Prefix => CheckedQuery::prefix(checked, label, origin),
             RowStage::Suffix => CheckedQuery::suffix(checked, label, origin),
@@ -511,19 +551,29 @@ fn query_target(
     }
 }
 
-fn helper_target(
+fn helper_application(
     tc: &crate::check::TypeCheck,
     module: usize,
     expr: &Expr,
-) -> Option<(usize, usize)> {
-    let ExprKind::App(_, args) = &expr.kind else {
+) -> Option<((usize, usize), Vec<Expr>)> {
+    let (head, args) = match &expr.kind {
+        ExprKind::App(head, args) => (&**head, args.to_vec()),
+        _ => (expr, Vec::new()),
+    };
+    let Resolved::Def(target) = tc.resolution(module, head.id)? else {
         return None;
     };
-    let helper = args.get(1)?;
-    let Resolved::Def(target) = tc.resolution(module, helper.id)? else {
-        return None;
-    };
-    Some(*target)
+    Some((*target, args))
+}
+
+fn lambda_params(expr: &Expr) -> Vec<String> {
+    let mut params = Vec::new();
+    let mut body = expr;
+    while let ExprKind::Lambda(parameter, next) = &body.kind {
+        params.push(parameter.clone());
+        body = next;
+    }
+    params
 }
 
 fn is_pipe_head(head: &Expr) -> bool {
@@ -831,6 +881,81 @@ mod tests {
         compare_with_terms(input, &typed, &checked, &terms).unwrap();
         assert_eq!(typed.chain().len(), 3);
         assert_eq!(checked.row().names(), &["h_h_id"]);
+    }
+
+    #[test]
+    fn open_helper_witness_comes_from_its_call_arguments() {
+        let src = "users : query { id = int } = table \"s\" \"users\"\n\
+             helper = affix => q => q & prefix affix\n\
+             q = users & helper \"h_\"\n";
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let input = CompilerInput::new(&ws, &tc);
+        let (typed, checked) = lower(
+            input,
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap()
+        .unwrap();
+        let terms = crate::normalize::elaborate_query_via_terms(
+            input,
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap();
+        compare_with_terms(input, &typed, &checked, &terms).unwrap();
+        assert_eq!(checked.row().names(), &["h_id"]);
+    }
+
+    #[test]
+    fn open_map_value_witness_comes_from_its_call_arguments() {
+        let src = "users : query { id = int } = table \"s\" \"users\"\n\
+             helper = wrapper => q => q & mapValue wrapper\n\
+             q = users & helper \"nullable\"\n";
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let input = CompilerInput::new(&ws, &tc);
+        let (typed, checked) = lower(
+            input,
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap()
+        .unwrap();
+        let terms = crate::normalize::elaborate_query_via_terms(
+            input,
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap();
+        compare_with_terms(input, &typed, &checked, &terms).unwrap();
+        assert_eq!(typed.root_kind(), QueryNodeKind::MapValue);
+        assert_eq!(
+            checked.row().columns(),
+            &[(
+                "id".to_string(),
+                crate::core::ScalarType::Maybe(Box::new(crate::core::ScalarType::Int))
+            )]
+        );
     }
 
     #[test]

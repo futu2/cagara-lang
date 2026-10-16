@@ -281,11 +281,16 @@ row-polymorphic helper such as `q => q & prefix "h_"`, including repeated uses
 of the same helper in one pipeline; its input is checked against the typed
 child row and its result is still compared with the normalized route.
 
-The slice deliberately declines helpers with open witnesses, unsupported
-relational stages, and overload-dependent bodies; those uses stay on the
-normalized term route. Repeated direct stages are already covered by the first
-slice. General polymorphic helper instantiation and overload selection still
-need use-site substitutions in the typed graph before this step can close. In
+A single open row rewrite can also take its witness from a literal argument at
+the helper call, as in `affix => q => q & prefix affix` or
+`wrapper => q => q & mapValue wrapper`. The helper parameter is matched to the
+stage witness, and the literal has already been checked at the call site.
+
+The slice deliberately declines helpers with witnesses that cannot be tied to
+a supplied literal, unsupported relational stages, and overload-dependent
+bodies; those uses stay on the normalized term route. Repeated direct stages
+are already covered by the first slice. General overload selection still needs
+use-site substitutions in the typed graph before this step can close. In
 particular, a multi-stage helper whose own row records are open needs per-stage
 instantiated rows, not only the helper call's final row.
 

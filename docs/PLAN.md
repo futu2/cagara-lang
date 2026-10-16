@@ -218,22 +218,25 @@ query structure and its row evidence first; expression payloads and removing
 the term route remain later work.
 
 `TypedQuery` now has ordered multi-input edges for joins and set operations, and
-records each child's checked output row. The lowering slice still does not
-construct those nodes: joins and sets are not `RowStage`s, and typed lowering
-still needs to consume the checker records for their operation identity, child
-query identities, and closed input/output rows. The next slice needs to build
-the two child subtrees before lowering joins and sets. Windows remain
-deferred until the expression payload bridge is carried by typed nodes.
+records each child's checked output row. Typed lowering constructs those nodes
+recursively, including both child subtrees, while keeping join predicates and
+other expression payloads on the normalized bridge. The recursive slice also
+accepts ordinary stages around a combine, so a filter, projection, row rewrite,
+ordering, or limit can consume a join or set result and a staged query can be
+used as either combine operand. Windows remain deferred until the expression
+payload bridge is carried by typed nodes.
 
 The checker records join and set applications on the typed expression node,
 including piped forms where the primitive is partially applied first. Each
 record has a stable application identity, operation kind, both operand rows in
-operand order, and the output row. Typed lowering now consumes these records
-for direct joins and sets over tables or typed query aliases, constructs both
-child subtrees, and checks the resulting output row against the checked route.
-Join predicates and other expression payloads still remain on the normalized
-bridge, and more complex combinations remain on the term route until those
-payloads and child instantiations are carried by typed nodes.
+operand order, and the output row. Typed lowering consumes these records for
+joins and sets over tables or typed query aliases, constructs both child
+subtrees recursively, and checks the resulting output row against the checked
+route. Ordinary stages can surround a combine and can occur inside either
+operand; graph copying preserves unary stages when a typed alias is
+instantiated. Join predicates and other expression payloads still remain on
+the normalized bridge, as do helper instantiations whose stage bodies are not
+yet represented directly in the typed nodes.
 
 ### Step 1, done
 

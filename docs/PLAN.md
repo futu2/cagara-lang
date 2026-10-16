@@ -222,8 +222,9 @@ payload bridge and removing the term route remain later work.
 
 `TypedQuery` now has ordered multi-input edges for joins and set operations, and
 records each child's checked output row. Typed lowering constructs those nodes
-recursively, including both child subtrees, while keeping join predicates and
-other expression payloads on the normalized bridge. The recursive slice also
+recursively, including both child subtrees, and carries checked join predicates
+on typed join nodes. Other expression payloads still use the normalized bridge.
+The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be
 used as either combine operand. Windows remain deferred until the expression
@@ -238,8 +239,7 @@ subtrees recursively, and checks the resulting output row against the checked
 route. Ordinary stages can surround a combine and can occur inside either
 operand; graph copying preserves unary stages when a typed alias is
 instantiated. Row-rewrite helpers are instantiated inside combine operands as
-well, with their definition identities preserved. Join predicates and other
-expression payloads still remain on the normalized bridge. Helpers whose stage
+well, with their definition identities preserved. Helpers whose stage
 bodies preserve their row (`where`, `order`, `limit`, `offset`, or `distinct`)
 are now instantiated inside combine operands too. A helper with one `select`,
 `update`, or `agg`, surrounded by any number of those row-preserving stages,

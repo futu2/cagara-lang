@@ -250,6 +250,8 @@ struct TypedQueryNode {
     order_keys: Option<Vec<(CheckedExpr, bool)>>,
     /// The checked output fields owned by a projection or aggregate node.
     projection_fields: Option<Vec<(String, CheckedExpr)>>,
+    /// The checked `on` expression owned by a join node.
+    join_predicate: Option<CheckedExpr>,
 }
 
 /// A read-only view of one typed query node.
@@ -327,6 +329,11 @@ impl<'a> QueryNode<'a> {
     /// The checked output fields owned by `select`, `update`, or `agg`.
     pub fn projection_fields(&self) -> Option<&[(String, CheckedExpr)]> {
         self.node.projection_fields.as_deref()
+    }
+
+    /// The checked `on` expression owned by a join node.
+    pub fn join_predicate(&self) -> Option<&CheckedExpr> {
+        self.node.join_predicate.as_ref()
     }
 }
 
@@ -485,6 +492,7 @@ impl TypedQuery {
             predicate: None,
             order_keys: None,
             projection_fields: None,
+            join_predicate: None,
         };
         Ok(self.push(node))
     }
@@ -519,6 +527,7 @@ impl TypedQuery {
             predicate: None,
             order_keys: None,
             projection_fields: None,
+            join_predicate: None,
         };
         if !kind.recomputes_row() {
             return Err(QueryErr::new(
@@ -576,7 +585,7 @@ impl TypedQuery {
         origin: Origin,
         predicate: Option<CheckedExpr>,
     ) -> Result<NodeId, QueryErr> {
-        self.keep_row_with_payload(site, kind, input, origin, predicate, None, None)
+        self.keep_row_with_payload(site, kind, input, origin, predicate, None, None, None)
     }
 
     /// A row-preserving stage with checked expression payloads.
@@ -589,6 +598,7 @@ impl TypedQuery {
         predicate: Option<CheckedExpr>,
         order_keys: Option<Vec<(CheckedExpr, bool)>>,
         projection_fields: Option<Vec<(String, CheckedExpr)>>,
+        join_predicate: Option<CheckedExpr>,
     ) -> Result<NodeId, QueryErr> {
         let row = self.raw(input).output_row.clone();
         let node = TypedQueryNode {
@@ -601,12 +611,14 @@ impl TypedQuery {
             predicate,
             order_keys,
             projection_fields,
+            join_predicate,
         };
         if kind.arity() != 1
             || kind.recomputes_row()
             || (node.predicate.is_some() && kind != QueryNodeKind::Where)
             || (node.order_keys.is_some() && kind != QueryNodeKind::Order)
             || node.projection_fields.is_some()
+            || node.join_predicate.is_some()
         {
             return Err(QueryErr::new(
                 &node,
@@ -644,6 +656,7 @@ impl TypedQuery {
             predicate: None,
             order_keys: None,
             projection_fields,
+            join_predicate: None,
         };
         if !matches!(
             kind,
@@ -668,6 +681,7 @@ impl TypedQuery {
         right: NodeId,
         output_row: Option<Row>,
         origin: Origin,
+        join_predicate: Option<CheckedExpr>,
     ) -> Result<NodeId, QueryErr> {
         let node = TypedQueryNode {
             site,
@@ -682,11 +696,18 @@ impl TypedQuery {
             predicate: None,
             order_keys: None,
             projection_fields: None,
+            join_predicate,
         };
         if kind.arity() != 2 || !matches!(kind, QueryNodeKind::Join(_) | QueryNodeKind::Set(_)) {
             return Err(QueryErr::new(
                 &node,
                 format!("{kind:?} is not a two-input relational operation"),
+            ));
+        }
+        if node.join_predicate.is_some() && !matches!(kind, QueryNodeKind::Join(_)) {
+            return Err(QueryErr::new(
+                &node,
+                format!("{kind:?} cannot carry a join predicate"),
             ));
         }
         Ok(self.push(node))
@@ -949,6 +970,7 @@ mod tests {
                 right,
                 Some(row(&["left", "right"])),
                 origin(),
+                None,
             )
             .expect("two-input join");
 
@@ -987,6 +1009,7 @@ mod tests {
                 right,
                 Some(row(&["id"])),
                 origin(),
+                None,
             )
             .is_err());
     }

@@ -2,7 +2,7 @@
 //!
 //! This builder consumes the checker-owned stage records and the typed query
 //! nodes' rows. It handles direct pipelines and recursively composed joins and
-//! set operations over tables or already typed query aliases. Expression
+//! set operations over tables or already typed query aliases. Some expression
 //! payloads remain on the normalized bridge, and shapes whose stage bodies
 //! cannot yet be instantiated return `None` for the established term route.
 #![allow(dead_code)] // Keep the slice self-contained while later stages land.
@@ -37,10 +37,10 @@ pub(crate) fn lower(
     if let Some(lowered) = lower_keep_pipeline(input, module, def, body)? {
         return Ok(Some(lowered));
     }
-    // The expression-bearing stages use the existing normalized expression
-    // bridge for their predicates, fields, and sort keys. Their relational
-    // boundaries still come from the typed stage records, so the query arena
-    // does not recover rows from the composed result type.
+    // The expression-bearing stages use the checked payload bridge for their
+    // predicates, fields, and sort keys. Their relational boundaries still
+    // come from the typed stage records, so the query arena does not recover
+    // rows from the composed result type.
     if let Some(lowered) = lower_expression_pipeline(input, module, def, body)? {
         return Ok(Some(lowered));
     }
@@ -185,9 +185,8 @@ pub(crate) fn lower(
 
 /// Lower a direct join or set operation whose two relational operands are
 /// tables or already typed query aliases. The checker record supplies the
-/// operation kind and both closed operand rows; the normalized route remains
-/// the source of the join predicate and final checked relation until payloads
-/// are carried by typed nodes.
+/// operation kind and both closed operand rows; the checked query supplies a
+/// join predicate when this operation is a join.
 fn lower_combine_pipeline(
     input: CompilerInput<'_>,
     module: usize,
@@ -231,7 +230,15 @@ fn lower_combine_pipeline(
     let output_row = combine.output.clone().map(Row::new);
     let origin = Origin::new(combine.node.definition_module, operation.span);
     let root = typed
-        .combine(combine.node, kind, left, right, output_row.clone(), origin)
+        .combine(
+            combine.node,
+            kind,
+            left,
+            right,
+            output_row.clone(),
+            origin,
+            checked_join_predicate(&terms, origin),
+        )
         .map_err(query_error)?;
     let Some(output_row) = output_row else {
         return Ok(None);
@@ -321,8 +328,23 @@ fn lower_composed_expr(
             let kind = combine_query_kind(combine.kind);
             let output = combine.output.clone().map(Row::new);
             let origin = Origin::new(combine.node.definition_module, operation.span);
+            let checked = crate::normalize::elaborate_query_via_terms(
+                input,
+                module,
+                def,
+                &input.module(module).def(def).body,
+            )?;
+            let join_predicate = checked_join_predicate(&checked, origin);
             let id = typed
-                .combine(combine.node, kind, left, right, output, origin)
+                .combine(
+                    combine.node,
+                    kind,
+                    left,
+                    right,
+                    output,
+                    origin,
+                    join_predicate,
+                )
                 .map_err(query_error)?;
             return Ok(Some(id));
         }
@@ -351,8 +373,23 @@ fn lower_composed_expr(
         let kind = combine_query_kind(combine.kind);
         let output = combine.output.clone().map(Row::new);
         let origin = Origin::new(combine.node.definition_module, operation.span);
+        let checked = crate::normalize::elaborate_query_via_terms(
+            input,
+            module,
+            def,
+            &input.module(module).def(def).body,
+        )?;
+        let join_predicate = checked_join_predicate(&checked, origin);
         let id = typed
-            .combine(combine.node, kind, left, right, output, origin)
+            .combine(
+                combine.node,
+                kind,
+                left,
+                right,
+                output,
+                origin,
+                join_predicate,
+            )
             .map_err(query_error)?;
         return Ok(Some(id));
     }
@@ -595,6 +632,22 @@ fn combine_query_kind(kind: CombineKind) -> QueryNodeKind {
     }
 }
 
+fn checked_join_predicate(
+    checked: &CheckedQuery,
+    origin: Origin,
+) -> Option<crate::checked::CheckedExpr> {
+    let joins: Vec<_> = checked
+        .node_chain_join_predicates()
+        .into_iter()
+        .filter(|(kind, _, _)| *kind == crate::checked::QueryKind::Join)
+        .collect();
+    joins
+        .iter()
+        .find(|(_, node_origin, _)| *node_origin == origin)
+        .or_else(|| (joins.len() == 1).then(|| &joins[0]))
+        .and_then(|(_, _, predicate)| predicate.clone())
+}
+
 fn contains_combine_record(tc: &crate::check::TypeCheck, module: usize, expr: &Expr) -> bool {
     combine_record_in(tc, module, expr).is_some()
 }
@@ -732,6 +785,7 @@ fn copy_typed_graph(source: &TypedQuery, target: &mut TypedQuery) -> Result<Node
                         right,
                         node.output_row().cloned(),
                         node.origin(),
+                        node.join_predicate().cloned(),
                     )
                     .map_err(query_error)?
             }
@@ -965,6 +1019,7 @@ fn lower_expression_pipeline(
                     } else {
                         None
                     },
+                    None,
                     None,
                 )
                 .map_err(query_error)?,
@@ -2184,6 +2239,13 @@ mod tests {
             QueryNodeKind::Join(crate::ir::JoinKind::Inner)
         );
         assert_eq!(typed.node(typed.root()).inputs().len(), 2);
+        assert_eq!(
+            typed
+                .node(typed.root())
+                .join_predicate()
+                .map(|predicate| predicate.kind()),
+            Some(crate::checked::ExprKind::Template)
+        );
         assert_eq!(checked.row().names(), &["id", "name", "uid"]);
         {
             let ws = Workspace::from_source(

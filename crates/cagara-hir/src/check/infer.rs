@@ -117,12 +117,15 @@ impl<'w> Checker<'w> {
         let r = self.check_def(i);
         self.depth -= 1;
         // Use types as far as checking got, even if it failed later on.
+        let mut typed_facts: HashMap<u32, Ty> = HashMap::new();
+        let mut shown_by_id: HashMap<u32, String> = HashMap::new();
         for (id, sp, t, lit) in std::mem::replace(&mut self.uses, saved_uses) {
             let shown = match (lit, self.resolve(&t)) {
                 (Some(l), Ty::Var(_)) => l.to_string(),
                 _ => self.show(&t),
             };
-            self.use_types.insert((m, sp.start, sp.end), shown);
+            self.use_types.insert((m, sp.start, sp.end), shown.clone());
+            shown_by_id.insert(id, shown);
             // The same facts keyed by `ExprId`, which is what a phase building a
             // typed tree from source needs: it walks the AST and asks "what type
             // did *this* node get?". The span map above cannot answer that — it
@@ -137,7 +140,22 @@ impl<'w> Checker<'w> {
             // definition's signature instead of reading off the node. `zonk`
             // resolves inside constructors, rows, and function arrows, so what
             // is stored here is the type the node actually got.
-            self.use_tys.insert((m, id), self.zonk(&t));
+            let zonked = self.zonk(&t);
+            self.use_tys.insert((m, id), zonked.clone());
+            typed_facts.insert(id, zonked);
+        }
+        // The same facts as a tree over the body, which is what a consumer
+        // walks: the maps above are read by `ExprId`, which is a question only
+        // a consumer that already knows the id can ask.
+        if !typed_facts.is_empty() {
+            let body = &self.env.defs[i].body;
+            let tree = crate::check::typed::build(
+                body,
+                |id| typed_facts.get(&id).cloned(),
+                |id| shown_by_id.get(&id).cloned(),
+                |id| self.resolutions.get(&(m, id)).cloned(),
+            );
+            self.typed_bodies.insert((m, i), tree);
         }
         // Whatever the definition learned about the probe's row, even if it
         // failed later on. Only the definition that actually referenced the

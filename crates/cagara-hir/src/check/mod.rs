@@ -55,6 +55,7 @@ mod reduce;
 mod row;
 mod stage;
 mod ty;
+mod typed;
 mod unify;
 
 use std::sync::Arc;
@@ -68,7 +69,7 @@ pub(crate) use row::*;
 pub(crate) use stage::*;
 pub(crate) use ty::*;
 
-pub(crate) use facts::{definition_facts, DefinitionFacts};
+pub(crate) use facts::{child_exprs, definition_facts, DefinitionFacts};
 /// The query stage a definition is, and one stage application's rows.
 pub use stage::{RowStage, RowStageView};
 pub use ty::Choice;
@@ -82,6 +83,8 @@ pub use ty::Choice;
 pub use ty::SchemeView;
 /// Scalar-type views of a `Ty`, for the checked layer (`crate::checked`).
 pub(crate) use ty::{scheme_result_expr, scheme_result_scalar, scheme_view};
+/// A definition's body as a typed tree, and one node of it.
+pub use typed::{TypedBody, TypedExpr};
 
 pub(crate) use crate::core::ScalarType;
 pub(crate) use crate::db::ModuleInput;
@@ -221,6 +224,20 @@ impl TypeCheck {
             .and_then(|m| m.row_stages.get(&(module, def)))
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    /// A definition's body as a typed tree, if the checker built one.
+    ///
+    /// This is the checker's own account of the definition, node by node: the
+    /// type each expression got, the row it is a query over, what a name
+    /// resolved to, and which sub-expressions belong to which node. A consumer
+    /// walks this instead of walking the AST and asking the maps what they saw.
+    ///
+    /// `None` for a definition the checker did not reach — a `sql` template,
+    /// whose signature is its type, or one that failed before any expression
+    /// was typed.
+    pub fn typed_body(&self, module: usize, def: usize) -> Option<&TypedBody> {
+        self.modules.get(module)?.typed.get(&(module, def))
     }
 
     /// Printed type of the name use whose expression spans `span` in `module`.
@@ -491,6 +508,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         use_types: out.use_types,
         resolutions: out.resolutions,
         row_stages: out.row_stages,
+        typed: out.typed,
     })
 }
 
@@ -523,6 +541,8 @@ struct ModuleOutput {
     resolutions: HashMap<(usize, u32), Resolved>,
     /// The stage nodes each definition recorded, by `(module, def)`.
     row_stages: HashMap<(usize, usize), Vec<RowStageView>>,
+    /// Each definition's body as a typed tree, by `(module, def)`.
+    typed: HashMap<(usize, usize), TypedBody>,
 }
 
 /// A checked module with its diagnostics already rendered.
@@ -548,6 +568,8 @@ struct ModuleCheck {
     resolutions: HashMap<(usize, u32), Resolved>,
     /// The stage nodes each definition recorded, by `(module, def)`.
     row_stages: HashMap<(usize, usize), Vec<RowStageView>>,
+    /// Each definition's body as a typed tree, by `(module, def)`.
+    typed: HashMap<(usize, usize), TypedBody>,
 }
 
 /// What checking one module reads: its definitions and scope, and every
@@ -590,6 +612,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         resolutions: HashMap::new(),
         row_stages: Vec::new(),
         row_stage_nodes: HashMap::new(),
+        typed_bodies: HashMap::new(),
         unify_depth: 0,
     };
     for i in 0..c.env.defs.len() {
@@ -606,6 +629,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
     let use_tys = c.use_tys;
     let resolutions = c.resolutions;
     let row_stages = c.row_stage_nodes;
+    let typed = c.typed_bodies;
     ModuleOutput {
         schemes: c.schemes,
         errors: c.errors,
@@ -617,6 +641,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         use_tys,
         resolutions,
         row_stages,
+        typed,
     }
 }
 

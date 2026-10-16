@@ -189,6 +189,113 @@ fn collect_cagara(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+/// The typed tree agrees with the maps, node for node.
+///
+/// The tree is meant to replace `use_tys`, `use_types`, and `resolutions`, so
+/// before anything reads it the two accounts have to be shown to be the same
+/// account. Every node of every shipped program is compared: its scalar type
+/// against `use_ty`, its row against `use_row`, its printed type against
+/// `use_type`, and its resolution against `resolution`.
+///
+/// The node *set* is compared too, against a walk of the AST using the same
+/// child order the tree was built with — a tree that quietly dropped a node
+/// would otherwise pass every per-node check.
+#[test]
+fn the_typed_tree_agrees_with_the_maps_on_every_shipped_program() {
+    let mut files = Vec::new();
+    for dir in [
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples"),
+    ] {
+        collect_cagara(&dir, &mut files);
+    }
+    files.sort();
+    assert!(!files.is_empty(), "no shipped programs were found");
+
+    let mut compared = 0usize;
+    for path in files {
+        let ws = Workspace::open(&path);
+        let tc = crate::check::check(&ws);
+        for (i, def) in ws.modules[ws.root].module.defs.iter().enumerate() {
+            let Some(tree) = tc.typed_body(ws.root, i) else {
+                continue;
+            };
+            // Every AST node is in the tree, and every tree node is in the AST.
+            let mut ast_ids = Vec::new();
+            let mut pending = vec![&def.body];
+            while let Some(e) = pending.pop() {
+                ast_ids.push(e.id);
+                pending.extend(crate::check::child_exprs(e));
+            }
+            let mut tree_ids: Vec<u32> = tree.nodes().iter().map(|n| n.id).collect();
+            ast_ids.sort_unstable();
+            tree_ids.sort_unstable();
+            assert_eq!(
+                tree_ids,
+                ast_ids,
+                "{} / `{}`: the tree does not cover the body",
+                path.display(),
+                def.name
+            );
+
+            for node in tree.nodes() {
+                assert_eq!(
+                    node.ty,
+                    tc.use_ty(ws.root, node.id),
+                    "{} / `{}`: node {} scalar type",
+                    path.display(),
+                    def.name,
+                    node.id
+                );
+                let mapped_row = match tc.use_scheme(ws.root, node.id) {
+                    Some(crate::check::SchemeView::Query { fields }) => fields,
+                    _ => None,
+                };
+                assert_eq!(
+                    node.row,
+                    mapped_row,
+                    "{} / `{}`: node {} row",
+                    path.display(),
+                    def.name,
+                    node.id
+                );
+                // The printed type is keyed by *span* on the boundary, and the
+                // span recorded for a use is not always the node's own — a
+                // deferred literal records its argument's — so compare where
+                // that map has an entry and otherwise assert the node carries
+                // a printed form at all.
+                match tc.use_type(ws.root, node.span) {
+                    Some(shown) => assert_eq!(
+                        node.shown,
+                        shown,
+                        "{} / `{}`: node {} printed type",
+                        path.display(),
+                        def.name,
+                        node.id
+                    ),
+                    None => assert!(
+                        node.shown.is_empty() == (node.ty.is_none() && node.row.is_none()),
+                        "{} / `{}`: node {} has a type but no printed form",
+                        path.display(),
+                        def.name,
+                        node.id
+                    ),
+                }
+                assert_eq!(
+                    node.resolved.as_ref(),
+                    tc.resolution(ws.root, node.id),
+                    "{} / `{}`: node {} resolution",
+                    path.display(),
+                    def.name,
+                    node.id
+                );
+                compared += 1;
+            }
+        }
+    }
+    assert!(compared > 0, "no shipped program produced a typed tree");
+}
+
 #[test]
 fn cached_compilation_matches_fresh_across_edits_errors_and_overloads() {
     let table = "users : query { a = int } = table \"s\" \"one\"\n";

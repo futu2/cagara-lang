@@ -765,6 +765,8 @@ pub(crate) struct Checker<'w> {
     /// The finished stage nodes of every definition checked so far, by
     /// `(module, def)`.
     pub(crate) row_stage_nodes: HashMap<(usize, usize), Vec<RowStageView>>,
+    /// Each definition's body as a typed tree, by `(module, def)`.
+    pub(crate) typed_bodies: HashMap<(usize, usize), TypedBody>,
     /// Recursion depth of `unify`, to turn a cyclic reduction into a
     /// diagnostic instead of a stack overflow.
     pub(crate) unify_depth: usize,

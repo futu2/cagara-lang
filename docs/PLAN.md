@@ -137,6 +137,16 @@ correctness, not as an optimization.
   re-rendering at the boundary, because its value folds in the literal fallback
   (`(Some(lit), Ty::Var(_)) => lit`) and the printer needs a resolver; it should
   go last, with the others already tree-backed.
+  `holes` is the one map that may not need migrating at all: it counts the
+  overloads a definition leaves open, and an overload constraint is born at a
+  site, becomes `Origin::Hole` when stored in a scheme, and becomes a site of
+  the *using* definition again when that scheme is instantiated — so the count
+  and the `Choice::Hole` entries in `choices` have agreed on every path traced,
+  and `compile::tests::an_inherited_hole_is_recorded_against_the_definition_that_inherits_it`
+  pins the re-attribution. Before deriving it, check the one path not traced:
+  `instantiate` is called with no site while resolving an overload, and a
+  candidate whose own scheme carried open overloads would keep `Origin::Hole`
+  into the caller's leftovers, where the count sees it and `choices` does not.
 
 ## Roadmap
 

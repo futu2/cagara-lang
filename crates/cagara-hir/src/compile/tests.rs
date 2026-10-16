@@ -1420,6 +1420,73 @@ fn an_overload_choice_is_keyed_by_the_use_site() {
     );
 }
 
+/// An inherited open overload is re-attributed to the definition that
+/// inherits it.
+///
+/// An overload constraint is born at a site (`overload.rs`), becomes
+/// `Origin::Hole` when it is stored in a scheme, and becomes a *site* of the
+/// using definition again when that scheme is instantiated (`infer.rs`). So a
+/// definition that applies another definition's still-open overload records
+/// the hole against **its own** use site, and `holes` — the count that decides
+/// whether a definition is elaborated at all — agrees with the holes its
+/// `choices` record, which is what makes the count readable from either.
+#[test]
+fn an_inherited_hole_is_recorded_against_the_definition_that_inherits_it() {
+    let ws = Workspace::from_source(
+        "users : query { id = int, age = int } = table \"public\" \"users\"\n\
+         h = e => users & select { x = e + 1, id = .id }\n\
+         mid = x => h x\n",
+    );
+    let tc = crate::check::check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    let defs = &ws.modules[ws.root].module.defs;
+    let h = defs.iter().position(|d| d.name == "h").expect("`h`");
+    let mid = defs.iter().position(|d| d.name == "mid").expect("`mid`");
+
+    // `h` opens the overload at the `+` in its own body.
+    assert_eq!(tc.holes(ws.root, h), 1, "`h` leaves one overload open");
+    let h_holes: Vec<_> = tc
+        .choices_of(ws.root, h)
+        .into_iter()
+        .filter(|(_, _, c)| matches!(c, crate::check::Choice::Hole(_)))
+        .collect();
+    assert_eq!(h_holes.len(), 1, "`h` records its own hole: {h_holes:?}");
+
+    // `mid` inherits it, and the hole is attributed to `mid`'s use of `h`.
+    assert_eq!(
+        tc.holes(ws.root, mid),
+        1,
+        "`mid` inherits `h`'s open overload"
+    );
+    let mid_holes: Vec<_> = tc
+        .choices_of(ws.root, mid)
+        .into_iter()
+        .filter(|(_, _, c)| matches!(c, crate::check::Choice::Hole(_)))
+        .collect();
+    assert_eq!(
+        mid_holes.len(),
+        1,
+        "`mid` records the hole it inherited: {:?}",
+        tc.choices_of(ws.root, mid)
+    );
+
+    // The site is the callee *name* node of `mid`'s own body — not `h`'s `+`.
+    let cagara_syntax::ast::ExprKind::Lambda(_, body) = &defs[mid].body.kind else {
+        panic!("`mid`'s body should be a lambda");
+    };
+    let cagara_syntax::ast::ExprKind::App(head, _) = &body.kind else {
+        panic!("`mid`'s body should apply `h`");
+    };
+    assert_eq!(
+        mid_holes[0].0, head.id,
+        "the inherited hole belongs to `mid`'s use of `h`"
+    );
+    assert_ne!(
+        mid_holes[0].0, h_holes[0].0,
+        "the two definitions record their holes at different sites"
+    );
+}
+
 /// The checker and the elaborator read the **same** AST, with the same
 /// `ExprId`s.
 ///

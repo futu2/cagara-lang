@@ -25,7 +25,7 @@ use super::*;
 /// A helper is not a stage: its scheme carries `None`, and the stages it
 /// applies are the nodes recorded in its own body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StageKind {
+pub enum RowStage {
     Where,
     Select,
     Update,
@@ -40,7 +40,7 @@ pub enum StageKind {
     Distinct,
 }
 
-impl StageKind {
+impl RowStage {
     /// The stage a primitive denotes, if it is a query stage.
     ///
     /// The relational primitives that are *not* stages — `table` (no input row
@@ -48,21 +48,21 @@ impl StageKind {
     /// `query input -> query output`), `merge`, and the expression-level
     /// primitives — are deliberately absent: a stage node is only meaningful
     /// for an operation that reads one row and produces one.
-    pub(crate) fn of_prim(p: Prim) -> Option<StageKind> {
+    pub(crate) fn of_prim(p: Prim) -> Option<RowStage> {
         use Prim::*;
         Some(match p {
-            Where => StageKind::Where,
-            Select => StageKind::Select,
-            Update => StageKind::Update,
-            Omit => StageKind::Omit,
-            Prefix => StageKind::Prefix,
-            Suffix => StageKind::Suffix,
-            MapValue => StageKind::MapValue,
-            AggStage => StageKind::Agg,
-            Order => StageKind::Order,
-            Limit => StageKind::Limit,
-            Offset => StageKind::Offset,
-            Distinct => StageKind::Distinct,
+            Where => RowStage::Where,
+            Select => RowStage::Select,
+            Update => RowStage::Update,
+            Omit => RowStage::Omit,
+            Prefix => RowStage::Prefix,
+            Suffix => RowStage::Suffix,
+            MapValue => RowStage::MapValue,
+            AggStage => RowStage::Agg,
+            Order => RowStage::Order,
+            Limit => RowStage::Limit,
+            Offset => RowStage::Offset,
+            Distinct => RowStage::Distinct,
             Table | Merge | In | Join(_) | Set(_) | Group | Asc | Desc | Rows
             | UnboundedPreceding | UnboundedFollowing | CurrentRow | Preceding | Following => {
                 return None
@@ -80,7 +80,7 @@ impl StageKind {
     fn recomputes(self) -> bool {
         matches!(
             self,
-            StageKind::Prefix | StageKind::Suffix | StageKind::Omit | StageKind::MapValue
+            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
         )
     }
 }
@@ -89,10 +89,10 @@ impl StageKind {
 ///
 /// The rows are `Ty`s because they may still be open at the moment the stage is
 /// applied — a helper's input row is its parameter — and are closed into
-/// [`StageView`]s once the definition is finished and its rows are solved.
+/// [`RowStageView`]s once the definition is finished and its rows are solved.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct PendingStage {
-    pub(crate) kind: StageKind,
+pub(crate) struct PendingRowStage {
+    pub(crate) kind: RowStage,
     /// The `ExprId` of the application, so a consumer can find the node.
     pub(crate) site: u32,
     pub(crate) span: Span,
@@ -110,8 +110,8 @@ pub(crate) struct PendingStage {
 /// `input`/`output` are `None` when the row is still open (a helper's stage
 /// applied to a parameter), which is different from a row with no columns.
 #[derive(Debug, Clone, PartialEq)]
-pub struct StageView {
-    pub kind: StageKind,
+pub struct RowStageView {
+    pub kind: RowStage,
     pub site: u32,
     pub span: Span,
     pub input: Option<Vec<(String, ScalarType)>>,
@@ -125,7 +125,7 @@ impl<'w> Checker<'w> {
     /// `prefix`'s scheme says it is a prefix stage wherever it is used, and a
     /// helper's says nothing (so a helper's use is not a stage application —
     /// the stages it applies were recorded in its own body).
-    pub(crate) fn callee_stage(&self, f: &ast::Expr) -> Option<StageKind> {
+    pub(crate) fn callee_row_stage(&self, f: &ast::Expr) -> Option<RowStage> {
         let Some(Resolved::Def((m, i))) = self.resolutions.get(&(self.module, f.id)) else {
             return None;
         };
@@ -145,9 +145,9 @@ impl<'w> Checker<'w> {
     /// (`query input -> query output`), not a row recovered from a composed
     /// result. `remaining` is the type the stage has left once the witness
     /// argument is consumed.
-    pub(crate) fn record_stage(
+    pub(crate) fn record_row_stage(
         &mut self,
-        kind: StageKind,
+        kind: RowStage,
         site: u32,
         span: Span,
         label: Ty,
@@ -161,7 +161,7 @@ impl<'w> Checker<'w> {
         else {
             return;
         };
-        self.stages.push(PendingStage {
+        self.row_stages.push(PendingRowStage {
             kind,
             site,
             span,
@@ -180,13 +180,13 @@ impl<'w> Checker<'w> {
     /// wrapper that does not wrap is a compiler bug, so it is an assertion
     /// rather than a diagnostic — the same way the schema layer asserts its own
     /// rules.
-    pub(crate) fn finish_stages(&mut self) -> Vec<StageView> {
+    pub(crate) fn finish_row_stages(&mut self) -> Vec<RowStageView> {
         let mut out = Vec::new();
-        for s in std::mem::take(&mut self.stages) {
+        for s in std::mem::take(&mut self.row_stages) {
             let input = self.zonk(&s.input);
             let output = self.zonk(&s.output);
             let label = self.zonk(&s.label);
-            if s.kind.recomputes() && !stage_agrees(s.kind, &label, &input, &output) {
+            if s.kind.recomputes() && !row_stage_agrees(s.kind, &label, &input, &output) {
                 debug_assert!(
                     false,
                     "stage {:?} at {:?} did not produce its output row from its input row: \
@@ -198,7 +198,7 @@ impl<'w> Checker<'w> {
                     self.show(&output),
                 );
             }
-            out.push(StageView {
+            out.push(RowStageView {
                 kind: s.kind,
                 site: s.site,
                 span: s.span,
@@ -230,15 +230,15 @@ impl<'w> Checker<'w> {
 /// Only the row rewrites are recomputed, and only when both rows are closed and
 /// the witness is known; anything else is "nothing to check" rather than a
 /// failure, so an open helper never trips the assertion.
-fn stage_agrees(kind: StageKind, label: &Ty, input: &Ty, output: &Ty) -> bool {
+fn row_stage_agrees(kind: RowStage, label: &Ty, input: &Ty, output: &Ty) -> bool {
     let Ty::Sym(name) = label else {
         return true;
     };
     let expected = match kind {
-        StageKind::Prefix => reduce_mapkey(&KeyMap::Prefix(name.clone()).to_ty(), input),
-        StageKind::Suffix => reduce_mapkey(&KeyMap::Suffix(name.clone()).to_ty(), input),
-        StageKind::Omit => reduce_removekey(label, input),
-        StageKind::MapValue => reduce_mapvalues(label, input),
+        RowStage::Prefix => reduce_mapkey(&KeyMap::Prefix(name.clone()).to_ty(), input),
+        RowStage::Suffix => reduce_mapkey(&KeyMap::Suffix(name.clone()).to_ty(), input),
+        RowStage::Omit => reduce_removekey(label, input),
+        RowStage::MapValue => reduce_mapvalues(label, input),
         _ => return true,
     };
     match expected {

@@ -1,4 +1,4 @@
-use super::{check, StageKind};
+use super::{check, RowStage};
 use crate::core::ScalarType;
 use crate::workspace::Workspace;
 use std::collections::HashMap;
@@ -65,12 +65,13 @@ fn row_of(src: &str, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// The stage nodes a definition recorded, as `(kind, input columns, output
-/// columns)`. A column is its name; `None` means the row is still open.
-fn stage_nodes(
-    src: &str,
-    name: &str,
-) -> Vec<(StageKind, Option<Vec<String>>, Option<Vec<String>>)> {
+/// One recorded row-rewrite stage: what it applied, the columns it read, and
+/// the columns it produced. A column is its name; `None` means the row is
+/// still open.
+type RecordedRowStage = (RowStage, Option<Vec<String>>, Option<Vec<String>>);
+
+/// The row-rewrite stages a definition recorded.
+fn row_stage_nodes(src: &str, name: &str) -> Vec<RecordedRowStage> {
     let ws = Workspace::from_source(&format!("{TABLES}{src}"));
     assert!(ws.diags.is_empty(), "{:?}", ws.diags);
     let tc = check(&ws);
@@ -85,7 +86,7 @@ fn stage_nodes(
         fs.as_ref()
             .map(|fs| fs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>())
     };
-    tc.stages(m, i)
+    tc.row_stages(m, i)
         .iter()
         .map(|s| (s.kind, names(&s.input), names(&s.output)))
         .collect()
@@ -1357,15 +1358,15 @@ fn stage_nodes_chain_their_rows() {
     let suffixed: Vec<String> = ["u_id_v2", "u_name_v2", "u_age_v2", "u_active_v2"]
         .map(str::to_string)
         .to_vec();
-    let nodes = stage_nodes("q = users & prefix \"u_\" & suffix \"_v2\"\n", "q");
+    let nodes = row_stage_nodes("q = users & prefix \"u_\" & suffix \"_v2\"\n", "q");
     assert_eq!(nodes.len(), 2, "{nodes:?}");
-    assert_eq!(nodes[0].0, StageKind::Prefix);
+    assert_eq!(nodes[0].0, RowStage::Prefix);
     assert_eq!(nodes[0].1.as_ref(), Some(&users));
     assert_eq!(nodes[0].2.as_ref(), Some(&renamed));
     // The second stage reads exactly what the first one produced, and its own
     // output is the row the later stages see.
     assert_eq!(nodes[1].1, nodes[0].2);
-    assert_eq!(nodes[1].0, StageKind::Suffix);
+    assert_eq!(nodes[1].0, RowStage::Suffix);
     assert_eq!(nodes[1].2.as_ref(), Some(&suffixed));
 }
 
@@ -1374,20 +1375,26 @@ fn two_deferred_key_stages_record_two_nodes() {
     // The reported program: two key stages whose affix is a parameter. Each
     // application owns a node, and the helper's rows stay open (they are its
     // parameter), which is exactly why the chain is instantiated at the use.
-    let nodes = stage_nodes("two = p => q => q & prefix p & prefix p\n", "two");
+    let nodes = row_stage_nodes("two = p => q => q & prefix p & prefix p\n", "two");
     assert_eq!(nodes.len(), 2, "{nodes:?}");
-    assert!(nodes.iter().all(|(kind, ..)| *kind == StageKind::Prefix), "{nodes:?}");
+    assert!(
+        nodes.iter().all(|(kind, ..)| *kind == RowStage::Prefix),
+        "{nodes:?}"
+    );
     assert_eq!(nodes[0].1, None, "a helper's input row is its parameter");
-    assert_eq!(nodes[1].1, nodes[0].2, "the second stage reads the first's output");
+    assert_eq!(
+        nodes[1].1, nodes[0].2,
+        "the second stage reads the first's output"
+    );
 }
 
 #[test]
 fn an_omit_node_records_the_removed_column() {
     let users: Vec<String> = ["id", "name", "age", "active"].map(str::to_string).to_vec();
     let kept: Vec<String> = ["id", "name", "active"].map(str::to_string).to_vec();
-    let nodes = stage_nodes("q = users & omit \"age\"\n", "q");
+    let nodes = row_stage_nodes("q = users & omit \"age\"\n", "q");
     assert_eq!(nodes.len(), 1, "{nodes:?}");
-    assert_eq!(nodes[0].0, StageKind::Omit);
+    assert_eq!(nodes[0].0, RowStage::Omit);
     assert_eq!(nodes[0].1.as_ref(), Some(&users));
     assert_eq!(nodes[0].2.as_ref(), Some(&kept));
 }
@@ -1423,16 +1430,19 @@ fn a_deferred_wrapper_travels_in_the_scheme() {
         ]
     );
     // An unknown wrapper is still the stage's own error, reported at the use.
-    let e = err("mv = w => q => q & mapValue w\nmain = users & mv \"nope\"\n", "main");
+    let e = err(
+        "mv = w => q => q & mapValue w\nmain = users & mv \"nope\"\n",
+        "main",
+    );
     assert!(e.contains("nope"), "{e}");
 }
 
 #[test]
 fn a_map_value_node_records_the_wrapped_row() {
     let users: Vec<String> = ["id", "name", "age", "active"].map(str::to_string).to_vec();
-    let nodes = stage_nodes("q = users & mapValue \"nullable\"\n", "q");
+    let nodes = row_stage_nodes("q = users & mapValue \"nullable\"\n", "q");
     assert_eq!(nodes.len(), 1, "{nodes:?}");
-    assert_eq!(nodes[0].0, StageKind::MapValue);
+    assert_eq!(nodes[0].0, RowStage::MapValue);
     assert_eq!(nodes[0].1.as_ref(), Some(&users));
     assert_eq!(nodes[0].2.as_ref(), Some(&users));
 }
@@ -1578,12 +1588,21 @@ fn a_key_stage_rule_travels_in_the_scheme() {
         row_of(src, "a"),
         vec!["name = string", "age = int", "active = bool"]
     );
-    assert_eq!(row_of(src, "b"), vec!["id = int", "age = int", "active = bool"]);
+    assert_eq!(
+        row_of(src, "b"),
+        vec!["id = int", "age = int", "active = bool"]
+    );
     // A missing column is still the stage's own error, reported at the use.
-    let e = err("drop = k => q => q & omit k\nmain = users & drop \"nope\"\n", "main");
+    let e = err(
+        "drop = k => q => q & omit k\nmain = users & drop \"nope\"\n",
+        "main",
+    );
     assert!(e.contains("no column `nope`"), "{e}");
     // And a *computed* key still cannot name a column.
-    let e = err("drop = k => q => q & omit k\nmain = users & drop .id\n", "main");
+    let e = err(
+        "drop = k => q => q & omit k\nmain = users & drop .id\n",
+        "main",
+    );
     assert!(e.contains("literal"), "{e}");
 }
 

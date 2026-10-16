@@ -677,7 +677,7 @@ pub(crate) struct Scheme {
     /// stage it applied without reading it back out of a composed result type;
     /// a helper carries `None`, and the stages it applies are the nodes
     /// recorded in its own body.
-    pub(crate) stage: Option<StageKind>,
+    pub(crate) stage: Option<RowStage>,
     /// The definition has a type error: its users fail too, instead of
     /// going on with a made-up type.
     pub(crate) failed: bool,
@@ -761,10 +761,10 @@ pub(crate) struct Checker<'w> {
     /// waiting to disagree with this one.
     pub(crate) resolutions: HashMap<(usize, u32), Resolved>,
     /// The stage applications of the definition being checked, in order.
-    pub(crate) stages: Vec<PendingStage>,
+    pub(crate) row_stages: Vec<PendingRowStage>,
     /// The finished stage nodes of every definition checked so far, by
     /// `(module, def)`.
-    pub(crate) stage_nodes: HashMap<(usize, usize), Vec<StageView>>,
+    pub(crate) row_stage_nodes: HashMap<(usize, usize), Vec<RowStageView>>,
     /// Recursion depth of `unify`, to turn a cyclic reduction into a
     /// diagnostic instead of a stack overflow.
     pub(crate) unify_depth: usize,

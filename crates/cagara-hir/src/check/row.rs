@@ -73,7 +73,9 @@ impl Row {
             Ty::Merge(left, right) => {
                 Row::Merge(Box::new(Row::of_ty(left)), Box::new(Row::of_ty(right)))
             }
-            Ty::MapValue(label, row) => Row::MapValues((**label).clone(), Box::new(Row::of_ty(row))),
+            Ty::MapValue(label, row) => {
+                Row::MapValues((**label).clone(), Box::new(Row::of_ty(row)))
+            }
             other => Row::Tail(other.clone()),
         }
     }
@@ -89,7 +91,9 @@ impl Row {
             Row::MapKeys(km, row) => Ty::MapKey(Box::new(km.clone()), Box::new(row.to_ty())),
             Row::Remove(k, row) => Ty::RemoveKey(Box::new(k.clone()), Box::new(row.to_ty())),
             Row::Merge(left, right) => Ty::Merge(Box::new(left.to_ty()), Box::new(right.to_ty())),
-            Row::MapValues(label, row) => Ty::MapValue(Box::new(label.clone()), Box::new(row.to_ty())),
+            Row::MapValues(label, row) => {
+                Ty::MapValue(Box::new(label.clone()), Box::new(row.to_ty()))
+            }
         }
     }
 }
@@ -224,10 +228,7 @@ fn reduce(env: &impl RowEnv, t: Ty) -> RowOutcome {
                 match reduce_mapkey(&km, &row) {
                     Some(reduced) => cur = env.resolve(&reduced),
                     None => {
-                        return RowOutcome::Open(
-                            fields,
-                            Ty::MapKey(Box::new(km), Box::new(row)),
-                        )
+                        return RowOutcome::Open(fields, Ty::MapKey(Box::new(km), Box::new(row)))
                     }
                 }
             }
@@ -271,10 +272,7 @@ fn reduce(env: &impl RowEnv, t: Ty) -> RowOutcome {
                 match reduce_merge(&left, &right) {
                     Some(reduced) => cur = env.resolve(&reduced),
                     None => {
-                        return RowOutcome::Open(
-                            fields,
-                            Ty::Merge(Box::new(left), Box::new(right)),
-                        )
+                        return RowOutcome::Open(fields, Ty::Merge(Box::new(left), Box::new(right)))
                     }
                 }
             }
@@ -374,7 +372,10 @@ mod tests {
             ),
             Box::new(two_columns()),
         );
-        assert_eq!(names(reduce_row(&Unbound, &nested)), vec!["u_id_v2", "u_name_v2"]);
+        assert_eq!(
+            names(reduce_row(&Unbound, &nested)),
+            vec!["u_id_v2", "u_name_v2"]
+        );
         assert_eq!(
             names(reduce_row(&Unbound, &nested)),
             names(reduce_row(&Unbound, &composed))
@@ -392,9 +393,15 @@ mod tests {
             } else {
                 KeyMap::Suffix(affix.to_string())
             };
-            let reduced = names(reduce_row(&Unbound, &Ty::MapKey(Box::new(km.to_ty()), Box::new(two_columns()))));
+            let reduced = names(reduce_row(
+                &Unbound,
+                &Ty::MapKey(Box::new(km.to_ty()), Box::new(two_columns())),
+            ));
             let columns: Vec<String> = vec!["id".into(), "name".into()];
-            assert_eq!(reduced, crate::schema::rename_columns(&columns, affix, prefix));
+            assert_eq!(
+                reduced,
+                crate::schema::rename_columns(&columns, affix, prefix)
+            );
         }
     }
 
@@ -415,7 +422,10 @@ mod tests {
         );
         match reduce_row(&Unbound, &outside) {
             RowOutcome::Open(fields, tail) => {
-                assert!(fields.is_empty(), "the column is inside the term: {fields:?}");
+                assert!(
+                    fields.is_empty(),
+                    "the column is inside the term: {fields:?}"
+                );
                 assert!(matches!(tail, Ty::MapKey(..)), "{tail:?}");
             }
             other => panic!("expected an open row, got {other:?}"),
@@ -464,10 +474,7 @@ mod tests {
         }
         // The same removal over an open row waits instead: the column may still
         // arrive.
-        let waiting = Ty::RemoveKey(
-            Box::new(Ty::Sym("nope".to_string())),
-            Box::new(Ty::Var(0)),
-        );
+        let waiting = Ty::RemoveKey(Box::new(Ty::Sym("nope".to_string())), Box::new(Ty::Var(0)));
         assert!(matches!(
             reduce_row(&Unbound, &waiting),
             RowOutcome::Open(..)
@@ -482,10 +489,7 @@ mod tests {
 
     #[test]
     fn a_removal_keeps_the_order_of_the_rest() {
-        let removed = Ty::RemoveKey(
-            Box::new(Ty::Sym("id".to_string())),
-            Box::new(two_columns()),
-        );
+        let removed = Ty::RemoveKey(Box::new(Ty::Sym("id".to_string())), Box::new(two_columns()));
         assert_eq!(names(reduce_row(&Unbound, &removed)), vec!["name"]);
     }
 

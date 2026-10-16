@@ -15,10 +15,7 @@ use crate::rules::{self, Place};
 /// same position and are recognised so a hand-written signature using one still
 /// gets the stage's own error rather than a bare type mismatch.
 fn is_key_parameter(p: &Ty) -> bool {
-    matches!(
-        p,
-        Ty::Con("keyLabel" | "valueLabel", _)
-    )
+    matches!(p, Ty::Con("keyLabel" | "valueLabel", _))
 }
 
 /// The label a key parameter declares: the type variable inside `keyLabel`, or
@@ -116,7 +113,7 @@ impl<'w> Checker<'w> {
         self.depth += 1;
         let saved = std::mem::take(&mut self.pending);
         let saved_uses = std::mem::take(&mut self.uses);
-        let saved_stages = std::mem::take(&mut self.stages);
+        let saved_stages = std::mem::take(&mut self.row_stages);
         let r = self.check_def(i);
         self.depth -= 1;
         // Use types as far as checking got, even if it failed later on.
@@ -158,7 +155,7 @@ impl<'w> Checker<'w> {
         // The stage nodes this definition recorded: what each stage application
         // read and produced. They are closed here, once the definition's rows
         // are solved, and dropped for a definition that failed.
-        let stages = self.finish_stages();
+        let stages = self.finish_row_stages();
         let scheme = match r {
             Ok(t) => {
                 // Constraints can bind the row after inference has built a
@@ -185,7 +182,7 @@ impl<'w> Checker<'w> {
                     self.holes.insert((m, i), k);
                 }
                 if !stages.is_empty() {
-                    self.stage_nodes.insert((m, i), stages);
+                    self.row_stage_nodes.insert((m, i), stages);
                 }
                 let mut scheme = self.generalize(&t, cons);
                 scheme.stage = self.def_stage(i);
@@ -206,7 +203,7 @@ impl<'w> Checker<'w> {
                 }
             }
         };
-        self.stages = saved_stages;
+        self.row_stages = saved_stages;
         self.schemes.insert((m, i), scheme.clone());
         self.fit_cache.clear();
         Some(scheme)
@@ -1076,10 +1073,10 @@ impl<'w> Checker<'w> {
 
     /// The stage a definition is, from its body. A `primitive` whose signature
     /// is a query stage owns that stage's row rule.
-    pub(crate) fn def_stage(&self, i: usize) -> Option<StageKind> {
+    pub(crate) fn def_stage(&self, i: usize) -> Option<RowStage> {
         match &self.env.defs[i].body.kind {
             ExprKind::Primitive(name) => {
-                crate::primitive::prim_of(name).and_then(StageKind::of_prim)
+                crate::primitive::prim_of(name).and_then(RowStage::of_prim)
             }
             _ => None,
         }
@@ -1483,7 +1480,7 @@ impl<'w> Checker<'w> {
                 // rule. A helper's scheme says nothing, so its use is not a
                 // stage application: the stages it applies were recorded in its
                 // own body, against its own parameter rows.
-                let stage = self.callee_stage(f);
+                let stage = self.callee_row_stage(f);
                 if is_key_parameter(&p) && !is_key_argument(arg) {
                     return Err(TyErr {
                         span: arg.span,
@@ -1496,7 +1493,7 @@ impl<'w> Checker<'w> {
                         // argument binds, so the node's witness is the same
                         // variable the stage's row term mentions.
                         let label = key_label(&p);
-                        self.record_stage(kind, e.id, f.span, label, &r);
+                        self.record_row_stage(kind, e.id, f.span, label, &r);
                     }
                 }
             }
@@ -1942,10 +1939,7 @@ impl<'w> Checker<'w> {
                     },
                     sp,
                 ));
-                fun(
-                    Ty::Con("keyLabel", vec![k]),
-                    fun(query(r), query(out)),
-                )
+                fun(Ty::Con("keyLabel", vec![k]), fun(query(r), query(out)))
             }
             // `mapValue "w"` wraps every field type. The rule is the
             // definition's own: the wrapper comes from the signature's
@@ -2089,7 +2083,10 @@ impl<'w> Checker<'w> {
                 );
                 fun(
                     Ty::Con("keyLabel", vec![k]),
-                    fun(query(r.clone()), query(Ty::MapKey(Box::new(label), Box::new(r)))),
+                    fun(
+                        query(r.clone()),
+                        query(Ty::MapKey(Box::new(label), Box::new(r))),
+                    ),
                 )
             }
         }

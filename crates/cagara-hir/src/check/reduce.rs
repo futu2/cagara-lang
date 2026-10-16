@@ -92,7 +92,10 @@ pub(crate) fn reduce_merge(left: &Ty, right: &Ty) -> Option<Ty> {
         return None;
     }
 
-    Some(Ty::Row(overlay(left_fields, right_fields), Box::new(Ty::Empty)))
+    Some(Ty::Row(
+        overlay(left_fields, right_fields),
+        Box::new(Ty::Empty),
+    ))
 }
 
 /// Overlay `right` on `left`: the left keeps its positions, a collision takes

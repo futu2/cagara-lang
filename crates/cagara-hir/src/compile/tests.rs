@@ -70,7 +70,11 @@ fn stage_nodes_agree_with_the_relational_rows() {
     let ws = Workspace::from_source(src);
     let tc = crate::check::check(&ws);
     let compilation = compile_checked(&ws, &tc);
-    assert!(compilation.diagnostics.is_empty(), "{:?}", compilation.diagnostics);
+    assert!(
+        compilation.diagnostics.is_empty(),
+        "{:?}",
+        compilation.diagnostics
+    );
 
     let nodes: Vec<_> = ws.modules[ws.root]
         .module
@@ -91,7 +95,7 @@ fn stage_nodes_agree_with_the_relational_rows() {
             };
             let compiled = stage_rows(rel);
             let recorded: Vec<(Vec<String>, Vec<String>)> = tc
-                .stages(ws.root, i)
+                .row_stages(ws.root, i)
                 .iter()
                 .map(|s| (node_columns(&s.input), node_columns(&s.output)))
                 .collect();
@@ -133,7 +137,7 @@ fn shipped_programs_stage_nodes_agree_with_the_relational_rows() {
         let compilation = compile_checked(&ws, &tc);
         for (i, def) in ws.modules[ws.root].module.defs.iter().enumerate() {
             let recorded: Vec<(Vec<String>, Vec<String>)> = tc
-                .stages(ws.root, i)
+                .row_stages(ws.root, i)
                 .iter()
                 .map(|s| (node_columns(&s.input), node_columns(&s.output)))
                 .collect();

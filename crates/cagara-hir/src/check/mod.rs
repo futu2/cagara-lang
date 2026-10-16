@@ -69,9 +69,9 @@ pub(crate) use stage::*;
 pub(crate) use ty::*;
 
 pub(crate) use facts::{definition_facts, DefinitionFacts};
-pub use ty::Choice;
 /// The query stage a definition is, and one stage application's rows.
-pub use stage::{StageKind, StageView};
+pub use stage::{RowStage, RowStageView};
+pub use ty::Choice;
 /// What shape a definition's scheme has.
 ///
 /// Public because [`TypeCheck::scheme_view`] returns it and a caller outside
@@ -215,10 +215,10 @@ impl TypeCheck {
     /// later pass must not have to recover from a composed type.
     ///
     /// Empty for a definition that applies no stage, and for one that failed.
-    pub fn stages(&self, module: usize, def: usize) -> &[StageView] {
+    pub fn row_stages(&self, module: usize, def: usize) -> &[RowStageView] {
         self.modules
             .get(module)
-            .and_then(|m| m.stages.get(&(module, def)))
+            .and_then(|m| m.row_stages.get(&(module, def)))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
@@ -490,7 +490,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         use_tys: out.use_tys,
         use_types: out.use_types,
         resolutions: out.resolutions,
-        stages: out.stages,
+        row_stages: out.row_stages,
     })
 }
 
@@ -522,7 +522,7 @@ struct ModuleOutput {
     /// What each module-scope name occurrence resolved to, by `ExprId`.
     resolutions: HashMap<(usize, u32), Resolved>,
     /// The stage nodes each definition recorded, by `(module, def)`.
-    stages: HashMap<(usize, usize), Vec<StageView>>,
+    row_stages: HashMap<(usize, usize), Vec<RowStageView>>,
 }
 
 /// A checked module with its diagnostics already rendered.
@@ -547,7 +547,7 @@ struct ModuleCheck {
     /// cannot recover it from the first.
     resolutions: HashMap<(usize, u32), Resolved>,
     /// The stage nodes each definition recorded, by `(module, def)`.
-    stages: HashMap<(usize, usize), Vec<StageView>>,
+    row_stages: HashMap<(usize, usize), Vec<RowStageView>>,
 }
 
 /// What checking one module reads: its definitions and scope, and every
@@ -588,8 +588,8 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         use_types: HashMap::new(),
         use_tys: HashMap::new(),
         resolutions: HashMap::new(),
-        stages: Vec::new(),
-        stage_nodes: HashMap::new(),
+        row_stages: Vec::new(),
+        row_stage_nodes: HashMap::new(),
         unify_depth: 0,
     };
     for i in 0..c.env.defs.len() {
@@ -605,7 +605,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
     let use_types = c.use_types;
     let use_tys = c.use_tys;
     let resolutions = c.resolutions;
-    let stages = c.stage_nodes;
+    let row_stages = c.row_stage_nodes;
     ModuleOutput {
         schemes: c.schemes,
         errors: c.errors,
@@ -616,7 +616,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         use_types,
         use_tys,
         resolutions,
-        stages,
+        row_stages,
     }
 }
 

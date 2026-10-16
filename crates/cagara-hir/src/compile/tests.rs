@@ -110,6 +110,33 @@ fn stage_nodes_agree_with_the_relational_rows() {
     }
 }
 
+#[test]
+fn production_stage_check_handles_repeated_helpers_and_imports() {
+    // Repeated stages exercise the one-record-one-match rule. The helper and
+    // imported query exercise the ownership boundary: their stage records live
+    // with the definition that applies them, not with the caller that inlines
+    // them.
+    let root_path = std::path::PathBuf::from("/tmp/cagara-stage-check/main.cagara");
+    let lib_path = std::path::PathBuf::from("/tmp/cagara-stage-check/lib.cagara");
+    let root = "import \"lib.cagara\" as lib\n\
+               users : query { id = int } = table \"s\" \"users\"\n\
+               helper = q => q & prefix \"h_\"\n\
+               repeated = users & prefix \"a_\" & prefix \"b_\"\n\
+               via_helper = users & helper\n\
+               via_import = lib.query\n";
+    let lib = "users : query { id = int } = table \"s\" \"lib_users\"\n\
+               query = users & prefix \"l_\"\n";
+    let buffers = HashMap::from([(lib_path, lib.to_string())]);
+    let ws = Workspace::open_with_buffers(&root_path, root.into(), &buffers);
+    let tc = crate::check::check(&ws);
+    let compilation = compile_checked(&ws, &tc);
+    assert!(
+        compilation.diagnostics.is_empty(),
+        "stage check rejected a valid helper/import program: {:?}",
+        compilation.diagnostics
+    );
+}
+
 /// The bridge visits every node the typed tree holds, except a projection's
 /// base.
 ///

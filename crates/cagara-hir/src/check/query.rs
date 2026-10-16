@@ -59,6 +59,7 @@
 #![allow(dead_code)]
 
 use super::NodeRef;
+use crate::checked::CheckedExpr;
 use crate::core::{Origin, ScalarType};
 use crate::ir::{JoinKind, SetKind};
 
@@ -242,6 +243,9 @@ struct TypedQueryNode {
     output_row: Option<Row>,
     /// Where the operation was written.
     origin: Origin,
+    /// The checked predicate owned by a `where` node, when this slice has
+    /// carried expression payloads into the typed query.
+    predicate: Option<CheckedExpr>,
 }
 
 /// A read-only view of one typed query node.
@@ -304,6 +308,11 @@ impl<'a> QueryNode<'a> {
     /// Where the operation was written.
     pub fn origin(&self) -> Origin {
         self.node.origin
+    }
+
+    /// The checked predicate carried by a `where` node.
+    pub fn predicate(&self) -> Option<&CheckedExpr> {
+        self.node.predicate.as_ref()
     }
 }
 
@@ -459,6 +468,7 @@ impl TypedQuery {
             input_rows: Vec::new(),
             output_row: Some(Row::new(columns)),
             origin,
+            predicate: None,
         };
         Ok(self.push(node))
     }
@@ -490,6 +500,7 @@ impl TypedQuery {
             input_rows: vec![input_row],
             output_row,
             origin,
+            predicate: None,
         };
         if !kind.recomputes_row() {
             return Err(QueryErr::new(
@@ -535,6 +546,18 @@ impl TypedQuery {
         input: NodeId,
         origin: Origin,
     ) -> Result<NodeId, QueryErr> {
+        self.keep_row_with_predicate(site, kind, input, origin, None)
+    }
+
+    /// A row-preserving stage with an already checked predicate payload.
+    pub(crate) fn keep_row_with_predicate(
+        &mut self,
+        site: NodeRef,
+        kind: QueryNodeKind,
+        input: NodeId,
+        origin: Origin,
+        predicate: Option<CheckedExpr>,
+    ) -> Result<NodeId, QueryErr> {
         let row = self.raw(input).output_row.clone();
         let node = TypedQueryNode {
             site,
@@ -543,8 +566,12 @@ impl TypedQuery {
             input_rows: vec![row.clone()],
             output_row: row,
             origin,
+            predicate,
         };
-        if kind.arity() != 1 || kind.recomputes_row() {
+        if kind.arity() != 1
+            || kind.recomputes_row()
+            || (node.predicate.is_some() && kind != QueryNodeKind::Where)
+        {
             return Err(QueryErr::new(
                 &node,
                 format!("{kind:?} does not preserve its input's row"),
@@ -577,6 +604,7 @@ impl TypedQuery {
             input_rows: vec![input_row],
             output_row,
             origin,
+            predicate: None,
         };
         if !matches!(
             kind,
@@ -612,6 +640,7 @@ impl TypedQuery {
             ],
             output_row,
             origin,
+            predicate: None,
         };
         if kind.arity() != 2 || !matches!(kind, QueryNodeKind::Join(_) | QueryNodeKind::Set(_)) {
             return Err(QueryErr::new(

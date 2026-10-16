@@ -873,6 +873,11 @@ fn lower_expression_pipeline(
         .map_err(query_error)?;
     let mut syntax = HashMap::new();
     index_exprs(body, &mut syntax);
+    let mut where_payloads = checked
+        .node_chain_predicates()
+        .into_iter()
+        .filter(|(kind, _)| *kind == crate::checked::QueryKind::Where)
+        .map(|(_, predicate)| predicate);
 
     for stage in stages {
         let input_row = Row::new(stage.input.clone().expect("checked above"));
@@ -917,7 +922,7 @@ fn lower_expression_pipeline(
             | RowStage::Limit
             | RowStage::Offset
             | RowStage::Distinct => typed
-                .keep_row(
+                .keep_row_with_predicate(
                     stage.node,
                     match stage.kind {
                         RowStage::Where => QueryNodeKind::Where,
@@ -929,6 +934,11 @@ fn lower_expression_pipeline(
                     },
                     child,
                     origin,
+                    if stage.kind == RowStage::Where {
+                        where_payloads.next().flatten()
+                    } else {
+                        None
+                    },
                 )
                 .map_err(query_error)?,
         };
@@ -2071,6 +2081,16 @@ mod tests {
             ]
         );
         assert_eq!(checked.row().names(), &["name", "older"]);
+        let where_node = typed
+            .chain()
+            .into_iter()
+            .map(|id| typed.node(id))
+            .find(|node| node.kind() == QueryNodeKind::Where)
+            .expect("typed pipeline has a where node");
+        assert_eq!(
+            where_node.predicate().map(|predicate| predicate.kind()),
+            Some(crate::checked::ExprKind::Template)
+        );
 
         let (typed, checked) = lower_source(
             "users : query { id = int, age = int } = table \"s\" \"users\"\n\

@@ -176,6 +176,41 @@ impl CheckedQuery {
         visit(self, &mut out);
         out
     }
+
+    /// The same input-to-root walk, retaining a `where` predicate when a node
+    /// owns one. Other relational nodes have no predicate payload.
+    pub(crate) fn node_chain_predicates(&self) -> Vec<(QueryKind, Option<CheckedExpr>)> {
+        fn visit(query: &CheckedQuery, out: &mut Vec<(QueryKind, Option<CheckedExpr>)>) {
+            match &query.node {
+                CheckedQueryNode::Table { .. } => {}
+                CheckedQueryNode::Where { input, .. }
+                | CheckedQueryNode::Select { input, .. }
+                | CheckedQueryNode::Update { input, .. }
+                | CheckedQueryNode::Omit { input, .. }
+                | CheckedQueryNode::Rename { input, .. }
+                | CheckedQueryNode::MapValue { input, .. }
+                | CheckedQueryNode::Agg { input, .. }
+                | CheckedQueryNode::Order { input, .. }
+                | CheckedQueryNode::Limit { input, .. }
+                | CheckedQueryNode::Offset { input, .. } => visit(input, out),
+                CheckedQueryNode::Distinct(input) => visit(input, out),
+                CheckedQueryNode::Join { left, right, .. }
+                | CheckedQueryNode::Set { left, right, .. } => {
+                    visit(left, out);
+                    visit(right, out);
+                }
+            }
+            let predicate = match &query.node {
+                CheckedQueryNode::Where { pred, .. } => Some(pred.clone()),
+                _ => None,
+            };
+            out.push((query.kind(), predicate));
+        }
+
+        let mut out = Vec::new();
+        visit(self, &mut out);
+        out
+    }
     /// A table, with its columns known.
     ///
     /// `columns` is the table's closed row: the checker gives a `table`

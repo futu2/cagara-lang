@@ -210,12 +210,13 @@ include `where`, `select`, `update`, `agg`, or `order`, and allows those stages
 to mix with the already supported row rewrites and row-preserving stages. The
 checker records their stage identity and input/output boundaries at application
 time. `where` and `order` take their rows from the typed child; projections and
-aggregates carry the checker's recorded output row. Predicates, projection
-fields, aggregate expressions, and sort keys still use the normalized
-expression bridge, and the checked relational result is still supplied by the
-term route and compared with the typed skeleton. This slice therefore moves the
-query structure and its row evidence first; expression payloads and removing
-the term route remain later work.
+aggregates carry the checker's recorded output row. A direct typed `where` node
+now also carries its checked predicate payload. Projection fields, aggregate
+expressions, sort keys, and payloads in composed/helper stages still use the
+normalized expression bridge, and the checked relational result is still
+supplied by the term route and compared with the typed skeleton. This slice
+moves one expression fact onto the typed graph; completing the payload bridge
+and removing the term route remain later work.
 
 `TypedQuery` now has ordered multi-input edges for joins and set operations, and
 records each child's checked output row. Typed lowering constructs those nodes

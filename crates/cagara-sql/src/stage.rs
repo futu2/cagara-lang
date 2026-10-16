@@ -548,11 +548,7 @@ fn subst_node(e: Expr, args: &[Expr]) -> Expr {
                 // `cagara_arg_N` as SQL, and a release build is where that
                 // would reach a user unnoticed. A panic here is a compiler bug
                 // reported loudly, which is the better of the two failures.
-                None => {
-                    assert!(false, "unvalidated placeholder `{name}`");
-                    #[allow(unreachable_code)]
-                    e
-                }
+                None => panic!("unvalidated placeholder `{name}`"),
             }
         }
         Expr::Function {

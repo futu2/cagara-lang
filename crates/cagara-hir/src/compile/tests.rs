@@ -254,6 +254,45 @@ fn transitive_users_change_while_an_independent_query_is_reused() {
     assert_eq!(edited, compile_checked(&ws, &crate::check::check(&ws)));
 }
 
+/// A dependency's *row* change dirties the definitions that use it.
+///
+/// `DefinitionFacts` records a use's scalar type, and a query-typed use is
+/// `None` on both sides of an edit — so this definition's own facts compare
+/// equal and cannot be the proof. What has to catch it is the walk over
+/// `dependencies`: the edited definition's own facts differ (its scheme's
+/// fields do), and every definition that names it is reached from there.
+///
+/// The edit is chosen so a stale reuse would be *wrong*, not merely
+/// redundant: `q` renames every column, so a row whose column is now `b` has
+/// to produce `p_b`, not `p_a`. It is also the same length, so the definitions
+/// after it keep their spans and are not dirtied merely by moving.
+#[test]
+fn a_row_change_dirties_the_definitions_that_use_it() {
+    let src = "users : query { a = int } = table \"s\" \"t\"\n\
+               q = users & prefix \"p_\"\n\
+               alone : query { a = int } = table \"s\" \"own\"\n";
+    let mut ws = Workspace::from_source(src);
+    assert!(compile(&ws).is_ok());
+    let before = crate::elaborate::elaborated_defs().len();
+    // Only `users`'s declaration: `alone` has the same text and must keep it.
+    assert!(ws.set_source(ws.root, src.replacen("{ a = int }", "{ b = int }", 1)));
+    let edited = compile(&ws);
+    let rerun = &crate::elaborate::elaborated_defs()[before..];
+    assert!(
+        rerun.contains(&(ws.root, 1)),
+        "`q` names the edited row and must not reuse a stale one; rerun {rerun:?}"
+    );
+    assert!(
+        !rerun.contains(&(ws.root, 2)),
+        "an independent definition must still be reused; rerun {rerun:?}"
+    );
+    assert_eq!(
+        edited,
+        compile_checked(&ws, &crate::check::check(&ws)),
+        "the reused compilation must equal a fresh one"
+    );
+}
+
 #[test]
 fn dependency_walk_handles_long_chains_and_cycles_without_recursing() {
     let mut source = "d0 = 1\n".to_string();

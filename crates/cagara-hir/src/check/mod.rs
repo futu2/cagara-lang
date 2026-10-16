@@ -52,6 +52,8 @@ mod infer;
 mod overload;
 mod print;
 mod reduce;
+mod row;
+mod stage;
 mod ty;
 mod unify;
 
@@ -62,10 +64,14 @@ use std::sync::Arc;
 // reach them with a single `use super::*;`, exactly as the pre-split single file
 // reached every item with no qualification.
 pub(crate) use reduce::*;
+pub(crate) use row::*;
+pub(crate) use stage::*;
 pub(crate) use ty::*;
 
 pub(crate) use facts::{definition_facts, DefinitionFacts};
 pub use ty::Choice;
+/// The query stage a definition is, and one stage application's rows.
+pub use stage::{StageKind, StageView};
 /// What shape a definition's scheme has.
 ///
 /// Public because [`TypeCheck::scheme_view`] returns it and a caller outside
@@ -199,6 +205,22 @@ impl TypeCheck {
             .collect();
         out.sort_by_key(|&(site, k, _)| (site, k));
         out
+    }
+
+    /// The stage nodes a definition recorded, in application order.
+    ///
+    /// Each node is one query-stage application: the operation it applied, the
+    /// row it read, and the row it produced. Adjacent nodes chain — a stage's
+    /// input row is the previous stage's output row — which is the boundary a
+    /// later pass must not have to recover from a composed type.
+    ///
+    /// Empty for a definition that applies no stage, and for one that failed.
+    pub fn stages(&self, module: usize, def: usize) -> &[StageView] {
+        self.modules
+            .get(module)
+            .and_then(|m| m.stages.get(&(module, def)))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Printed type of the name use whose expression spans `span` in `module`.
@@ -468,6 +490,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         use_tys: out.use_tys,
         use_types: out.use_types,
         resolutions: out.resolutions,
+        stages: out.stages,
     })
 }
 
@@ -498,6 +521,8 @@ struct ModuleOutput {
     use_types: HashMap<(usize, u32, u32), String>,
     /// What each module-scope name occurrence resolved to, by `ExprId`.
     resolutions: HashMap<(usize, u32), Resolved>,
+    /// The stage nodes each definition recorded, by `(module, def)`.
+    stages: HashMap<(usize, usize), Vec<StageView>>,
 }
 
 /// A checked module with its diagnostics already rendered.
@@ -521,6 +546,8 @@ struct ModuleCheck {
     /// this name refer to". A consumer expanding a call needs the second and
     /// cannot recover it from the first.
     resolutions: HashMap<(usize, u32), Resolved>,
+    /// The stage nodes each definition recorded, by `(module, def)`.
+    stages: HashMap<(usize, usize), Vec<StageView>>,
 }
 
 /// What checking one module reads: its definitions and scope, and every
@@ -561,6 +588,8 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         use_types: HashMap::new(),
         use_tys: HashMap::new(),
         resolutions: HashMap::new(),
+        stages: Vec::new(),
+        stage_nodes: HashMap::new(),
         unify_depth: 0,
     };
     for i in 0..c.env.defs.len() {
@@ -576,6 +605,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
     let use_types = c.use_types;
     let use_tys = c.use_tys;
     let resolutions = c.resolutions;
+    let stages = c.stage_nodes;
     ModuleOutput {
         schemes: c.schemes,
         errors: c.errors,
@@ -586,6 +616,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         use_types,
         use_tys,
         resolutions,
+        stages,
     }
 }
 

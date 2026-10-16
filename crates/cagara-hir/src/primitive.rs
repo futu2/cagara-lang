@@ -109,6 +109,21 @@ impl Prim {
         matches!(self, Where | Select | Update | AggStage | Join(_))
     }
 
+    /// Does the compiler own this primitive's row rule?
+    ///
+    /// A projection's signature *describes* an internal type — the record of
+    /// field expressions the stage constraint consumes — so `check_def`
+    /// reconciles the two. A key stage's signature *is* its type, and the row
+    /// rule that ties its input row to its output row is stated there
+    /// (`removeKey k r` for `omit`, `keyMap m r` for the renames). Registering
+    /// that rule once, for the definition, is what lets every use instantiate it
+    /// with fresh variables instead of rebuilding it from the callee's result
+    /// type. See `docs/TYPE-SYSTEM-REDESIGN.md`.
+    pub fn owns_row_rule(self) -> bool {
+        use Prim::*;
+        matches!(self, Omit | Prefix | Suffix | MapValue)
+    }
+
     pub fn arity(self) -> usize {
         use Prim::*;
         match self {

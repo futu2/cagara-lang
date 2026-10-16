@@ -35,15 +35,22 @@ so the mapping cannot come from an unrelated witness. `prependSym k` /
 `k` is still open — inside a helper — the term is retained exactly as a variable
 mapper is.
 
-Two consequences are load-bearing. First, the stage is read from the parameter's
-*result* (`query (keyMap …)` is a rename, anything else an `omit`), which is what
-lets `symbol k` serve both `omit` and the renames. Second, a `symbol` position
-lifts a string literal to `Ty::Sym` rather than to `string`, so the helper's
-parameter is generalized with its label marker intact and the literal binds the
-label at the use site.
+A `symbol` position lifts a string literal to `Ty::Sym` rather than to
+`string`, so a helper's parameter is generalized with its label intact and the
+literal binds that same label at the use site — which is what lets the helper
+stay polymorphic in both its affix and its row.
 
-`Cons::Omit` remains the source of the missing-column error; removing it needs a
-fallible reducer.
+The stage a definition *is* comes from its own body, not from its result type:
+each stage primitive's definition records its operation in the scheme it
+publishes (`Scheme::stage`), so a use site names the operation it applied
+without inspecting the type it produced. Recovering the stage from the result
+is what used to break a body with two key stages; see
+[`PLAN.md`](PLAN.md) under *Current behavior*.
+
+`Cons::Omit` is the source of the missing-column error: it is the `omit`
+definition's own obligation, instantiated per use, and the reducer tells it
+"not yet" (an open row or an unbound label) from "not there" (a known label over
+a closed row).
 
 Key mappers are first-order witnesses: `id`, `prefix "x"`, `suffix "x"`, and
 composition. `prefix` and `suffix` read their literal argument at the call
@@ -53,14 +60,16 @@ site, so a helper can remain polymorphic in its mapper and row:
 addPrefix = p => q => q & prefix p
 ```
 
-`mapValue` supports three wrappers. Read from the checker
-(`check/infer.rs`, the `wrapper.as_str()` match):
+`mapValue` supports three wrappers. The wrapper is a label in the type — the
+signature is `mapValue : valueLabel w -> query r -> query (mapValue w r)`, so
+the literal binds `w` on both sides exactly as `prefix`'s affix does. The names
+are decoded by one table (`check/reduce.rs`, `value_map_of`):
 
 | Wrapper | Effect |
 |---|---|
 | `"nullable"` | Wrap every field type in `maybe` |
 | `"list"` | Wrap every field type in `list` |
-| `"id"` | The identity mapper — no change, handled before the reduction |
+| `"id"` | The identity mapper — no change |
 
 `"nullable"` is the one outer joins use, to make the missing side's columns
 nullable. The wrappers are deliberately first-order; Cagara does not expose
@@ -96,5 +105,7 @@ operation until their tail is known; no guessed columns are introduced.
 The user-facing row operations are documented in [`LEARN.md`](LEARN.md) —
 `prefix`, `suffix` and `update` cover what `keyMap` and `merge` do. `mapValue`
 has no surface spelling outside the prelude's own use of it. The type
-implementation lives in `crates/cagara-hir/src/check/` (`infer.rs` for the
-operations, `reduce.rs` for the kind rules, `ty.rs` for the representation).
+implementation lives in `crates/cagara-hir/src/check/`: `row.rs` owns the row
+algebra and its single reducer, `stage.rs` the typed stage nodes, `infer.rs` the
+operations, `reduce.rs` the kind rules and the first-order reducers, and `ty.rs`
+the representation.

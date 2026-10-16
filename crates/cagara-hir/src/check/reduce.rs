@@ -113,6 +113,36 @@ pub(crate) fn reduce_merge(left: &Ty, right: &Ty) -> Option<Ty> {
     Some(Ty::Row(result, Box::new(Ty::Empty)))
 }
 
+/// The wrapper a `mapValue` label names, if it names one.
+///
+/// One table, read by the stage step that decodes the label and by the stage
+/// node that checks its own row. A second copy would be a second answer waiting
+/// to disagree.
+pub(crate) fn value_map_of(name: &str) -> Option<ValueMap> {
+    match name {
+        "nullable" => Some(ValueMap::AsNullable),
+        "list" => Some(ValueMap::AsList),
+        "id" => Some(ValueMap::Id),
+        _ => None,
+    }
+}
+
+/// The wrapper a *label* names, if it names one.
+///
+/// A label is a `Sym` once the use site has bound it; an open label (a variable)
+/// names nothing yet, which is the deferred case rather than an error.
+pub(crate) fn value_map_of_label(label: &Ty) -> Option<ValueMap> {
+    match label {
+        Ty::Sym(name) => value_map_of(name),
+        _ => None,
+    }
+}
+
+/// Reduce a `mapValue` term: decode its label, then wrap every field type.
+pub(crate) fn reduce_mapvalues(label: &Ty, row: &Ty) -> Option<Ty> {
+    reduce_mapvalue(&value_map_of_label(label)?, row)
+}
+
 /// Reduce a MapValue term when the row is closed.
 /// Returns None if the row is open (contains a variable tail).
 pub(crate) fn reduce_mapvalue(mapper: &ValueMap, row: &Ty) -> Option<Ty> {
@@ -204,10 +234,9 @@ pub(crate) const CONS: &[(&str, usize)] = &[
     // application, where the literal still is, so its parameter carries a
     // marker instead of a value type; `key_stage` recognises it and records the
     // literal in the stage's constraint or witness.
-    ("key_omit", 0),
-    ("key_prefix", 0),
-    ("key_suffix", 0),
-    ("value_wrapper", 0),
+    // `valueLabel w` — the witness `mapValue` takes, carried as a label so the
+    // operation travels in the type.
+    ("valueLabel", 1),
     // `merge r s` — the row former for a join's output row.
     ("merge", 2),
     // `mapValue w r` — the row term for a uniform type wrapper. `w` is the

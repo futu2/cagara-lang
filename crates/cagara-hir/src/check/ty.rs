@@ -35,8 +35,12 @@ pub(crate) enum Ty {
     /// Merge two rows: right-wins on collision, keeps old field positions,
     /// appends labels that occur only in the right row.
     Merge(Box<Ty>, Box<Ty>),
-    /// Value mapping over a row: applies a uniform type wrapper to every field type.
-    MapValue(ValueMap, Box<Ty>),
+    /// Value mapping over a row: every field type wrapped by the witness the
+    /// label names. The witness is a *label* (`Ty::Sym("nullable")`, say) rather
+    /// than a closed `ValueMap`, so it can still be a signature's variable —
+    /// `mapValue w r` with `valueLabel w` — and travel in the type exactly as a
+    /// `keyMap`'s mapper does.
+    MapValue(Box<Ty>, Box<Ty>),
     /// Remove one named field from a row: `removeKey k r`. The label is a type
     /// (normally `Sym`), so a signature's `k` links to the result. It reduces
     /// once the label is a `Sym`, `r` is closed, and `r` contains the label;
@@ -184,6 +188,22 @@ impl ValueMap {
             ValueMap::AsList => Ty::Con("list", vec![ty]),
         }
     }
+
+    /// The same wrapper at the *closed* level, for a reader that has only
+    /// [`ScalarType`]s (the scheme views). One rule, two domains: a second
+    /// spelling here is how a signature's columns and the row the reducer
+    /// produces could come to disagree about a wrapper.
+    pub(crate) fn apply_scalar(&self, ty: ScalarType) -> ScalarType {
+        match self {
+            ValueMap::Id => ty,
+            ValueMap::AsNullable => match ty {
+                // maybe (maybe t) = maybe t (idempotent)
+                ScalarType::Maybe(_) => ty,
+                _ => ScalarType::maybe(ty),
+            },
+            ValueMap::AsList => ScalarType::List(Box::new(ty)),
+        }
+    }
 }
 
 pub(crate) fn con(n: &'static str) -> Ty {
@@ -278,27 +298,18 @@ pub(crate) enum Cons {
     /// `omit "k"`: the row equation `input ~ { k : t | output }`. The unifier
     /// solves this with its own leftover rule — there is no bespoke column
     /// computation here.
-    Omit { key: String, input: Ty, output: Ty },
-    /// `prefix "s"` / `suffix "s"`: `output ~ keyMap m input`, where `m` is the
-    /// type-level mapper. Usually `m` is the concrete witness the affix names,
-    /// but a helper such as `addPrefix = p => q => q & prefix p` leaves it as a
-    /// variable, so this equation is what binds that variable once the affix is
-    /// known at a use.
-    ///
-    /// With `m` still a variable the term is retained (R-MapKey-Open); with `m`
-    /// concrete and `input` closed the output row is computed here.
-    MapKey {
-        marker: KeyMarker,
-        key: Ty,
-        input: Ty,
-        output: Ty,
-    },
-    /// `mapValue "wrapper"`: every column type wrapped by the witness.
-    MapValue {
-        wrapper: String,
-        input: Ty,
-        output: Ty,
-    },
+    /// `omit "k"`: the stage's own rule, `input ~ { k : t | output }`. The
+    /// label is a type (`symbol k`, bound to the literal's `Sym` at the use),
+    /// so the equation travels in the definition's scheme and every use
+    /// instantiates it with fresh variables. The missing-column error is
+    /// reported by this constraint, which is the operation that owns it.
+    Omit { label: Ty, input: Ty, output: Ty },
+    /// `mapValue "w"`: the stage's own rule, `output ~ mapValue w input`. The
+    /// witness is a type (`valueLabel w`, bound to the literal's `Sym` at the
+    /// use), so the equation travels in the definition's scheme and every use
+    /// instantiates it with fresh variables. An unknown wrapper is reported by
+    /// this constraint, which is the operation that owns it.
+    MapValue { label: Ty, output: Ty },
     /// `merge left right`: combine two rows; right-wins on collision.
     Merge { left: Ty, right: Ty, out: Ty },
     /// Use of an overload set at type `target`.
@@ -384,11 +395,19 @@ pub(crate) fn ty_fields(t: &Ty) -> Vec<(String, ScalarType)> {
             }
             out
         }
-        Ty::MapValue(ValueMap::AsNullable, r) => ty_fields(r)
-            .into_iter()
-            .map(|(n, t)| (n, ScalarType::maybe(t)))
-            .collect(),
-        Ty::MapValue(_, r) => ty_fields(r),
+        // A wrapper is a label: a `Sym` names one, and an open label is not
+        // known yet, so the columns are the input's until it is. The wrapping
+        // itself is the mapper's own rule, at the closed level.
+        Ty::MapValue(label, r) => {
+            let fields = ty_fields(r);
+            match value_map_of_label(label) {
+                Some(vm) => fields
+                    .into_iter()
+                    .map(|(n, t)| (n, vm.apply_scalar(t)))
+                    .collect(),
+                None => fields,
+            }
+        }
         _ => vec![],
     }
 }
@@ -620,29 +639,17 @@ impl Cons {
                 output: f(output),
                 result: f(result),
             },
-            Cons::Omit { key, input, output } => Cons::Omit {
-                key: key.clone(),
+            Cons::Omit {
+                label,
+                input,
+                output,
+            } => Cons::Omit {
+                label: f(label),
                 input: f(input),
                 output: f(output),
             },
-            Cons::MapKey {
-                marker,
-                key,
-                input,
-                output,
-            } => Cons::MapKey {
-                marker: *marker,
-                key: f(key),
-                input: f(input),
-                output: f(output),
-            },
-            Cons::MapValue {
-                wrapper,
-                input,
-                output,
-            } => Cons::MapValue {
-                wrapper: wrapper.clone(),
-                input: f(input),
+            Cons::MapValue { label, output } => Cons::MapValue {
+                label: f(label),
                 output: f(output),
             },
             Cons::Merge { left, right, out } => Cons::Merge {
@@ -672,6 +679,13 @@ pub(crate) struct Scheme {
     pub(crate) ty: Ty,
     pub(crate) cons: Vec<Cons>,
     pub(crate) gens: Vec<GenInfo>,
+    /// The stage this definition *is*, when its body is a `primitive`.
+    ///
+    /// The operation travels with the scheme so a use site can record which
+    /// stage it applied without reading it back out of a composed result type;
+    /// a helper carries `None`, and the stages it applies are the nodes
+    /// recorded in its own body.
+    pub(crate) stage: Option<StageKind>,
     /// The definition has a type error: its users fail too, instead of
     /// going on with a made-up type.
     pub(crate) failed: bool,
@@ -754,6 +768,11 @@ pub(crate) struct Checker<'w> {
     /// and re-deriving it by looking the name up again is a second answer
     /// waiting to disagree with this one.
     pub(crate) resolutions: HashMap<(usize, u32), Resolved>,
+    /// The stage applications of the definition being checked, in order.
+    pub(crate) stages: Vec<PendingStage>,
+    /// The finished stage nodes of every definition checked so far, by
+    /// `(module, def)`.
+    pub(crate) stage_nodes: HashMap<(usize, usize), Vec<StageView>>,
     /// Recursion depth of `unify`, to turn a cyclic reduction into a
     /// diagnostic instead of a stack overflow.
     pub(crate) unify_depth: usize,
@@ -775,92 +794,6 @@ pub(crate) fn names(fields: &[(String, Ty)]) -> String {
         .map(|(k, _)| k.as_str())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// The marker on a key parameter.
-///
-/// A key names a column (or supplies a label fragment) rather than being an
-/// ordinary expression, so it cannot be typed as one. The parameter therefore
-/// carries a marker type, and the application recognises that marker in order
-/// to read the literal where it is still written.
-///
-/// This is an enum rather than a set of string literals on purpose: the marker
-/// name used to be spelled out at the producer, at the consumer, and in the
-/// error text, with nothing tying the three together. A rename in one place
-/// silently broke another, which is how this file came to reference AST
-/// variants that no longer existed. One constructor, one spelling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KeyMarker {
-    /// `omit "k"` — drops one column.
-    Omit,
-    /// `prefix "s"` — prepends to every column name.
-    Prefix,
-    /// `suffix "s"` — appends to every column name.
-    Suffix,
-    /// `mapValue "w"` — wraps every field type.
-    ValueWrapper,
-}
-
-impl KeyMarker {
-    /// The type constructor standing for this marker in a signature.
-    pub(crate) fn ty(self) -> Ty {
-        let name = match self {
-            KeyMarker::Omit => "key_omit",
-            KeyMarker::Prefix => "key_prefix",
-            KeyMarker::Suffix => "key_suffix",
-            KeyMarker::ValueWrapper => "value_wrapper",
-        };
-        Ty::Con(name, Vec::new())
-    }
-
-    /// The marker a type denotes, if it denotes one.
-    pub(crate) fn of(t: &Ty) -> Option<KeyMarker> {
-        match t {
-            Ty::Con("key_omit", a) if a.is_empty() => Some(KeyMarker::Omit),
-            Ty::Con("key_prefix", a) if a.is_empty() => Some(KeyMarker::Prefix),
-            Ty::Con("key_suffix", a) if a.is_empty() => Some(KeyMarker::Suffix),
-            Ty::Con("value_wrapper", a) if a.is_empty() => Some(KeyMarker::ValueWrapper),
-            _ => None,
-        }
-    }
-
-    /// The `key_stage` key list tag for this marker. The tag is internal to
-    /// this file: it is produced only by [`KeyMarker::tag`] and matched only in
-    /// `key_stage`.
-    pub(crate) fn tag(self) -> &'static str {
-        match self {
-            KeyMarker::Omit => "key_omit",
-            KeyMarker::Prefix => "key_prefix",
-            KeyMarker::Suffix => "key_suffix",
-            KeyMarker::ValueWrapper => "value_wrapper",
-        }
-    }
-
-    /// Why this argument has to be a literal, and what to write instead.
-    pub(crate) fn literal_msg(self) -> String {
-        match self {
-            KeyMarker::Omit => {
-                "`omit` needs a literal column name, such as `omit \"password_hash\"`: the \
-                 column must be known when the query is checked"
-                    .into()
-            }
-            KeyMarker::Prefix => {
-                "`prefix` needs a literal string, such as `prefix \"user_\"`: the mapping is \
-                 part of the type, so it must be known when the query is checked"
-                    .into()
-            }
-            KeyMarker::Suffix => {
-                "`suffix` needs a literal string, such as `suffix \"_v2\"`: the mapping is part \
-                 of the type, so it must be known when the query is checked"
-                    .into()
-            }
-            KeyMarker::ValueWrapper => {
-                "`mapValue` needs a literal wrapper, such as `mapValue \"nullable\"` or \
-                 `mapValue \"list\"`"
-                    .into()
-            }
-        }
-    }
 }
 
 /// Error type and helpers shared by every `Checker` module. Moved here

@@ -1,4 +1,5 @@
-use super::check;
+use super::{check, StageKind};
+use crate::core::ScalarType;
 use crate::workspace::Workspace;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -61,6 +62,32 @@ fn row_of(src: &str, name: &str) -> Vec<String> {
         .split(',')
         .map(|f| f.trim().to_string())
         .filter(|f| !f.is_empty())
+        .collect()
+}
+
+/// The stage nodes a definition recorded, as `(kind, input columns, output
+/// columns)`. A column is its name; `None` means the row is still open.
+fn stage_nodes(
+    src: &str,
+    name: &str,
+) -> Vec<(StageKind, Option<Vec<String>>, Option<Vec<String>>)> {
+    let ws = Workspace::from_source(&format!("{TABLES}{src}"));
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let tc = check(&ws);
+    let m = ws.root;
+    let i = ws.modules[m]
+        .module
+        .defs
+        .iter()
+        .position(|d| d.name == name)
+        .expect("no such definition");
+    let names = |fs: &Option<Vec<(String, ScalarType)>>| {
+        fs.as_ref()
+            .map(|fs| fs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>())
+    };
+    tc.stages(m, i)
+        .iter()
+        .map(|s| (s.kind, names(&s.input), names(&s.output)))
         .collect()
 }
 
@@ -1315,6 +1342,249 @@ fn prefix_composes() {
         row_of("q = users & prefix \"u_\" & select {.u_id, .u_name}\n", "q"),
         vec!["u_id = int", "u_name = string"]
     );
+}
+
+#[test]
+fn stage_nodes_chain_their_rows() {
+    // Each stage application records the row it read and the row it produced,
+    // and the two chain: the second stage's input is the first stage's output.
+    // That boundary is what a body with two key stages lost — the second stage
+    // used to read the *composed* row as if it were its own input.
+    let users: Vec<String> = ["id", "name", "age", "active"].map(str::to_string).to_vec();
+    let renamed: Vec<String> = ["u_id", "u_name", "u_age", "u_active"]
+        .map(str::to_string)
+        .to_vec();
+    let suffixed: Vec<String> = ["u_id_v2", "u_name_v2", "u_age_v2", "u_active_v2"]
+        .map(str::to_string)
+        .to_vec();
+    let nodes = stage_nodes("q = users & prefix \"u_\" & suffix \"_v2\"\n", "q");
+    assert_eq!(nodes.len(), 2, "{nodes:?}");
+    assert_eq!(nodes[0].0, StageKind::Prefix);
+    assert_eq!(nodes[0].1.as_ref(), Some(&users));
+    assert_eq!(nodes[0].2.as_ref(), Some(&renamed));
+    // The second stage reads exactly what the first one produced, and its own
+    // output is the row the later stages see.
+    assert_eq!(nodes[1].1, nodes[0].2);
+    assert_eq!(nodes[1].0, StageKind::Suffix);
+    assert_eq!(nodes[1].2.as_ref(), Some(&suffixed));
+}
+
+#[test]
+fn two_deferred_key_stages_record_two_nodes() {
+    // The reported program: two key stages whose affix is a parameter. Each
+    // application owns a node, and the helper's rows stay open (they are its
+    // parameter), which is exactly why the chain is instantiated at the use.
+    let nodes = stage_nodes("two = p => q => q & prefix p & prefix p\n", "two");
+    assert_eq!(nodes.len(), 2, "{nodes:?}");
+    assert!(nodes.iter().all(|(kind, ..)| *kind == StageKind::Prefix), "{nodes:?}");
+    assert_eq!(nodes[0].1, None, "a helper's input row is its parameter");
+    assert_eq!(nodes[1].1, nodes[0].2, "the second stage reads the first's output");
+}
+
+#[test]
+fn an_omit_node_records_the_removed_column() {
+    let users: Vec<String> = ["id", "name", "age", "active"].map(str::to_string).to_vec();
+    let kept: Vec<String> = ["id", "name", "active"].map(str::to_string).to_vec();
+    let nodes = stage_nodes("q = users & omit \"age\"\n", "q");
+    assert_eq!(nodes.len(), 1, "{nodes:?}");
+    assert_eq!(nodes[0].0, StageKind::Omit);
+    assert_eq!(nodes[0].1.as_ref(), Some(&users));
+    assert_eq!(nodes[0].2.as_ref(), Some(&kept));
+}
+
+#[test]
+fn a_deferred_wrapper_travels_in_the_scheme() {
+    // `mapValue`'s witness is a label in its type now, so a helper whose
+    // wrapper is a parameter checks — the rule travels in the definition's
+    // scheme and each use instantiates it with its own wrapper. Before the
+    // witness was in the type this was impossible: the wrapper was read at the
+    // application, so a helper's parameter had nothing to bind.
+    let src = "mv = w => q => q & mapValue w\n\
+               a = users & mv \"nullable\"\n\
+               b = users & mv \"list\"\n";
+    assert_eq!(
+        row_of(src, "a"),
+        vec![
+            "id = maybe int",
+            "name = maybe string",
+            "age = maybe int",
+            "active = maybe bool"
+        ]
+    );
+    // The same helper at another wrapper gives that wrapper's row, with no
+    // trace of the first use.
+    assert_eq!(
+        row_of(src, "b"),
+        vec![
+            "id = list int",
+            "name = list string",
+            "age = list int",
+            "active = list bool"
+        ]
+    );
+    // An unknown wrapper is still the stage's own error, reported at the use.
+    let e = err("mv = w => q => q & mapValue w\nmain = users & mv \"nope\"\n", "main");
+    assert!(e.contains("nope"), "{e}");
+}
+
+#[test]
+fn a_map_value_node_records_the_wrapped_row() {
+    let users: Vec<String> = ["id", "name", "age", "active"].map(str::to_string).to_vec();
+    let nodes = stage_nodes("q = users & mapValue \"nullable\"\n", "q");
+    assert_eq!(nodes.len(), 1, "{nodes:?}");
+    assert_eq!(nodes[0].0, StageKind::MapValue);
+    assert_eq!(nodes[0].1.as_ref(), Some(&users));
+    assert_eq!(nodes[0].2.as_ref(), Some(&users));
+}
+
+#[test]
+fn two_key_stages_with_a_deferred_affix() {
+    // The two programs the redesign exists for: a body that renames twice where
+    // the first affix is a helper's parameter. `prefix`'s row rule belongs to
+    // `prefix`'s own definition and is instantiated once per use, so the second
+    // stage consumes the *first* stage's output instead of being recovered from
+    // the composed result type.
+    //
+    // Reading that composed `keyMap (m, keyMap (m, r))` as one layer over `r`
+    // — which is what a use site used to do — asked for `keyMap (m, r) ~ r`,
+    // and the occurs check refused it.
+    assert_eq!(
+        row_of(
+            "two = p => q => q & prefix p & prefix p\n\
+             main = users & two \"b_\"\n",
+            "main"
+        ),
+        vec![
+            "b_b_id = int",
+            "b_b_name = string",
+            "b_b_age = int",
+            "b_b_active = bool"
+        ]
+    );
+    // A deferred stage followed by a literal one keeps *both* renames, in order.
+    assert_eq!(
+        row_of(
+            "two = p => q => q & prefix p & prefix \"z_\"\n\
+             main = users & two \"b_\"\n",
+            "main"
+        ),
+        vec![
+            "z_b_id = int",
+            "z_b_name = string",
+            "z_b_age = int",
+            "z_b_active = bool"
+        ]
+    );
+    // The helper's own type names both mappers, so the composition is visible
+    // before any affix is known.
+    let t = ty("two = p => q => q & prefix p & prefix p\n", "two");
+    assert_eq!(t.matches("keyMap").count(), 2, "{t}");
+}
+
+#[test]
+fn three_key_stages_compose_in_order() {
+    assert_eq!(
+        row_of(
+            "three = p => q => q & prefix p & suffix \"_v2\" & prefix \"x_\"\n\
+             main = users & three \"b_\"\n",
+            "main"
+        ),
+        vec![
+            "x_b_id_v2 = int",
+            "x_b_name_v2 = string",
+            "x_b_age_v2 = int",
+            "x_b_active_v2 = bool"
+        ]
+    );
+}
+
+#[test]
+fn one_helper_two_affixes_have_independent_rows() {
+    // Each use instantiates the stage's rule with its own variables, so two
+    // uses of one helper at two literal affixes cannot share a row.
+    let src = "two = p => q => q & prefix p & prefix p\n\
+               a = users & two \"b_\"\n\
+               b = users & two \"c_\"\n";
+    assert_eq!(
+        row_of(src, "a"),
+        vec![
+            "b_b_id = int",
+            "b_b_name = string",
+            "b_b_age = int",
+            "b_b_active = bool"
+        ]
+    );
+    assert_eq!(
+        row_of(src, "b"),
+        vec![
+            "c_c_id = int",
+            "c_c_name = string",
+            "c_c_age = int",
+            "c_c_active = bool"
+        ]
+    );
+}
+
+#[test]
+fn mixed_prefix_and_suffix_through_a_helper() {
+    let src = "mix = p => q => q & prefix p & suffix \"_v2\"\n\
+               a = users & mix \"u_\"\n\
+               b = users & mix \"c_\"\n";
+    assert_eq!(
+        row_of(src, "a"),
+        vec![
+            "u_id_v2 = int",
+            "u_name_v2 = string",
+            "u_age_v2 = int",
+            "u_active_v2 = bool"
+        ]
+    );
+    assert_eq!(
+        row_of(src, "b"),
+        vec![
+            "c_id_v2 = int",
+            "c_name_v2 = string",
+            "c_age_v2 = int",
+            "c_active_v2 = bool"
+        ]
+    );
+}
+
+#[test]
+fn a_projection_after_a_deferred_rename() {
+    assert_eq!(
+        row_of(
+            "two = p => q => q & prefix p & prefix p\n\
+             main = users & two \"b_\" & select { .b_b_id, .b_b_name }\n",
+            "main"
+        ),
+        vec!["b_b_id = int", "b_b_name = string"]
+    );
+    // The un-renamed name is gone: the row the stage produced is the one later
+    // stages see.
+    let e = err("main = users & prefix \"b_\" & select { .id }\n", "main");
+    assert!(e.contains("no column `id`"), "{e}");
+}
+
+#[test]
+fn a_key_stage_rule_travels_in_the_scheme() {
+    // `omit`'s rule is its own definition's, so a helper whose key is a
+    // parameter is checked: the label stays a type variable until the use site
+    // binds it to a literal, and the row equation is instantiated there.
+    let src = "drop = k => q => q & omit k\n\
+               a = users & drop \"id\"\n\
+               b = users & drop \"name\"\n";
+    assert_eq!(
+        row_of(src, "a"),
+        vec!["name = string", "age = int", "active = bool"]
+    );
+    assert_eq!(row_of(src, "b"), vec!["id = int", "age = int", "active = bool"]);
+    // A missing column is still the stage's own error, reported at the use.
+    let e = err("drop = k => q => q & omit k\nmain = users & drop \"nope\"\n", "main");
+    assert!(e.contains("no column `nope`"), "{e}");
+    // And a *computed* key still cannot name a column.
+    let e = err("drop = k => q => q & omit k\nmain = users & drop .id\n", "main");
+    assert!(e.contains("literal"), "{e}");
 }
 
 #[test]

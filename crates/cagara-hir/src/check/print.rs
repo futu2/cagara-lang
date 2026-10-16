@@ -53,17 +53,16 @@ impl Printer {
                         .clone()
                 }
             },
-            // Omit/value-wrapper markers are string positions. A directional
-            // affix stage is a `symbol k` parameter now, printed by the
-            // `keyLabel` arm below.
-            Ty::Con("key_omit" | "key_pattern" | "key_replacement" | "value_wrapper", _) => {
-                "string".into()
-            }
             // A `symbol k` parameter: print the surface form, not the internal
-            // `keyLabel` marker, so a helper's signature reads the way it is
-            // written.
-            Ty::Con("keyLabel", args) if args.len() == 1 => {
-                format!("symbol {}", self.ty(&args[0], 2))
+            // marker, so a helper's signature reads the way it is written. A
+            // `valueLabel w` is the same kind of position for `mapValue`.
+            Ty::Con(n @ ("keyLabel" | "valueLabel"), args) if args.len() == 1 => {
+                let surface = if *n == "valueLabel" {
+                    "valueLabel"
+                } else {
+                    "symbol"
+                };
+                format!("{surface} {}", self.ty(&args[0], 2))
             }
             // The label-driven mappers are spelled `prependSym k` / `appendSym k`
             // at the source; the internal names would leak a representation
@@ -97,8 +96,8 @@ impl Printer {
             Ty::Merge(left, right) => {
                 format!("merge({}, {})", self.ty(left, 2), self.ty(right, 2))
             }
-            Ty::MapValue(vm, row) => {
-                format!("mapValue({:?}, {})", vm, self.ty(row, 2))
+            Ty::MapValue(label, row) => {
+                format!("mapValue({}, {})", self.ty(label, 2), self.ty(row, 2))
             }
             Ty::RemoveKey(k, row) => {
                 format!("removeKey({}, {})", self.ty(k, 2), self.ty(row, 2))

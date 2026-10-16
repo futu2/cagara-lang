@@ -86,9 +86,14 @@ update : expr r (row s) -> query r -> query (merge r s) = primitive "__update"
 omit : symbol k -> query r -> query (removeKey k r) = primitive "__omit"
 
 # `mapValue "w"` transforms all field types using a wrapper: `"nullable"`
-# wraps each in `maybe`, `"list"` wraps each in `list`. The wrapper is read at
-# the application, so it is recorded as the type-level term `mapValue w r`.
-mapValue : value_wrapper -> query r -> query s = primitive "__mapValue"
+# wraps each in `maybe`, `"list"` wraps each in `list`.
+#
+# The wrapper is a label, like `omit`'s column name: `valueLabel w` is the
+# parameter, the literal at the application binds `w`, and the result names the
+# type-level term `mapValue w r` — the same binding on both sides, so the
+# operation travels in the type and a stage's output row cannot come from an
+# unrelated wrapper.
+mapValue : valueLabel w -> query r -> query (mapValue w r) = primitive "__mapValue"
 
 # `prefix "s"` prepends a literal string to every column name.
 #

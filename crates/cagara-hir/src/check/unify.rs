@@ -100,7 +100,10 @@ impl<'w> Checker<'w> {
                 Ty::MapKey(..) => return true,
                 Ty::Row(_, tail) => cur = self.resolve(&tail),
                 Ty::Merge(left, _) => cur = self.resolve(&left),
-                Ty::MapValue(_, row) => cur = self.resolve(&row),
+                Ty::MapValue(label, row) => {
+                    cur = self.resolve(&row);
+                    let _ = label;
+                }
                 _ => return false,
             }
         }
@@ -129,76 +132,15 @@ impl<'w> Checker<'w> {
     }
 
     /// Row fields and the tail after following bound variables.
+    ///
+    /// The reader half of [`reduce_row`], in the shape a comparison wants: a
+    /// closed row's tail is `Empty`, and an open row's tail is whatever the
+    /// reducer could not reduce. A failure reads like an open row here — the
+    /// stage that owns the operation asks the reducer itself and reports it —
+    /// because a comparison through an unreduced term has to wait rather than
+    /// fail on a row that may still grow.
     pub(crate) fn flatten(&self, t: &Ty) -> (Vec<(String, Ty)>, Ty) {
-        let mut fs = Vec::new();
-        let mut cur = self.resolve(t);
-        loop {
-            match cur {
-                Ty::Row(more, tail) => {
-                    fs.extend(more);
-                    cur = self.resolve(&tail);
-                }
-                Ty::MapKey(km, row) => {
-                    // Resolve both components before trying to reduce. A
-                    // pipeline often binds the mapper and inner row through
-                    // separate applications, so leaving either child as a
-                    // variable makes an otherwise closed term look open.
-                    let km = self.resolve_mapper(&km);
-                    let (rf, rt) = self.flatten(&row);
-                    let row = row_or_tail(rf, rt);
-                    if let Some(reduced) = reduce_mapkey(&km, &row) {
-                        cur = reduced;
-                    } else {
-                        // Cannot reduce yet; return MapKey as tail
-                        return (fs, Ty::MapKey(Box::new(km), Box::new(row)));
-                    }
-                }
-                Ty::RemoveKey(k, row) => {
-                    // Resolve the label and the inner row before reducing. The
-                    // label is usually a variable bound at the call site.
-                    let k = self.zonk(&k);
-                    let (rf, rt) = self.flatten(&row);
-                    let row = row_or_tail(rf, rt);
-                    if let Some(reduced) = reduce_removekey(&k, &row) {
-                        cur = reduced;
-                    } else {
-                        // Still open, or the column is absent: keep the term.
-                        return (fs, Ty::RemoveKey(Box::new(k), Box::new(row)));
-                    }
-                }
-                Ty::Merge(left, right) => {
-                    // Resolve both operands before reducing. A join binds
-                    // each side through separate constraints, so the merge
-                    // often becomes closed only after this term was built.
-                    let left = self.resolve(&left);
-                    let right = self.resolve(&right);
-                    // A row tail can itself be a row after unification
-                    // (`{ id | tail }` with a closed input). Flatten those
-                    // nested tails before asking the first-order reducer
-                    // whether both merge operands are closed.
-                    let (lf, lt) = self.flatten(&left);
-                    let (rf, rt) = self.flatten(&right);
-                    let left = row_or_tail(lf, lt);
-                    let right = row_or_tail(rf, rt);
-                    if let Some(reduced) = reduce_merge(&left, &right) {
-                        cur = reduced;
-                    } else {
-                        // Cannot reduce yet; return Merge as tail
-                        return (fs, Ty::Merge(Box::new(left), Box::new(right)));
-                    }
-                }
-                Ty::MapValue(vm, row) => {
-                    let row = self.resolve(&row);
-                    if let Some(reduced) = reduce_mapvalue(&vm, &row) {
-                        cur = reduced;
-                    } else {
-                        // Cannot reduce yet; return MapValue as tail
-                        return (fs, Ty::MapValue(vm, Box::new(row)));
-                    }
-                }
-                other => return (fs, other),
-            }
-        }
+        reduce_row(self, t).parts()
     }
 
     pub(crate) fn zonk(&self, t: &Ty) -> Ty {
@@ -235,13 +177,14 @@ impl<'w> Checker<'w> {
                     Ty::Merge(Box::new(left), Box::new(right))
                 }
             }
-            Ty::MapValue(vm, row) => {
+            Ty::MapValue(label, row) => {
+                let label = self.zonk(&label);
                 let row = self.zonk(&row);
                 // Try to reduce after zonking
-                if let Some(reduced) = reduce_mapvalue(&vm, &row) {
+                if let Some(reduced) = reduce_mapvalues(&label, &row) {
                     self.zonk(&reduced)
                 } else {
-                    Ty::MapValue(vm, Box::new(row))
+                    Ty::MapValue(Box::new(label), Box::new(row))
                 }
             }
             Ty::RemoveKey(k, row) => {
@@ -264,7 +207,7 @@ impl<'w> Checker<'w> {
             Ty::Row(fs, tail) => fs.iter().any(|(_, t)| self.occurs(v, t)) || self.occurs(v, &tail),
             Ty::MapKey(_, row) => self.occurs(v, &row),
             Ty::Merge(left, right) => self.occurs(v, &left) || self.occurs(v, &right),
-            Ty::MapValue(_, row) => self.occurs(v, &row),
+            Ty::MapValue(label, row) => self.occurs(v, &label) || self.occurs(v, &row),
             Ty::RemoveKey(_, row) => self.occurs(v, &row),
             _ => false,
         }
@@ -542,8 +485,12 @@ impl<'w> Checker<'w> {
                 self.unify(&al, &el)?;
                 self.unify(&ar, &er)
             }
-            (Ty::MapValue(av, ar), Ty::MapValue(ev, er)) if av == ev => {
-                let (ar, er) = (ar.clone(), er.clone());
+            // Two value-map terms unify componentwise: the labels first, so an
+            // unbound one can adopt the witness the other side names, then the
+            // rows they wrap.
+            (Ty::MapValue(al, ar), Ty::MapValue(el, er)) => {
+                let (al, ar, el, er) = (al.clone(), ar.clone(), el.clone(), er.clone());
+                self.unify(&al, &el)?;
                 self.unify(&ar, &er)
             }
             // A `keyMap` term facing a concrete row reduces first, so a stage's
@@ -562,15 +509,30 @@ impl<'w> Checker<'w> {
                     // row has not been renamed — and it is what produced "no
                     // column `u_id`" for a stage that was about to be correct.
                     // Leaving the comparison satisfied-and-pending is safe: the
-                    // stage registered a `Cons::MapKey` equation, so `solve`
-                    // retries once the mapper and the row are both known, and
-                    // any genuine mismatch is reported then.
+                    // term is re-reduced on every later unification (`flatten`
+                    // and `zonk` both do it), so a genuine mismatch is reported
+                    // as soon as the row and the mapper are known. The rename is
+                    // a *type-level term*, not an obligation of a stage
+                    // constraint: a `keyMap` written by `prefix`'s own signature
+                    // is the operation, stated once.
                     _ => Ok(()),
                 }
             }
-            // `removeKey` is a row former like `merge`: an unreduced term is
-            // compared through its flattened row, so it waits until its inner
-            // row is known instead of being read as final.
+            // Two `removeKey` terms unify structurally, componentwise. This
+            // must come before the flattening arm below: both sides flatten to
+            // an empty field list plus the term as their tail, so comparing the
+            // tails there would re-enter this unification on the same terms and
+            // recurse until the depth bound. It is also the honest reading —
+            // `removeKey k r` is equal to `removeKey k' r'` exactly when the
+            // labels and the rows are.
+            (Ty::RemoveKey(ka, ra), Ty::RemoveKey(kb, rb)) => {
+                let (ka, ra, kb, rb) = (ka.clone(), ra.clone(), kb.clone(), rb.clone());
+                self.unify(&ka, &kb)?;
+                self.unify(&ra, &rb)
+            }
+            // `removeKey` against anything else is a row former like `merge`:
+            // an unreduced term is compared through its flattened row, so it
+            // waits until its inner row is known instead of being read as final.
             (Ty::RemoveKey(..), _) | (_, Ty::RemoveKey(..)) => self.unify_rows(&a, &e),
             (
                 Ty::Row(..),
@@ -578,7 +540,7 @@ impl<'w> Checker<'w> {
             )
             | (Ty::Empty | Ty::Rigid(..) | Ty::Merge(..) | Ty::MapValue(..), Ty::Row(..))
             | (Ty::Merge(..), Ty::Empty | Ty::Rigid(..) | Ty::MapValue(..))
-            | (Ty::MapValue(..), Ty::MapValue(..) | Ty::Merge(..) | Ty::Empty | Ty::Rigid(..)) => {
+            | (Ty::MapValue(..), Ty::Merge(..) | Ty::Empty | Ty::Rigid(..)) => {
                 self.unify_rows(&a, &e)
             }
             (Ty::Con(x, xs), Ty::Con(y, ys)) if x == y && xs.len() == ys.len() => {

@@ -34,6 +34,25 @@ the single source of validity rules.
 - Query stages are deferred constraints, so helpers can be reused with
   different rows. Aggregates and windows have explicit phases and cannot be
   placed where SQL would reject them.
+- **Each query stage owns its row rule, and every use instantiates it.** A
+  stage's operation is declared once, in the stage's own definition — the
+  `keyMap (prependSym k) r` term `prefix`'s signature names, the `removeKey k r`
+  `omit`'s names, the `mapValue w r` `mapValue`'s names — and the stage
+  constraint that ties the input row to the output row travels in that
+  definition's scheme. No pass reconstructs a stage's boundary from a composed
+  result type, which is what made a body with two key stages — `two = p => q =>
+  q & prefix p & prefix p`, and the same with a literal second affix — ask for
+  `keyMap (m, r) ~ r` and fail an occurs check. Both spellings check now, as do
+  three stages in a row, a helper reused at two affixes, and a helper whose
+  wrapper is a parameter (`w => q => q & mapValue w`).
+- Row algebra is one reducer: `crates/cagara-hir/src/check/row.rs` owns
+  flattening, mapper composition, removal, merging, and value wrapping, and
+  answers with a closed row, an open row (its columns so far and the tail it
+  could not reduce), or a specific failure — never a plausible partial row.
+- Checking records one **typed stage node** per stage application: the
+  operation, the row it read, and the row it produced, with an assertion that
+  the operation reproduces the output from the input. Adjacent nodes chain, so a
+  stage's input row is the previous stage's output row.
 - A filter over an aggregate **wraps a derived table**: it lowers to a `WHERE`
   outside the aggregate's subquery, like any other filter that cannot fold into
   its input. See "Aggregate filters and `HAVING`" under *Deliberately absent*
@@ -93,26 +112,6 @@ correctness, not as an optimization.
   expansion before being refused. Bounding the expansion itself means charging
   the budget inside the reduction, where `substitute` does the copying, which
   needs a failure channel through `Term::apply`.
-- A definition whose body applies **two** key stages — `prefix`, `suffix` — fails
-  to check when either affix is a helper's parameter rather than a literal:
-
-  ```haskell
-  two = p => q => q & prefix p & prefix p   -- infinite type: (keyMap((prefix "b_"), a))
-  two = p => q => q & prefix p & prefix "z_" -- the outer stage is lost from the type
-  ```
-
-  Two literal affixes work, and so does a single deferred one, so the fault is
-  the interaction between a deferred stage and a second key stage. The cause is
-  in `step_map_key` (`crates/cagara-hir/src/check/infer.rs`): it reads the
-  result row as **one** `keyMap` layer over the stage's input, which is what
-  `prefix`'s own signature says, but a definition that renames twice has
-  `keyMap (m, keyMap (m, r))` and the row beneath the outer mapper is not the
-  input. The constraint then asks `keyMap (m, r) ~ r`, which the occurs check
-  refuses. Walking to the innermost row and reducing the layers inside-out is
-  the shape of the fix, but doing only that regresses the cases that work today
-  (two literal affixes among them), because the layers are also tied to the
-  input by the ordinary inference around the constraint. It needs the
-  `Cons::MapKey` equation to carry the whole chain rather than one layer.
 - Some join combinations require extra derived tables because parenthesized
   joins are not yet represented directly.
 - `--optimize` is opt-in; it runs sqlglot optimization after Cagara lowering.

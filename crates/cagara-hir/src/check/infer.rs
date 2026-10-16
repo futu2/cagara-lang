@@ -7,6 +7,74 @@ use super::*;
 
 use crate::rules::{self, Place};
 
+/// Is this a key parameter — the position a stage reads its key from?
+///
+/// `omit` / `prefix` / `suffix` take a `symbol k`, which `conv` carries as a
+/// `keyLabel` around a type variable; the call site binds that variable to the
+/// literal's `Sym`. The bare marker constructors are the older spelling of the
+/// same position and are recognised so a hand-written signature using one still
+/// gets the stage's own error rather than a bare type mismatch.
+fn is_key_parameter(p: &Ty) -> bool {
+    matches!(
+        p,
+        Ty::Con("keyLabel" | "valueLabel", _)
+    )
+}
+
+/// The label a key parameter declares: the type variable inside `keyLabel`, or
+/// the marker itself for a hand-written signature that uses one.
+fn key_label(p: &Ty) -> Ty {
+    match p {
+        Ty::Con("keyLabel" | "valueLabel", args) if args.len() == 1 => args[0].clone(),
+        other => other.clone(),
+    }
+}
+
+/// Can this argument name a column or a label fragment?
+///
+/// Two forms can: a literal (the use-site spelling, `prefix "u_"`) and a bare
+/// name (a helper's own parameter, `addPrefix = p => q => q & prefix p`). A
+/// computed string cannot name a column, so it is refused rather than deferred.
+fn is_key_argument(arg: &ast::Expr) -> bool {
+    matches!(
+        arg.kind,
+        ExprKind::Lit(ast::Lit::Str(_)) | ExprKind::Name(_)
+    )
+}
+
+/// Why a key argument has to be a label, and what to write instead.
+///
+/// The message names the stage when the source does, because that is what the
+/// reader is looking at; a helper whose parameter is a label gets the generic
+/// wording, since the helper is not the stage that applies the mapping.
+fn key_argument_message(f: &ast::Expr) -> String {
+    match &f.kind {
+        ExprKind::Name(n) if n == "omit" => {
+            "`omit` needs a literal column name, such as `omit \"password_hash\"`: the \
+             column must be known when the query is checked"
+                .into()
+        }
+        ExprKind::Name(n) if n == "prefix" => {
+            "`prefix` needs a literal string, such as `prefix \"user_\"`: the mapping is \
+             part of the type, so it must be known when the query is checked"
+                .into()
+        }
+        ExprKind::Name(n) if n == "suffix" => {
+            "`suffix` needs a literal string, such as `suffix \"_v2\"`: the mapping is part \
+             of the type, so it must be known when the query is checked"
+                .into()
+        }
+        ExprKind::Name(n) if n == "mapValue" => {
+            "`mapValue` needs a literal wrapper, such as `mapValue \"nullable\"` or \
+             `mapValue \"list\"`"
+                .into()
+        }
+        _ => "a key argument must be a literal string, such as `prefix \"user_\"`: the \
+              mapping is part of the type, so it must be known when the query is checked"
+            .into(),
+    }
+}
+
 impl<'w> Checker<'w> {
     // ── definitions and schemes ────────────────────────────────────────────
 
@@ -48,6 +116,7 @@ impl<'w> Checker<'w> {
         self.depth += 1;
         let saved = std::mem::take(&mut self.pending);
         let saved_uses = std::mem::take(&mut self.uses);
+        let saved_stages = std::mem::take(&mut self.stages);
         let r = self.check_def(i);
         self.depth -= 1;
         // Use types as far as checking got, even if it failed later on.
@@ -86,6 +155,10 @@ impl<'w> Checker<'w> {
         }
         let left = std::mem::replace(&mut self.pending, saved);
         self.active.pop();
+        // The stage nodes this definition recorded: what each stage application
+        // read and produced. They are closed here, once the definition's rows
+        // are solved, and dropped for a definition that failed.
+        let stages = self.finish_stages();
         let scheme = match r {
             Ok(t) => {
                 // Constraints can bind the row after inference has built a
@@ -111,7 +184,12 @@ impl<'w> Checker<'w> {
                 if k > 0 {
                     self.holes.insert((m, i), k);
                 }
-                self.generalize(&t, cons)
+                if !stages.is_empty() {
+                    self.stage_nodes.insert((m, i), stages);
+                }
+                let mut scheme = self.generalize(&t, cons);
+                scheme.stage = self.def_stage(i);
+                scheme
             }
             Err(e) => {
                 self.errors.push(RawTypeError {
@@ -128,6 +206,7 @@ impl<'w> Checker<'w> {
                 }
             }
         };
+        self.stages = saved_stages;
         self.schemes.insert((m, i), scheme.clone());
         self.fit_cache.clear();
         Some(scheme)
@@ -230,7 +309,7 @@ impl<'w> Checker<'w> {
                     // table rather than mapping every name through it.
                     let internal = match &def.body.kind {
                         ExprKind::Primitive(name) => crate::primitive::prim_of(name)
-                            .filter(|p| p.is_projection())
+                            .filter(|p| p.is_projection() || p.owns_row_rule())
                             .map(|p| self.prim_type(p, def.body.span)),
                         _ => None,
                     };
@@ -555,12 +634,14 @@ impl<'w> Checker<'w> {
                         }
                     }
                     // `mapValue w r` — wrap every field type of `r` with the
-                    // wrapper `w`. The wrapper is read at the application, so a
-                    // variable here is not a value wrapper the checker can use.
+                    // wrapper `w` names. The witness is a *label*: a closed
+                    // `(AsNullable)` names one, and a bare variable is the
+                    // `valueLabel w` a signature declared, so the operation
+                    // travels in the type exactly as `keyMap`'s mapper does.
                     "mapValue" => {
-                        let w = self.conv_valuemap(&args[0])?;
+                        let w = self.conv_valuemap_label(&args[0], names)?;
                         let r = self.conv_with_kind(&args[1], phase, names, Kind::Row)?;
-                        Ok(Ty::MapValue(w, Box::new(r)))
+                        Ok(Ty::MapValue(Box::new(w), Box::new(r)))
                     }
                     // `keymapper m` introduces a `KeyMap`-kinded variable `m`,
                     // for a signature that takes a mapper as an argument:
@@ -737,22 +818,28 @@ impl<'w> Checker<'w> {
         }
     }
 
-    /// Convert a `ValueMap`-kinded symbol: `(AsNullable)`, `(AsList)`, `(Id)`.
-    /// Like a key mapper, the wrapper is closed data read at the application.
-    pub(crate) fn conv_valuemap(&mut self, t: &TypeExpr) -> Result<ValueMap, String> {
-        let TypeExpr::App { head, args, .. } = t else {
-            return Err("expected a value wrapper, such as `(AsNullable)`".into());
-        };
-        if !args.is_empty() {
-            return Err(format!("`{head}` takes no type argument"));
-        }
-        match head.as_str() {
-            "AsNullable" => Ok(ValueMap::AsNullable),
-            "AsList" => Ok(ValueMap::AsList),
-            "Id" => Ok(ValueMap::Id),
-            other => Err(format!(
-                "unknown value wrapper `{other}`; expected `Id`, `(AsNullable)`, or `(AsList)`"
-            )),
+    /// Convert a `mapValue` witness to the label the row term carries.
+    ///
+    /// A closed wrapper names its label (`(AsNullable)` is `"nullable"`), and a
+    /// bare type variable is the `valueLabel w` a signature declared — the same
+    /// variable in the parameter and in the result row, which is what lets the
+    /// operation travel in the type instead of being read at each application.
+    pub(crate) fn conv_valuemap_label(
+        &mut self,
+        t: &TypeExpr,
+        names: &mut HashMap<String, Ty>,
+    ) -> Result<Ty, String> {
+        match t {
+            TypeExpr::App { head, args, .. } if args.is_empty() => match head.as_str() {
+                "AsNullable" => Ok(Ty::Sym("nullable".to_string())),
+                "AsList" => Ok(Ty::Sym("list".to_string())),
+                "Id" => Ok(Ty::Sym("id".to_string())),
+                _ => Ok(self.rigid(head, names)),
+            },
+            _ => Err(
+                "expected a value wrapper, such as `(AsNullable)`, or a `valueLabel` variable"
+                    .into(),
+            ),
         }
     }
 
@@ -956,7 +1043,10 @@ impl<'w> Checker<'w> {
                 Box::new(self.inst(&left, map, gens)),
                 Box::new(self.inst(&right, map, gens)),
             ),
-            Ty::MapValue(vm, row) => Ty::MapValue(vm, Box::new(self.inst(&row, map, gens))),
+            Ty::MapValue(label, row) => Ty::MapValue(
+                Box::new(self.inst(&label, map, gens)),
+                Box::new(self.inst(&row, map, gens)),
+            ),
             Ty::RemoveKey(k, row) => Ty::RemoveKey(
                 Box::new(self.inst(&k, map, gens)),
                 Box::new(self.inst(&row, map, gens)),
@@ -979,7 +1069,19 @@ impl<'w> Checker<'w> {
             ty,
             cons: out,
             gens,
+            stage: None,
             failed: false,
+        }
+    }
+
+    /// The stage a definition is, from its body. A `primitive` whose signature
+    /// is a query stage owns that stage's row rule.
+    pub(crate) fn def_stage(&self, i: usize) -> Option<StageKind> {
+        match &self.env.defs[i].body.kind {
+            ExprKind::Primitive(name) => {
+                crate::primitive::prim_of(name).and_then(StageKind::of_prim)
+            }
+            _ => None,
         }
     }
 
@@ -1025,7 +1127,10 @@ impl<'w> Checker<'w> {
                 Box::new(self.gen(&left, map, gens)),
                 Box::new(self.gen(&right, map, gens)),
             ),
-            Ty::MapValue(vm, row) => Ty::MapValue(vm, Box::new(self.gen(&row, map, gens))),
+            Ty::MapValue(label, row) => Ty::MapValue(
+                Box::new(self.gen(&label, map, gens)),
+                Box::new(self.gen(&row, map, gens)),
+            ),
             Ty::RemoveKey(k, row) => Ty::RemoveKey(
                 Box::new(self.gen(&k, map, gens)),
                 Box::new(self.gen(&row, map, gens)),
@@ -1097,11 +1202,11 @@ impl<'w> Checker<'w> {
             ExprKind::Lit(ast::Lit::Str(s))
                 if matches!(
                     self.resolve(expected),
-                    Ty::Con("keyLabel", ref a) if a.len() == 1
+                    Ty::Con("keyLabel" | "valueLabel", ref a) if a.len() == 1
                 ) =>
             {
-                let Ty::Con("keyLabel", inner) = self.resolve(expected) else {
-                    unreachable!("matched a keyLabel expectation")
+                let Ty::Con(_, inner) = self.resolve(expected) else {
+                    unreachable!("matched a label expectation")
                 };
                 self.unify(&inner[0], &Ty::Sym(s.clone()))
                     .map_err(at(e.span))?;
@@ -1358,136 +1463,44 @@ impl<'w> Checker<'w> {
             unreachable!("dispatched on ExprKind::App")
         };
         let mut ft = self.infer(env, f)?;
-        // The key arguments of the key stages, read below.
-        let mut keys: Vec<(&'static str, String)> = Vec::new();
         for arg in args {
-            // A key argument (`omit "k"`, `prefix "p"`, or `suffix "s"`)
-            // names a column, so its value has to be known when the
-            // query is checked. It is read here, where the syntax still is, and
-            // recorded in the stage's constraint — which keeps column
-            // names out of the type language entirely. A computed key
-            // cannot name a column, so it is refused rather than
-            // deferred. See docs/ROW-TYPES.md.
             if let Ty::Fun(p, r) = self.resolve(&ft) {
-                // A key parameter carries a marker so the stage can be read
-                // where the argument still is: `symbol k` for `omit` and for
-                // the renames, whose *result* decides which of the two it is.
-                let marker = match (&*p, KeyMarker::of(&p)) {
-                    // `symbol k` is the label parameter of a key stage: `omit`,
-                    // and now `prefix`/`suffix`, whose result names the
-                    // label-driven mapper `prependSym k` / `appendSym k`. The
-                    // stage is read from the result: a `keyMap` whose mapper is
-                    // a label-driven witness is a prefix or suffix stage; any
-                    // other `symbol` parameter (`omit`) is an omit stage.
-                    //
-                    // The label variable is carried through as the marker's
-                    // payload, so binding it to the literal's `Sym` reaches both
-                    // `removeKey k r` and the result's mapper
-                    // `(labelPrefix k)` / `(labelSuffix k)`: they are the same
-                    // variable.
-                    (Ty::Con("keyLabel", args), _) if args.len() == 1 => {
-                        Some((self.keylabel_stage(&r), Some(args[0].clone())))
+                // A key argument (`omit "k"`, `prefix "p"`, `suffix "s"`) names
+                // a column or supplies a label fragment, so its value has to be
+                // known when the query is checked. The argument itself is
+                // checked like any other one — a literal binds the signature's
+                // label variable, and a helper's own parameter is a name — but a
+                // *computed* key cannot name a column, so it is refused here,
+                // where the syntax still is, rather than deferred.
+                //
+                // Nothing about the stage is recorded here. Its row rule
+                // belongs to the stage's own definition (`prim_type`), and every
+                // use instantiates that rule with fresh variables; rebuilding
+                // the rule here, out of the callee's *result* type, is what made
+                // a body with two key stages read the second stage's input as
+                // the composed row. See docs/TYPE-SYSTEM-REDESIGN.md.
+                // The stage this callee *is*, when its definition owns a row
+                // rule. A helper's scheme says nothing, so its use is not a
+                // stage application: the stages it applies were recorded in its
+                // own body, against its own parameter rows.
+                let stage = self.callee_stage(f);
+                if is_key_parameter(&p) && !is_key_argument(arg) {
+                    return Err(TyErr {
+                        span: arg.span,
+                        msg: key_argument_message(f),
+                    });
+                }
+                if is_key_parameter(&p) {
+                    if let Some(kind) = stage {
+                        // The label the signature declared is the one this
+                        // argument binds, so the node's witness is the same
+                        // variable the stage's row term mentions.
+                        let label = key_label(&p);
+                        self.record_stage(kind, e.id, f.span, label, &r);
                     }
-                    (_, Some(m)) => Some((m, None)),
-                    _ => None,
-                };
-                if let Some((marker, carried)) = marker {
-                    // A key argument names a column or supplies a label
-                    // fragment. When it is a literal, read it here where
-                    // the syntax still is and record it in the stage's
-                    // witness. When it is *not* a literal the mapping
-                    // cannot be applied yet, so the stage is deferred
-                    // and the argument's type is what carries the mapper
-                    // — which is what types `addPrefix = p => q => q &
-                    // prefix p`.
-                    let affix = match &arg.kind {
-                        ExprKind::Lit(ast::Lit::Str(s)) => Some(s.clone()),
-                        _ => None,
-                    };
-                    self.span = arg.span;
-                    match (marker, affix) {
-                        // `omit` needs the column name now: it is a row
-                        // equation, and there is no deferring away the
-                        // fact that the equation names a column.
-                        (KeyMarker::Omit, None) => {
-                            return Err(TyErr {
-                                span: arg.span,
-                                msg: marker.literal_msg(),
-                            });
-                        }
-                        (KeyMarker::Prefix | KeyMarker::Suffix, None) => {
-                            // Deferred affix: the argument is not a literal at
-                            // *this* application, so the stage stays symbolic.
-                            // That is the helper case `addPrefix = p => q => q &
-                            // prefix p`, where `p` is a lambda parameter whose
-                            // label the use site supplies.
-                            let at_ = self.infer(env, arg)?;
-                            // A key stage's parameter is always `symbol k`, so
-                            // the argument's type *is* the label: tie `k` to it.
-                            // That is what keeps the result's `labelPrefix k`
-                            // tied to the parameter, so instantiating the helper
-                            // at a use site binds the label there — which is how
-                            // `addPrefix "u_"` reduces its row.
-                            //
-                            // The argument must be a label, not a computed string
-                            // expression: `prefix (upper "u")` cannot name a
-                            // column. Two things count as a label — a literal
-                            // (the use-site form, handled by the `Some(s)` arm
-                            // below) and a bare name (the helper's own parameter,
-                            // still unknown here). Anything else is refused.
-                            let is_label = matches!(
-                                arg.kind,
-                                ExprKind::Lit(ast::Lit::Str(_)) | ExprKind::Name(_)
-                            );
-                            if !is_label {
-                                return Err(TyErr {
-                                    span: arg.span,
-                                    msg: marker.literal_msg(),
-                                });
-                            }
-                            // The whole `keyLabel k` is what the parameter means:
-                            // keeping the wrapper (rather than `k` alone) is what
-                            // carries the marker into the helper's generalized
-                            // scheme, so a use site can recognise the position as
-                            // a label and bind the literal to `Sym`.
-                            self.unify(&at_, &p).map_err(|msg| TyErr {
-                                span: arg.span,
-                                msg: format!("{}: {msg}", marker.literal_msg()),
-                            })?;
-                            keys.push((marker.tag(), String::new()));
-                        }
-                        (_, Some(s)) => {
-                            // A `symbol k` parameter is bound to the literal's
-                            // type, so the signature's `k` resolves to `"s"`:
-                            // in `removeKey k r` for `omit`, and in the
-                            // label-driven mapper `(labelPrefix k)` /
-                            // `(labelSuffix k)` that `prefix`/`suffix` name in
-                            // their result.
-                            if let Ty::Con("keyLabel", _) = &*p {
-                                let label = carried.clone().unwrap_or_else(|| self.fresh());
-                                self.unify(&label, &Ty::Sym(s.clone()))
-                                    .map_err(|msg| TyErr {
-                                        span: arg.span,
-                                        msg: format!("key label mismatch: {msg}"),
-                                    })?;
-                            }
-                            keys.push((marker.tag(), s));
-                        }
-                        (_, None) => {
-                            let at_ = self.infer(env, arg)?;
-                            self.coerce(&at_, &con("string")).map_err(|m| TyErr {
-                                span: arg.span,
-                                msg: format!("{}: {m}", marker.literal_msg()),
-                            })?;
-                            keys.push((marker.tag(), String::new()));
-                        }
-                    }
-                    ft = *r;
-                    self.key_stage(&keys, &ft)?;
-                    self.solve()?;
-                    continue;
                 }
             }
+
             self.span = arg.span;
             // Resolve the callee's type *before* typing the argument, so a
             // known parameter type can be pushed down into the argument instead
@@ -1856,172 +1869,6 @@ impl<'w> Checker<'w> {
         Ok(())
     }
 
-    /// The stage a `symbol` parameter belongs to, read from its function's
-    /// result: `query (keyMap (labelPrefix k) r)` is a prefix stage, and
-    /// `query (keyMap (labelSuffix k) r)` is a suffix stage. Anything else is
-    /// an omit stage.
-    fn keylabel_stage(&self, result: &Ty) -> KeyMarker {
-        // The parameter's *result* is what names the stage, and `infer_app`
-        // passes the whole function type here (the callee's type is still
-        // `symbol k -> query r -> query (keyMap …)` at this point), so peel
-        // the remaining `-> …` spine down to the final result first.
-        let mut result = self.resolve(result);
-        loop {
-            match result {
-                Ty::Fun(_, r) => result = self.resolve(&r),
-                other => {
-                    result = other;
-                    break;
-                }
-            }
-        }
-        let Ty::Con("query", out) = result else {
-            return KeyMarker::Omit;
-        };
-        let Ty::MapKey(km, _) = self.resolve(&out[0]) else {
-            return KeyMarker::Omit;
-        };
-        match self.resolve(&km) {
-            Ty::Con("labelPrefix", _) => KeyMarker::Prefix,
-            Ty::Con("labelSuffix", _) => KeyMarker::Suffix,
-            _ => KeyMarker::Omit,
-        }
-    }
-
-    /// Register a key stage's constraint once its key arguments have been read
-    /// and the remaining function is `query input -> query output`. Called
-    /// after each key argument, so a partial application still gets its
-    /// constraint.
-    ///
-    /// Two families live here, and they are deliberately different mechanisms:
-    ///
-    /// * `omit` is a **row equation** (`input ~ { k : t | output }`) solved by
-    ///   the unifier's own leftover rule. It constrains the row's *shape*.
-    /// * `prefix`/`suffix` build a **`Ty::MapKey` row term**. A rename is not a
-    ///   shape constraint — the output label is not a function of the input's
-    ///   shape — so it must be carried as a term and reduced when the row is
-    ///   known.
-    pub(crate) fn key_stage(&mut self, keys: &[(&'static str, String)], ft: &Ty) -> R<()> {
-        let Ty::Fun(p, r) = self.resolve(ft) else {
-            return Ok(());
-        };
-        let (Ty::Con("query", inp), Ty::Con("query", out)) = (&*p, &*r) else {
-            return Ok(());
-        };
-        let (input, out_ty) = (inp[0].clone(), out[0].clone());
-        let stage_marker = match keys {
-            [(t, _)] if *t == KeyMarker::Prefix.tag() => Some(KeyMarker::Prefix),
-            [(t, _)] if *t == KeyMarker::Suffix.tag() => Some(KeyMarker::Suffix),
-            _ => None,
-        };
-
-        let c = match keys {
-            [(t, s)] if *t == KeyMarker::Prefix.tag() || *t == KeyMarker::Suffix.tag() => {
-                // The signature says `query (keyMap m r)`. Keep that row term
-                // intact in the constraint: the solver first ties its mapper
-                // and input components to the stage, then reduces it when the
-                // input row is known.
-                let (sig_key, output) = match self.resolve(&out_ty) {
-                    Ty::MapKey(m, _) => (*m, out_ty.clone()),
-                    // Not a `keyMap` result: the signature is not one of ours.
-                    _ => {
-                        let is_prefix = *t == KeyMarker::Prefix.tag();
-                        return Err(TyErr {
-                            span: self.span,
-                            msg: format!(
-                                "`{}` must produce a `keyMap` row",
-                                if is_prefix { "prefix" } else { "suffix" }
-                            ),
-                        });
-                    }
-                };
-                let is_prefix = *t == KeyMarker::Prefix.tag();
-                // The mapper comes from the result type the signature declared:
-                // `query (keyMap m r)`. For a literal affix `m` is concrete
-                // (`KeyMapPrefix "u_"`), and for `prefix p` it is the variable
-                // the affix parameter's type named — which is what lets the
-                // deferred term reduce at a use site, where the argument's type
-                // binds that variable.
-                let mut key = self.resolve_mapper(&sig_key);
-                // A literal affix names its own witness, read here where the
-                // syntax still is. That is what keeps the mapping on the type
-                // side: the checker builds the `KeyMap` from the literal instead
-                // of letting the literal travel as a type.
-                if !s.is_empty() {
-                    let km = if is_prefix {
-                        KeyMap::Prefix(s.clone())
-                    } else {
-                        KeyMap::Suffix(s.clone())
-                    };
-                    key = km.normalize().to_ty();
-                }
-                // A label-driven mapper (`labelPrefix (Sym s)`) is a signature
-                // detail, not the witness: `prefix`/`suffix` now take `symbol k`
-                // and name `prependSym k` / `appendSym k` in their result. Once
-                // the literal above has bound that label, resolve the witness to
-                // the `KeyAffix` it denotes. This must happen *after* the
-                // binding: resolving earlier left the label a variable, so the
-                // witness never decoded and the two sides were reported as an
-                // affix mismatch.
-                let sig_key = self.resolve_mapper(&sig_key);
-                // Tie the result-side mapper to the witness. `sig_key` is the
-                // mapper named in the *result* type (`query (keyMap m s)`), and
-                // `key` is the one the argument denotes. A literal affix replaces
-                // `key` with a concrete witness, so the result-side mapper must
-                // be bound too — otherwise the row term stays symbolic at the
-                // very place it is now known.
-                //
-                // There used to be a second, queued mapper here, kept in an
-                // `affix_mappers` list and looked up by stage direction. The
-                // commit that moved the parameter to `symbol k` removed both
-                // push sites but left the lookup, so the list was always empty
-                // and the branch was dead: the parameter's label and the
-                // result's mapper are the *same* variable now, and unifying
-                // `sig_key` with `key` is the whole tie. Deleting the dead list
-                // also deletes a trap — matching a queued mapper on direction
-                // alone would pair the wrong application as soon as a body held
-                // two stages of the same direction.
-                self.unify(&sig_key, &key).map_err(|msg| TyErr {
-                    span: self.span,
-                    msg: format!("affix mismatch: {msg}"),
-                })?;
-                // Register the equation and let the solver discharge it. The
-                // input row is usually still an unbound variable here (the
-                // stage's argument is checked after it), so reducing now would
-                // always defer; the solver runs once the row is known and
-                // reduces the term then. `output` remains the complete
-                // `keyMap` row term from the signature.
-                self.pending.push((
-                    Cons::MapKey {
-                        marker: stage_marker.expect("key marker checked above"),
-                        key,
-                        input: self.resolve(&input),
-                        output,
-                    },
-                    self.span,
-                ));
-                return Ok(());
-            }
-            // `omit` and `mapValue` constrain the row directly: their result
-            // type is `query s`, so `out[0]` *is* the row.
-            [(t, k)] if *t == KeyMarker::Omit.tag() => Cons::Omit {
-                key: k.clone(),
-                input,
-                output: out_ty,
-            },
-            [(t, wrapper)] if *t == KeyMarker::ValueWrapper.tag() => Cons::MapValue {
-                wrapper: wrapper.clone(),
-                input,
-                output: out_ty,
-            },
-            // The key list is not complete yet (a partial application).
-            _ => return Ok(()),
-        };
-        let sp = self.span;
-        self.pending.push((c, sp));
-        Ok(())
-    }
-
     // ── primitives ─────────────────────────────────────────────────────────
 
     pub(crate) fn prim_type(&mut self, p: Prim, sp: Span) -> Ty {
@@ -2078,17 +1925,45 @@ impl<'w> Checker<'w> {
                     fun(query(a), query(out)),
                 )
             }
-            // A key stage reads its key from the application, where the literal
-            // still is (`key_stage`). Omit/value mapping use markers; the
-            // directional stages also carry their KeyMap witness through the
-            // argument and result so those positions cannot drift apart.
+            // `omit "k"` drops one column. The rule is the definition's own:
+            // the label comes from the signature's `symbol k`, the input row
+            // from its `r`, and the output row is `removeKey k r` — the same
+            // term the signature names, which is what makes the equation
+            // `input ~ { k : t | output }` an obligation of *this* stage rather
+            // than something a later pass recovers from a composed result.
             Omit => {
-                let (r, out) = (self.fresh_row(), self.fresh_row());
-                fun(KeyMarker::Omit.ty(), fun(query(r), query(out)))
+                let (k, r) = (self.fresh(), self.fresh_row());
+                let out = Ty::RemoveKey(Box::new(k.clone()), Box::new(r.clone()));
+                self.pending.push((
+                    Cons::Omit {
+                        label: k.clone(),
+                        input: r.clone(),
+                        output: out.clone(),
+                    },
+                    sp,
+                ));
+                fun(
+                    Ty::Con("keyLabel", vec![k]),
+                    fun(query(r), query(out)),
+                )
             }
+            // `mapValue "w"` wraps every field type. The rule is the
+            // definition's own: the wrapper comes from the signature's
+            // `valueLabel w`, the input row from its `r`, and the output row is
+            // the term `mapValue w r` the signature names — so the equation is
+            // an obligation of *this* stage rather than something a later pass
+            // recovers from a composed result.
             MapValue => {
-                let (r, out) = (self.fresh_row(), self.fresh_row());
-                fun(KeyMarker::ValueWrapper.ty(), fun(query(r), query(out)))
+                let (w, r) = (self.fresh(), self.fresh_row());
+                let out = Ty::MapValue(Box::new(w.clone()), Box::new(r.clone()));
+                self.pending.push((
+                    Cons::MapValue {
+                        label: w.clone(),
+                        output: out.clone(),
+                    },
+                    sp,
+                ));
+                fun(Ty::Con("valueLabel", vec![w]), fun(query(r), query(out)))
             }
             Merge => {
                 let (left, right, out) = (self.fresh_row(), self.fresh_row(), self.fresh_row());
@@ -2196,14 +2071,26 @@ impl<'w> Checker<'w> {
             Rows => fun(con("bound"), fun(con("bound"), con("frame"))),
             UnboundedPreceding | UnboundedFollowing | CurrentRow => con("bound"),
             Preceding | Following => fun(i, con("bound")),
-            // `prefix`/`suffix` are not projections, so their signature comes
-            // from the prelude's own annotation (`symbol k -> query r -> query
-            // (keyMap (prependSym k) r)`) and never from here: `prim_type` is
-            // only consulted for the projections. Reaching this would mean a
-            // `__prefix`/`__suffix` use that should have been rejected for
-            // lacking a signature.
+            // `prefix "s"` / `suffix "s"` rename every column. The rule is
+            // carried by the *type*: the result row is the term
+            // `keyMap (prependSym k) r`, over the signature's own label and row,
+            // and the row reducer materializes it once the input row is known.
+            // There is no separate obligation because the operation is already
+            // stated exactly once, in the signature this definition owns.
             Prefix | Suffix => {
-                unreachable!("`prefix`/`suffix` take their signature from the prelude")
+                let (k, r) = (self.fresh(), self.fresh_row());
+                let label = Ty::Con(
+                    if p == Prefix {
+                        "labelPrefix"
+                    } else {
+                        "labelSuffix"
+                    },
+                    vec![k.clone()],
+                );
+                fun(
+                    Ty::Con("keyLabel", vec![k]),
+                    fun(query(r.clone()), query(Ty::MapKey(Box::new(label), Box::new(r)))),
+                )
             }
         }
     }
@@ -2256,7 +2143,6 @@ impl<'w> Checker<'w> {
             Cons::Within { .. } => self.step_within(c, sp),
             Cons::Update { .. } => self.step_update(c, sp),
             Cons::Omit { .. } => self.step_omit(c, sp),
-            Cons::MapKey { .. } => self.step_map_key(c, sp),
             Cons::MapValue { .. } => self.step_map_value(c, sp),
             Cons::Merge { .. } => self.step_merge(c, sp),
             Cons::JoinOut { .. } => self.step_join_out(c, sp),
@@ -2566,206 +2452,76 @@ impl<'w> Checker<'w> {
         Ok(true)
     }
 
-    /// `omit` *is* this equation. The unifier's own leftover rule
-    /// binds `output` to the rest of the row in the input's order,
-    /// and a missing key is reported through the ordinary
-    /// `missing()` path. No column computation happens here.
+    /// `omit "k"` *is* this equation, and the equation is the stage's own:
+    /// `output` is `removeKey k input`, so it reduces exactly when the column
+    /// is there. The rule belongs to `omit`'s definition and is instantiated
+    /// per use, so the label arrives as the signature's `k` bound to the
+    /// literal's `Sym` — never recovered from a composed result row.
+    ///
+    /// The reducer is what tells "not yet" from "not there", which is the
+    /// difference between waiting for the row to close and reporting a missing
+    /// column. Only this stage reports it, because only this stage owns it.
     fn step_omit(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
-        let Cons::Omit { key, input, output } = c else {
+        let Cons::Omit { label, output, .. } = c else {
             unreachable!("dispatched on Cons::Omit")
         };
-        if self.row_open(input) {
+        // The label is a `symbol k` until the use site binds it to a literal.
+        if !matches!(self.resolve(label), Ty::Sym(_)) {
             return Ok(false);
         }
-        let t = self.fresh();
-        self.unify(input, &row(vec![(key.clone(), t)], output.clone()))?;
-        Ok(true)
+        match reduce_row(self, output) {
+            RowOutcome::Failed { error, .. } => Err(error.message()),
+            RowOutcome::Open(..) => Ok(false),
+            RowOutcome::Closed(_) => Ok(true),
+        }
     }
 
-    /// `output ~ keyMap key input`, reduced as soon as both the
-    /// mapper and the row are known.
+    /// `mapValue "w"` *is* this equation, and the equation is the stage's own:
+    /// `output` is `mapValue w input`, so it reduces exactly when the wrapper
+    /// and the row are known. The rule belongs to `mapValue`'s definition and
+    /// is instantiated per use, so the wrapper arrives as the signature's `w`
+    /// bound to the literal's `Sym` — never recovered from a composed row.
     ///
-    /// The invariant this maintains is that **a `MapKey` term's row
-    /// is the input row**: `keyMap m r` denotes `m` applied to `r`,
-    /// and `r` itself stays unrenamed. Binding `output` to the
-    /// *renamed* row here would encode the mapping twice — once in
-    /// the term and once in the row — so a later stage would apply
-    /// it again (`prefix "u_" & suffix "_v2"` produced `u_u_id_v2`).
-    fn step_map_key(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
-        let Cons::MapKey {
-            marker,
-            key,
-            input,
-            output,
-        } = c
-        else {
-            unreachable!("dispatched on Cons::MapKey")
-        };
-        let mut key = self.resolve(key);
-        // A deferred helper carries its affix as an ordinary string,
-        // so the mapper witness can be rebound when that helper is
-        // instantiated. Preserve the stage direction while doing so;
-        // otherwise a stale mapper variable can make `suffix` act as
-        // a prefix.
-        if let Ty::KeyAffix(_, affix) = &key {
-            let constructor = match marker {
-                KeyMarker::Prefix => "KeyMapPrefix",
-                KeyMarker::Suffix => "KeyMapSuffix",
-                _ => "",
-            };
-            if !constructor.is_empty() {
-                key = Ty::KeyAffix(constructor, affix.clone());
-            }
-        }
-        let (input_fields, input_tail) = self.flatten(input);
-        let input = row_or_tail(input_fields, input_tail);
-        let mut output_ty = self.resolve(output);
-        if let Ty::MapKey(mapper, row) = output_ty.clone() {
-            if let Ty::KeyAffix(_, affix) = self.resolve(&mapper) {
-                let constructor = match marker {
-                    KeyMarker::Prefix => "KeyMapPrefix",
-                    KeyMarker::Suffix => "KeyMapSuffix",
-                    _ => "",
-                };
-                if !constructor.is_empty() {
-                    output_ty = Ty::MapKey(Box::new(Ty::KeyAffix(constructor, affix)), row);
-                }
-            }
-        }
-        // The result row is read as **one** `keyMap` layer over the stage's
-        // input, which is what `prefix`'s own signature says:
-        // `query r -> query (keyMap m r)`. That reading is wrong for a
-        // definition whose body renames more than once — there the result is
-        // `keyMap (m, keyMap (m, r))`, and the row beneath the outer mapper is
-        // not the input — and the two rows are then asked to be equal:
-        //
-        //     two = p => q => q & prefix p & prefix p
-        //     main = users & two "b_"
-        //     -- infinite type: a type would contain itself (keyMap((prefix "b_"), a))
-        //
-        // Reducing the chain inside-out instead is the fix, and it is *not*
-        // just a matter of walking to the innermost row here: that was tried and
-        // broke the cases that work today (two literal affixes among them),
-        // because the layers are tied to the input by the ordinary inference
-        // around this constraint as well. See `docs/PLAN.md`.
-        if let Ty::MapKey(mapper, row) = output_ty.clone() {
-            self.unify(&mapper, &key)?;
-            self.unify(&row, &input)?;
-            output_ty = self.zonk(output);
-        }
-        match reduce_mapkey(&key, &input) {
-            Some(reduced) => {
-                let stage = match KeyMap::of_ty(&key) {
-                    Some(KeyMap::Suffix(_)) => "suffix",
-                    _ => "prefix",
-                };
-                self.unify(&reduced, &output_ty)
-                    .map_err(|m| format!("`{stage}` cannot map its input row: {m}"))?;
-                Ok(true)
-            }
-            // Not reducible *yet*: the mapper is still a helper's
-            // variable, or the row is still open. Stay pending rather
-            // than binding `output` to the symbolic term: once bound, it
-            // could never become the rewritten row, so the reduction
-            // above would never fire. Waiting costs nothing — `solve`
-            // re-runs this after every binding.
-            None => Ok(false),
-        }
-    }
-
-    /// `mapValue` wraps each field type.
-    /// If the tail is open (Var or Rigid), defer as a MapValue term.
+    /// The reducer is what tells "not yet" from "not a wrapper", which is the
+    /// difference between waiting for the row to close and reporting an unknown
+    /// wrapper. Only this stage reports it, because only this stage owns it.
     fn step_map_value(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
-        let Cons::MapValue {
-            wrapper,
-            input,
-            output,
-        } = c
-        else {
+        let Cons::MapValue { label, output } = c else {
             unreachable!("dispatched on Cons::MapValue")
         };
-        let (ifs, itail) = self.flatten(input);
-
-        // Parse the wrapper
-        let vm = match wrapper.as_str() {
-            "nullable" => ValueMap::AsNullable,
-            "list" => ValueMap::AsList,
-            "id" => ValueMap::Id,
-            _ => return Err(format!("unknown wrapper `{}`", wrapper)),
-        };
-
-        // Handle Id early: no transformation needed
-        if matches!(vm, ValueMap::Id) {
-            self.unify(input, output)?;
-            return Ok(true);
+        // The label is a `valueLabel w` variable until the use site binds it.
+        if !matches!(self.resolve(label), Ty::Sym(_)) {
+            return Ok(false);
         }
-
-        let input_row = row_or_tail(ifs.clone(), itail.clone());
-
-        // Try to reduce at type level first
-        match reduce_mapvalue(&vm, &input_row) {
-            Some(reduced) => {
-                // Successful eager reduction - unify with output
-                self.unify(&reduced, output)?;
-                Ok(true)
-            }
-            None => {
-                // Cannot reduce yet (open row)
-                match itail {
-                    Ty::Empty => {
-                        // A closed row that the reducer refused. It has no
-                        // validation errors of its own, so this is a compiler
-                        // gap rather than a user error; report it as one instead
-                        // of aborting the process.
-                        Err(format!(
-                            "`mapValue` could not reduce a closed row: {input_row:?}"
-                        ))
-                    }
-                    Ty::Var(_) => {
-                        // Open variable tail: wait for it to be bound
-                        Ok(false)
-                    }
-                    // `flatten` returns the row's **tail**, which is not
-                    // necessarily a variable: a deferred key stage leaves an
-                    // unreduced `keyMap`/`merge`/`removeKey`/`mapValue` term
-                    // there. Any such tail means the row is not yet known, which
-                    // is the same situation as a rigid tail — carry the wrapper
-                    // as a term and reduce it once the tail is resolved. This
-                    // used to be an `unreachable!`, and two lines of ordinary
-                    // user code reached it: `q & prefix p & mapValue "nullable"`.
-                    _ => {
-                        let deferred = Ty::MapValue(vm, Box::new(input_row));
-                        self.unify(&deferred, output)?;
-                        Ok(true)
-                    }
-                }
-            }
+        match reduce_row(self, output) {
+            RowOutcome::Failed { error, .. } => Err(error.message()),
+            RowOutcome::Open(..) => Ok(false),
+            RowOutcome::Closed(_) => Ok(true),
         }
     }
 
-    /// Merge combines two rows; wait if either is open
+    /// Merge combines two rows; wait if either is open.
+    ///
+    /// The rule is the reducer's (`reduce_merge`), not a second spelling of it
+    /// here: the row this constraint produces and the row a `merge` term
+    /// reduces to have to be the same rule, or `update`'s signature and a
+    /// `merge` in a signature could disagree about a collision.
     fn step_merge(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
         let Cons::Merge { left, right, out } = c else {
             unreachable!("dispatched on Cons::Merge")
         };
         let (lf, lt) = self.flatten(left);
         let (rf, rt) = self.flatten(right);
-        if !matches!(lt, Ty::Empty) || !matches!(rt, Ty::Empty) {
-            return Ok(false);
-        }
-        // Merge logic: right-wins, keeps left positions, appends right-only
-        let mut merged: Vec<(String, Ty)> = lf.clone();
-        for (rname, rty) in &rf {
-            if let Some(pos) = merged.iter().position(|(n, _)| n == rname) {
-                // Replace with right's type
-                merged[pos].1 = rty.clone();
-            } else {
-                // Append new field
-                merged.push((rname.clone(), rty.clone()));
+        let left = row_or_tail(lf, lt);
+        let right = row_or_tail(rf, rt);
+        match reduce_merge(&left, &right) {
+            Some(merged) => {
+                self.unify(&merged, out)?;
+                Ok(true)
             }
+            // An operand is still open: the merge waits for it.
+            None => Ok(false),
         }
-        self.unify(&row(merged, Ty::Empty), out)?;
-        Ok(true)
     }
 
     fn step_join_out(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {

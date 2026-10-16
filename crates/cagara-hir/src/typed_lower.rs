@@ -296,10 +296,21 @@ fn lower_composed_expr(
     };
 
     if args.len() == 2 && is_pipe_head(head) {
+        // A helper stage is a query-valued function, not a primitive row
+        // stage, so it has no `RowStageView` at the use site. Let the helper
+        // instantiation path build its own typed nodes before this expression
+        // is used as one side of a combine.
+        let rhs = &args[1];
+        let has_combine = combine_record_in(input.type_check(), module, rhs).is_some();
+        let has_stage = stage_record(input.type_check(), module, def, rhs.id).is_some();
+        if !has_combine && !has_stage {
+            if let Some(id) = lower_composed_helper(input, module, def, expr, typed)? {
+                return Ok(Some(id));
+            }
+        }
         let Some(left) = lower_composed_expr(input, module, def, &args[0], typed)? else {
             return Ok(None);
         };
-        let rhs = &args[1];
         if let Some((combine, operation)) = combine_record_in(input.type_check(), module, rhs) {
             let Some(right_expr) = query_operand_args(input, module, operation).next() else {
                 return Ok(None);
@@ -346,7 +357,25 @@ fn lower_composed_expr(
         return Ok(Some(id));
     }
 
+    if let Some(id) = lower_composed_helper(input, module, def, expr, typed)? {
+        return Ok(Some(id));
+    }
     Ok(None)
+}
+
+fn lower_composed_helper(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    expr: &Expr,
+    target: &mut TypedQuery,
+) -> Result<Option<NodeId>, Error> {
+    let mut source = TypedQuery::new();
+    let Some((root, _)) = lower_helper_expr(input, module, def, expr, &mut source)? else {
+        return Ok(None);
+    };
+    let source = source.finish(root);
+    copy_typed_graph(&source, target).map(Some)
 }
 
 fn lower_composed_stage(
@@ -1838,6 +1867,20 @@ mod tests {
             "q",
         );
         assert_eq!(typed.root_kind(), QueryNodeKind::Limit);
+        assert!(typed
+            .nodes()
+            .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));
+
+        let (typed, _) = lower_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             orders : query { uid = int, amount = float } = table \"s\" \"orders\"\n\
+             rename = affix => q => q & prefix affix\n\
+             q = users & innerJoin (orders & rename \"o_\") (.<id == .>o_uid)\n",
+            "q",
+        );
+        assert!(typed
+            .nodes()
+            .any(|node| matches!(node.kind(), QueryNodeKind::Prefix)));
         assert!(typed
             .nodes()
             .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));

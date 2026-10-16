@@ -234,9 +234,10 @@ joins and sets over tables or typed query aliases, constructs both child
 subtrees recursively, and checks the resulting output row against the checked
 route. Ordinary stages can surround a combine and can occur inside either
 operand; graph copying preserves unary stages when a typed alias is
-instantiated. Join predicates and other expression payloads still remain on
-the normalized bridge, as do helper instantiations whose stage bodies are not
-yet represented directly in the typed nodes.
+instantiated. Row-rewrite helpers are instantiated inside combine operands as
+well, with their definition identities preserved. Join predicates and other
+expression payloads still remain on the normalized bridge, as do helpers whose
+stage bodies include expression-bearing operations.
 
 ### Step 1, done
 

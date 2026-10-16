@@ -225,12 +225,15 @@ query identities, and closed input/output rows. The next slice needs to build
 the two child subtrees before lowering joins and sets. Windows remain
 deferred until the expression payload bridge is carried by typed nodes.
 
-The checker now records join and set applications on the typed expression node,
+The checker records join and set applications on the typed expression node,
 including piped forms where the primitive is partially applied first. Each
 record has a stable application identity, operation kind, both operand rows in
-operand order, and the output row. Typed lowering still needs to consume these
-records and construct the corresponding two child subtrees; it remains on the
-term route until that consumer lands.
+operand order, and the output row. Typed lowering now consumes these records
+for direct joins and sets over tables or typed query aliases, constructs both
+child subtrees, and checks the resulting output row against the checked route.
+Join predicates and other expression payloads still remain on the normalized
+bridge, and more complex combinations remain on the term route until those
+payloads and child instantiations are carried by typed nodes.
 
 ### Step 1, done
 

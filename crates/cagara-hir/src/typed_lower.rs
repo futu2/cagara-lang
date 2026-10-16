@@ -1,13 +1,13 @@
-//! The first tree driven query lowering slice.
+//! Tree-driven query lowering slices.
 //!
 //! This builder consumes the checker-owned stage records and the typed query
-//! nodes' rows. It intentionally handles only a direct pipeline whose base is
-//! a table and whose stages are `prefix`, `suffix`, `omit`, or `mapValue`.
-//! Other shapes return `None` and remain on the established term route until a
-//! later migration slice supplies their constructors and expression bridge.
+//! nodes' rows. It handles direct pipelines, plus direct joins and set
+//! operations over tables or already typed query aliases. Other shapes return
+//! `None` and remain on the established term route until a later migration
+//! slice supplies their constructors and expression bridge.
 #![allow(dead_code)] // Keep the slice self-contained while later stages land.
 
-use crate::check::{NodeId, NodeRef, QueryNodeKind, Row, RowStage, TypedQuery};
+use crate::check::{CombineKind, NodeId, NodeRef, QueryNodeKind, Row, RowStage, TypedQuery};
 use crate::checked::CheckedQuery;
 use crate::compile::CompilerInput;
 use crate::core::{Error, Origin, RowType};
@@ -32,6 +32,10 @@ pub(crate) fn lower(
     // boundaries still come from the typed stage records, so the query arena
     // does not recover rows from the composed result type.
     if let Some(lowered) = lower_expression_pipeline(input, module, def, body)? {
+        return Ok(Some(lowered));
+    }
+
+    if let Some(lowered) = lower_combine_pipeline(input, module, def, body)? {
         return Ok(Some(lowered));
     }
 
@@ -167,6 +171,191 @@ pub(crate) fn lower(
     }
 
     Ok(Some((typed.finish(child), checked)))
+}
+
+/// Lower a direct join or set operation whose two relational operands are
+/// tables or already typed query aliases. The checker record supplies the
+/// operation kind and both closed operand rows; the normalized route remains
+/// the source of the join predicate and final checked relation until payloads
+/// are carried by typed nodes.
+fn lower_combine_pipeline(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
+    let tc = input.type_check();
+    if !tc.row_stages(module, def).next().is_none() {
+        return Ok(None);
+    }
+    let Some(combine) = tc
+        .typed_body(module, def)
+        .into_iter()
+        .flat_map(|body| body.nodes().iter())
+        .find_map(|node| node.combine.as_ref())
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let Some((left_expr, operation)) = find_combine_context(body, combine.site) else {
+        return Ok(None);
+    };
+    let ExprKind::App(_, args) = &operation.kind else {
+        return Ok(None);
+    };
+    let Some(right_expr) = args.first() else {
+        return Ok(None);
+    };
+    let terms = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
+    let mut typed = TypedQuery::new();
+    let Some((left, _)) = lower_combine_input(input, module, def, left_expr, &mut typed)? else {
+        return Ok(None);
+    };
+    let Some((right, _)) = lower_combine_input(input, module, def, right_expr, &mut typed)? else {
+        return Ok(None);
+    };
+    let kind = match combine.kind {
+        CombineKind::Join(kind) => QueryNodeKind::Join(kind),
+        CombineKind::Set(kind) => QueryNodeKind::Set(kind),
+    };
+    let output_row = combine.output.clone().map(Row::new);
+    let origin = Origin::new(combine.node.definition_module, operation.span);
+    let root = typed
+        .combine(combine.node, kind, left, right, output_row.clone(), origin)
+        .map_err(query_error)?;
+    let Some(output_row) = output_row else {
+        return Ok(None);
+    };
+    if terms.row().columns() != output_row.columns() {
+        return Err(
+            Error::unsupported("typed combine output row differs from its checked query")
+                .at(origin),
+        );
+    }
+    Ok(Some((typed.finish(root), terms)))
+}
+
+fn lower_combine_input(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    expr: &Expr,
+    typed: &mut TypedQuery,
+) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    if let Some((schema, table, columns)) = table_parts(input, module, expr) {
+        let origin = Origin::new(module, expr.span);
+        let checked =
+            CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
+                .map_err(|error| Error::unsupported(error.message).at(origin))?;
+        let id = typed
+            .table(NodeRef::new(module, def, expr.id), origin, columns)
+            .map_err(query_error)?;
+        return Ok(Some((id, checked)));
+    }
+    if let Some((target_module, target_def)) = query_target(input.type_check(), module, expr) {
+        let target_body = &input.module(target_module).def(target_def).body;
+        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
+        else {
+            return Ok(None);
+        };
+        let id = copy_typed_graph(&target_typed, typed)?;
+        return Ok(Some((id, checked)));
+    }
+    Ok(None)
+}
+
+fn copy_typed_graph(source: &TypedQuery, target: &mut TypedQuery) -> Result<NodeId, Error> {
+    let mut copied = HashMap::new();
+    let source_ids: Vec<_> = source.nodes().map(|node| node.id()).collect();
+    for old in source_ids {
+        let node = source.node(old);
+        let new = match node.kind() {
+            QueryNodeKind::Table => target
+                .table(
+                    node.site(),
+                    node.origin(),
+                    node.output_row()
+                        .ok_or_else(|| Error::unsupported("typed table has no output row"))?
+                        .columns()
+                        .to_vec(),
+                )
+                .map_err(query_error)?,
+            QueryNodeKind::Join(_) | QueryNodeKind::Set(_) => {
+                let inputs = node.inputs();
+                let left = *copied
+                    .get(&inputs[0])
+                    .ok_or_else(|| Error::unsupported("typed combine left child was not copied"))?;
+                let right = *copied.get(&inputs[1]).ok_or_else(|| {
+                    Error::unsupported("typed combine right child was not copied")
+                })?;
+                target
+                    .combine(
+                        node.site(),
+                        node.kind(),
+                        left,
+                        right,
+                        node.output_row().cloned(),
+                        node.origin(),
+                    )
+                    .map_err(query_error)?
+            }
+            _ => {
+                let child = *copied
+                    .get(
+                        &node
+                            .input()
+                            .ok_or_else(|| Error::unsupported("typed stage has no child"))?,
+                    )
+                    .ok_or_else(|| Error::unsupported("typed stage child was not copied"))?;
+                target
+                    .rewrite(
+                        node.site(),
+                        node.kind(),
+                        child,
+                        node.input_row().cloned(),
+                        node.output_row().cloned(),
+                        node.origin(),
+                    )
+                    .map_err(query_error)?
+            }
+        };
+        copied.insert(old, new);
+    }
+    copied
+        .get(&source.root())
+        .copied()
+        .ok_or_else(|| Error::unsupported("typed query has no root"))
+}
+
+fn find_combine_context<'a>(expr: &'a Expr, site: u32) -> Option<(&'a Expr, &'a Expr)> {
+    let ExprKind::App(head, args) = &expr.kind else {
+        return None;
+    };
+    if args.len() == 2 && is_pipe_head(head) && contains_expr_id(&args[1], site) {
+        return find_expr_id(&args[1], site).map(|operation| (&args[0], operation));
+    }
+    for child in crate::check::child_exprs(expr) {
+        if let Some(found) = find_combine_context(child, site) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn contains_expr_id(expr: &Expr, id: u32) -> bool {
+    expr.id == id
+        || crate::check::child_exprs(expr)
+            .into_iter()
+            .any(|child| contains_expr_id(child, id))
+}
+
+fn find_expr_id(expr: &Expr, id: u32) -> Option<&Expr> {
+    if expr.id == id {
+        return Some(expr);
+    }
+    crate::check::child_exprs(expr)
+        .into_iter()
+        .find_map(|child| find_expr_id(child, id))
 }
 
 /// Lower a direct pipeline whose stages carry expressions (`where`, `select`,
@@ -746,6 +935,30 @@ pub(crate) fn compare_with_terms(
         .collect();
     let mut matched = 0usize;
     for node in chain {
+        if matches!(node.kind(), QueryNodeKind::Join(_) | QueryNodeKind::Set(_)) {
+            let Some(combine) = input
+                .type_check()
+                .typed_node(node.site().definition_module, node.site().expr_id)
+                .and_then(|typed| typed.combine.as_ref())
+            else {
+                return Err(fail("typed query route contains an unrecorded combine"));
+            };
+            let expected_kind = match combine.kind {
+                CombineKind::Join(kind) => QueryNodeKind::Join(kind),
+                CombineKind::Set(kind) => QueryNodeKind::Set(kind),
+            };
+            let actual_inputs: Vec<_> =
+                node.input_rows().map(|row| row.map(Row::columns)).collect();
+            let expected_inputs: Vec<_> = combine.inputs.iter().map(Option::as_deref).collect();
+            if node.site() != combine.node
+                || node.kind() != expected_kind
+                || actual_inputs != expected_inputs
+                || node.output_row().map(Row::columns) != combine.output.as_deref()
+            {
+                return Err(fail("typed and checker combine records disagree"));
+            }
+            continue;
+        }
         let Some(stage) = input
             .type_check()
             .row_stages(node.site().definition_module, node.site().definition)
@@ -1153,6 +1366,55 @@ mod tests {
         );
         assert_eq!(typed.root_kind(), QueryNodeKind::Agg);
         assert_eq!(checked.row().names(), &["age", "n"]);
+    }
+
+    #[test]
+    fn direct_joins_and_sets_build_two_input_typed_nodes() {
+        let (typed, checked) = lower_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             orders : query { id = int, uid = int } = table \"s\" \"orders\"\n\
+             q = users & innerJoin orders (.<id == .>uid)\n",
+            "q",
+        );
+        assert_eq!(
+            typed.root_kind(),
+            QueryNodeKind::Join(crate::ir::JoinKind::Inner)
+        );
+        assert_eq!(typed.node(typed.root()).inputs().len(), 2);
+        assert_eq!(checked.row().names(), &["id", "name", "uid"]);
+        {
+            let ws = Workspace::from_source(
+                "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+                 orders : query { id = int, uid = int } = table \"s\" \"orders\"\n\
+                 q = users & innerJoin orders (.<id == .>uid)\n",
+            );
+            let tc = check::check(&ws);
+            let def = ws.modules[ws.root]
+                .module
+                .defs
+                .iter()
+                .position(|d| d.name == "q")
+                .unwrap();
+            let input = CompilerInput::new(&ws, &tc);
+            let body = &ws.modules[ws.root].module.defs[def].body;
+            let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
+            let terms =
+                crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+            compare_with_terms(input, &typed, &checked, &terms).unwrap();
+        }
+
+        let (typed, checked) = lower_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             vips : query { id = int, name = string } = table \"s\" \"vips\"\n\
+             q = users & union vips\n",
+            "q",
+        );
+        assert_eq!(
+            typed.root_kind(),
+            QueryNodeKind::Set(crate::ir::SetKind::Union)
+        );
+        assert_eq!(typed.node(typed.root()).inputs().len(), 2);
+        assert_eq!(checked.row().names(), &["id", "name"]);
     }
 
     #[test]

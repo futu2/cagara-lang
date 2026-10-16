@@ -7,6 +7,107 @@ fn assert_matches_fresh(ws: &Workspace) -> Compilation {
     cached
 }
 
+/// The `(input columns, output columns)` of every row-rewriting stage in a
+/// compiled query, innermost first — the order the checker recorded them.
+///
+/// The stages that only *keep* their input row pass it through; the ones that
+/// build a row from expressions (`select`, `agg`, `update`, the joins) are not
+/// rewrites and are skipped.
+fn stage_rows(rel: &Rel) -> Vec<(Vec<String>, Vec<String>)> {
+    fn walk(rel: &Rel, out: &mut Vec<(Vec<String>, Vec<String>)>) -> Vec<String> {
+        let (input, output) = match rel {
+            Rel::Table { columns, .. } => return columns.clone().unwrap_or_default(),
+            // `At` stamps a location on each node and is transparent here, as
+            // it is for the schema and lowering passes.
+            Rel::At(_, inner) => return walk(inner, out),
+            Rel::Where(inner, _)
+            | Rel::Order(inner, _)
+            | Rel::Limit(inner, _)
+            | Rel::Offset(inner, _)
+            | Rel::Distinct(inner) => return walk(inner, out),
+            Rel::Prefix(inner, affix) => {
+                let cols = walk(inner, out);
+                let renamed = crate::schema::rename_columns(&cols, affix, true);
+                (cols, renamed)
+            }
+            Rel::Suffix(inner, affix) => {
+                let cols = walk(inner, out);
+                let renamed = crate::schema::rename_columns(&cols, affix, false);
+                (cols, renamed)
+            }
+            Rel::Omit(inner, key) => {
+                let cols = walk(inner, out);
+                let kept = crate::schema::omit_columns(&cols, key).expect("a checked omit");
+                (cols, kept)
+            }
+            // Not a row rewrite, and not comparable here.
+            _ => return Vec::new(),
+        };
+        out.push((input, output.clone()));
+        output
+    }
+    let mut out = Vec::new();
+    walk(rel, &mut out);
+    out
+}
+
+#[test]
+fn stage_nodes_agree_with_the_relational_rows() {
+    // The checker records what each stage read and produced; the relational tree
+    // carries the rows the schema layer derives from the *same* operation. The
+    // two must agree — a disagreement is exactly the class of fault this
+    // redesign exists to remove: two answers to one question, drifting.
+    let src = "users : query { id = int, name = string } = table \"public\" \"users\"\n\
+               q = users & prefix \"u_\" & suffix \"_v2\"\n\
+               r = users & omit \"name\" & prefix \"x_\"\n";
+    let ws = Workspace::from_source(src);
+    let tc = crate::check::check(&ws);
+    let compilation = compile_checked(&ws, &tc);
+    assert!(compilation.diagnostics.is_empty(), "{:?}", compilation.diagnostics);
+
+    let nodes: Vec<_> = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.name == "q" || d.name == "r")
+        .map(|(i, d)| {
+            let rel = compilation
+                .queries
+                .iter()
+                .find(|query| query.id.def == i)
+                .and_then(|query| query.result.as_ref().ok())
+                .expect("both definitions compile");
+            let rel = match rel {
+                Rel::At(_, inner) => inner,
+                other => other,
+            };
+            let compiled = stage_rows(rel);
+            let recorded: Vec<(Vec<String>, Vec<String>)> = tc
+                .stages(ws.root, i)
+                .iter()
+                .map(|s| {
+                    let names = |fs: &Option<Vec<(String, crate::core::ScalarType)>>| {
+                        fs.as_ref().map(|fs| fs.iter().map(|(n, _)| n.clone()).collect())
+                    };
+                    (
+                        names(&s.input).unwrap_or_default(),
+                        names(&s.output).unwrap_or_default(),
+                    )
+                })
+                .collect();
+            (d.name.clone(), recorded, compiled)
+        })
+        .collect();
+
+    for (name, recorded, compiled) in nodes {
+        assert_eq!(
+            recorded, compiled,
+            "`{name}`: the checker's stage rows and the relational rows disagree"
+        );
+    }
+}
+
 #[test]
 fn cached_compilation_matches_fresh_across_edits_errors_and_overloads() {
     let table = "users : query { a = int } = table \"s\" \"one\"\n";

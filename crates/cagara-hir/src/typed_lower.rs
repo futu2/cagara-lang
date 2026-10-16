@@ -2224,6 +2224,23 @@ mod tests {
         assert_eq!(agg_fields.len(), 2);
         assert_eq!(agg_fields[0].0, "age");
         assert_eq!(agg_fields[1].0, "n");
+
+        let (typed, checked) = lower_source(
+            "spec = { order = [asc .id] }\n\
+             users : query { id = int } = table \"s\" \"users\"\n\
+             q = users & select { id = .id, rn = rowNumber spec }\n",
+            "q",
+        );
+        assert_eq!(checked.row().names(), &["id", "rn"]);
+        let window_node = typed.node(typed.root());
+        let window_fields = window_node
+            .projection_fields()
+            .expect("select carries checked fields");
+        assert_eq!(window_fields[1].0, "rn");
+        assert_eq!(
+            window_fields[1].1.kind(),
+            crate::checked::ExprKind::WinTemplate
+        );
     }
 
     #[test]

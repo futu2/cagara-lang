@@ -543,11 +543,14 @@ fn subst_node(e: Expr, args: &[Expr]) -> Expr {
                 Some(a) => a.clone(),
                 // `template` rejected every placeholder that is not a whole
                 // term naming one of its arguments before this runs, so an
-                // unresolvable index is unreachable. Asserting keeps it from
-                // silently emitting `cagara_arg_N` as SQL if that check ever
-                // loosens.
+                // unresolvable index is unreachable. The check is compiled in,
+                // not a `debug_assert!`: what it guards against is emitting
+                // `cagara_arg_N` as SQL, and a release build is where that
+                // would reach a user unnoticed. A panic here is a compiler bug
+                // reported loudly, which is the better of the two failures.
                 None => {
-                    debug_assert!(false, "unvalidated placeholder `{name}`");
+                    assert!(false, "unvalidated placeholder `{name}`");
+                    #[allow(unreachable_code)]
                     e
                 }
             }

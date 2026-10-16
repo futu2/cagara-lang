@@ -137,6 +137,16 @@ correctness, not as an optimization.
   re-rendering at the boundary, because its value folds in the literal fallback
   (`(Some(lit), Ty::Var(_)) => lit`) and the printer needs a resolver; it should
   go last, with the others already tree-backed.
+  Four of the five are gone: the typed tree carries the type, row, choices, and
+  resolution of every expression, and `use_tys`, `resolutions`, `choices`, and
+  `holes` are no longer published. `use_types` is the last one, and it is not a
+  straight move: it is keyed by the span the checker *recorded* for a use, which
+  is not always the node's own span (a deferred literal records its argument's),
+  so the tree would have to carry that key span as well as the printed form.
+  Two uses can also share a key span, and the map keeps the last one written —
+  reproducing it means preserving that tie-break, which is the checker's
+  recording order rather than the tree's arena order. Neither is hard; both are
+  the reason this one is not simply deleted.
   `holes` — the count of overloads a definition leaves open — is the one map
   that might be a projection of `choices` rather than a fact of its own. An
   overload constraint is born at a site (`overload.rs`), becomes

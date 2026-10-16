@@ -66,7 +66,7 @@ fn term_path(src: &str, name: &str) -> String {
     let body = Body {
         module: ws.root,
         def,
-        expr: ws.modules[ws.root].module.defs[def].body.clone(),
+        expr: &ws.modules[ws.root].module.defs[def].body,
     };
     let resolved = |m: usize, id: u32| facts.resolution(m, id);
     let mut cx = Normalizer::new(Box::new(resolved));
@@ -430,7 +430,7 @@ fn the_lowering_covers_the_relational_vocabulary() {
         let body = Body {
             module: ws.root,
             def,
-            expr: ws.modules[ws.root].module.defs[def].body.clone(),
+            expr: &ws.modules[ws.root].module.defs[def].body,
         };
         let resolved = |m: usize, id: u32| facts.resolution(m, id);
         let mut cx = Normalizer::new(Box::new(resolved));

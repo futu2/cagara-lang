@@ -1109,7 +1109,7 @@ pub trait Facts {
     ///
     /// Returned by value because the caller owns a workspace and the bridge
     /// must not hold a borrow across the recursive walk.
-    fn def_body(&self, module: usize, def: usize) -> Option<Body>;
+    fn def_body(&self, module: usize, def: usize) -> Option<Body<'_>>;
 
     /// Whether the definition is a `sql "..."` template, and its text, and the
     /// phase kind its signature declares.
@@ -1300,11 +1300,33 @@ pub struct Template {
 /// The pair travels with the syntax because every fact the bridge reads —
 /// resolutions, types — is keyed by where a piece of syntax was *written*, and
 /// normalizing a callee's body moves to the callee's module.
-#[derive(Debug, Clone)]
-pub struct Body {
+///
+/// The expression is **borrowed**, not owned. The walk recurses into
+/// sub-expressions, and an owned body had to clone the child it stepped into —
+/// and an `ast::Expr` owns its children, so cloning a node cloned the whole
+/// subtree under it. A pipeline nested *n* deep was copied O(n²) times before a
+/// single term existed. Borrowing is also the shape a walk needs to carry
+/// anything else the checker recorded about the same body, since that is
+/// borrowed from the `TypeCheck` the walk already holds.
+#[derive(Debug, Clone, Copy)]
+pub struct Body<'a> {
     pub module: usize,
     pub def: usize,
-    pub expr: cagara_syntax::ast::Expr,
+    pub expr: &'a cagara_syntax::ast::Expr,
+}
+
+impl<'a> Body<'a> {
+    /// A body at one of its sub-expressions, keeping the module and definition.
+    ///
+    /// The child's lifetime is the parent's: every sub-expression of a body
+    /// lives inside that body.
+    pub fn child(&self, expr: &'a cagara_syntax::ast::Expr) -> Body<'a> {
+        Body {
+            module: self.module,
+            def: self.def,
+            expr,
+        }
+    }
 }
 
 /// What the bridge could not normalize.
@@ -1452,11 +1474,7 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                 expression(
                     facts,
                     cx,
-                    &Body {
-                        module,
-                        def: body.def,
-                        expr: (**body_expr).clone(),
-                    },
+                    &body.child(body_expr),
                 )
             })?;
             Ok(Term::Lambda {
@@ -1490,25 +1508,13 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                 _ => None,
             };
             let apply = |cx: &mut Normalizer<'_>| -> Result<Term, Gap> {
-                let head_term = expression(
-                    facts,
-                    cx,
-                    &Body {
-                        module,
-                        def: body.def,
-                        expr: (**head).clone(),
-                    },
-                )?;
+                let head_term = expression(facts, cx, &body.child(head))?;
                 let mut arg_terms = Vec::with_capacity(args.len());
                 for arg in args.iter() {
                     arg_terms.push(expression(
                         facts,
                         cx,
-                        &Body {
-                            module,
-                            def: body.def,
-                            expr: arg.clone(),
-                        },
+                        &body.child(arg),
                     )?);
                 }
                 // Reduce as far as the head allows. An application that cannot
@@ -1571,31 +1577,19 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                     expression(
                         facts,
                         cx,
-                        &Body {
-                            module,
-                            def: body.def,
-                            expr: c.clone(),
-                        },
+                        &body.child(c),
                     )?,
                     expression(
                         facts,
                         cx,
-                        &Body {
-                            module,
-                            def: body.def,
-                            expr: v.clone(),
-                        },
+                        &body.child(v),
                     )?,
                 ));
             }
             let default = expression(
                 facts,
                 cx,
-                &Body {
-                    module,
-                    def: body.def,
-                    expr: default.clone(),
-                },
+                &body.child(default),
             )?;
             Ok(Term::Case {
                 arms: out,
@@ -1612,11 +1606,7 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                 out.push(expression(
                     facts,
                     cx,
-                    &Body {
-                        module,
-                        def: body.def,
-                        expr: item.clone(),
-                    },
+                    &body.child(item),
                 )?);
             }
             Ok(Term::List { items: out, origin })
@@ -1633,11 +1623,7 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                     expression(
                         facts,
                         cx,
-                        &Body {
-                            module,
-                            def: body.def,
-                            expr: value.clone(),
-                        },
+                        &body.child(value),
                     )?,
                 ));
             }
@@ -1841,7 +1827,7 @@ pub fn elaborate_query_via_terms(
     let body = Body {
         module,
         def: owner,
-        expr: e.clone(),
+        expr: e,
     };
     let resolve = |module: usize, id: u32| facts.resolution(module, id);
     let mut cx = Normalizer::new(Box::new(resolve));
@@ -2466,12 +2452,12 @@ impl Facts for InputFacts<'_> {
         .resolution(module, id)
     }
 
-    fn def_body(&self, module: usize, def: usize) -> Option<Body> {
+    fn def_body(&self, module: usize, def: usize) -> Option<Body<'_>> {
         let d = self.input.module(module).source().defs.get(def)?;
         Some(Body {
             module,
             def,
-            expr: d.body.clone(),
+            expr: &d.body,
         })
     }
 
@@ -2524,12 +2510,12 @@ impl Facts for WorkspaceFacts<'_> {
         resolved_assignment(self.tc, module, owner, site)
     }
 
-    fn def_body(&self, module: usize, def: usize) -> Option<Body> {
+    fn def_body(&self, module: usize, def: usize) -> Option<Body<'_>> {
         let d = self.ws.modules.get(module)?.module.defs.get(def)?;
         Some(Body {
             module,
             def,
-            expr: d.body.clone(),
+            expr: &d.body,
         })
     }
 
@@ -2817,7 +2803,7 @@ mod bridge_tests {
         let body = Body {
             module: ws.root,
             def,
-            expr: ws.modules[ws.root].module.defs[def].body.clone(),
+            expr: &ws.modules[ws.root].module.defs[def].body,
         };
         let resolved = |module: usize, id: u32| facts.resolution(module, id);
         let mut cx = Normalizer::new(Box::new(resolved));
@@ -3111,7 +3097,7 @@ mod bridge_tests {
             let body = Body {
                 module: ws.root,
                 def: index,
-                expr: defs[index].body.clone(),
+                expr: &defs[index].body,
             };
             let resolved = |module: usize, id: u32| facts.resolution(module, id);
             let mut cx = Normalizer::new(Box::new(resolved));
@@ -3180,7 +3166,7 @@ mod prelude_covers_the_bridge {
                 let body = Body {
                     module: m,
                     def: i,
-                    expr: d.body.clone(),
+                    expr: &d.body,
                 };
                 let resolved = |mm: usize, id: u32| facts.resolution(mm, id);
                 let mut cx = Normalizer::new(Box::new(resolved));
@@ -3217,7 +3203,7 @@ mod prelude_covers_the_bridge {
                 let body = Body {
                     module: m,
                     def: i,
-                    expr: d.body.clone(),
+                    expr: &d.body,
                 };
                 let resolved = |mm: usize, id: u32| facts.resolution(mm, id);
                 let mut cx = Normalizer::new(Box::new(resolved));

@@ -194,6 +194,85 @@ Route source compilation through typed checking directly to `CheckedQuery`.
 Delete transitional maps and adapters after downstream consumers have migrated.
 Keep erasure structural and SQL lowering type-agnostic.
 
+Steps 1–5 are done as far as the *facts* go: checking returns a typed tree that
+carries the type, row, printed form, resolution, overload choices, and stage of
+every expression, `holes` on the body, and no per-expression map survives.
+What remains is the second half of this step — the **walk**, not the facts.
+
+#### What stands in the way
+
+`CheckedQuery` is built today by normalizing source to a `Term` and lowering
+that: `elaborate_query_via_terms` walks the AST through the bridge
+(`normalize::expression`), which resolves every name, inlines every definition,
+and reduces every application, and `lower_query` then reads the finished term.
+
+A walk over the typed tree cannot simply replace it. The tree deliberately does
+not copy syntax — a node carries its `ExprId` and span, and a consumer that
+needs a node's *shape* reads the AST node it already has — so a tree-driven walk
+still consults the AST for each node's kind. Taking children from
+`TypedBody::children` instead of `child_exprs` yields the same nodes in the same
+order, which
+`compile::tests::the_bridge_visits_every_node_the_typed_tree_holds_except_projection_bases`
+already pins. Re-pointing the walk alone buys nothing.
+
+What the tree *does* add is the query skeleton: a definition's stage
+applications, each with the operation it applied and the rows its own signature
+instance read and produced (`TypedExpr::stage`, ordered by `TypedBody::by_stage`).
+That is the boundary this step exists to make authoritative, instead of
+recovering it from a composed result type.
+
+#### The composition model
+
+A definition's tree records only the stages *it* applies directly. A helper's
+scheme carries no stage, so a use of a helper records nothing at the call site —
+the stages it applies are in its own tree. Composition therefore happens at the
+use: elaborating a call means elaborating the callee's tree with the use site's
+arguments, which is what inlining already does, and it is why the tree alone
+cannot answer "what stages does this query run" without it.
+
+- **Holes**: the candidate for a use is on the call node's `choices`, so the
+  assignment travels with the node rather than through the term's substitution
+  stack.
+- **Expressions**: predicates, projections, aggregate inputs, and scalar
+  arguments stay on the bridge. They are terms today and the checked layer
+  already consumes `CheckedExpr`; there is no reason to rebuild that path over
+  the tree before the query path moves.
+- **Bases**: a table, join, or set operation is an application whose arguments
+  are syntax (table names, join predicates). Its *row* is on the node
+  (`TypedExpr::view`), and its arguments come from the AST as they do now.
+
+#### Slices, each with its own witness
+
+1. **A direct pipeline over a base.** Build `CheckedQuery` from the recorded
+   stage chain, taking each stage's input and output rows from its node rather
+   than from the lowered term, and each stage's expression arguments from the
+   bridge. Witness: the corpus and example snapshots, plus
+   `shipped_programs_stage_nodes_agree_with_the_relational_rows` and the
+   query-lowering agreement test, which compare against an outside source.
+2. **Helper-composed pipelines.** Compose the callee's tree at the use, as
+   inlining does today. Witness: the same tests, whose cases already include a
+   helper reused at two labels and a chain through an alias.
+3. **Everything else the gate counts.** `compile::tests::the_normalized_route_handles_every_construct`
+   is the list of shapes the language has; each must be built from the tree
+   before the term route can go.
+4. **Delete the term route for queries**, and with it `Body`, `expression`,
+   `lower_query`, and the `Facts` trait — or keep the trait as the *reader* of
+   tree facts that the new path uses, which is smaller and loses nothing.
+
+#### What must not change
+
+- A `CheckedQuery` is still only made by its constructors, so the row a node
+  reports is the row its operation produces.
+- A stage's rows are still its *own* signature instance, never recovered from a
+  composed result type — the property `check::stage::finish_row_stages` asserts.
+- Erasure stays structural and SQL lowering stays type-agnostic.
+
+The honest summary: this step is a rewrite of the query half of elaboration, not
+another fact migration, and it should be done slice by slice with the corpus as
+the witness at every step. Until slice 1 lands, the tree is authoritative for
+*what was checked* and the term route remains authoritative for *how a query is
+built*.
+
 ## Acceptance criteria
 
 - `two = p => q => q & prefix p & prefix p` checks and maps every label twice.

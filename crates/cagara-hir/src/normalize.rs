@@ -1107,8 +1107,10 @@ pub trait Facts {
 
     /// The definition body to normalize, given a resolved definition.
     ///
-    /// Returned by value because the caller owns a workspace and the bridge
-    /// must not hold a borrow across the recursive walk.
+    /// Borrowed from the adapter, not from a temporary: both adapters hold the
+    /// workspace or the compiler input for the whole walk, so the borrow lives
+    /// as long as the walk needs it and the bridge never copies a body.
+    /// `None` when the definition does not exist in that module.
     fn def_body(&self, module: usize, def: usize) -> Option<Body<'_>>;
 
     /// Whether the definition is a `sql "..."` template, and its text, and the

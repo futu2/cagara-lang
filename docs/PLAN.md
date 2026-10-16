@@ -217,9 +217,13 @@ term route and compared with the typed skeleton. This slice therefore moves the
 query structure and its row evidence first; expression payloads and removing
 the term route remain later work.
 
-Joins and set operations remain deferred because `TypedQuery` still models one
-child per stage. Windows remain deferred until the expression payload bridge is
-carried by typed nodes.
+`TypedQuery` now has ordered multi-input edges for joins and set operations, and
+records each child's checked output row. The lowering slice still does not
+construct those nodes: joins and sets are not `RowStage`s, and the checker does
+not yet record their operation identity, child query identities, and closed
+input/output rows together. The next slice needs to add that checker evidence
+and build the two child subtrees before lowering joins and sets. Windows remain
+deferred until the expression payload bridge is carried by typed nodes.
 
 ### Step 1, done
 

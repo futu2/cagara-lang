@@ -60,6 +60,7 @@
 
 use super::NodeRef;
 use crate::core::{Origin, ScalarType};
+use crate::ir::{JoinKind, SetKind};
 
 /// A handle to one node of a [`TypedQuery`]'s arena.
 ///
@@ -154,6 +155,10 @@ pub enum QueryNodeKind {
     Offset,
     /// `distinct`.
     Distinct,
+    /// A two-input join.
+    Join(JoinKind),
+    /// A two-input set operation.
+    Set(SetKind),
 }
 
 impl QueryNodeKind {
@@ -165,6 +170,7 @@ impl QueryNodeKind {
     pub fn arity(self) -> usize {
         match self {
             QueryNodeKind::Table => 0,
+            QueryNodeKind::Join(_) | QueryNodeKind::Set(_) => 2,
             QueryNodeKind::Prefix
             | QueryNodeKind::Suffix
             | QueryNodeKind::Omit
@@ -223,12 +229,12 @@ struct TypedQueryNode {
     site: NodeRef,
     kind: QueryNodeKind,
     /// The typed child this operation was applied to, when it takes one.
-    input: Option<NodeId>,
+    inputs: Vec<NodeId>,
     /// The row the operation read, as the checker closed it at this node.
     ///
     /// `None` when the row is still open — a helper's stage applied to a
     /// parameter — which is a different fact from a row with no columns.
-    input_row: Option<Row>,
+    input_rows: Vec<Option<Row>>,
     /// The row the operation produced, as the checker closed it at this node.
     ///
     /// This is the answer to "what does this node produce", and there is no
@@ -272,12 +278,22 @@ impl<'a> QueryNode<'a> {
     /// A [`NodeId`] into the same arena, so a caller follows the chain through
     /// the query rather than through syntax.
     pub fn input(&self) -> Option<NodeId> {
-        self.node.input
+        self.node.inputs.first().copied()
+    }
+
+    /// All relational children in operation order.
+    pub fn inputs(&self) -> &[NodeId] {
+        &self.node.inputs
     }
 
     /// The row the operation read, when the checker closed it.
     pub fn input_row(&self) -> Option<&Row> {
-        self.node.input_row.as_ref()
+        self.node.input_rows.first().and_then(Option::as_ref)
+    }
+
+    /// Rows read from each relational child, in the same order as `inputs`.
+    pub fn input_rows(&self) -> impl Iterator<Item = Option<&Row>> {
+        self.node.input_rows.iter().map(Option::as_ref)
     }
 
     /// The row the operation produced, when the checker closed it.
@@ -394,7 +410,7 @@ impl TypedQuery {
         let mut at = Some(self.root());
         while let Some(id) = at {
             out.push(id);
-            at = self.raw(id).input;
+            at = self.raw(id).inputs.first().copied();
         }
         out
     }
@@ -439,8 +455,8 @@ impl TypedQuery {
         let node = TypedQueryNode {
             site,
             kind: QueryNodeKind::Table,
-            input: None,
-            input_row: None,
+            inputs: Vec::new(),
+            input_rows: Vec::new(),
             output_row: Some(Row::new(columns)),
             origin,
         };
@@ -470,8 +486,8 @@ impl TypedQuery {
         let node = TypedQueryNode {
             site,
             kind,
-            input: Some(input),
-            input_row,
+            inputs: vec![input],
+            input_rows: vec![input_row],
             output_row,
             origin,
         };
@@ -486,7 +502,9 @@ impl TypedQuery {
         // separately because each is a fact about *this* node, but a
         // disagreement means the child is not the input this stage read — a
         // compiler bug, and the one this link exists to catch.
-        if let (Some(recorded), Some(child_row)) = (&node.input_row, &child_row) {
+        if let (Some(recorded), Some(child_row)) =
+            (node.input_rows.first().and_then(Option::as_ref), &child_row)
+        {
             if recorded != child_row {
                 return Err(QueryErr::new(
                     &node,
@@ -521,8 +539,8 @@ impl TypedQuery {
         let node = TypedQueryNode {
             site,
             kind,
-            input: Some(input),
-            input_row: row.clone(),
+            inputs: vec![input],
+            input_rows: vec![row.clone()],
             output_row: row,
             origin,
         };
@@ -555,8 +573,8 @@ impl TypedQuery {
         let node = TypedQueryNode {
             site,
             kind,
-            input: Some(input),
-            input_row,
+            inputs: vec![input],
+            input_rows: vec![input_row],
             output_row,
             origin,
         };
@@ -567,6 +585,38 @@ impl TypedQuery {
             return Err(QueryErr::new(
                 &node,
                 format!("{kind:?} is not a projection"),
+            ));
+        }
+        Ok(self.push(node))
+    }
+
+    /// Combine two typed children with a join or set operation. The checker
+    /// supplies the output row; this constructor records both child rows in
+    /// operand order and refuses an operation of any other arity.
+    pub(crate) fn combine(
+        &mut self,
+        site: NodeRef,
+        kind: QueryNodeKind,
+        left: NodeId,
+        right: NodeId,
+        output_row: Option<Row>,
+        origin: Origin,
+    ) -> Result<NodeId, QueryErr> {
+        let node = TypedQueryNode {
+            site,
+            kind,
+            inputs: vec![left, right],
+            input_rows: vec![
+                self.raw(left).output_row.clone(),
+                self.raw(right).output_row.clone(),
+            ],
+            output_row,
+            origin,
+        };
+        if kind.arity() != 2 || !matches!(kind, QueryNodeKind::Join(_) | QueryNodeKind::Set(_)) {
+            return Err(QueryErr::new(
+                &node,
+                format!("{kind:?} is not a two-input relational operation"),
             ));
         }
         Ok(self.push(node))
@@ -731,6 +781,8 @@ mod tests {
         ] {
             assert_eq!(kind.arity(), 1, "{kind:?}");
         }
+        assert_eq!(QueryNodeKind::Join(JoinKind::Inner).arity(), 2);
+        assert_eq!(QueryNodeKind::Set(SetKind::Union).arity(), 2);
         assert!(QueryNodeKind::Prefix.recomputes_row());
         assert!(!QueryNodeKind::Where.recomputes_row());
     }
@@ -801,5 +853,64 @@ mod tests {
             stage.input,
             "the typed child's row is the row the stage read"
         );
+    }
+
+    #[test]
+    fn a_combine_records_both_children_and_rows_in_operand_order() {
+        let mut q = TypedQuery::new();
+        let left = q
+            .table(site(0, 0, 1), origin(), row(&["left"]).columns().to_vec())
+            .expect("left table");
+        let right = q
+            .table(site(0, 0, 2), origin(), row(&["right"]).columns().to_vec())
+            .expect("right table");
+        let join = q
+            .combine(
+                site(0, 0, 3),
+                QueryNodeKind::Join(JoinKind::Inner),
+                left,
+                right,
+                Some(row(&["left", "right"])),
+                origin(),
+            )
+            .expect("two-input join");
+
+        let node = q.node(join);
+        assert_eq!(node.inputs(), &[left, right]);
+        let input_rows: Vec<_> = node
+            .input_rows()
+            .map(|row| row.expect("table rows are closed").names())
+            .collect();
+        assert_eq!(input_rows, vec![vec!["left"], vec!["right"]]);
+        assert_eq!(
+            node.output_row().expect("join output row").names(),
+            ["left", "right"]
+        );
+
+        let q = q.finish(join);
+        // The legacy chain view follows the left operand; graph consumers use
+        // `inputs()` to visit both children.
+        assert_eq!(q.chain(), vec![join, left]);
+    }
+
+    #[test]
+    fn combine_rejects_one_input_operations() {
+        let mut q = TypedQuery::new();
+        let left = q
+            .table(site(0, 0, 1), origin(), row(&["id"]).columns().to_vec())
+            .expect("left table");
+        let right = q
+            .table(site(0, 0, 2), origin(), row(&["id"]).columns().to_vec())
+            .expect("right table");
+        assert!(q
+            .combine(
+                site(0, 0, 3),
+                QueryNodeKind::Where,
+                left,
+                right,
+                Some(row(&["id"])),
+                origin(),
+            )
+            .is_err());
     }
 }

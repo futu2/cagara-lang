@@ -688,7 +688,9 @@ fn copy_typed_chain(source: &TypedQuery, target: &mut TypedQuery) -> Result<Node
                 .map_err(query_error)?,
             _ => {
                 let old_child = node
-                    .input()
+                    .inputs()
+                    .first()
+                    .copied()
                     .ok_or_else(|| Error::unsupported("typed stage has no child"))?;
                 let child = *copied
                     .get(&old_child)

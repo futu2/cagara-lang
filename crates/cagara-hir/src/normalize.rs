@@ -1153,6 +1153,43 @@ pub trait Facts {
     }
 }
 
+/// The three questions a definition's typed tree can answer.
+///
+/// The tree is the checker's own account of a body, node by node, and these
+/// are the facts elaboration reads off it: the type an expression got, the row
+/// it is a query over, and what a name resolved to. `Facts` asks by `ExprId`
+/// alone while a tree belongs to one definition, so the node is reached
+/// through the module's id index.
+///
+/// The rest of the trait — the body, a template, an overload choice, a hole
+/// assignment — is not in the tree yet and stays with the source that owns it.
+struct TreeFacts<'a> {
+    tc: &'a crate::check::TypeCheck,
+}
+
+impl TreeFacts<'_> {
+    fn node(&self, module: usize, id: u32) -> Option<&crate::check::TypedExpr> {
+        self.tc.typed_node(module, id)
+    }
+
+    /// The scalar type, or `Unknown` when the node got none — the same answer
+    /// [`Facts::use_ty`] documents, because a definition that failed is still
+    /// elaborated as far as it got.
+    fn use_ty(&self, module: usize, id: u32) -> crate::core::ScalarType {
+        self.node(module, id)
+            .and_then(|n| n.ty.clone())
+            .unwrap_or(crate::core::ScalarType::Unknown)
+    }
+
+    fn use_row(&self, module: usize, id: u32) -> Option<Vec<(String, crate::core::ScalarType)>> {
+        self.node(module, id).and_then(|n| n.row.clone())
+    }
+
+    fn resolution(&self, module: usize, id: u32) -> Option<Resolved> {
+        self.node(module, id).and_then(|n| n.resolved.clone())
+    }
+}
+
 /// The hole assignment a use site resolved, as `holes[k] = (callee_module,
 /// The overload choice the checker recorded at one use site.
 ///
@@ -2396,7 +2433,10 @@ impl Facts for InputFacts<'_> {
     }
 
     fn resolution(&self, module: usize, id: u32) -> Option<Resolved> {
-        self.input.type_check().resolution(module, id).cloned()
+        TreeFacts {
+            tc: self.input.type_check(),
+        }
+        .resolution(module, id)
     }
 
     fn def_body(&self, module: usize, def: usize) -> Option<Body> {
@@ -2429,23 +2469,23 @@ impl Facts for InputFacts<'_> {
     }
 
     fn use_ty(&self, module: usize, id: u32) -> crate::core::ScalarType {
-        self.input
-            .type_check()
-            .use_ty(module, id)
-            .unwrap_or(crate::core::ScalarType::Unknown)
+        TreeFacts {
+            tc: self.input.type_check(),
+        }
+        .use_ty(module, id)
     }
 
     fn use_row(&self, module: usize, id: u32) -> Option<Vec<(String, crate::core::ScalarType)>> {
-        match self.input.type_check().use_scheme(module, id)? {
-            crate::check::SchemeView::Query { fields } => fields,
-            _ => None,
+        TreeFacts {
+            tc: self.input.type_check(),
         }
+        .use_row(module, id)
     }
 }
 
 impl Facts for WorkspaceFacts<'_> {
     fn resolution(&self, module: usize, id: u32) -> Option<Resolved> {
-        self.tc.resolution(module, id).cloned()
+        TreeFacts { tc: self.tc }.resolution(module, id)
     }
 
     /// The same answer the compiler's adapter gives, from the same function.
@@ -2487,16 +2527,11 @@ impl Facts for WorkspaceFacts<'_> {
     }
 
     fn use_ty(&self, module: usize, id: u32) -> crate::core::ScalarType {
-        self.tc
-            .use_ty(module, id)
-            .unwrap_or(crate::core::ScalarType::Unknown)
+        TreeFacts { tc: self.tc }.use_ty(module, id)
     }
 
     fn use_row(&self, module: usize, id: u32) -> Option<Vec<(String, crate::core::ScalarType)>> {
-        match self.tc.use_scheme(module, id)? {
-            crate::check::SchemeView::Query { fields } => fields,
-            _ => None,
-        }
+        TreeFacts { tc: self.tc }.use_row(module, id)
     }
 }
 

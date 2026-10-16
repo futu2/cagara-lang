@@ -240,6 +240,21 @@ impl TypeCheck {
         self.modules.get(module)?.typed.get(&(module, def))
     }
 
+    /// The typed node for one expression of a module, found by `ExprId`.
+    ///
+    /// `Facts` is keyed by `ExprId` alone while a tree belongs to one
+    /// definition, so this is how a reader that knows only the id reaches the
+    /// node. The index holds positions, not facts.
+    pub fn typed_node(&self, module: usize, id: u32) -> Option<&TypedExpr> {
+        let checked = self.modules.get(module)?;
+        let at = checked
+            .typed_index
+            .binary_search_by_key(&id, |(id, _, _)| *id)
+            .ok()?;
+        let (_, def, node) = checked.typed_index[at];
+        checked.typed.get(&(module, def))?.nodes().get(node)
+    }
+
     /// Printed type of the name use whose expression spans `span` in `module`.
     pub fn use_type(&self, module: usize, span: Span) -> Option<&str> {
         self.modules
@@ -509,6 +524,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         resolutions: out.resolutions,
         row_stages: out.row_stages,
         typed: out.typed,
+        typed_index: out.typed_index,
     })
 }
 
@@ -543,6 +559,11 @@ struct ModuleOutput {
     row_stages: HashMap<(usize, usize), Vec<RowStageView>>,
     /// Each definition's body as a typed tree, by `(module, def)`.
     typed: HashMap<(usize, usize), TypedBody>,
+    /// `ExprId` to the definition that has it and the node's place in that
+    /// body, ascending by id. Positions only: the facts stay on the node, and
+    /// this is what lets an id-keyed reader find one without scanning every
+    /// definition.
+    typed_index: Vec<(u32, usize, usize)>,
 }
 
 /// A checked module with its diagnostics already rendered.
@@ -570,6 +591,11 @@ struct ModuleCheck {
     row_stages: HashMap<(usize, usize), Vec<RowStageView>>,
     /// Each definition's body as a typed tree, by `(module, def)`.
     typed: HashMap<(usize, usize), TypedBody>,
+    /// `ExprId` to the definition that has it and the node's place in that
+    /// body, ascending by id. Positions only: the facts stay on the node, and
+    /// this is what lets an id-keyed reader find one without scanning every
+    /// definition.
+    typed_index: Vec<(u32, usize, usize)>,
 }
 
 /// What checking one module reads: its definitions and scope, and every
@@ -630,6 +656,13 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
     let resolutions = c.resolutions;
     let row_stages = c.row_stage_nodes;
     let typed = c.typed_bodies;
+    let mut typed_index: Vec<(u32, usize, usize)> = Vec::new();
+    for (&(_, def), body) in &typed {
+        for (at, node) in body.nodes().iter().enumerate() {
+            typed_index.push((node.id, def, at));
+        }
+    }
+    typed_index.sort_unstable_by_key(|(id, _, _)| *id);
     ModuleOutput {
         schemes: c.schemes,
         errors: c.errors,
@@ -642,6 +675,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         resolutions,
         row_stages,
         typed,
+        typed_index,
     }
 }
 

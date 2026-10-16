@@ -246,6 +246,8 @@ struct TypedQueryNode {
     /// The checked predicate owned by a `where` node, when this slice has
     /// carried expression payloads into the typed query.
     predicate: Option<CheckedExpr>,
+    /// The checked sort keys owned by an `order` node.
+    order_keys: Option<Vec<(CheckedExpr, bool)>>,
 }
 
 /// A read-only view of one typed query node.
@@ -313,6 +315,11 @@ impl<'a> QueryNode<'a> {
     /// The checked predicate carried by a `where` node.
     pub fn predicate(&self) -> Option<&CheckedExpr> {
         self.node.predicate.as_ref()
+    }
+
+    /// The checked sort keys owned by an `order` node, in source order.
+    pub fn order_keys(&self) -> Option<&[(CheckedExpr, bool)]> {
+        self.node.order_keys.as_deref()
     }
 }
 
@@ -469,6 +476,7 @@ impl TypedQuery {
             output_row: Some(Row::new(columns)),
             origin,
             predicate: None,
+            order_keys: None,
         };
         Ok(self.push(node))
     }
@@ -501,6 +509,7 @@ impl TypedQuery {
             output_row,
             origin,
             predicate: None,
+            order_keys: None,
         };
         if !kind.recomputes_row() {
             return Err(QueryErr::new(
@@ -558,6 +567,19 @@ impl TypedQuery {
         origin: Origin,
         predicate: Option<CheckedExpr>,
     ) -> Result<NodeId, QueryErr> {
+        self.keep_row_with_payload(site, kind, input, origin, predicate, None)
+    }
+
+    /// A row-preserving stage with checked expression payloads.
+    pub(crate) fn keep_row_with_payload(
+        &mut self,
+        site: NodeRef,
+        kind: QueryNodeKind,
+        input: NodeId,
+        origin: Origin,
+        predicate: Option<CheckedExpr>,
+        order_keys: Option<Vec<(CheckedExpr, bool)>>,
+    ) -> Result<NodeId, QueryErr> {
         let row = self.raw(input).output_row.clone();
         let node = TypedQueryNode {
             site,
@@ -567,10 +589,12 @@ impl TypedQuery {
             output_row: row,
             origin,
             predicate,
+            order_keys,
         };
         if kind.arity() != 1
             || kind.recomputes_row()
             || (node.predicate.is_some() && kind != QueryNodeKind::Where)
+            || (node.order_keys.is_some() && kind != QueryNodeKind::Order)
         {
             return Err(QueryErr::new(
                 &node,
@@ -605,6 +629,7 @@ impl TypedQuery {
             output_row,
             origin,
             predicate: None,
+            order_keys: None,
         };
         if !matches!(
             kind,
@@ -641,6 +666,7 @@ impl TypedQuery {
             output_row,
             origin,
             predicate: None,
+            order_keys: None,
         };
         if kind.arity() != 2 || !matches!(kind, QueryNodeKind::Join(_) | QueryNodeKind::Set(_)) {
             return Err(QueryErr::new(

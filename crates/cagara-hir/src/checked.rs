@@ -211,6 +211,45 @@ impl CheckedQuery {
         visit(self, &mut out);
         out
     }
+
+    /// The same input-to-root walk, retaining the sort keys owned by `order`.
+    pub(crate) fn node_chain_order_keys(
+        &self,
+    ) -> Vec<(QueryKind, Option<Vec<(CheckedExpr, bool)>>)> {
+        fn visit(
+            query: &CheckedQuery,
+            out: &mut Vec<(QueryKind, Option<Vec<(CheckedExpr, bool)>>)>,
+        ) {
+            match &query.node {
+                CheckedQueryNode::Table { .. } => {}
+                CheckedQueryNode::Where { input, .. }
+                | CheckedQueryNode::Select { input, .. }
+                | CheckedQueryNode::Update { input, .. }
+                | CheckedQueryNode::Omit { input, .. }
+                | CheckedQueryNode::Rename { input, .. }
+                | CheckedQueryNode::MapValue { input, .. }
+                | CheckedQueryNode::Agg { input, .. }
+                | CheckedQueryNode::Order { input, .. }
+                | CheckedQueryNode::Limit { input, .. }
+                | CheckedQueryNode::Offset { input, .. } => visit(input, out),
+                CheckedQueryNode::Distinct(input) => visit(input, out),
+                CheckedQueryNode::Join { left, right, .. }
+                | CheckedQueryNode::Set { left, right, .. } => {
+                    visit(left, out);
+                    visit(right, out);
+                }
+            }
+            let keys = match &query.node {
+                CheckedQueryNode::Order { keys, .. } => Some(keys.clone()),
+                _ => None,
+            };
+            out.push((query.kind(), keys));
+        }
+
+        let mut out = Vec::new();
+        visit(self, &mut out);
+        out
+    }
     /// A table, with its columns known.
     ///
     /// `columns` is the table's closed row: the checker gives a `table`

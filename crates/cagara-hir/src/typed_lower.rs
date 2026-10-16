@@ -878,6 +878,11 @@ fn lower_expression_pipeline(
         .into_iter()
         .filter(|(kind, _)| *kind == crate::checked::QueryKind::Where)
         .map(|(_, predicate)| predicate);
+    let mut order_payloads = checked
+        .node_chain_order_keys()
+        .into_iter()
+        .filter(|(kind, _)| *kind == crate::checked::QueryKind::Order)
+        .map(|(_, keys)| keys);
 
     for stage in stages {
         let input_row = Row::new(stage.input.clone().expect("checked above"));
@@ -922,7 +927,7 @@ fn lower_expression_pipeline(
             | RowStage::Limit
             | RowStage::Offset
             | RowStage::Distinct => typed
-                .keep_row_with_predicate(
+                .keep_row_with_payload(
                     stage.node,
                     match stage.kind {
                         RowStage::Where => QueryNodeKind::Where,
@@ -936,6 +941,11 @@ fn lower_expression_pipeline(
                     origin,
                     if stage.kind == RowStage::Where {
                         where_payloads.next().flatten()
+                    } else {
+                        None
+                    },
+                    if stage.kind == RowStage::Order {
+                        order_payloads.next().flatten()
                     } else {
                         None
                     },
@@ -2091,6 +2101,16 @@ mod tests {
             where_node.predicate().map(|predicate| predicate.kind()),
             Some(crate::checked::ExprKind::Template)
         );
+        let order_node = typed
+            .chain()
+            .into_iter()
+            .map(|id| typed.node(id))
+            .find(|node| node.kind() == QueryNodeKind::Order)
+            .expect("typed pipeline has an order node");
+        let order_keys = order_node.order_keys().expect("order carries checked keys");
+        assert_eq!(order_keys.len(), 1);
+        assert_eq!(order_keys[0].0.kind(), crate::checked::ExprKind::Column);
+        assert!(order_keys[0].1, "the source key is ascending");
 
         let (typed, checked) = lower_source(
             "users : query { id = int, age = int } = table \"s\" \"users\"\n\

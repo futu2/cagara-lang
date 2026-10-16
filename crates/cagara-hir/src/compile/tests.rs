@@ -279,7 +279,7 @@ fn the_typed_tree_agrees_with_the_maps_on_every_shipped_program() {
                     );
                 }
                 assert_eq!(
-                    node.ty,
+                    node.ty(),
                     tc.use_ty(ws.root, node.id),
                     "{} / `{}`: node {} scalar type",
                     path.display(),
@@ -291,7 +291,7 @@ fn the_typed_tree_agrees_with_the_maps_on_every_shipped_program() {
                     _ => None,
                 };
                 assert_eq!(
-                    node.row,
+                    node.row(),
                     mapped_row,
                     "{} / `{}`: node {} row",
                     path.display(),
@@ -313,7 +313,7 @@ fn the_typed_tree_agrees_with_the_maps_on_every_shipped_program() {
                         node.id
                     ),
                     None => assert!(
-                        node.shown.is_empty() == (node.ty.is_none() && node.row.is_none()),
+                        node.shown.is_empty() == (node.ty().is_none() && node.row().is_none()),
                         "{} / `{}`: node {} has a type but no printed form",
                         path.display(),
                         def.name,

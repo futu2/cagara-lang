@@ -20,43 +20,6 @@ use super::child_exprs;
 use super::*;
 use cagara_syntax::ast;
 
-/// The facts the checker recorded for one expression.
-#[derive(Debug, Clone, PartialEq)]
-struct NodeFacts {
-    /// The scalar type, as [`TypeCheck::use_ty`] reports it: `None` when the
-    /// node got no type or a non-scalar one, `Some(Unknown)` when the checker
-    /// never solved it.
-    ty: Option<crate::core::ScalarType>,
-    /// The row, when the node is query-shaped.
-    row: Option<Vec<(String, crate::core::ScalarType)>>,
-    /// The printed type, as [`TypeCheck::use_type`] shows it for this node.
-    shown: String,
-    /// What a module-scope name occurrence resolved to, if it was one.
-    resolved: Option<Resolved>,
-}
-
-impl NodeFacts {
-    /// Read a node's facts off the type the checker resolved for it.
-    ///
-    /// The two answers `use_ty` and `use_row` give are one `SchemeView` apart,
-    /// so they are computed together here rather than by two readers that could
-    /// classify a type differently.
-    fn of(ty: &Ty, shown: String, resolved: Option<Resolved>) -> NodeFacts {
-        let (scalar, row) = match scheme_view(ty) {
-            SchemeView::Scalar(s) => (Some(s), None),
-            SchemeView::Open => (Some(crate::core::ScalarType::Unknown), None),
-            SchemeView::Query { fields } => (None, fields),
-            _ => (None, None),
-        };
-        NodeFacts {
-            ty: scalar,
-            row,
-            shown,
-            resolved,
-        }
-    }
-}
-
 /// One expression, with the facts the checker recorded for it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedExpr {
@@ -64,10 +27,14 @@ pub struct TypedExpr {
     pub id: u32,
     /// Where it was written.
     pub span: Span,
-    /// The scalar type, as [`TypeCheck::use_ty`] reports it.
-    pub ty: Option<crate::core::ScalarType>,
-    /// The row, when the node is query-shaped.
-    pub row: Option<Vec<(String, crate::core::ScalarType)>>,
+    /// The checker's own classification of the type this node got, or `None`
+    /// when it recorded none.
+    ///
+    /// Stored as the classification rather than as a `Ty`: a `Ty` never leaves
+    /// the crate, and the questions a reader asks of it — what scalar, what
+    /// row, which shape — are all projections of this, so storing it once is
+    /// what keeps those readers from classifying a type differently.
+    pub view: Option<SchemeView>,
     /// The printed type, as hover shows it for this node.
     pub shown: String,
     /// What a module-scope name occurrence resolved to, if it was one.
@@ -82,6 +49,27 @@ pub struct TypedExpr {
     /// Sub-expressions, as indices into the body's arena, in the order
     /// [`child_exprs`] states.
     children: Vec<usize>,
+}
+
+impl TypedExpr {
+    /// The scalar type, as [`TypeCheck::use_ty`] reports it: `None` when the
+    /// node got no type or a non-scalar one, `Some(Unknown)` when the checker
+    /// never solved it.
+    pub fn ty(&self) -> Option<crate::core::ScalarType> {
+        match self.view.as_ref()? {
+            SchemeView::Scalar(s) => Some(s.clone()),
+            SchemeView::Open => Some(crate::core::ScalarType::Unknown),
+            _ => None,
+        }
+    }
+
+    /// The row, when the node is query-shaped.
+    pub fn row(&self) -> Option<Vec<(String, crate::core::ScalarType)>> {
+        match self.view.as_ref()? {
+            SchemeView::Query { fields } => fields.clone(),
+            _ => None,
+        }
+    }
 }
 
 /// A definition's body as a typed tree.
@@ -131,7 +119,7 @@ impl TypedBody {
 pub(crate) fn build(
     root_expr: &ast::Expr,
     holes: usize,
-    ty_of: impl Fn(u32) -> Option<Ty>,
+    view_of: impl Fn(u32) -> Option<SchemeView>,
     shown_of: impl Fn(u32) -> Option<String>,
     resolved_of: impl Fn(u32) -> Option<Resolved>,
     choices_of: impl Fn(u32) -> Vec<(usize, Choice)>,
@@ -143,14 +131,11 @@ pub(crate) fn build(
     let mut stack: Vec<(&ast::Expr, Option<usize>)> = vec![(root_expr, None)];
     while let Some((e, parent)) = stack.pop() {
         let at = nodes.len();
-        let facts = ty_of(e.id)
-            .map(|t| NodeFacts::of(&t, shown_of(e.id).unwrap_or_default(), resolved_of(e.id)));
         nodes.push(TypedExpr {
             id: e.id,
             span: e.span,
-            ty: facts.as_ref().and_then(|f| f.ty.clone()),
-            row: facts.as_ref().and_then(|f| f.row.clone()),
-            shown: facts.map(|f| f.shown).unwrap_or_default(),
+            view: view_of(e.id),
+            shown: shown_of(e.id).unwrap_or_default(),
             resolved: resolved_of(e.id),
             choices: choices_of(e.id),
             children: Vec::new(),

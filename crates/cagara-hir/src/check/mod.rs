@@ -284,12 +284,7 @@ impl TypeCheck {
     /// `Some(Unknown)` when it is a scalar the checker never solved. The
     /// distinction matches [`TypeCheck::def_scalar`], and for the same reason.
     pub fn use_ty(&self, module: usize, id: u32) -> Option<ScalarType> {
-        let t = self.modules.get(module)?.use_tys.get(&(module, id))?;
-        match scheme_view(t) {
-            SchemeView::Scalar(s) => Some(s),
-            SchemeView::Open => Some(ScalarType::Unknown),
-            _ => None,
-        }
+        self.typed_node(module, id)?.ty()
     }
 
     /// The `ExprId`s the checker recorded a type for in `module`, ascending.
@@ -299,13 +294,9 @@ impl TypeCheck {
         let Some(checked) = self.modules.get(module) else {
             return Vec::new();
         };
-        let mut out: Vec<u32> = checked
-            .use_tys
-            .keys()
-            .filter(|(m, _)| *m == module)
-            .map(|(_, id)| *id)
-            .collect();
+        let mut out: Vec<u32> = checked.typed_index.iter().map(|(id, _, _)| *id).collect();
         out.sort_unstable();
+        out.dedup();
         out
     }
 
@@ -321,7 +312,7 @@ impl TypeCheck {
     /// got as far as resolving it. The two are deliberately not distinguished,
     /// matching [`TypeCheck::use_ty`]: both mean "nothing was recorded here".
     pub fn resolution(&self, module: usize, id: u32) -> Option<&Resolved> {
-        self.modules.get(module)?.resolutions.get(&(module, id))
+        self.typed_node(module, id)?.resolved.as_ref()
     }
 
     /// Every `ExprId` in `module` the checker recorded a resolution for.
@@ -330,10 +321,10 @@ impl TypeCheck {
             return Vec::new();
         };
         let mut out: Vec<u32> = checked
-            .resolutions
-            .keys()
-            .filter(|(m, _)| *m == module)
-            .map(|(_, id)| *id)
+            .typed_index
+            .iter()
+            .map(|(id, _, _)| *id)
+            .filter(|id| self.resolution(module, *id).is_some())
             .collect();
         out.sort_unstable();
         out
@@ -412,8 +403,7 @@ impl TypeCheck {
     /// `None` when the checker recorded nothing for that id — the node is not
     /// one it typed, or checking did not reach it.
     pub fn use_scheme(&self, module: usize, id: u32) -> Option<SchemeView> {
-        let t = self.modules.get(module)?.use_tys.get(&(module, id))?;
-        Some(scheme_view(t))
+        self.typed_node(module, id)?.view.clone()
     }
 
     /// A definition's scalar type, as closed data.
@@ -523,9 +513,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         errors,
         types: out.types,
         probe_fields: out.probe_fields,
-        use_tys: out.use_tys,
         use_types: out.use_types,
-        resolutions: out.resolutions,
         row_stages: out.row_stages,
         typed: out.typed,
         typed_index: out.typed_index,
@@ -553,10 +541,8 @@ struct ModuleOutput {
     errors: Vec<RawTypeError>,
     types: HashMap<(usize, usize), String>,
     probe_fields: Option<(usize, Vec<(String, String)>)>,
-    use_tys: HashMap<(usize, u32), Ty>,
     use_types: HashMap<(usize, u32, u32), String>,
     /// What each module-scope name occurrence resolved to, by `ExprId`.
-    resolutions: HashMap<(usize, u32), Resolved>,
     /// The stage nodes each definition recorded, by `(module, def)`.
     row_stages: HashMap<(usize, usize), Vec<RowStageView>>,
     /// Each definition's body as a typed tree, by `(module, def)`.
@@ -578,7 +564,6 @@ struct ModuleCheck {
     errors: Vec<TypeError>,
     types: HashMap<(usize, usize), String>,
     probe_fields: Option<(usize, Vec<(String, String)>)>,
-    use_tys: HashMap<(usize, u32), Ty>,
     use_types: HashMap<(usize, u32, u32), String>,
     /// What each module-scope name occurrence resolved to, by `ExprId`.
     ///
@@ -586,7 +571,6 @@ struct ModuleCheck {
     /// answers "what type did this expression get", this one answers "what did
     /// this name refer to". A consumer expanding a call needs the second and
     /// cannot recover it from the first.
-    resolutions: HashMap<(usize, u32), Resolved>,
     /// The stage nodes each definition recorded, by `(module, def)`.
     row_stages: HashMap<(usize, usize), Vec<RowStageView>>,
     /// Each definition's body as a typed tree, by `(module, def)`.
@@ -652,8 +636,6 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         .collect();
     let probe_fields = c.probe_fields.map(|fs| (m, fs));
     let use_types = c.use_types;
-    let use_tys = c.use_tys;
-    let resolutions = c.resolutions;
     let row_stages = c.row_stage_nodes;
     let typed = c.typed_bodies;
     let mut typed_index: Vec<(u32, usize, usize)> = Vec::new();
@@ -669,8 +651,6 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         types,
         probe_fields,
         use_types,
-        use_tys,
-        resolutions,
         row_stages,
         typed,
         typed_index,

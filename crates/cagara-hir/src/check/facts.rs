@@ -64,14 +64,11 @@ pub(crate) fn definition_facts(
     };
     let mut pending = vec![&definition.body];
     while let Some(e) = pending.pop() {
-        let ty = checked
-            .use_tys
-            .get(&(module, e.id))
-            .and_then(|t| match scheme_view(t) {
-                SchemeView::Scalar(ty) => Some(ty),
-                SchemeView::Open => Some(ScalarType::Unknown),
-                _ => None,
-            });
+        // The node's own classification, so the reuse proof and elaboration
+        // read one account of what an expression got.
+        let ty = typed
+            .and_then(|body| body.node(e.id))
+            .and_then(|node| node.ty());
         facts.uses.push((e.id, ty));
         match &e.kind {
             ExprKind::Name(name) => facts.binding(scope.get(name)),

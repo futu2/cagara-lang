@@ -1177,12 +1177,12 @@ impl TreeFacts<'_> {
     /// elaborated as far as it got.
     fn use_ty(&self, module: usize, id: u32) -> crate::core::ScalarType {
         self.node(module, id)
-            .and_then(|n| n.ty.clone())
+            .and_then(|n| n.ty())
             .unwrap_or(crate::core::ScalarType::Unknown)
     }
 
     fn use_row(&self, module: usize, id: u32) -> Option<Vec<(String, crate::core::ScalarType)>> {
-        self.node(module, id).and_then(|n| n.row.clone())
+        self.node(module, id).and_then(|n| n.row())
     }
 
     fn resolution(&self, module: usize, id: u32) -> Option<Resolved> {

@@ -221,7 +221,7 @@ impl<'w> Checker<'w> {
             let tree = crate::check::typed::build(
                 body,
                 holes,
-                |id| typed_facts.get(&id).cloned(),
+                |id| typed_facts.get(&id).map(scheme_view),
                 |id| shown_by_id.get(&id).cloned(),
                 |id| self.resolutions.get(&(m, id)).cloned(),
                 |id| {

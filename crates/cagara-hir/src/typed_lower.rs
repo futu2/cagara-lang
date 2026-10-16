@@ -370,12 +370,94 @@ fn lower_composed_helper(
     expr: &Expr,
     target: &mut TypedQuery,
 ) -> Result<Option<NodeId>, Error> {
-    let mut source = TypedQuery::new();
-    let Some((root, _)) = lower_helper_expr(input, module, def, expr, &mut source)? else {
+    let ExprKind::App(head, args) = &expr.kind else {
         return Ok(None);
     };
-    let source = source.finish(root);
-    copy_typed_graph(&source, target).map(Some)
+    if args.len() != 2 || !is_pipe_head(head) {
+        return Ok(None);
+    }
+    let tc = input.type_check();
+    let Some(((helper_module, helper_def), _helper_args)) =
+        helper_application(tc, module, &args[1])
+    else {
+        return Ok(None);
+    };
+    if !matches!(
+        input.module(helper_module).def(helper_def).body.kind,
+        ExprKind::Lambda(_, _)
+    ) {
+        return Ok(None);
+    }
+    let helper_stages: Vec<_> = tc.row_stages(helper_module, helper_def).cloned().collect();
+    if helper_stages.is_empty() {
+        return Ok(None);
+    }
+    if helper_stages.iter().any(|stage| {
+        !matches!(
+            stage.kind,
+            RowStage::Where
+                | RowStage::Order
+                | RowStage::Limit
+                | RowStage::Offset
+                | RowStage::Distinct
+        )
+    }) {
+        let mut source = TypedQuery::new();
+        let Some((root, _)) = lower_helper_expr(input, module, def, expr, &mut source)? else {
+            return Ok(None);
+        };
+        return copy_typed_graph(&source.finish(root), target).map(Some);
+    }
+    let Some(child) = lower_composed_expr(input, module, def, &args[0], target)? else {
+        return Ok(None);
+    };
+    let mut syntax = HashMap::new();
+    index_exprs(
+        &input.module(helper_module).def(helper_def).body,
+        &mut syntax,
+    );
+    let mut child = child;
+    for stage in helper_stages {
+        let origin = Origin::new(
+            helper_module,
+            syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
+        );
+        let id = typed_keep_stage(target, child, stage.kind, stage.node, origin)?;
+        let node = target.node(id);
+        if !rows_match(
+            stage.kind,
+            stage.input.as_deref(),
+            node.input_row().map(Row::columns),
+        ) || !rows_match(
+            stage.kind,
+            stage.output.as_deref(),
+            node.output_row().map(Row::columns),
+        ) {
+            return Ok(None);
+        }
+        child = id;
+    }
+    Ok(Some(child))
+}
+
+fn typed_keep_stage(
+    typed: &mut TypedQuery,
+    child: NodeId,
+    stage: RowStage,
+    site: NodeRef,
+    origin: Origin,
+) -> Result<NodeId, Error> {
+    let kind = match stage {
+        RowStage::Where => QueryNodeKind::Where,
+        RowStage::Order => QueryNodeKind::Order,
+        RowStage::Limit => QueryNodeKind::Limit,
+        RowStage::Offset => QueryNodeKind::Offset,
+        RowStage::Distinct => QueryNodeKind::Distinct,
+        _ => return Err(Error::unsupported("helper stage is not row-preserving").at(origin)),
+    };
+    typed
+        .keep_row(site, kind, child, origin)
+        .map_err(query_error)
 }
 
 fn lower_composed_stage(
@@ -1881,6 +1963,20 @@ mod tests {
         assert!(typed
             .nodes()
             .any(|node| matches!(node.kind(), QueryNodeKind::Prefix)));
+        assert!(typed
+            .nodes()
+            .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));
+
+        let (typed, _) = lower_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             orders : query { uid = int, amount = float } = table \"s\" \"orders\"\n\
+             filtered = q => q & where (.amount > 1.0)\n\
+             q = users & innerJoin (orders & filtered) (.<id == .>uid)\n",
+            "q",
+        );
+        assert!(typed
+            .nodes()
+            .any(|node| matches!(node.kind(), QueryNodeKind::Where)));
         assert!(typed
             .nodes()
             .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));

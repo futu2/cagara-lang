@@ -306,13 +306,14 @@ builders in step 6.
 
 ### Step 6, first slice
 
-Direct pipelines made only of integer literal `limit` and `offset` stages now
-build typed row preserving nodes. The builder derives each stage boundary from
-the typed child row and uses the checked constructors for the count and the
-unchanged output row. The normalized route remains the oracle, including its
-location independent relation comparison. Expression bearing stages such as
-`where`, `select`, `update`, `agg`, and `order` still use the term route until
-their checked expression bridge is added.
+Direct pipelines made only of integer literal `limit` and `offset` stages, or
+the argument free `distinct` stage, now build typed row preserving nodes. The
+builder derives each stage boundary from the typed child row and uses the
+checked constructors for the count and the unchanged output row. The
+normalized route remains the oracle, including its location independent
+relation comparison. Expression bearing stages such as `where`, `select`,
+`update`, `agg`, and `order` still use the term route until their checked
+expression bridge is added.
 
 Slice 1 is a **builder** that walks a definition's stage records and populates
 the arena, then a `CheckedQuery` constructed from the tree. The feasibility claim

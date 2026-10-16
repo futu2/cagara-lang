@@ -161,7 +161,10 @@ fn lower_keep_pipeline(
     if typed.nodes().any(|node| {
         !matches!(
             node.kind(),
-            QueryNodeKind::Table | QueryNodeKind::Limit | QueryNodeKind::Offset
+            QueryNodeKind::Table
+                | QueryNodeKind::Limit
+                | QueryNodeKind::Offset
+                | QueryNodeKind::Distinct
         )
     }) {
         return Ok(None);
@@ -195,8 +198,10 @@ fn lower_keep_expr(
     let Some((child, mut checked)) = lower_keep_expr(input, module, def, &args[0], typed)? else {
         return Ok(None);
     };
-    let ExprKind::App(stage_head, stage_args) = &args[1].kind else {
-        return Ok(None);
+    let (stage_head, stage_args) = match &args[1].kind {
+        ExprKind::App(stage_head, stage_args) => (&**stage_head, &stage_args[..]),
+        ExprKind::Name(_) | ExprKind::Proj(_, _) => (&args[1], &[][..]),
+        _ => return Ok(None),
     };
     let Some(Resolved::Def((stage_module, stage_def))) =
         input.type_check().resolution(module, stage_head.id)
@@ -209,10 +214,8 @@ fn lower_keep_expr(
     let kind = match crate::primitive::prim_of(name) {
         Some(crate::primitive::Prim::Limit) if stage_args.len() == 1 => QueryNodeKind::Limit,
         Some(crate::primitive::Prim::Offset) if stage_args.len() == 1 => QueryNodeKind::Offset,
+        Some(crate::primitive::Prim::Distinct) if stage_args.is_empty() => QueryNodeKind::Distinct,
         _ => return Ok(None),
-    };
-    let Some(ExprKind::Lit(Lit::Int(count))) = stage_args.first().map(|arg| &arg.kind) else {
-        return Ok(None);
     };
     let origin = Origin::new(module, args[1].span);
     let site = NodeRef::new(module, def, args[1].id);
@@ -220,8 +223,21 @@ fn lower_keep_expr(
         .keep_row(site, kind, child, origin)
         .map_err(query_error)?;
     checked = match kind {
-        QueryNodeKind::Limit => CheckedQuery::limit(checked, *count, origin),
-        QueryNodeKind::Offset => CheckedQuery::offset(checked, *count, origin),
+        QueryNodeKind::Limit => {
+            let Some(ExprKind::Lit(Lit::Int(count))) = stage_args.first().map(|arg| &arg.kind)
+            else {
+                return Ok(None);
+            };
+            CheckedQuery::limit(checked, *count, origin)
+        }
+        QueryNodeKind::Offset => {
+            let Some(ExprKind::Lit(Lit::Int(count))) = stage_args.first().map(|arg| &arg.kind)
+            else {
+                return Ok(None);
+            };
+            CheckedQuery::offset(checked, *count, origin)
+        }
+        QueryNodeKind::Distinct => CheckedQuery::distinct(checked, origin),
         _ => unreachable!(),
     }
     .map_err(|error| Error::unsupported(error.message).at(origin))?;
@@ -509,7 +525,10 @@ pub(crate) fn compare_with_terms(
             .row_stages(node.site().definition_module, node.site().definition)
             .find(|stage| stage.node == node.site())
         else {
-            if matches!(node.kind(), QueryNodeKind::Limit | QueryNodeKind::Offset) {
+            if matches!(
+                node.kind(),
+                QueryNodeKind::Limit | QueryNodeKind::Offset | QueryNodeKind::Distinct
+            ) {
                 continue;
             }
             return Err(fail("typed query route contains an unrecorded stage"));
@@ -572,11 +591,13 @@ pub(crate) fn compare_with_terms(
         .nodes()
         .filter(|node| node.kind() != QueryNodeKind::Table)
         .filter(|node| {
-            !matches!(node.kind(), QueryNodeKind::Limit | QueryNodeKind::Offset)
-                || input
-                    .type_check()
-                    .row_stages(node.site().definition_module, node.site().definition)
-                    .any(|stage| stage.node == node.site())
+            !matches!(
+                node.kind(),
+                QueryNodeKind::Limit | QueryNodeKind::Offset | QueryNodeKind::Distinct
+            ) || input
+                .type_check()
+                .row_stages(node.site().definition_module, node.site().definition)
+                .any(|stage| stage.node == node.site())
         })
         .count();
     if matched != expected {
@@ -610,6 +631,7 @@ fn relations_match(left: &crate::ir::Rel, right: &crate::ir::Rel) -> bool {
         (Rel::Limit(li, ln), Rel::Limit(ri, rn)) | (Rel::Offset(li, ln), Rel::Offset(ri, rn)) => {
             ln == rn && relations_match(li, ri)
         }
+        (Rel::Distinct(li), Rel::Distinct(ri)) => relations_match(li, ri),
         _ => left == right,
     }
 }
@@ -859,6 +881,30 @@ mod tests {
         assert_eq!(typed.node(chain[1]).kind(), QueryNodeKind::Limit);
         assert_eq!(typed.node(chain[2]).kind(), QueryNodeKind::Table);
         assert_eq!(checked.kind(), crate::checked::QueryKind::Offset);
+        assert_eq!(checked.row().names(), &["id", "name"]);
+    }
+
+    #[test]
+    fn row_preserving_distinct_builds_a_typed_node() {
+        let ws = Workspace::from_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             q = users & distinct\n",
+        );
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let body = &ws.modules[ws.root].module.defs[def].body;
+        let input = CompilerInput::new(&ws, &tc);
+        let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
+        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        compare_with_terms(input, &typed, &checked, &terms).unwrap();
+        assert_eq!(typed.root_kind(), QueryNodeKind::Distinct);
+        assert_eq!(checked.kind(), crate::checked::QueryKind::Distinct);
         assert_eq!(checked.row().names(), &["id", "name"]);
     }
 

@@ -27,6 +27,13 @@ pub(crate) fn lower(
     if let Some(lowered) = lower_keep_pipeline(input, module, def, body)? {
         return Ok(Some(lowered));
     }
+    // The expression-bearing stages use the existing normalized expression
+    // bridge for their predicates, fields, and sort keys. Their relational
+    // boundaries still come from the typed stage records, so the query arena
+    // does not recover rows from the composed result type.
+    if let Some(lowered) = lower_expression_pipeline(input, module, def, body)? {
+        return Ok(Some(lowered));
+    }
 
     let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
     // A name or qualified projection can be an alias of a query definition.
@@ -101,7 +108,24 @@ pub(crate) fn lower(
             module,
             syntax.get(&stage.site).map_or(stage.span, |e| e.span),
         );
-        let input_row = Row::new(stage.input.clone().expect("checked above"));
+        // For expression stages the checker may close an unordered row
+        // constraint in a different field order than the query child. The
+        // child is the typed boundary this node actually consumes; rewrites
+        // retain their strict recorded row because their mapper is order
+        // sensitive.
+        let child_row = typed
+            .node(child)
+            .output_row()
+            .cloned()
+            .ok_or_else(|| Error::unsupported("typed stage child has no output row"))?;
+        let input_row = if matches!(
+            stage.kind,
+            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
+        ) {
+            Row::new(stage.input.clone().expect("checked above"))
+        } else {
+            child_row
+        };
         let output_row = Row::new(stage.output.clone().expect("checked above"));
         let kind = match stage.kind {
             RowStage::Prefix => QueryNodeKind::Prefix,
@@ -143,6 +167,206 @@ pub(crate) fn lower(
     }
 
     Ok(Some((typed.finish(child), checked)))
+}
+
+/// Lower a direct pipeline whose stages carry expressions (`where`, `select`,
+/// `update`, `agg`, and `order`), together with any row-preserving stages mixed
+/// into it. The expression bridge remains the normalized term lowering used by
+/// the established route; this slice moves the relational skeleton and its row
+/// boundaries onto `TypedQuery`.
+fn lower_expression_pipeline(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
+    let tc = input.type_check();
+    let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
+    if stages.is_empty()
+        || stages.iter().any(|stage| {
+            stage.node.definition_module != module
+                || stage.node.definition != def
+                || stage.input.is_none()
+                || stage.output.is_none()
+        })
+        || !is_direct_pipeline(input, module, body)
+    {
+        return Ok(None);
+    }
+
+    // A direct pipeline has one query leaf. This check is intentionally
+    // structural: `find_base` alone would also find the left table inside a
+    // join and could silently drop the right input.
+    let stage_sites: HashSet<u32> = stages.iter().map(|stage| stage.site).collect();
+    let Some(base) = find_base(body, &stage_sites, tc, module) else {
+        return Ok(None);
+    };
+    let Some((_, _, columns)) = table_parts(input, module, base) else {
+        return Ok(None);
+    };
+    let terms = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
+    let base_origin = Origin::new(module, base.span);
+    let checked = terms;
+    let mut typed = TypedQuery::new();
+    let mut child = typed
+        .table(NodeRef::new(module, def, base.id), base_origin, columns)
+        .map_err(query_error)?;
+    let mut syntax = HashMap::new();
+    index_exprs(body, &mut syntax);
+
+    for stage in stages {
+        let input_row = Row::new(stage.input.clone().expect("checked above"));
+        let output_row = Row::new(stage.output.clone().expect("checked above"));
+        let origin = Origin::new(
+            stage.node.definition_module,
+            syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
+        );
+        let id = match stage.kind {
+            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => typed
+                .rewrite(
+                    stage.node,
+                    match stage.kind {
+                        RowStage::Prefix => QueryNodeKind::Prefix,
+                        RowStage::Suffix => QueryNodeKind::Suffix,
+                        RowStage::Omit => QueryNodeKind::Omit,
+                        RowStage::MapValue => QueryNodeKind::MapValue,
+                        _ => unreachable!(),
+                    },
+                    child,
+                    Some(input_row.clone()),
+                    Some(output_row.clone()),
+                    origin,
+                )
+                .map_err(query_error)?,
+            RowStage::Select | RowStage::Update | RowStage::Agg => typed
+                .project(
+                    stage.node,
+                    match stage.kind {
+                        RowStage::Select => QueryNodeKind::Select,
+                        RowStage::Update => QueryNodeKind::Update,
+                        RowStage::Agg => QueryNodeKind::Agg,
+                        _ => unreachable!(),
+                    },
+                    child,
+                    Some(output_row.clone()),
+                    origin,
+                )
+                .map_err(query_error)?,
+            RowStage::Where
+            | RowStage::Order
+            | RowStage::Limit
+            | RowStage::Offset
+            | RowStage::Distinct => typed
+                .keep_row(
+                    stage.node,
+                    match stage.kind {
+                        RowStage::Where => QueryNodeKind::Where,
+                        RowStage::Order => QueryNodeKind::Order,
+                        RowStage::Limit => QueryNodeKind::Limit,
+                        RowStage::Offset => QueryNodeKind::Offset,
+                        RowStage::Distinct => QueryNodeKind::Distinct,
+                        _ => unreachable!(),
+                    },
+                    child,
+                    origin,
+                )
+                .map_err(query_error)?,
+        };
+        let node = typed.node(id);
+        if !rows_match(
+            stage.kind,
+            stage.input.as_deref(),
+            node.input_row().map(Row::columns),
+        ) || !rows_match(
+            stage.kind,
+            stage.output.as_deref(),
+            node.output_row().map(Row::columns),
+        ) {
+            return Err(Error::unsupported(format!(
+                "typed stage {:?} produced rows different from its checked record",
+                stage.kind
+            ))
+            .at(origin));
+        }
+        child = id;
+    }
+
+    let typed_columns = typed
+        .node(child)
+        .output_row()
+        .map(|row| row.columns().to_vec())
+        .unwrap_or_default();
+    if checked.row().columns() != typed_columns.as_slice() {
+        return Err(Error::unsupported(
+            "typed expression pipeline produced a row different from its checked query",
+        )
+        .at(checked.origin()));
+    }
+    // The checked value is intentionally the normalized expression bridge
+    // result, while every relational node is represented by the typed arena.
+    Ok(Some((typed.finish(child), checked)))
+}
+
+/// Whether a query body is one direct `&` chain over a table (or a table alias)
+/// and primitive stages. This excludes joins, sets, and helper applications,
+/// whose query graph needs more than one child or a later instantiation slice.
+fn is_direct_pipeline(input: CompilerInput<'_>, module: usize, expr: &Expr) -> bool {
+    if table_parts(input, module, expr).is_some() {
+        return true;
+    }
+    let ExprKind::App(head, args) = &expr.kind else {
+        return false;
+    };
+    if args.len() != 2 || !is_pipe_head(head) {
+        return false;
+    }
+    if !is_direct_pipeline(input, module, &args[0]) {
+        return false;
+    }
+    let (stage_head, _) = match &args[1].kind {
+        ExprKind::App(stage_head, stage_args) => (&**stage_head, &stage_args[..]),
+        ExprKind::Name(_) | ExprKind::Proj(_, _) => (&args[1], &[][..]),
+        _ => return false,
+    };
+    let Some(Resolved::Def((stage_module, stage_def))) =
+        input.type_check().resolution(module, stage_head.id)
+    else {
+        return false;
+    };
+    let ExprKind::Primitive(name) = &input.module(*stage_module).def(*stage_def).body.kind else {
+        return false;
+    };
+    crate::primitive::prim_of(name)
+        .and_then(RowStage::of_prim)
+        .is_some()
+}
+
+fn rows_match(
+    kind: RowStage,
+    expected: Option<&[(String, crate::core::ScalarType)]>,
+    actual: Option<&[(String, crate::core::ScalarType)]>,
+) -> bool {
+    match (expected, actual) {
+        // An open checker row carries no boundary to compare. A typed helper
+        // may still have a concrete row after instantiation, which is valid.
+        (None, _) => true,
+        (Some(expected), Some(actual))
+            if matches!(
+                kind,
+                RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
+            ) =>
+        {
+            expected == actual
+        }
+        (Some(expected), Some(actual)) => {
+            let mut expected = expected.to_vec();
+            let mut actual = actual.to_vec();
+            expected.sort_by(|a, b| a.0.cmp(&b.0));
+            actual.sort_by(|a, b| a.0.cmp(&b.0));
+            expected == actual
+        }
+        _ => false,
+    }
 }
 
 /// Lower the expression-free row-preserving slice. These stages are not
@@ -562,14 +786,57 @@ pub(crate) fn compare_with_terms(
                 stage.input.as_deref(),
                 stage.output.as_deref(),
             ),
-            _ => return Err(fail("typed query route contains an unsupported stage")),
+            RowStage::Where => (
+                QueryNodeKind::Where,
+                stage.input.as_deref(),
+                stage.output.as_deref(),
+            ),
+            RowStage::Select => (
+                QueryNodeKind::Select,
+                stage.input.as_deref(),
+                stage.output.as_deref(),
+            ),
+            RowStage::Update => (
+                QueryNodeKind::Update,
+                stage.input.as_deref(),
+                stage.output.as_deref(),
+            ),
+            RowStage::Agg => (
+                QueryNodeKind::Agg,
+                stage.input.as_deref(),
+                stage.output.as_deref(),
+            ),
+            RowStage::Order => (
+                QueryNodeKind::Order,
+                stage.input.as_deref(),
+                stage.output.as_deref(),
+            ),
+            RowStage::Limit => (
+                QueryNodeKind::Limit,
+                stage.input.as_deref(),
+                stage.output.as_deref(),
+            ),
+            RowStage::Offset => (
+                QueryNodeKind::Offset,
+                stage.input.as_deref(),
+                stage.output.as_deref(),
+            ),
+            RowStage::Distinct => (
+                QueryNodeKind::Distinct,
+                stage.input.as_deref(),
+                stage.output.as_deref(),
+            ),
         };
-        let input_disagrees = expected_input
-            .is_some_and(|expected| node.input_row().map(|row| row.columns()) != Some(expected))
-            || (expected_input.is_none() && node.input_row().is_none());
-        let output_disagrees = expected_output
-            .is_some_and(|expected| node.output_row().map(|row| row.columns()) != Some(expected))
-            || (expected_output.is_none() && node.output_row().is_none());
+        let input_disagrees = !rows_match(
+            stage.kind,
+            expected_input,
+            node.input_row().map(|row| row.columns()),
+        );
+        let output_disagrees = !rows_match(
+            stage.kind,
+            expected_output,
+            node.output_row().map(|row| row.columns()),
+        );
         if node.site() != stage.node
             || node.kind() != expected_kind
             || node.origin().module != node.site().definition_module
@@ -591,10 +858,7 @@ pub(crate) fn compare_with_terms(
         .nodes()
         .filter(|node| node.kind() != QueryNodeKind::Table)
         .filter(|node| {
-            !matches!(
-                node.kind(),
-                QueryNodeKind::Limit | QueryNodeKind::Offset | QueryNodeKind::Distinct
-            ) || input
+            input
                 .type_check()
                 .row_stages(node.site().definition_module, node.site().definition)
                 .any(|stage| stage.node == node.site())
@@ -854,6 +1118,39 @@ mod tests {
                 ("u_name_v2".to_string(), crate::core::ScalarType::String),
             ]
         );
+    }
+
+    #[test]
+    fn direct_expression_stages_build_typed_nodes() {
+        let (typed, checked) = lower_source(
+            "users : query { id = int, name = string, age = int } = table \"s\" \"users\"\n\
+             q = users & where (.age > 1) & update { older = .age } & select { .name, .older } & order [asc .name]\n",
+            "q",
+        );
+        let kinds: Vec<_> = typed
+            .chain()
+            .into_iter()
+            .map(|id| typed.node(id).kind())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                QueryNodeKind::Order,
+                QueryNodeKind::Select,
+                QueryNodeKind::Update,
+                QueryNodeKind::Where,
+                QueryNodeKind::Table,
+            ]
+        );
+        assert_eq!(checked.row().names(), &["name", "older"]);
+
+        let (typed, checked) = lower_source(
+            "users : query { id = int, age = int } = table \"s\" \"users\"\n\
+             q = users & agg { age = group .age, n = count }\n",
+            "q",
+        );
+        assert_eq!(typed.root_kind(), QueryNodeKind::Agg);
+        assert_eq!(checked.row().names(), &["age", "n"]);
     }
 
     #[test]

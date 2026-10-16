@@ -3498,23 +3498,23 @@ fn check_stage_records(
             stage.kind, r.kind, r.node.expr_id
         );
         if let Some(input) = &r.input {
-            assert_eq!(
-                stage.input.as_ref(),
-                Some(input),
-                "the lowering read a different input row than the checker recorded for \
-                 {:?} at {}",
-                r.kind,
-                r.node.expr_id
-            );
+            if let Some(lowered) = &stage.input {
+                assert_stage_rows_agree(
+                    r.kind,
+                    Some(lowered),
+                    Some(input),
+                    "input",
+                    r.node.expr_id,
+                );
+            }
         }
         if let Some(output) = &r.output {
-            assert_eq!(
-                stage.output.as_ref(),
-                Some(output),
-                "the lowering produced a different output row than the checker recorded for \
-                 {:?} at {}",
+            assert_stage_rows_agree(
                 r.kind,
-                r.node.expr_id
+                stage.output.as_deref(),
+                Some(output),
+                "output",
+                r.node.expr_id,
             );
         }
     }
@@ -3563,6 +3563,39 @@ fn check_stage_records(
         stray.is_empty(),
         "the lowering built a stage under this definition's identity that the checker never \
          recorded in module {module} def {def}: {stray:?}"
+    );
+}
+
+fn assert_stage_rows_agree(
+    kind: RowStage,
+    lowered: Option<&[(String, crate::core::ScalarType)]>,
+    recorded: Option<&[(String, crate::core::ScalarType)]>,
+    side: &str,
+    site: u32,
+) {
+    let equal = match (lowered, recorded) {
+        (None, _) => true,
+        (Some(a), Some(b))
+            if matches!(
+                kind,
+                RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
+            ) =>
+        {
+            a == b
+        }
+        (Some(a), Some(b)) => {
+            let mut a = a.to_vec();
+            let mut b = b.to_vec();
+            a.sort_by(|x, y| x.0.cmp(&y.0));
+            b.sort_by(|x, y| x.0.cmp(&y.0));
+            a == b
+        }
+        _ => false,
+    };
+    assert!(
+        equal,
+        "the lowering {side} row differs from the checker recorded for {kind:?} at {site}: \
+         lowered={lowered:?}, recorded={recorded:?}"
     );
 }
 

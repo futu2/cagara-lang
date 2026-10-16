@@ -144,6 +144,8 @@ pub enum QueryNodeKind {
     Select,
     /// `update {..}`: the listed fields merged over the input row.
     Update,
+    /// `agg {..}`: a grouped/aggregate row from the listed fields.
+    Agg,
     /// `order [..]`: the input row, sorted.
     Order,
     /// `limit n`.
@@ -170,6 +172,7 @@ impl QueryNodeKind {
             | QueryNodeKind::Where
             | QueryNodeKind::Select
             | QueryNodeKind::Update
+            | QueryNodeKind::Agg
             | QueryNodeKind::Order
             | QueryNodeKind::Limit
             | QueryNodeKind::Offset
@@ -557,7 +560,10 @@ impl TypedQuery {
             output_row,
             origin,
         };
-        if !matches!(kind, QueryNodeKind::Select | QueryNodeKind::Update) {
+        if !matches!(
+            kind,
+            QueryNodeKind::Select | QueryNodeKind::Update | QueryNodeKind::Agg
+        ) {
             return Err(QueryErr::new(
                 &node,
                 format!("{kind:?} is not a projection"),

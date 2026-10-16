@@ -1534,12 +1534,41 @@ impl<'w> Checker<'w> {
                         msg: key_argument_message(f),
                     });
                 }
-                if is_key_parameter(&p) {
-                    if let Some(kind) = stage {
-                        // The label the signature declared is the one this
-                        // argument binds, so the node's witness is the same
-                        // variable the stage's row term mentions.
-                        let label = key_label(&p);
+                if let Some(kind) = stage {
+                    // Row stages with a key parameter are recorded at that
+                    // witness argument. Expression-bearing stages have no
+                    // witness; their first argument leaves the stage with
+                    // exactly `query input -> query output`, which is the
+                    // same point at which its own row boundary is available.
+                    let records_here = if is_key_parameter(&p) {
+                        true
+                    } else {
+                        !matches!(
+                            kind,
+                            RowStage::Prefix
+                                | RowStage::Suffix
+                                | RowStage::Omit
+                                | RowStage::MapValue
+                        ) && matches!(
+                            self.resolve(&r),
+                            Ty::Fun(ref next, ref result)
+                                if matches!(self.resolve(next), Ty::Con("query", _))
+                                    && matches!(self.resolve(result), Ty::Con("query", _))
+                        )
+                    };
+                    if records_here {
+                        let label = if is_key_parameter(&p) {
+                            // The label the signature declared is the one this
+                            // argument binds, so the stage's witness is the
+                            // same variable its row term mentions.
+                            key_label(&p)
+                        } else {
+                            // Expression stages have no label. The checked
+                            // view intentionally turns this non-symbol into
+                            // `None`; the value only supplies the stage's
+                            // application boundary here.
+                            (*p).clone()
+                        };
                         self.record_row_stage(kind, e.id, f.span, label, &r);
                     }
                 }

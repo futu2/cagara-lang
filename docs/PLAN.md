@@ -199,9 +199,27 @@ the diffs.
 | 2 | Internal typed query representation (`TypedQueryNode`) | **Done** |
 | 3 | First typed lowering slice: table, prefix, suffix, omit, mapValue | **Done** |
 | 4 | Run both routes; compare rows, stages, origins, relations, SQL | **Done** |
-| 5 | Typed instantiation: helpers, aliases, imports, overloads, repeats | **In progress** |
+| 5 | Typed instantiation: helpers, aliases, imports, overloads, repeats | **Done** |
 | 6 | Remaining constructs: joins/sets → select/update/agg → windows → expressions | **In progress** |
 | 7 | Remove the source walk: `lower_query_recorded`, `check_stage_records`, `Facts` | Not started |
+
+#### Step 6 progress: direct expression-bearing stages
+
+The typed lowering now builds typed query nodes for direct table pipelines that
+include `where`, `select`, `update`, `agg`, or `order`, and allows those stages
+to mix with the already supported row rewrites and row-preserving stages. The
+checker records their stage identity and input/output boundaries at application
+time. `where` and `order` take their rows from the typed child; projections and
+aggregates carry the checker's recorded output row. Predicates, projection
+fields, aggregate expressions, and sort keys still use the normalized
+expression bridge, and the checked relational result is still supplied by the
+term route and compared with the typed skeleton. This slice therefore moves the
+query structure and its row evidence first; expression payloads and removing
+the term route remain later work.
+
+Joins and set operations remain deferred because `TypedQuery` still models one
+child per stage. Windows remain deferred until the expression payload bridge is
+carried by typed nodes.
 
 ### Step 1, done
 

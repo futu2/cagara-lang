@@ -96,6 +96,15 @@ fn stage_nodes_agree_with_the_relational_rows() {
             let compiled = stage_rows(rel);
             let recorded: Vec<(Vec<String>, Vec<String>)> = tc
                 .row_stages(ws.root, i)
+                .filter(|s| {
+                    matches!(
+                        s.kind,
+                        crate::check::RowStage::Prefix
+                            | crate::check::RowStage::Suffix
+                            | crate::check::RowStage::Omit
+                            | crate::check::RowStage::MapValue
+                    )
+                })
                 .map(|s| (node_columns(&s.input), node_columns(&s.output)))
                 .collect();
             (d.name.clone(), recorded, compiled)
@@ -365,6 +374,15 @@ fn shipped_programs_stage_nodes_agree_with_the_relational_rows() {
         for (i, def) in ws.modules[ws.root].module.defs.iter().enumerate() {
             let recorded: Vec<(Vec<String>, Vec<String>)> = tc
                 .row_stages(ws.root, i)
+                .filter(|s| {
+                    matches!(
+                        s.kind,
+                        crate::check::RowStage::Prefix
+                            | crate::check::RowStage::Suffix
+                            | crate::check::RowStage::Omit
+                            | crate::check::RowStage::MapValue
+                    )
+                })
                 .map(|s| (node_columns(&s.input), node_columns(&s.output)))
                 .collect();
             if recorded.is_empty() {

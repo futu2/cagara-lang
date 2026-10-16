@@ -290,11 +290,22 @@ impl TypeCheck {
     /// The `ExprId`s the checker recorded a type for in `module`, ascending.
     ///
     /// For a caller that wants to know what is available before walking.
+    ///
+    /// The typed tree covers every node of a definition, typed or not, because
+    /// a walk wants the shape. This lists the subset with a recorded type: a
+    /// definition that failed partway leaves its untyped nodes in the tree with
+    /// no view, and an id from one of those would answer `None` to every fact
+    /// reader — a node that looks available and has nothing to say.
     pub fn use_ids(&self, module: usize) -> Vec<u32> {
         let Some(checked) = self.modules.get(module) else {
             return Vec::new();
         };
-        let mut out: Vec<u32> = checked.typed_index.iter().map(|(id, _, _)| *id).collect();
+        let mut out: Vec<u32> = checked
+            .typed_index
+            .iter()
+            .map(|(id, _, _)| *id)
+            .filter(|id| self.use_scheme(module, *id).is_some())
+            .collect();
         out.sort_unstable();
         out.dedup();
         out

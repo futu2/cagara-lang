@@ -2621,6 +2621,51 @@ fn an_application_records_its_own_type() {
     );
 }
 
+/// `use_ids` lists the nodes the checker recorded a type for — no more.
+///
+/// The typed tree covers the **whole** body, typed or not, because a consumer
+/// walking it wants the shape of the definition. `use_ids` answers a narrower
+/// question: "which nodes did the checker give a type". A definition that fails
+/// partway leaves the node it failed on in the tree with no view, and listing
+/// that id hands a caller something `use_scheme` and `use_ty` both answer `None`
+/// for — the reason the predicate below reads the node rather than the index.
+#[test]
+fn use_ids_lists_only_nodes_the_checker_typed() {
+    // The application fails on its unknown second operand, after the head and
+    // the literal were typed, so the definition has a tree with untyped nodes
+    // in it.
+    let ws = Workspace::from_source(&format!("{TABLES}q = 1 + nosuch\n"));
+    let def = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .position(|d| d.name == "q")
+        .expect("the test program defines `q`");
+    let tc = check(&ws);
+    assert!(
+        tc.error_for(ws.root, def).is_some(),
+        "the test program must fail, or the partial case is not exercised"
+    );
+    let tree = tc
+        .typed_body(ws.root, def)
+        .expect("a definition that typed some node still has a tree");
+    assert!(
+        tree.nodes().iter().any(|n| n.view.is_none()),
+        "the test program must leave a node untyped"
+    );
+
+    let ids = tc.use_ids(ws.root);
+    for node in tree.nodes() {
+        assert_eq!(
+            ids.contains(&node.id),
+            node.view.is_some(),
+            "node {} ({:?}) is listed by use_ids exactly when it was typed",
+            node.id,
+            node.span
+        );
+    }
+}
+
 /// `ExprId`s are unique within a module, which is what makes `(module, ExprId)`
 /// a sound key for `use_ty` and the resolution map.
 ///

@@ -7,7 +7,7 @@
 //! later migration slice supplies their constructors and expression bridge.
 #![allow(dead_code)] // Keep the slice self-contained while later stages land.
 
-use crate::check::{NodeRef, QueryNodeKind, Row, RowStage, TypedQuery};
+use crate::check::{NodeId, NodeRef, QueryNodeKind, Row, RowStage, TypedQuery};
 use crate::checked::CheckedQuery;
 use crate::compile::CompilerInput;
 use crate::core::{Error, Origin, RowType};
@@ -23,12 +23,16 @@ pub(crate) fn lower(
     body: &Expr,
 ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
     let tc = input.type_check();
+
     let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
     // A name or qualified projection can be an alias of a query definition.
     // Instantiate the already-typed target tree at this use while preserving
     // the target's stable stage identities. Plain table aliases fall through:
     // they have no stages and are handled by `table_parts` below.
     if stages.is_empty() {
+        if let Some(lowered) = lower_helper_pipeline(input, module, def, body)? {
+            return Ok(Some(lowered));
+        }
         if let Some((target_module, target_def)) = query_target(tc, module, body) {
             if (target_module, target_def) != (module, def)
                 && matches!(
@@ -135,6 +139,193 @@ pub(crate) fn lower(
     }
 
     Ok(Some((typed.finish(child), checked)))
+}
+
+fn lower_helper_pipeline(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
+    let mut typed = TypedQuery::new();
+    let Some((root, checked)) = lower_helper_expr(input, module, def, body, &mut typed)? else {
+        return Ok(None);
+    };
+    Ok(Some((typed.finish(root), checked)))
+}
+
+fn lower_helper_expr(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+    typed: &mut TypedQuery,
+) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    let tc = input.type_check();
+
+    // Resolve query aliases before treating a name as a table leaf. This keeps
+    // the alias's typed stage chain (rather than reducing it to the table it
+    // eventually names) when the alias is composed with another helper.
+    if let Some((target_module, target_def)) = query_target(tc, module, body) {
+        if (target_module, target_def) == (module, def) {
+            return Ok(None);
+        }
+        if !matches!(
+            tc.scheme_view(target_module, target_def),
+            Some(crate::check::SchemeView::Query { .. })
+        ) {
+            return Ok(None);
+        }
+        let target_body = &input.module(target_module).def(target_def).body;
+        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
+        else {
+            return Ok(None);
+        };
+        let root = copy_typed_chain(&target_typed, typed)?;
+        return Ok(Some((root, checked)));
+    }
+
+    if let Some((schema, table, columns)) = table_parts(input, module, body) {
+        let origin = Origin::new(module, body.span);
+        let checked =
+            CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
+                .map_err(|error| Error::unsupported(error.message).at(origin))?;
+        let child = typed
+            .table(NodeRef::new(module, def, body.id), origin, columns)
+            .map_err(query_error)?;
+        return Ok(Some((child, checked)));
+    }
+
+    if let ExprKind::App(head, args) = &body.kind {
+        if args.len() == 2 && is_pipe_head(head) {
+            let Some((child, checked)) = lower_helper_expr(input, module, def, &args[0], typed)?
+            else {
+                return Ok(None);
+            };
+            let Some((helper_module, helper_def)) = helper_target(tc, module, body) else {
+                return Ok(None);
+            };
+            return apply_helper(input, child, checked, helper_module, helper_def, typed);
+        }
+    }
+
+    Ok(None)
+}
+
+fn apply_helper(
+    input: CompilerInput<'_>,
+    mut child: NodeId,
+    mut checked: CheckedQuery,
+    helper_module: usize,
+    helper_def: usize,
+    typed: &mut TypedQuery,
+) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    let tc = input.type_check();
+    if !matches!(
+        input.module(helper_module).def(helper_def).body.kind,
+        ExprKind::Lambda(_, _)
+    ) {
+        return Ok(None);
+    }
+    let helper_stages: Vec<_> = tc.row_stages(helper_module, helper_def).cloned().collect();
+    if helper_stages.is_empty()
+        || helper_stages.iter().any(|stage| {
+            !matches!(
+                stage.kind,
+                RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
+            ) || stage.input.is_none()
+                || stage.output.is_none()
+                || stage.label.is_none()
+        })
+    {
+        return Ok(None);
+    }
+    let helper_syntax = &input.module(helper_module).def(helper_def).body;
+    let mut syntax = HashMap::new();
+    index_exprs(helper_syntax, &mut syntax);
+    for stage in helper_stages {
+        let origin = Origin::new(
+            helper_module,
+            syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
+        );
+        let input_row = Row::new(stage.input.expect("checked above"));
+        let output_row = Row::new(stage.output.expect("checked above"));
+        let kind = match stage.kind {
+            RowStage::Prefix => QueryNodeKind::Prefix,
+            RowStage::Suffix => QueryNodeKind::Suffix,
+            RowStage::Omit => QueryNodeKind::Omit,
+            RowStage::MapValue => QueryNodeKind::MapValue,
+            _ => unreachable!(),
+        };
+        let id = typed
+            .rewrite(
+                stage.node,
+                kind,
+                child,
+                Some(input_row),
+                Some(output_row.clone()),
+                origin,
+            )
+            .map_err(query_error)?;
+        let label = stage.label.expect("checked above");
+        checked = match stage.kind {
+            RowStage::Prefix => CheckedQuery::prefix(checked, label, origin),
+            RowStage::Suffix => CheckedQuery::suffix(checked, label, origin),
+            RowStage::Omit => CheckedQuery::omit(checked, label, origin),
+            RowStage::MapValue => CheckedQuery::map_value(checked, label, origin),
+            _ => unreachable!(),
+        }
+        .map_err(|error| Error::unsupported(error.message).at(origin))?;
+        if checked.row().columns() != output_row.columns() {
+            return Err(
+                Error::unsupported("helper stage produced a different recorded row").at(origin),
+            );
+        }
+        child = id;
+    }
+    Ok(Some((child, checked)))
+}
+
+fn copy_typed_chain(source: &TypedQuery, target: &mut TypedQuery) -> Result<NodeId, Error> {
+    let mut copied = HashMap::new();
+    for old in source.chain().into_iter().rev() {
+        let node = source.node(old);
+        let new = match node.kind() {
+            QueryNodeKind::Table => target
+                .table(
+                    node.site(),
+                    node.origin(),
+                    node.output_row()
+                        .ok_or_else(|| Error::unsupported("typed table has no output row"))?
+                        .columns()
+                        .to_vec(),
+                )
+                .map_err(query_error)?,
+            _ => {
+                let old_child = node
+                    .input()
+                    .ok_or_else(|| Error::unsupported("typed stage has no child"))?;
+                let child = *copied
+                    .get(&old_child)
+                    .ok_or_else(|| Error::unsupported("typed chain child was not copied"))?;
+                target
+                    .rewrite(
+                        node.site(),
+                        node.kind(),
+                        child,
+                        node.input_row().cloned(),
+                        node.output_row().cloned(),
+                        node.origin(),
+                    )
+                    .map_err(query_error)?
+            }
+        };
+        copied.insert(old, new);
+    }
+    copied
+        .get(&source.root())
+        .copied()
+        .ok_or_else(|| Error::unsupported("typed query has no root"))
 }
 
 /// Check the first typed slice against the normalized term route before its
@@ -271,6 +462,25 @@ fn query_target(
         },
         _ => None,
     }
+}
+
+fn helper_target(
+    tc: &crate::check::TypeCheck,
+    module: usize,
+    expr: &Expr,
+) -> Option<(usize, usize)> {
+    let ExprKind::App(_, args) = &expr.kind else {
+        return None;
+    };
+    let helper = args.get(1)?;
+    let Resolved::Def(target) = tc.resolution(module, helper.id)? else {
+        return None;
+    };
+    Some(*target)
+}
+
+fn is_pipe_head(head: &Expr) -> bool {
+    matches!(&head.kind, ExprKind::Name(name) if name == "_&_")
 }
 
 fn contains_unmigrated_stage(input: CompilerInput<'_>, module: usize, body: &Expr) -> bool {
@@ -474,5 +684,97 @@ mod tests {
         );
         assert_eq!(typed.root_kind(), QueryNodeKind::Prefix);
         assert_eq!(checked.row().names(), &["u_id"]);
+    }
+
+    #[test]
+    fn signed_helper_reuses_its_typed_stage_chain() {
+        let src = "users : query { id = int } = table \"s\" \"users\"\n\
+             helper : query { id = int } -> query { h_id = int } = q => q & prefix \"h_\"\n\
+             q = users & helper\n";
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let (typed, checked) = lower(
+            CompilerInput::new(&ws, &tc),
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(typed.root_kind(), QueryNodeKind::Prefix);
+        assert_eq!(checked.row().names(), &["h_id"]);
+    }
+
+    #[test]
+    fn helper_can_follow_a_typed_query_alias() {
+        let src = "users : query { id = int } = table \"s\" \"users\"\n\
+             renamed = users & prefix \"u_\"\n\
+             helper : query { u_id = int } -> query { h_u_id = int } = q => q & prefix \"h_\"\n\
+             q = renamed & helper\n";
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let (typed, checked) = lower(
+            CompilerInput::new(&ws, &tc),
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(typed.chain().len(), 3);
+        assert_eq!(checked.row().names(), &["h_u_id"]);
+    }
+
+    #[test]
+    fn imported_helper_keeps_its_definition_identity() {
+        let root_path = std::path::PathBuf::from("/tmp/cagara-typed-helper/main.cagara");
+        let lib_path = std::path::PathBuf::from("/tmp/cagara-typed-helper/lib.cagara");
+        let root = "import \"lib.cagara\" as lib\n\
+                    users : query { id = int } = table \"s\" \"users\"\n\
+                    q = users & lib.helper\n";
+        let lib = "helper : query { id = int } -> query { h_id = int } = q => q & prefix \"h_\"\n";
+        let buffers = std::collections::HashMap::from([(lib_path, lib.to_string())]);
+        let ws = Workspace::open_with_buffers(&root_path, root.into(), &buffers);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let (typed, checked) = lower(
+            CompilerInput::new(&ws, &tc),
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap()
+        .unwrap();
+        let helper_module = ws
+            .module_for_path(&std::path::PathBuf::from(
+                "/tmp/cagara-typed-helper/lib.cagara",
+            ))
+            .unwrap();
+        assert_eq!(typed.root_kind(), QueryNodeKind::Prefix);
+        assert_eq!(checked.row().names(), &["h_id"]);
+        assert_eq!(
+            typed.node(typed.root()).site().definition_module,
+            helper_module
+        );
     }
 }

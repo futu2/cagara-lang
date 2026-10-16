@@ -266,12 +266,21 @@ the step 4 gate.
 
 ### Step 5, in progress
 
-Typed lowering now follows a direct query alias to the definition that owns its
-typed stage chain, preserving the original `NodeRef` identities and checking
-the alias against the normalized route. Helper composition, imports, overload
-instantiation, and repeated helper uses still need an instantiated row context;
-their stages remain on the term route until that context is represented in the
-typed query graph.
+Typed lowering now follows query aliases to the definition that owns their
+typed stage chain, preserves the original `NodeRef` identities, and checks
+aliases against the normalized route. It also instantiates a closed helper
+lambda at a use site: the helper's `prefix`, `suffix`, `omit`, and `mapValue`
+stages are copied into the caller's typed arena over the caller's child.
+Left-associated helper pipelines compose repeatedly, and imported helpers
+retain the imported definition module in each stage identity. Focused tests
+cover a signed helper, an alias followed by a helper, and an imported helper.
+
+The slice deliberately declines helpers with open row or witness information,
+unsupported relational stages, and overload-dependent bodies; those uses stay
+on the normalized term route. Repeated direct stages are already covered by
+the first slice. General polymorphic helper instantiation and overload
+selection still need use-site substitutions in the typed graph before this
+step can close.
 
 Slice 1 is a **builder** that walks a definition's stage records and populates
 the arena, then a `CheckedQuery` constructed from the tree. The feasibility claim

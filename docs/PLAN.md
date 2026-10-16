@@ -200,7 +200,7 @@ the diffs.
 | 3 | First typed lowering slice: table, prefix, suffix, omit, mapValue | **Done** |
 | 4 | Run both routes; compare rows, stages, origins, relations, SQL | **Done** |
 | 5 | Typed instantiation: helpers, aliases, imports, overloads, repeats | **In progress** |
-| 6 | Remaining constructs: joins/sets → select/update/agg → windows → expressions | Not started |
+| 6 | Remaining constructs: joins/sets → select/update/agg → windows → expressions | **In progress** |
 | 7 | Remove the source walk: `lower_query_recorded`, `check_stage_records`, `Facts` | Not started |
 
 ### Step 1, done
@@ -303,6 +303,16 @@ choice remains an open `Choice::Hole`; those uses stay on the normalized term
 route. Repeated direct stages are already covered by the first slice. Helper
 bodies with expression-bearing relational stages also await their expression
 builders in step 6.
+
+### Step 6, first slice
+
+Direct pipelines made only of integer literal `limit` and `offset` stages now
+build typed row preserving nodes. The builder derives each stage boundary from
+the typed child row and uses the checked constructors for the count and the
+unchanged output row. The normalized route remains the oracle, including its
+location independent relation comparison. Expression bearing stages such as
+`where`, `select`, `update`, `agg`, and `order` still use the term route until
+their checked expression bridge is added.
 
 Slice 1 is a **builder** that walks a definition's stage records and populates
 the arena, then a `CheckedQuery` constructed from the tree. The feasibility claim

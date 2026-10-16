@@ -24,6 +24,10 @@ pub(crate) fn lower(
 ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
     let tc = input.type_check();
 
+    if let Some(lowered) = lower_keep_pipeline(input, module, def, body)? {
+        return Ok(Some(lowered));
+    }
+
     let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
     // A name or qualified projection can be an alias of a query definition.
     // Instantiate the already-typed target tree at this use while preserving
@@ -139,6 +143,89 @@ pub(crate) fn lower(
     }
 
     Ok(Some((typed.finish(child), checked)))
+}
+
+/// Lower the expression-free row-preserving slice. These stages are not
+/// checker row records yet: their boundaries are derived by the typed child,
+/// while the checker still owns the full expression-bearing stage bridge.
+fn lower_keep_pipeline(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
+    let mut typed = TypedQuery::new();
+    let Some((root, checked)) = lower_keep_expr(input, module, def, body, &mut typed)? else {
+        return Ok(None);
+    };
+    if typed.nodes().any(|node| {
+        !matches!(
+            node.kind(),
+            QueryNodeKind::Table | QueryNodeKind::Limit | QueryNodeKind::Offset
+        )
+    }) {
+        return Ok(None);
+    }
+    Ok(Some((typed.finish(root), checked)))
+}
+
+fn lower_keep_expr(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    expr: &Expr,
+    typed: &mut TypedQuery,
+) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    if let Some((schema, table, columns)) = table_parts(input, module, expr) {
+        let origin = Origin::new(module, expr.span);
+        let checked =
+            CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
+                .map_err(|error| Error::unsupported(error.message).at(origin))?;
+        let child = typed
+            .table(NodeRef::new(module, def, expr.id), origin, columns)
+            .map_err(query_error)?;
+        return Ok(Some((child, checked)));
+    }
+    let ExprKind::App(head, args) = &expr.kind else {
+        return Ok(None);
+    };
+    if args.len() != 2 || !is_pipe_head(head) {
+        return Ok(None);
+    }
+    let Some((child, mut checked)) = lower_keep_expr(input, module, def, &args[0], typed)? else {
+        return Ok(None);
+    };
+    let ExprKind::App(stage_head, stage_args) = &args[1].kind else {
+        return Ok(None);
+    };
+    let Some(Resolved::Def((stage_module, stage_def))) =
+        input.type_check().resolution(module, stage_head.id)
+    else {
+        return Ok(None);
+    };
+    let ExprKind::Primitive(name) = &input.module(*stage_module).def(*stage_def).body.kind else {
+        return Ok(None);
+    };
+    let kind = match crate::primitive::prim_of(name) {
+        Some(crate::primitive::Prim::Limit) if stage_args.len() == 1 => QueryNodeKind::Limit,
+        Some(crate::primitive::Prim::Offset) if stage_args.len() == 1 => QueryNodeKind::Offset,
+        _ => return Ok(None),
+    };
+    let Some(ExprKind::Lit(Lit::Int(count))) = stage_args.first().map(|arg| &arg.kind) else {
+        return Ok(None);
+    };
+    let origin = Origin::new(module, args[1].span);
+    let site = NodeRef::new(module, def, args[1].id);
+    let id = typed
+        .keep_row(site, kind, child, origin)
+        .map_err(query_error)?;
+    checked = match kind {
+        QueryNodeKind::Limit => CheckedQuery::limit(checked, *count, origin),
+        QueryNodeKind::Offset => CheckedQuery::offset(checked, *count, origin),
+        _ => unreachable!(),
+    }
+    .map_err(|error| Error::unsupported(error.message).at(origin))?;
+    Ok(Some((id, checked)))
 }
 
 fn lower_helper_pipeline(
@@ -422,6 +509,9 @@ pub(crate) fn compare_with_terms(
             .row_stages(node.site().definition_module, node.site().definition)
             .find(|stage| stage.node == node.site())
         else {
+            if matches!(node.kind(), QueryNodeKind::Limit | QueryNodeKind::Offset) {
+                continue;
+            }
             return Err(fail("typed query route contains an unrecorded stage"));
         };
         let mut syntax = HashMap::new();
@@ -481,6 +571,13 @@ pub(crate) fn compare_with_terms(
     let expected = typed
         .nodes()
         .filter(|node| node.kind() != QueryNodeKind::Table)
+        .filter(|node| {
+            !matches!(node.kind(), QueryNodeKind::Limit | QueryNodeKind::Offset)
+                || input
+                    .type_check()
+                    .row_stages(node.site().definition_module, node.site().definition)
+                    .any(|stage| stage.node == node.site())
+        })
         .count();
     if matched != expected {
         return Err(fail(
@@ -510,6 +607,9 @@ fn relations_match(left: &crate::ir::Rel, right: &crate::ir::Rel) -> bool {
         (Rel::Omit(li, lk), Rel::Omit(ri, rk))
         | (Rel::Prefix(li, lk), Rel::Prefix(ri, rk))
         | (Rel::Suffix(li, lk), Rel::Suffix(ri, rk)) => lk == rk && relations_match(li, ri),
+        (Rel::Limit(li, ln), Rel::Limit(ri, rn)) | (Rel::Offset(li, ln), Rel::Offset(ri, rn)) => {
+            ln == rn && relations_match(li, ri)
+        }
         _ => left == right,
     }
 }
@@ -732,6 +832,34 @@ mod tests {
                 ("u_name_v2".to_string(), crate::core::ScalarType::String),
             ]
         );
+    }
+
+    #[test]
+    fn row_preserving_limit_and_offset_build_typed_nodes() {
+        let ws = Workspace::from_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             q = users & limit 10 & offset 2\n",
+        );
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let body = &ws.modules[ws.root].module.defs[def].body;
+        let input = CompilerInput::new(&ws, &tc);
+        let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
+        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        compare_with_terms(input, &typed, &checked, &terms).unwrap();
+        let chain = typed.chain();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(typed.node(chain[0]).kind(), QueryNodeKind::Offset);
+        assert_eq!(typed.node(chain[1]).kind(), QueryNodeKind::Limit);
+        assert_eq!(typed.node(chain[2]).kind(), QueryNodeKind::Table);
+        assert_eq!(checked.kind(), crate::checked::QueryKind::Offset);
+        assert_eq!(checked.row().names(), &["id", "name"]);
     }
 
     #[test]

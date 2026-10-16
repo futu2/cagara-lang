@@ -24,6 +24,25 @@ pub(crate) fn lower(
 ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
     let tc = input.type_check();
     let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
+    // A name or qualified projection can be an alias of a query definition.
+    // Instantiate the already-typed target tree at this use while preserving
+    // the target's stable stage identities. Plain table aliases fall through:
+    // they have no stages and are handled by `table_parts` below.
+    if stages.is_empty() {
+        if let Some((target_module, target_def)) = query_target(tc, module, body) {
+            if (target_module, target_def) != (module, def)
+                && matches!(
+                    tc.scheme_view(target_module, target_def),
+                    Some(crate::check::SchemeView::Query { .. })
+                )
+            {
+                let target_body = &input.module(target_module).def(target_def).body;
+                if let Some(lowered) = lower(input, target_module, target_def, target_body)? {
+                    return Ok(Some(lowered));
+                }
+            }
+        }
+    }
     // A definition with no recorded rewrite stage may still contain a
     // relational stage whose signature has no label witness (`where`,
     // `select`, `order`, ...). The first slice must decline such a pipeline
@@ -122,8 +141,6 @@ pub(crate) fn lower(
 /// result is allowed onto the production path.
 pub(crate) fn compare_with_terms(
     input: CompilerInput<'_>,
-    module: usize,
-    def: usize,
     typed: &TypedQuery,
     checked: &CheckedQuery,
     terms: &CheckedQuery,
@@ -143,19 +160,29 @@ pub(crate) fn compare_with_terms(
         .at(checked.origin()));
     }
 
-    let recorded: Vec<_> = input.type_check().row_stages(module, def).collect();
     let chain: Vec<_> = typed
         .chain()
         .into_iter()
         .map(|id| typed.node(id))
         .filter(|node| node.kind() != QueryNodeKind::Table)
         .collect();
-    if chain.len() != recorded.len() {
-        return Err(fail("typed query route built a different number of stages"));
-    }
-    let mut syntax = HashMap::new();
-    index_exprs(&input.module(module).def(def).body, &mut syntax);
-    for (node, stage) in chain.into_iter().zip(recorded.into_iter().rev()) {
+    let mut matched = 0usize;
+    for node in chain {
+        let Some(stage) = input
+            .type_check()
+            .row_stages(node.site().definition_module, node.site().definition)
+            .find(|stage| stage.node == node.site())
+        else {
+            return Err(fail("typed query route contains an unrecorded stage"));
+        };
+        let mut syntax = HashMap::new();
+        index_exprs(
+            &input
+                .module(node.site().definition_module)
+                .def(node.site().definition)
+                .body,
+            &mut syntax,
+        );
         let (expected_kind, expected_input, expected_output) = match stage.kind {
             RowStage::Prefix => (
                 QueryNodeKind::Prefix,
@@ -181,7 +208,7 @@ pub(crate) fn compare_with_terms(
         };
         if node.site() != stage.node
             || node.kind() != expected_kind
-            || node.origin().module != module
+            || node.origin().module != node.site().definition_module
             || syntax
                 .get(&stage.node.expr_id)
                 .is_none_or(|expr| node.origin().span != expr.span)
@@ -194,6 +221,16 @@ pub(crate) fn compare_with_terms(
             ))
             .at(node.origin()));
         }
+        matched += 1;
+    }
+    let expected = typed
+        .nodes()
+        .filter(|node| node.kind() != QueryNodeKind::Table)
+        .count();
+    if matched != expected {
+        return Err(fail(
+            "typed query route and checker stage records have different sizes",
+        ));
     }
     Ok(())
 }
@@ -219,6 +256,20 @@ fn relations_match(left: &crate::ir::Rel, right: &crate::ir::Rel) -> bool {
         | (Rel::Prefix(li, lk), Rel::Prefix(ri, rk))
         | (Rel::Suffix(li, lk), Rel::Suffix(ri, rk)) => lk == rk && relations_match(li, ri),
         _ => left == right,
+    }
+}
+
+fn query_target(
+    tc: &crate::check::TypeCheck,
+    module: usize,
+    expr: &Expr,
+) -> Option<(usize, usize)> {
+    match &expr.kind {
+        ExprKind::Name(_) | ExprKind::Proj(_, _) => match tc.resolution(module, expr.id) {
+            Some(Resolved::Def(target)) => Some(*target),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -411,5 +462,17 @@ mod tests {
         assert!(
             matches!(rel, crate::ir::Rel::At(_, inner) if matches!(*inner, crate::ir::Rel::Table { .. }))
         );
+    }
+
+    #[test]
+    fn query_alias_reuses_the_typed_stage_chain() {
+        let (typed, checked) = lower_source(
+            "users : query { id = int } = table \"s\" \"users\"\n\
+             renamed = users & prefix \"u_\"\n\
+             q = renamed\n",
+            "q",
+        );
+        assert_eq!(typed.root_kind(), QueryNodeKind::Prefix);
+        assert_eq!(checked.row().names(), &["u_id"]);
     }
 }

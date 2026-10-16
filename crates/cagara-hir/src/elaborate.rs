@@ -151,7 +151,7 @@ fn elaborate_def(
     // overloads through its own stack.
     if let Some((typed, checked)) = crate::typed_lower::lower(input, module, def, &d.body)? {
         let terms = crate::normalize::elaborate_query_via_terms(input, module, def, &d.body)?;
-        crate::typed_lower::compare_with_terms(input, module, def, &typed, &checked, &terms)?;
+        crate::typed_lower::compare_with_terms(input, &typed, &checked, &terms)?;
         return Ok(checked);
     }
     crate::normalize::elaborate_query_via_terms(input, module, def, &d.body)

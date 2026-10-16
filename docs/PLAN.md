@@ -198,8 +198,8 @@ the diffs.
 | 1 | Stable `NodeRef` on normalized stage info; match by identity | **Done** |
 | 2 | Internal typed query representation (`TypedQueryNode`) | **Done** |
 | 3 | First typed lowering slice: table, prefix, suffix, omit, mapValue | **Done** |
-| 4 | Run both routes; compare rows, stages, origins, relations, SQL | **In progress** |
-| 5 | Typed instantiation: helpers, aliases, imports, overloads, repeats | Not started |
+| 4 | Run both routes; compare rows, stages, origins, relations, SQL | **Done** |
+| 5 | Typed instantiation: helpers, aliases, imports, overloads, repeats | **In progress** |
 | 6 | Remaining constructs: joins/sets → select/update/agg → windows → expressions | Not started |
 | 7 | Remove the source walk: `lower_query_recorded`, `check_stage_records`, `Facts` | Not started |
 
@@ -257,11 +257,21 @@ builder for the supported slice after comparing it with the term route; other
 shapes still use the term route. Expression-bearing stages and general
 table/base forms remain for subsequent work.
 
-The comparison currently checks output rows, stage count/order/identity/kind,
-stage origins and input/output rows, and the erased relation after ignoring
-`Rel::At` wrappers (which carry route-specific source spans). Step 4 remains
-in progress until this comparison is exercised across the full differential
-corpus and SQL output is explicitly covered.
+The comparison checks output rows, stage count/order/identity/kind, stage origins
+and input/output rows, and the erased relation after ignoring `Rel::At` wrappers
+(which carry route-specific source spans). A SQL backend integration test now
+rebuilds every successful shipped/corpus query through the normalized route and
+compares ANSI, PostgreSQL, SQLite, DuckDB, MySQL, and T-SQL output. This closes
+the step 4 gate.
+
+### Step 5, in progress
+
+Typed lowering now follows a direct query alias to the definition that owns its
+typed stage chain, preserving the original `NodeRef` identities and checking
+the alias against the normalized route. Helper composition, imports, overload
+instantiation, and repeated helper uses still need an instantiated row context;
+their stages remain on the term route until that context is represented in the
+typed query graph.
 
 Slice 1 is a **builder** that walks a definition's stage records and populates
 the arena, then a `CheckedQuery` constructed from the tree. The feasibility claim

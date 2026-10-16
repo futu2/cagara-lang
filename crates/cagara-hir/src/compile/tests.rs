@@ -7,6 +7,13 @@ fn assert_matches_fresh(ws: &Workspace) -> Compilation {
     cached
 }
 
+/// The columns a stage node recorded, or none if the node's row is open.
+fn node_columns(fs: &Option<Vec<(String, crate::core::ScalarType)>>) -> Vec<String> {
+    fs.as_ref()
+        .map(|fs| fs.iter().map(|(n, _)| n.clone()).collect())
+        .unwrap_or_default()
+}
+
 /// The `(input columns, output columns)` of every row-rewriting stage in a
 /// compiled query, innermost first — the order the checker recorded them.
 ///
@@ -86,15 +93,7 @@ fn stage_nodes_agree_with_the_relational_rows() {
             let recorded: Vec<(Vec<String>, Vec<String>)> = tc
                 .stages(ws.root, i)
                 .iter()
-                .map(|s| {
-                    let names = |fs: &Option<Vec<(String, crate::core::ScalarType)>>| {
-                        fs.as_ref().map(|fs| fs.iter().map(|(n, _)| n.clone()).collect())
-                    };
-                    (
-                        names(&s.input).unwrap_or_default(),
-                        names(&s.output).unwrap_or_default(),
-                    )
-                })
+                .map(|s| (node_columns(&s.input), node_columns(&s.output)))
                 .collect();
             (d.name.clone(), recorded, compiled)
         })
@@ -105,6 +104,84 @@ fn stage_nodes_agree_with_the_relational_rows() {
             recorded, compiled,
             "`{name}`: the checker's stage rows and the relational rows disagree"
         );
+    }
+}
+
+/// The same agreement, over every program the repository ships.
+///
+/// The unit test above writes down the shapes a rename chain and an `omit`
+/// take. The corpus is where a program that reaches a stage another way would
+/// show up — through an alias, a helper, a partial application, an import —
+/// which is exactly how the reported defect travelled.
+#[test]
+fn shipped_programs_stage_nodes_agree_with_the_relational_rows() {
+    let mut files = Vec::new();
+    for dir in [
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples"),
+    ] {
+        collect_cagara(&dir, &mut files);
+    }
+    files.sort();
+    assert!(!files.is_empty(), "no shipped programs were found");
+
+    let mut compared = 0usize;
+    for path in files {
+        // `open` rather than `from_source`: a corpus case may import a sibling.
+        let ws = Workspace::open(&path);
+        let tc = crate::check::check(&ws);
+        let compilation = compile_checked(&ws, &tc);
+        for (i, def) in ws.modules[ws.root].module.defs.iter().enumerate() {
+            let recorded: Vec<(Vec<String>, Vec<String>)> = tc
+                .stages(ws.root, i)
+                .iter()
+                .map(|s| (node_columns(&s.input), node_columns(&s.output)))
+                .collect();
+            if recorded.is_empty() {
+                continue;
+            }
+            // A definition that failed has no relational rows to compare with;
+            // the corpus deliberately holds programs that do not check.
+            let Some(Ok(rel)) = compilation
+                .queries
+                .iter()
+                .find(|query| query.id.def == i)
+                .map(|query| &query.result)
+            else {
+                continue;
+            };
+            let rel = match rel {
+                Rel::At(_, inner) => inner,
+                other => other,
+            };
+            assert_eq!(
+                recorded,
+                stage_rows(rel),
+                "{} / `{}`: the checker's stage rows and the relational rows disagree",
+                path.display(),
+                def.name
+            );
+            compared += 1;
+        }
+    }
+    assert!(
+        compared > 0,
+        "no shipped program applied a row-rewriting stage"
+    );
+}
+
+/// Every `.cagara` file under `dir`, recursively.
+fn collect_cagara(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_cagara(&path, out);
+        } else if path.extension().is_some_and(|e| e == "cagara") {
+            out.push(path);
+        }
     }
 }
 

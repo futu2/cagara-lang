@@ -159,12 +159,26 @@ scheme inference and derive the typed node from the application path. Add an
 assertion in debug/tests that the stage node's output row agrees with the
 instantiated signature. This makes disagreements local and observable.
 
+Done: the stage record is a field on the application's `TypedExpr`
+(`TypedExpr::stage`), and the body keeps the application order in an index
+(`TypedBody::by_stage`) because a chain is recorded in application order while
+the arena follows source order. `TypeCheck::row_stages` reads it, and
+`check::stage::finish_row_stages` carries the assertion.
+
 ### 4. Move expression facts into the typed tree
 
 Return `TypedExpr` from checking and carry resolved definitions, overload
 choices, phase, scalar type, and source locations there. Adapt normalization and
 checked construction to consume those facts. Keep the public `TypeCheck` query
 surface as a derived compatibility view during the transition.
+
+Done for the facts: the tree carries the type, row, printed form, resolution,
+choices, and stage of every expression, and the maps that published them are
+deleted. The compatibility view is derived from the tree rather than kept
+alongside it. What has not moved is the *walk*: normalization still reads
+syntax for each node's shape and asks the tree for its facts. The two have been
+shown to cover the same nodes, except a projection's base, which the projection
+node itself resolves.
 
 ### 5. Replace deferred stage equations
 

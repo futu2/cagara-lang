@@ -120,9 +120,10 @@ correctness, not as an optimization.
 - The checker's per-expression facts reach elaboration through the typed tree
   rather than through side maps. `use_tys` (a `Ty` per `ExprId`), `resolutions`
   (what a name referred to), `choices` (the overload candidate at a site),
-  `holes`, and the span-keyed `use_types` (the same use types rendered for
-  hover) are all gone; the tree carries the type, row, choices, resolution, and
-  printed form of every expression, and `holes` on the body.
+  `holes`, the span-keyed `use_types` (the same use types rendered for hover),
+  and the definition-keyed stage list are all gone; the tree carries the type,
+  row, choices, resolution, printed form, and stage of every expression, plus
+  `holes` on the body.
   The seam is one trait: `normalize::Facts` has seven methods (`use_ty`,
   `use_row`, `def_result_ty`, `def_body`, `def_template`, `resolution`,
   `choice`, `holes_at`) and everything downstream reads facts through it, which
@@ -130,9 +131,19 @@ correctness, not as an optimization.
   What remains of the migration is the walk, not the facts: production still
   walks the AST and asks the tree per node, and
   `docs/TYPE-SYSTEM-REDESIGN.md` step 4 is about feeding `CheckedQuery` from
-  the tree directly. Stage metadata is the piece that must move with it —
-  `check/stage.rs` records each application's operation and both rows, but on
-  `(module, def)` rather than on the node — before the walk can go.
+  the tree directly. The bridge and the tree have been shown to cover the same
+  nodes — `compile::tests::the_bridge_visits_every_node_the_typed_tree_holds_except_projection_bases`
+  — with one stated difference: a projection's base (`lib` in `lib.shout`) is
+  not a semantic step, because `infer_proj` records the field's binding at the
+  projection node's own `ExprId`. A walk that takes its children from the tree
+  must skip those bases too.
+  Stage metadata is on the nodes now: `TypedExpr::stage` holds the operation a
+  node applied and the rows its signature instance read and produced, and
+  `TypedBody::by_stage` keeps the application order, which is not the arena's
+  source order. `TypeCheck::row_stages` reads that index. The order is the part
+  worth remembering: a chain is recorded as it is applied, while the arena
+  follows source order, so `users & prefix "u_" & suffix "_v2"` applies the
+  prefix first but writes the suffix application outermost.
   Two properties of `use_types` are worth keeping in mind because they are not
   obvious from the tree: it was keyed by the span the checker *filed* a use
   under, which is the node's own span in every program measured but is carried
@@ -140,6 +151,21 @@ correctness, not as an optimization.
   last write, which `TypedBody::by_span` resolves while the tree is built, when
   the recording order is still known. `TypeCheck::use_type` and
   `TypeCheck::typed_node_at` read that index.
+  `holes` — the count of overloads a definition leaves open — is the one fact
+  that might be a projection of `choices` rather than a fact of its own. An
+  overload constraint is born at a site (`overload.rs`), becomes
+  `Origin::Hole` when stored in a scheme, and becomes a site of the *using*
+  definition again when that scheme is instantiated, so the two agree on the
+  application path; `compile::tests::an_inherited_hole_is_recorded_against_the_definition_that_inherits_it`
+  pins that re-attribution. The path that keeps the count is overload
+  *resolution*: a candidate is a definition, `cand_scheme` returns its checked
+  scheme with its constraints, and `step_overload` instantiates it with no site
+  (`infer.rs`), so a candidate's own open overloads keep `Origin::Hole` into
+  the caller's leftovers — where the count sees them and `choices` records
+  nothing. `check/tests.rs::overload_candidates_resolve_their_own_overloads`
+  shows the solver resolving them when they are literals; whether one can
+  survive unresolved is not proven either way, so the count stays a fact of its
+  own until someone proves that path closed.
   `holes` — the count of overloads a definition leaves open — is the one fact
   that might be a projection of `choices` rather than a fact of its own. An
   overload constraint is born at a site (`overload.rs`), becomes

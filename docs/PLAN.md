@@ -117,6 +117,26 @@ correctness, not as an optimization.
 - `--optimize` is opt-in; it runs sqlglot optimization after Cagara lowering.
 - A few loader, template qualification, reserved-word, and deep-recursion edge
   cases remain documented in the issue tracker and tests.
+- The checker still hands its per-expression facts to elaboration through side
+  maps rather than through a typed tree: `use_tys` (a `Ty` per `ExprId`),
+  `resolutions` (what a name referred to), `choices` (the overload candidate at
+  a site), `holes`, and the span-keyed `use_types` (the same use types rendered
+  for hover). They are not duplicates of one another — each answers a question
+  the others cannot — but they are keyed by `ExprId` and read back by a second
+  walk of the AST, which is the shape `docs/TYPE-SYSTEM-REDESIGN.md` step 4
+  exists to replace.
+  The seam is one trait: `normalize::Facts` has seven methods (`use_ty`,
+  `use_row`, `def_result_ty`, `def_body`, `def_template`, `resolution`,
+  `choice`, `holes_at`) and everything downstream reads facts through it, so a
+  typed tree is an alternative *implementation* of that trait rather than a
+  rewrite of the normalizer. What the tree must carry is exactly what the maps
+  carry today; the order to migrate is the one the design doc gives — stage
+  nodes first (done: `check/stage.rs` records each application's operation and
+  both rows), then use types, then resolutions and choices, deleting each map
+  only once its last reader is gone. `use_types` cannot be deleted by
+  re-rendering at the boundary, because its value folds in the literal fallback
+  (`(Some(lit), Ty::Var(_)) => lit`) and the printer needs a resolver; it should
+  go last, with the others already tree-backed.
 
 ## Roadmap
 

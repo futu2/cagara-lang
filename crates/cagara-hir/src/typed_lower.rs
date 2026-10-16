@@ -2453,6 +2453,40 @@ mod tests {
     }
 
     #[test]
+    fn multi_projection_helper_keeps_row_preserving_stages_in_order() {
+        let src = "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             helper = q => q & where (.id > 1) & select { .name } & limit 10\n\
+             q = users & helper\n";
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let input = CompilerInput::new(&ws, &tc);
+        let body = &ws.modules[ws.root].module.defs[def].body;
+        let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
+        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        compare_with_terms(input, &typed, &checked, &terms).unwrap();
+        assert_eq!(
+            typed
+                .chain()
+                .iter()
+                .map(|id| typed.node(*id).kind())
+                .collect::<Vec<_>>(),
+            vec![
+                QueryNodeKind::Limit,
+                QueryNodeKind::Select,
+                QueryNodeKind::Where,
+                QueryNodeKind::Table
+            ]
+        );
+    }
+
+    #[test]
     fn row_polymorphic_helper_instantiates_its_use_site_row() {
         let src = "users : query { id = int } = table \"s\" \"users\"\n\
              helper = q => q & prefix \"h_\"\n\

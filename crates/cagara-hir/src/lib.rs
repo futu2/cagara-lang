@@ -12,6 +12,8 @@ pub mod rules;
 pub mod schema;
 pub mod workspace;
 
+mod typed_lower;
+
 pub use check::{check, TypeCheck};
 // The checked core's public surface. `CheckedQuery`/`CheckedExpr` expose only
 // accessors (`row()`, `phase()`, `ty()`, `kind()`, `origin()`); their node

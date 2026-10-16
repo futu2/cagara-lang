@@ -197,8 +197,8 @@ the diffs.
 |---|---|---|
 | 1 | Stable `NodeRef` on normalized stage info; match by identity | **Done** |
 | 2 | Internal typed query representation (`TypedQueryNode`) | **Done** |
-| 3 | First typed lowering slice: table, prefix, suffix, omit, mapValue | Not started |
-| 4 | Run both routes; compare rows, stages, origins, relations, SQL | Not started |
+| 3 | First typed lowering slice: table, prefix, suffix, omit, mapValue | **Done** |
+| 4 | Run both routes; compare rows, stages, origins, relations, SQL | **In progress** |
 | 5 | Typed instantiation: helpers, aliases, imports, overloads, repeats | Not started |
 | 6 | Remaining constructs: joins/sets → select/update/agg → windows → expressions | Not started |
 | 7 | Remove the source walk: `lower_query_recorded`, `check_stage_records`, `Facts` | Not started |
@@ -246,6 +246,22 @@ with a guess in it. The module carries a scoped `#![allow(dead_code)]` for that
 reason, documented at the use site.
 
 ### Step 3, what it needs
+
+The first builder is implemented for **direct, closed table pipelines** built
+from `prefix`, `suffix`, `omit`, and `mapValue`: it builds a `TypedQuery` chain
+from the checker's stage records, uses the recorded stage rows and witnesses,
+and constructs the corresponding `CheckedQuery`. `mapValue` has a checked node
+whose row records nullable/list wrapping while erasure passes through it, since
+the wrapper is type-level and emits no SQL. The production path selects this
+builder for the supported slice after comparing it with the term route; other
+shapes still use the term route. Expression-bearing stages and general
+table/base forms remain for subsequent work.
+
+The comparison currently checks output rows, stage count/order/identity/kind,
+stage origins and input/output rows, and the erased relation after ignoring
+`Rel::At` wrappers (which carry route-specific source spans). Step 4 remains
+in progress until this comparison is exercised across the full differential
+corpus and SQL output is explicitly covered.
 
 Slice 1 is a **builder** that walks a definition's stage records and populates
 the arena, then a `CheckedQuery` constructed from the tree. The feasibility claim

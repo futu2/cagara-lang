@@ -1,0 +1,415 @@
+//! The first tree driven query lowering slice.
+//!
+//! This builder consumes the checker-owned stage records and the typed query
+//! nodes' rows. It intentionally handles only a direct pipeline whose base is
+//! a table and whose stages are `prefix`, `suffix`, `omit`, or `mapValue`.
+//! Other shapes return `None` and remain on the established term route until a
+//! later migration slice supplies their constructors and expression bridge.
+#![allow(dead_code)] // Keep the slice self-contained while later stages land.
+
+use crate::check::{NodeRef, QueryNodeKind, Row, RowStage, TypedQuery};
+use crate::checked::CheckedQuery;
+use crate::compile::CompilerInput;
+use crate::core::{Error, Origin, RowType};
+use crate::normalize::Resolved;
+use cagara_syntax::ast::{Expr, ExprKind, Lit};
+use std::collections::{HashMap, HashSet};
+
+/// Build the typed query and its checked counterpart when this slice applies.
+pub(crate) fn lower(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
+    let tc = input.type_check();
+    let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
+    // A definition with no recorded rewrite stage may still contain a
+    // relational stage whose signature has no label witness (`where`,
+    // `select`, `order`, ...). The first slice must decline such a pipeline
+    // instead of silently dropping that operation.
+    if stages.is_empty() || contains_unmigrated_stage(input, module, body) {
+        return Ok(None);
+    }
+    if stages.iter().any(|stage| {
+        stage.node.definition_module != module
+            || stage.node.definition != def
+            || !matches!(
+                stage.kind,
+                RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
+            )
+            || stage.input.is_none()
+            || stage.output.is_none()
+            || stage.label.is_none()
+    }) {
+        return Ok(None);
+    }
+
+    let mut syntax = HashMap::new();
+    index_exprs(body, &mut syntax);
+    let stage_sites: HashSet<u32> = stages.iter().map(|stage| stage.site).collect();
+    let Some(base) = find_base(body, &stage_sites, tc, module) else {
+        return Ok(None);
+    };
+    let Some((schema, table, columns)) = table_parts(input, module, base) else {
+        return Ok(None);
+    };
+    let base_origin = Origin::new(module, base.span);
+    let checked_columns = RowType::new(columns.clone());
+    let mut checked = CheckedQuery::table(schema, table, Some(checked_columns), base_origin)
+        .map_err(|error| Error::unsupported(error.message).at(base_origin))?;
+
+    let mut typed = TypedQuery::new();
+    let base_id = typed
+        .table(
+            NodeRef::new(module, def, base.id),
+            base_origin,
+            columns.clone(),
+        )
+        .map_err(query_error)?;
+    let mut child = base_id;
+
+    for stage in stages {
+        let origin = Origin::new(
+            module,
+            syntax.get(&stage.site).map_or(stage.span, |e| e.span),
+        );
+        let input_row = Row::new(stage.input.clone().expect("checked above"));
+        let output_row = Row::new(stage.output.clone().expect("checked above"));
+        let kind = match stage.kind {
+            RowStage::Prefix => QueryNodeKind::Prefix,
+            RowStage::Suffix => QueryNodeKind::Suffix,
+            RowStage::Omit => QueryNodeKind::Omit,
+            RowStage::MapValue => QueryNodeKind::MapValue,
+            _ => unreachable!("filtered above"),
+        };
+        let id = typed
+            .rewrite(
+                stage.node,
+                kind,
+                child,
+                Some(input_row),
+                Some(output_row.clone()),
+                origin,
+            )
+            .map_err(query_error)?;
+        let label = stage.label.expect("checked above");
+        checked = match stage.kind {
+            RowStage::Prefix => CheckedQuery::prefix(checked, label, origin)
+                .map_err(|error| Error::unsupported(error.message).at(origin))?,
+            RowStage::Suffix => CheckedQuery::suffix(checked, label, origin)
+                .map_err(|error| Error::unsupported(error.message).at(origin))?,
+            RowStage::Omit => CheckedQuery::omit(checked, label, origin)
+                .map_err(|error| Error::unsupported(error.message).at(origin))?,
+            RowStage::MapValue => CheckedQuery::map_value(checked, label, origin)
+                .map_err(|error| Error::unsupported(error.message).at(origin))?,
+            _ => unreachable!("filtered above"),
+        };
+        if checked.row().columns() != output_row.columns() {
+            return Err(Error::unsupported(format!(
+                "typed stage {:?} produced a row different from its checked record",
+                stage.kind
+            ))
+            .at(origin));
+        }
+        child = id;
+    }
+
+    Ok(Some((typed.finish(child), checked)))
+}
+
+/// Check the first typed slice against the normalized term route before its
+/// result is allowed onto the production path.
+pub(crate) fn compare_with_terms(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    typed: &TypedQuery,
+    checked: &CheckedQuery,
+    terms: &CheckedQuery,
+) -> Result<(), Error> {
+    let fail = |message: &str| Error::unsupported(message).at(checked.origin());
+    if checked.row() != terms.row() {
+        return Err(fail("typed and term query routes produced different rows"));
+    }
+    let typed_rel = crate::checked::erase(checked.clone())
+        .map_err(|_| fail("typed query could not be erased during route comparison"))?;
+    let term_rel = crate::checked::erase(terms.clone())
+        .map_err(|_| fail("term query could not be erased during route comparison"))?;
+    if !relations_match(&typed_rel, &term_rel) {
+        return Err(Error::unsupported(format!(
+            "typed and term query routes produced different relations: typed={typed_rel:?}, terms={term_rel:?}"
+        ))
+        .at(checked.origin()));
+    }
+
+    let recorded: Vec<_> = input.type_check().row_stages(module, def).collect();
+    let chain: Vec<_> = typed
+        .chain()
+        .into_iter()
+        .map(|id| typed.node(id))
+        .filter(|node| node.kind() != QueryNodeKind::Table)
+        .collect();
+    if chain.len() != recorded.len() {
+        return Err(fail("typed query route built a different number of stages"));
+    }
+    let mut syntax = HashMap::new();
+    index_exprs(&input.module(module).def(def).body, &mut syntax);
+    for (node, stage) in chain.into_iter().zip(recorded.into_iter().rev()) {
+        let (expected_kind, expected_input, expected_output) = match stage.kind {
+            RowStage::Prefix => (
+                QueryNodeKind::Prefix,
+                stage.input.as_deref(),
+                stage.output.as_deref(),
+            ),
+            RowStage::Suffix => (
+                QueryNodeKind::Suffix,
+                stage.input.as_deref(),
+                stage.output.as_deref(),
+            ),
+            RowStage::Omit => (
+                QueryNodeKind::Omit,
+                stage.input.as_deref(),
+                stage.output.as_deref(),
+            ),
+            RowStage::MapValue => (
+                QueryNodeKind::MapValue,
+                stage.input.as_deref(),
+                stage.output.as_deref(),
+            ),
+            _ => return Err(fail("typed query route contains an unsupported stage")),
+        };
+        if node.site() != stage.node
+            || node.kind() != expected_kind
+            || node.origin().module != module
+            || syntax
+                .get(&stage.node.expr_id)
+                .is_none_or(|expr| node.origin().span != expr.span)
+            || node.input_row().map(|row| row.columns()) != expected_input
+            || node.output_row().map(|row| row.columns()) != expected_output
+        {
+            return Err(Error::unsupported(format!(
+                "typed and checker stage records disagree at {:?}",
+                stage.node
+            ))
+            .at(node.origin()));
+        }
+    }
+    Ok(())
+}
+
+fn relations_match(left: &crate::ir::Rel, right: &crate::ir::Rel) -> bool {
+    use crate::ir::Rel;
+    match (left, right) {
+        (Rel::At(_, l), r) => relations_match(l, r),
+        (l, Rel::At(_, r)) => relations_match(l, r),
+        (
+            Rel::Table {
+                schema: ls,
+                name: ln,
+                columns: lc,
+            },
+            Rel::Table {
+                schema: rs,
+                name: rn,
+                columns: rc,
+            },
+        ) => ls == rs && ln == rn && lc == rc,
+        (Rel::Omit(li, lk), Rel::Omit(ri, rk))
+        | (Rel::Prefix(li, lk), Rel::Prefix(ri, rk))
+        | (Rel::Suffix(li, lk), Rel::Suffix(ri, rk)) => lk == rk && relations_match(li, ri),
+        _ => left == right,
+    }
+}
+
+fn contains_unmigrated_stage(input: CompilerInput<'_>, module: usize, body: &Expr) -> bool {
+    let tc = input.type_check();
+    let mut stack = vec![body];
+    while let Some(expr) = stack.pop() {
+        if let ExprKind::Name(_) | ExprKind::Proj(_, _) = &expr.kind {
+            if let Some(Resolved::Def((m, d))) = tc.resolution(module, expr.id) {
+                let target = input.module(*m).def(*d);
+                if let ExprKind::Primitive(name) = &target.body.kind {
+                    if let Some(prim) = crate::primitive::prim_of(name) {
+                        let Some(stage) = crate::check::RowStage::of_prim(prim) else {
+                            stack.extend(crate::check::child_exprs(expr));
+                            continue;
+                        };
+                        if !matches!(
+                            stage,
+                            RowStage::Prefix
+                                | RowStage::Suffix
+                                | RowStage::Omit
+                                | RowStage::MapValue
+                        ) {
+                            return true;
+                        }
+                    }
+                } else if tc.row_stages(*m, *d).next().is_some() {
+                    // A helper that applies a stage is a composition slice;
+                    // its stages belong to the helper's tree and need the
+                    // later instantiation step.
+                    return true;
+                }
+            }
+        }
+        stack.extend(crate::check::child_exprs(expr));
+    }
+    false
+}
+
+fn query_error(error: crate::check::QueryErr) -> Error {
+    Error::unsupported(error.message).at(error.origin)
+}
+
+fn index_exprs<'a>(expr: &'a Expr, out: &mut HashMap<u32, &'a Expr>) {
+    out.insert(expr.id, expr);
+    for child in crate::check::child_exprs(expr) {
+        index_exprs(child, out);
+    }
+}
+
+fn find_base<'a>(
+    expr: &'a Expr,
+    stages: &HashSet<u32>,
+    tc: &crate::check::TypeCheck,
+    module: usize,
+) -> Option<&'a Expr> {
+    if stages.contains(&expr.id) {
+        return None;
+    }
+    let is_query = tc
+        .use_scheme(module, expr.id)
+        .is_some_and(|view| matches!(view, crate::check::SchemeView::Query { .. }));
+    if is_query {
+        let has_query_child = crate::check::child_exprs(expr).into_iter().any(|child| {
+            tc.use_scheme(module, child.id)
+                .is_some_and(|view| matches!(view, crate::check::SchemeView::Query { .. }))
+        });
+        if !has_query_child {
+            return Some(expr);
+        }
+    }
+    for child in crate::check::child_exprs(expr) {
+        if let Some(found) = find_base(child, stages, tc, module) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn table_parts(
+    input: CompilerInput<'_>,
+    module: usize,
+    expr: &Expr,
+) -> Option<(String, String, Vec<(String, crate::core::ScalarType)>)> {
+    let tc = input.type_check();
+    match &expr.kind {
+        ExprKind::App(head, args) if args.len() == 2 && is_table_head(input, module, head) => {
+            let schema = string_literal(&args[0])?;
+            let table = string_literal(&args[1])?;
+            let columns = tc.typed_node(module, expr.id)?.row()?;
+            Some((schema, table, columns))
+        }
+        ExprKind::Name(_) | ExprKind::Proj(_, _) => {
+            let Resolved::Def((target_module, target_def)) =
+                tc.resolution(module, expr.id)?.clone()
+            else {
+                return None;
+            };
+            let target = input.module(target_module).def(target_def);
+            let (schema, table, _) = table_parts(input, target_module, &target.body)?;
+            let columns = tc.scheme_fields(target_module, target_def)?;
+            Some((schema, table, columns))
+        }
+        _ => None,
+    }
+}
+
+fn is_table_head(input: CompilerInput<'_>, module: usize, head: &Expr) -> bool {
+    if matches!(&head.kind, ExprKind::Primitive(name) if name == "__table") {
+        return true;
+    }
+    let Some(Resolved::Def((m, d))) = input.type_check().resolution(module, head.id) else {
+        return false;
+    };
+    matches!(&input.module(*m).def(*d).body.kind, ExprKind::Primitive(name) if name == "__table")
+}
+
+fn string_literal(expr: &Expr) -> Option<String> {
+    match &expr.kind {
+        ExprKind::Lit(Lit::Str(value)) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::check;
+    use crate::workspace::Workspace;
+
+    fn lower_source(src: &str, name: &str) -> (TypedQuery, CheckedQuery) {
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == name)
+            .expect("definition");
+        let body = &ws.modules[ws.root].module.defs[def].body;
+        lower(CompilerInput::new(&ws, &tc), ws.root, def, body)
+            .expect("typed lowering")
+            .expect("supported direct pipeline")
+    }
+
+    #[test]
+    fn direct_rewrites_build_a_typed_chain_and_checked_query() {
+        let (typed, checked) = lower_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             q = users & prefix \"u_\" & suffix \"_v2\"\n",
+            "q",
+        );
+        let chain = typed.chain();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(typed.node(chain[0]).kind(), QueryNodeKind::Suffix);
+        assert_eq!(typed.node(chain[1]).kind(), QueryNodeKind::Prefix);
+        assert_eq!(typed.node(chain[2]).kind(), QueryNodeKind::Table);
+        assert_eq!(
+            checked.row().columns(),
+            &[
+                ("u_id_v2".to_string(), crate::core::ScalarType::Int),
+                ("u_name_v2".to_string(), crate::core::ScalarType::String),
+            ]
+        );
+    }
+
+    #[test]
+    fn map_value_keeps_its_typed_row_while_erasing_to_the_input() {
+        let (typed, checked) = lower_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             q = users & mapValue \"nullable\"\n",
+            "q",
+        );
+        assert_eq!(typed.root_kind(), QueryNodeKind::MapValue);
+        assert_eq!(
+            checked.row().columns(),
+            &[
+                (
+                    "id".to_string(),
+                    crate::core::ScalarType::Maybe(Box::new(crate::core::ScalarType::Int))
+                ),
+                (
+                    "name".to_string(),
+                    crate::core::ScalarType::Maybe(Box::new(crate::core::ScalarType::String))
+                ),
+            ]
+        );
+        let rel = crate::checked::erase(checked).expect("type-only stage erases");
+        assert!(
+            matches!(rel, crate::ir::Rel::At(_, inner) if matches!(*inner, crate::ir::Rel::Table { .. }))
+        );
+    }
+}

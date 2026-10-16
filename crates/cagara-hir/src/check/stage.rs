@@ -165,6 +165,9 @@ pub struct RowStageView {
     /// The stable identity of the application; see [`PendingRowStage::node`].
     pub node: NodeRef,
     pub span: Span,
+    /// The closed witness supplied to the stage (`prefix`/`suffix` affix,
+    /// `omit` column, or `mapValue` wrapper). Open witnesses remain `None`.
+    pub label: Option<String>,
     pub input: Option<Vec<(String, ScalarType)>>,
     pub output: Option<Vec<(String, ScalarType)>>,
 }
@@ -281,6 +284,10 @@ impl<'w> Checker<'w> {
                 site: s.site,
                 node: s.node,
                 span: s.span,
+                label: match label {
+                    Ty::Sym(name) => Some(name),
+                    _ => None,
+                },
                 input: self.closed_fields(&input),
                 output: self.closed_fields(&output),
             });

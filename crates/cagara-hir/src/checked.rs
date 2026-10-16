@@ -42,6 +42,7 @@ pub enum QueryKind {
     Omit,
     /// `prefix` or `suffix`.
     Rename,
+    MapValue,
     Agg,
     Order,
     Limit,
@@ -130,6 +131,7 @@ impl CheckedQuery {
             CheckedQueryNode::Update { .. } => QueryKind::Update,
             CheckedQueryNode::Omit { .. } => QueryKind::Omit,
             CheckedQueryNode::Rename { .. } => QueryKind::Rename,
+            CheckedQueryNode::MapValue { .. } => QueryKind::MapValue,
             CheckedQueryNode::Agg { .. } => QueryKind::Agg,
             CheckedQueryNode::Order { .. } => QueryKind::Order,
             CheckedQueryNode::Limit { .. } => QueryKind::Limit,
@@ -393,6 +395,40 @@ impl CheckedQuery {
         })
     }
 
+    /// `mapValue "nullable"` or `mapValue "list"`: wrap every field type.
+    ///
+    /// The wrapper changes the checked row but has no SQL representation, so
+    /// erasure simply walks through this node. Keeping it in the checked tree
+    /// preserves the stage boundary and lets the typed query route carry the
+    /// same row witness as the checker.
+    pub fn map_value(
+        input: CheckedQuery,
+        wrapper: impl Into<String>,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        let wrapper = wrapper.into();
+        let row = match wrapper.as_str() {
+            "nullable" => input.row.map_value_nullable(),
+            "list" => RowType::new(
+                input
+                    .row
+                    .columns
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), ScalarType::List(Box::new(ty.clone()))))
+                    .collect(),
+            ),
+            _ => return Err(Error::new(format!("unknown value wrapper `{wrapper}`")).at(origin)),
+        };
+        Ok(CheckedQuery {
+            row: Arc::new(row),
+            node: CheckedQueryNode::MapValue {
+                input: Box::new(input),
+                wrapper,
+            },
+            origin,
+        })
+    }
+
     /// A join.
     ///
     /// The predicate must be row-phase `bool`, and every side-qualified name
@@ -566,6 +602,10 @@ pub(crate) enum CheckedQueryNode {
         input: Box<CheckedQuery>,
         affix: String,
         prefix: bool,
+    },
+    MapValue {
+        input: Box<CheckedQuery>,
+        wrapper: String,
     },
     Agg {
         input: Box<CheckedQuery>,
@@ -1092,6 +1132,7 @@ pub fn erase(query: CheckedQuery) -> Result<Rel, Error> {
                 Rel::Suffix(inner, affix)
             })
         }
+        CheckedQueryNode::MapValue { input, .. } => erase(*input)?,
         CheckedQueryNode::Agg { input, fields } => {
             at(Rel::Agg(Box::new(erase(*input)?), erase_fields(fields)?))
         }

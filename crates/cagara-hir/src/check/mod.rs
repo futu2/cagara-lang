@@ -71,17 +71,6 @@ pub(crate) use stage::*;
 pub(crate) use ty::*;
 
 pub(crate) use facts::{child_exprs, definition_facts, DefinitionFacts};
-/// The query stage a definition is, and one stage application's rows.
-pub use stage::{RowStage, RowStageView};
-/// The stable identity of one checked node, for matching a lowered stage to the
-/// record the checker made of it.
-///
-/// Crate-private on purpose: it is an internal handle between the checker and
-/// the lowering, and its spelling (arena positions, parser `ExprId`s) is free
-/// to change. [`RowStageView::node`] is a public field of that type, so the
-/// type has to be reachable from outside the crate's *code* — it is `pub` in
-/// `check::stage`, and re-exported here for the crate's own modules.
-pub(crate) use stage::NodeRef;
 /// The typed query: the relational skeleton a definition's stages build, with
 /// each node owning the rows its operation read and produced.
 ///
@@ -91,6 +80,17 @@ pub(crate) use stage::NodeRef;
 /// records.
 #[allow(unused_imports)]
 pub(crate) use query::{NodeId, QueryErr, QueryNodeKind, Row, TypedQuery};
+/// The stable identity of one checked node, for matching a lowered stage to the
+/// record the checker made of it.
+///
+/// Crate-private on purpose: it is an internal handle between the checker and
+/// the lowering, and its spelling (arena positions, parser `ExprId`s) is free
+/// to change. [`RowStageView::node`] is a public field of that type, so the
+/// type has to be reachable from outside the crate's *code* — it is `pub` in
+/// `check::stage`, and re-exported here for the crate's own modules.
+pub(crate) use stage::NodeRef;
+/// The query stage a definition is, and one stage application's rows.
+pub use stage::{RowStage, RowStageView};
 pub use ty::Choice;
 /// What shape a definition's scheme has.
 ///

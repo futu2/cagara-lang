@@ -3672,6 +3672,15 @@ fn lower_query_primitive(
             };
             Q::omit(lower_input(input)?, key, origin).map_err(at)
         }
+        "__mapValue" => {
+            let ([wrapper], input) = split(1)? else {
+                unreachable!()
+            };
+            let Some(wrapper) = string_of(wrapper) else {
+                return Err(Gap::new(origin, "`mapValue` takes a wrapper name"));
+            };
+            Q::map_value(lower_input(input)?, wrapper, origin).map_err(at)
+        }
         "__prefix" | "__suffix" => {
             let ([a], input) = split(1)? else {
                 unreachable!()

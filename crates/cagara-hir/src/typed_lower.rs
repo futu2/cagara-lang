@@ -400,7 +400,9 @@ fn lower_composed_helper(
                 | RowStage::Limit
                 | RowStage::Offset
                 | RowStage::Distinct
-        )
+                | RowStage::Select
+                | RowStage::Update
+        ) || matches!(stage.kind, RowStage::Select | RowStage::Update) && helper_stages.len() != 1
     }) {
         let mut source = TypedQuery::new();
         let Some((root, _)) = lower_helper_expr(input, module, def, expr, &mut source)? else {
@@ -417,12 +419,31 @@ fn lower_composed_helper(
         &mut syntax,
     );
     let mut child = child;
+    let helper_output = tc
+        .typed_node(module, expr.id)
+        .and_then(|node| node.row())
+        .map(Row::new);
     for stage in helper_stages {
         let origin = Origin::new(
             helper_module,
             syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
         );
-        let id = typed_keep_stage(target, child, stage.kind, stage.node, origin)?;
+        let id = match stage.kind {
+            RowStage::Select | RowStage::Update => target
+                .project(
+                    stage.node,
+                    match stage.kind {
+                        RowStage::Select => QueryNodeKind::Select,
+                        RowStage::Update => QueryNodeKind::Update,
+                        _ => unreachable!(),
+                    },
+                    child,
+                    helper_output.clone(),
+                    origin,
+                )
+                .map_err(query_error)?,
+            _ => typed_keep_stage(target, child, stage.kind, stage.node, origin)?,
+        };
         let node = target.node(id);
         if !rows_match(
             stage.kind,
@@ -1977,6 +1998,20 @@ mod tests {
         assert!(typed
             .nodes()
             .any(|node| matches!(node.kind(), QueryNodeKind::Where)));
+        assert!(typed
+            .nodes()
+            .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));
+
+        let (typed, _) = lower_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             orders : query { uid = int, amount = float } = table \"s\" \"orders\"\n\
+             projected = q => q & select { .uid, .amount }\n\
+             q = users & innerJoin (orders & projected) (.<id == .>uid)\n",
+            "q",
+        );
+        assert!(typed
+            .nodes()
+            .any(|node| matches!(node.kind(), QueryNodeKind::Select)));
         assert!(typed
             .nodes()
             .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));

@@ -178,17 +178,25 @@ impl<'w> Checker<'w> {
     /// is computed by that operation, exactly once, from the row the operation
     /// read. A rename that does not rename, a removal that does not remove, or a
     /// wrapper that does not wrap is a compiler bug, so it is an assertion
-    /// rather than a diagnostic — the same way the schema layer asserts its own
-    /// rules.
+    /// rather than a diagnostic: a user program cannot cause it, and there is
+    /// nothing to report against. The schema layer, by contrast, reports its
+    /// rules as diagnostics because *those* can be violated by a program.
     pub(crate) fn finish_row_stages(&mut self) -> Vec<RowStageView> {
         let mut out = Vec::new();
         for s in std::mem::take(&mut self.row_stages) {
             let input = self.zonk(&s.input);
             let output = self.zonk(&s.output);
             let label = self.zonk(&s.label);
-            if s.kind.recomputes() && !row_stage_agrees(s.kind, &label, &input, &output) {
-                debug_assert!(
-                    false,
+            if s.kind.recomputes() {
+                // A compiled-in check, not a `debug_assert!`: this is the
+                // invariant the redesign exists for, and a release build is
+                // where a compiler bug is least likely to be noticed and most
+                // likely to be shipped. It can only fire on a genuine
+                // disagreement — `row_stage_agrees` answers `true` whenever the
+                // label or either row is still open, so a merely unresolved
+                // program cannot trip it.
+                assert!(
+                    row_stage_agrees(s.kind, &label, &input, &output),
                     "stage {:?} at {:?} did not produce its output row from its input row: \
                      label = {}, input = {}, output = {}",
                     s.kind,

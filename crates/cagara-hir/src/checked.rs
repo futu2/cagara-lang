@@ -141,6 +141,41 @@ impl CheckedQuery {
             CheckedQueryNode::Set { .. } => QueryKind::Set,
         }
     }
+
+    /// The relational nodes in this query, from inputs toward the root.
+    ///
+    /// Elaboration keeps expression payloads on this checked tree while the
+    /// typed query builder migrates the structural graph.  A consumer that
+    /// needs the concrete row at an instantiated helper stage can inspect
+    /// this ordered view without taking ownership of the private node tree.
+    pub(crate) fn node_chain(&self) -> Vec<(QueryKind, Origin, RowType)> {
+        fn visit(query: &CheckedQuery, out: &mut Vec<(QueryKind, Origin, RowType)>) {
+            match &query.node {
+                CheckedQueryNode::Table { .. } => {}
+                CheckedQueryNode::Where { input, .. }
+                | CheckedQueryNode::Select { input, .. }
+                | CheckedQueryNode::Update { input, .. }
+                | CheckedQueryNode::Omit { input, .. }
+                | CheckedQueryNode::Rename { input, .. }
+                | CheckedQueryNode::MapValue { input, .. }
+                | CheckedQueryNode::Agg { input, .. }
+                | CheckedQueryNode::Order { input, .. }
+                | CheckedQueryNode::Limit { input, .. }
+                | CheckedQueryNode::Offset { input, .. } => visit(input, out),
+                CheckedQueryNode::Distinct(input) => visit(input, out),
+                CheckedQueryNode::Join { left, right, .. }
+                | CheckedQueryNode::Set { left, right, .. } => {
+                    visit(left, out);
+                    visit(right, out);
+                }
+            }
+            out.push((query.kind(), query.origin, (*query.row).clone()));
+        }
+
+        let mut out = Vec::new();
+        visit(self, &mut out);
+        out
+    }
     /// A table, with its columns known.
     ///
     /// `columns` is the table's closed row: the checker gives a `table`

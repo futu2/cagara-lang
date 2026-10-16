@@ -241,9 +241,11 @@ bodies preserve their row (`where`, `order`, `limit`, `offset`, or `distinct`)
 are now instantiated inside combine operands too. A helper with one `select`,
 `update`, or `agg`, surrounded by any number of those row-preserving stages,
 can use the closed row on its call expression as the projection boundary. The
-aggregate and projection expressions remain on the normalized bridge, and
-helpers with multiple projections still wait for the expression payload
-bridge.
+aggregate and projection expressions remain on the normalized bridge. Helpers
+with multiple projection or aggregate stages now instantiate each intermediate
+output row from the checked use expression, then build the complete typed chain
+with the helper stages' original identities. Helpers that mix those stages with
+row rewrites still wait for rewrite boundary facts.
 
 ### Step 1, done
 

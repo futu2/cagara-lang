@@ -401,21 +401,19 @@ fn lower_composed_helper(
             )
         })
         .count();
-    if projections > 1
-        || helper_stages.iter().any(|stage| {
-            !matches!(
-                stage.kind,
-                RowStage::Where
-                    | RowStage::Order
-                    | RowStage::Limit
-                    | RowStage::Offset
-                    | RowStage::Distinct
-                    | RowStage::Select
-                    | RowStage::Update
-                    | RowStage::Agg
-            )
-        })
-    {
+    if helper_stages.iter().any(|stage| {
+        !matches!(
+            stage.kind,
+            RowStage::Where
+                | RowStage::Order
+                | RowStage::Limit
+                | RowStage::Offset
+                | RowStage::Distinct
+                | RowStage::Select
+                | RowStage::Update
+                | RowStage::Agg
+        )
+    }) {
         let mut source = TypedQuery::new();
         let Some((root, _)) = lower_helper_expr(input, module, def, expr, &mut source)? else {
             return Ok(None);
@@ -435,14 +433,27 @@ fn lower_composed_helper(
         .typed_node(module, expr.id)
         .and_then(|node| node.row())
         .map(Row::new);
-    if projections > 0 && helper_output.is_none() {
+    let instantiated_rows = if projections > 0 {
+        helper_stage_rows(input, module, def, expr, &helper_stages)
+    } else {
+        None
+    };
+    if projections > 0 && helper_output.is_none() && instantiated_rows.is_none() {
         return Ok(None);
     }
-    for stage in helper_stages {
+    if projections > 1 && instantiated_rows.is_none() {
+        return Ok(None);
+    }
+    for (index, stage) in helper_stages.into_iter().enumerate() {
         let origin = Origin::new(
             helper_module,
             syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
         );
+        let projected_row = instantiated_rows
+            .as_ref()
+            .and_then(|rows| rows.get(index))
+            .cloned()
+            .or_else(|| helper_output.clone());
         let id = match stage.kind {
             RowStage::Select | RowStage::Update | RowStage::Agg => target
                 .project(
@@ -454,7 +465,7 @@ fn lower_composed_helper(
                         _ => unreachable!(),
                     },
                     child,
-                    helper_output.clone(),
+                    projected_row,
                     origin,
                 )
                 .map_err(query_error)?,
@@ -1186,12 +1197,14 @@ fn lower_helper_expr(
             return apply_helper(
                 input,
                 module,
+                def,
                 body.id,
                 child,
                 checked,
                 helper_module,
                 helper_def,
                 &helper_args,
+                body,
                 typed,
             );
         }
@@ -1203,12 +1216,14 @@ fn lower_helper_expr(
 fn apply_helper(
     input: CompilerInput<'_>,
     use_module: usize,
+    use_def: usize,
     use_site: u32,
     mut child: NodeId,
     mut checked: CheckedQuery,
     helper_module: usize,
     helper_def: usize,
     helper_args: &[Expr],
+    use_expr: &Expr,
     typed: &mut TypedQuery,
 ) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
     let tc = input.type_check();
@@ -1223,7 +1238,18 @@ fn apply_helper(
         || helper_stages.iter().any(|stage| {
             !matches!(
                 stage.kind,
-                RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
+                RowStage::Prefix
+                    | RowStage::Suffix
+                    | RowStage::Omit
+                    | RowStage::MapValue
+                    | RowStage::Where
+                    | RowStage::Order
+                    | RowStage::Limit
+                    | RowStage::Offset
+                    | RowStage::Distinct
+                    | RowStage::Select
+                    | RowStage::Update
+                    | RowStage::Agg
             )
         })
     {
@@ -1236,7 +1262,62 @@ fn apply_helper(
     }
     let mut syntax = HashMap::new();
     index_exprs(helper_syntax, &mut syntax);
-    for stage in helper_stages {
+    let projections = helper_stages
+        .iter()
+        .filter(|stage| {
+            matches!(
+                stage.kind,
+                RowStage::Select | RowStage::Update | RowStage::Agg
+            )
+        })
+        .count();
+    // A helper made solely of row-preserving stages still needs expression
+    // payloads (predicates, sort keys, and so on) from the established route.
+    // Keep that shape on the bridge; the typed helper slice below is for a
+    // projection/aggregate whose instantiated rows we can carry.
+    if projections == 0
+        && helper_stages.iter().any(|stage| {
+            matches!(
+                stage.kind,
+                RowStage::Where
+                    | RowStage::Order
+                    | RowStage::Limit
+                    | RowStage::Offset
+                    | RowStage::Distinct
+            )
+        })
+    {
+        return Ok(None);
+    }
+    if projections > 0
+        && helper_stages.iter().any(|stage| {
+            matches!(
+                stage.kind,
+                RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
+            )
+        })
+    {
+        // Rewrite helpers already have a dedicated instantiation path. A
+        // projection followed by a rewrite needs the rewrite's intermediate
+        // row facts, which this bridge slice does not carry yet.
+        return Ok(None);
+    }
+    let instantiated_rows = if projections > 0 {
+        helper_stage_rows(input, use_module, use_def, use_expr, &helper_stages)
+    } else {
+        None
+    };
+    if projections > 1 && instantiated_rows.is_none() {
+        return Ok(None);
+    }
+    let normalized = if projections > 0 {
+        Some(crate::normalize::elaborate_query_via_terms(
+            input, use_module, use_def, use_expr,
+        )?)
+    } else {
+        None
+    };
+    for (index, stage) in helper_stages.into_iter().enumerate() {
         let origin = Origin::new(
             helper_module,
             syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
@@ -1250,29 +1331,48 @@ fn apply_helper(
             return Ok(None);
         }
         let input_row = Row::new(input_columns);
+        let projected_row = instantiated_rows
+            .as_ref()
+            .and_then(|rows| rows.get(index))
+            .cloned();
         let kind = match stage.kind {
-            RowStage::Prefix => QueryNodeKind::Prefix,
-            RowStage::Suffix => QueryNodeKind::Suffix,
-            RowStage::Omit => QueryNodeKind::Omit,
-            RowStage::MapValue => QueryNodeKind::MapValue,
-            _ => unreachable!(),
-        };
-        let Some(label) = stage
-            .label
-            .clone()
-            .or_else(|| helper_witness(&stage, &syntax, &params, helper_args))
-        else {
-            return Ok(None);
+            RowStage::Prefix => Some(QueryNodeKind::Prefix),
+            RowStage::Suffix => Some(QueryNodeKind::Suffix),
+            RowStage::Omit => Some(QueryNodeKind::Omit),
+            RowStage::MapValue => Some(QueryNodeKind::MapValue),
+            _ => None,
         };
         checked = match stage.kind {
-            RowStage::Prefix => CheckedQuery::prefix(checked, label, origin),
-            RowStage::Suffix => CheckedQuery::suffix(checked, label, origin),
-            RowStage::Omit => CheckedQuery::omit(checked, label, origin),
-            RowStage::MapValue => CheckedQuery::map_value(checked, label, origin),
-            _ => unreachable!(),
+            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => {
+                let Some(label) = stage
+                    .label
+                    .clone()
+                    .or_else(|| helper_witness(&stage, &syntax, &params, helper_args))
+                else {
+                    return Ok(None);
+                };
+                match stage.kind {
+                    RowStage::Prefix => CheckedQuery::prefix(checked, label, origin),
+                    RowStage::Suffix => CheckedQuery::suffix(checked, label, origin),
+                    RowStage::Omit => CheckedQuery::omit(checked, label, origin),
+                    RowStage::MapValue => CheckedQuery::map_value(checked, label, origin),
+                    _ => unreachable!(),
+                }
+            }
+            RowStage::Where
+            | RowStage::Order
+            | RowStage::Limit
+            | RowStage::Offset
+            | RowStage::Distinct
+            | RowStage::Select
+            | RowStage::Update
+            | RowStage::Agg => Ok(checked),
         }
         .map_err(|error| Error::unsupported(error.message).at(origin))?;
-        let output_columns = checked.row().columns().to_vec();
+        let output_columns = projected_row
+            .as_ref()
+            .map(|row| row.columns().to_vec())
+            .unwrap_or_else(|| checked.row().columns().to_vec());
         if stage
             .output
             .as_deref()
@@ -1281,26 +1381,134 @@ fn apply_helper(
             return Ok(None);
         }
         let output_row = Row::new(output_columns);
-        let id = typed
-            .rewrite(
-                stage.node,
-                kind,
-                child,
-                Some(input_row),
-                Some(output_row.clone()),
-                origin,
-            )
-            .map_err(query_error)?;
+        let id = match stage.kind {
+            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => typed
+                .rewrite(
+                    stage.node,
+                    kind.expect("rewrite stage has a rewrite kind"),
+                    child,
+                    Some(input_row),
+                    Some(output_row.clone()),
+                    origin,
+                )
+                .map_err(query_error)?,
+            RowStage::Where
+            | RowStage::Order
+            | RowStage::Limit
+            | RowStage::Offset
+            | RowStage::Distinct => typed_keep_stage(typed, child, stage.kind, stage.node, origin)?,
+            RowStage::Select | RowStage::Update | RowStage::Agg => typed
+                .project(
+                    stage.node,
+                    match stage.kind {
+                        RowStage::Select => QueryNodeKind::Select,
+                        RowStage::Update => QueryNodeKind::Update,
+                        RowStage::Agg => QueryNodeKind::Agg,
+                        _ => unreachable!(),
+                    },
+                    child,
+                    projected_row,
+                    origin,
+                )
+                .map_err(query_error)?,
+        };
         child = id;
     }
+    let result_row = tc
+        .typed_node(use_module, use_site)
+        .and_then(|node| node.row())
+        .or_else(|| {
+            normalized
+                .as_ref()
+                .map(|query| query.row().columns().to_vec())
+        })
+        .unwrap_or_else(|| checked.row().columns().to_vec());
     if tc
         .typed_node(use_module, use_site)
         .and_then(|node| node.row())
-        .is_some_and(|expected| expected != checked.row().columns())
+        .is_some_and(|expected| expected != result_row.as_slice())
     {
         return Ok(None);
     }
-    Ok(Some((child, checked)))
+    if let Some(normalized) = normalized {
+        Ok(Some((child, normalized)))
+    } else {
+        Ok(Some((child, checked)))
+    }
+}
+
+/// Read the instantiated output row of each helper stage from the checked
+/// query for this use.  Helper definitions intentionally keep their stage
+/// rows open; the use expression is where the callee's scheme is instantiated
+/// and the checked bridge has the concrete intermediate rows.
+fn helper_stage_rows(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    expr: &Expr,
+    stages: &[crate::check::RowStageView],
+) -> Option<Vec<Row>> {
+    let checked = crate::normalize::elaborate_query_via_terms(input, module, def, expr).ok()?;
+    let chain = checked.node_chain();
+    if stages.len() > chain.len() {
+        return None;
+    }
+    let start = chain.len() - stages.len();
+    let rows = chain[start..]
+        .iter()
+        .zip(stages)
+        .all(|((kind, _, _), stage)| checked_kind_matches(*kind, stage.kind));
+    if !rows {
+        return None;
+    }
+    let final_row = input
+        .type_check()
+        .typed_node(module, expr.id)
+        .and_then(|node| node.row());
+    Some(
+        chain[start..]
+            .iter()
+            .map(|(_, _, row)| {
+                let columns = row
+                    .columns()
+                    .iter()
+                    .map(|(name, ty)| {
+                        if matches!(ty, crate::core::ScalarType::Unknown) {
+                            final_row
+                                .as_ref()
+                                .and_then(|fields| fields.iter().find(|(n, _)| n == name))
+                                .map_or((name.clone(), ty.clone()), |(_, ty)| {
+                                    (name.clone(), ty.clone())
+                                })
+                        } else {
+                            (name.clone(), ty.clone())
+                        }
+                    })
+                    .collect();
+                Row::new(columns)
+            })
+            .collect(),
+    )
+}
+
+fn checked_kind_matches(kind: crate::checked::QueryKind, stage: RowStage) -> bool {
+    matches!(
+        (kind, stage),
+        (crate::checked::QueryKind::Where, RowStage::Where)
+            | (crate::checked::QueryKind::Select, RowStage::Select)
+            | (crate::checked::QueryKind::Update, RowStage::Update)
+            | (crate::checked::QueryKind::Agg, RowStage::Agg)
+            | (crate::checked::QueryKind::Order, RowStage::Order)
+            | (crate::checked::QueryKind::Limit, RowStage::Limit)
+            | (crate::checked::QueryKind::Offset, RowStage::Offset)
+            | (crate::checked::QueryKind::Distinct, RowStage::Distinct)
+            | (
+                crate::checked::QueryKind::Rename,
+                RowStage::Prefix | RowStage::Suffix
+            )
+            | (crate::checked::QueryKind::Omit, RowStage::Omit)
+            | (crate::checked::QueryKind::MapValue, RowStage::MapValue)
+    )
 }
 
 fn helper_witness(
@@ -2179,6 +2387,69 @@ mod tests {
         .unwrap();
         assert_eq!(typed.root_kind(), QueryNodeKind::Prefix);
         assert_eq!(checked.row().names(), &["h_id"]);
+    }
+
+    #[test]
+    fn multi_projection_helper_instantiates_intermediate_rows() {
+        let src = "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             helper = q => q & select { .name } & update { upper = .name }\n\
+             q = users & helper\n";
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let q = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let input = CompilerInput::new(&ws, &tc);
+        let body = &ws.modules[ws.root].module.defs[q].body;
+        let (typed, checked) = lower(input, ws.root, q, body).unwrap().unwrap();
+        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, q, body).unwrap();
+        compare_with_terms(input, &typed, &checked, &terms).unwrap();
+        assert_eq!(
+            typed
+                .chain()
+                .iter()
+                .map(|id| typed.node(*id).kind())
+                .collect::<Vec<_>>(),
+            vec![
+                QueryNodeKind::Update,
+                QueryNodeKind::Select,
+                QueryNodeKind::Table
+            ]
+        );
+        assert_eq!(checked.row().names(), &["name", "upper"]);
+        assert_eq!(
+            typed.node(typed.chain()[1]).output_row().unwrap().names(),
+            vec!["name"]
+        );
+    }
+
+    #[test]
+    fn multi_stage_aggregate_helper_instantiates_each_output_row() {
+        let src = "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             helper = q => q & select { .name } & agg { name = group .name, n = count }\n\
+             q = users & helper\n";
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let input = CompilerInput::new(&ws, &tc);
+        let body = &ws.modules[ws.root].module.defs[def].body;
+        let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
+        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        compare_with_terms(input, &typed, &checked, &terms).unwrap();
+        assert!(typed
+            .nodes()
+            .any(|node| matches!(node.kind(), QueryNodeKind::Agg)));
+        assert_eq!(checked.row().names(), &["name", "n"]);
     }
 
     #[test]

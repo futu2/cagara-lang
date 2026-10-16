@@ -70,6 +70,92 @@ fn row_of(src: &str, name: &str) -> Vec<String> {
 /// still open.
 type RecordedRowStage = (RowStage, Option<Vec<String>>, Option<Vec<String>>);
 
+/// The stage metadata a definition's map holds is on the nodes that applied it.
+///
+/// A stage is applied at one expression — the application — so the operation and
+/// both rows belong to that node. The map this replaces is keyed by definition
+/// and ordered by when the checker recorded each application, which is
+/// application order and *not* the tree's source order; the tree keeps the fact
+/// on the node and that order in an index. Both have to be the same account
+/// before the map can go, so this compares them definition by definition over
+/// the examples and over programs whose stages arrive through a chain, a
+/// helper, an import, and a failure.
+#[test]
+fn the_nodes_hold_the_stage_metadata_the_map_holds() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let mut programs: Vec<(String, Workspace)> = vec![
+        (
+            "a chain of two renames".into(),
+            Workspace::from_source(&format!("{TABLES}q = users & prefix \"u_\" & suffix \"_v2\"\n")),
+        ),
+        (
+            "a removal and a projection".into(),
+            Workspace::from_source(&format!(
+                "{TABLES}q = users & omit \"age\" & select {{ .name }}\n"
+            )),
+        ),
+        (
+            "a stage through a helper".into(),
+            Workspace::from_source(&format!(
+                "{TABLES}h = p => p & prefix \"u_\"\nq = users & h\n"
+            )),
+        ),
+        (
+            "a definition that failed".into(),
+            Workspace::from_source(&format!("{TABLES}q = users & prefix \"u_\" & nosuch\n")),
+        ),
+    ];
+    for f in [
+        "report.cagara",
+        "public.cagara",
+        "schema.cagara",
+        "errors.cagara",
+    ] {
+        programs.push((f.to_string(), Workspace::open(&dir.join(f))));
+    }
+
+    let names = |fs: &Option<Vec<(String, ScalarType)>>| {
+        fs.as_ref()
+            .map(|fs| fs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>())
+    };
+    let mut compared = 0usize;
+    for (what, ws) in &programs {
+        let tc = check(ws);
+        for m in 0..ws.modules.len() {
+            for d in 0..ws.modules[m].module.defs.len() {
+                let from_map: Vec<RecordedRowStage> = tc.modules[m]
+                    .row_stages
+                    .get(&(m, d))
+                    .map(|v| {
+                        v.iter()
+                            .map(|s| (s.kind, names(&s.input), names(&s.output)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let from_nodes: Vec<RecordedRowStage> = tc
+                    .typed_body(m, d)
+                    .map(|tree| {
+                        tree.stages()
+                            .map(|node| {
+                                let s = node.stage.as_ref().expect("a node in the stage index");
+                                (s.kind, names(&s.input), names(&s.output))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                assert_eq!(
+                    from_nodes, from_map,
+                    "{what}: module {m} def {d}: the nodes and the map disagree about the stages"
+                );
+                compared += from_map.len();
+            }
+        }
+    }
+    assert!(compared > 0, "no shipped program applied a stage");
+}
+
+
+
 /// The row-rewrite stages a definition recorded.
 fn row_stage_nodes(src: &str, name: &str) -> Vec<RecordedRowStage> {
     let ws = Workspace::from_source(&format!("{TABLES}{src}"));

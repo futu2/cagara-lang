@@ -166,6 +166,7 @@ impl<'w> Checker<'w> {
         // read and produced. They are closed here, once the definition's rows
         // are solved, and dropped for a definition that failed.
         let stages = self.finish_row_stages();
+        let succeeded = r.is_ok();
         let scheme = match r {
             Ok(t) => {
                 // Constraints can bind the row after inference has built a
@@ -192,7 +193,7 @@ impl<'w> Checker<'w> {
                     self.holes.insert((m, i), k);
                 }
                 if !stages.is_empty() {
-                    self.row_stage_nodes.insert((m, i), stages);
+                    self.row_stage_nodes.insert((m, i), stages.clone());
                 }
                 let mut scheme = self.generalize(&t, cons);
                 scheme.stage = self.def_stage(i);
@@ -219,6 +220,10 @@ impl<'w> Checker<'w> {
         // The same facts as a tree over the body, which is what a consumer
         // walks: the maps above are read by `ExprId`, which is a question only
         // a consumer that already knows the id can ask.
+        //
+        // A definition that failed contributes no stage nodes, exactly as it
+        // contributes none to `row_stage_nodes`: the chain is closed only when
+        // the definition's rows are solved.
         if !typed_facts.is_empty() {
             let body = &self.env.defs[i].body;
             let holes = self.holes.get(&(m, i)).copied().unwrap_or(0);
@@ -226,19 +231,22 @@ impl<'w> Checker<'w> {
             let tree = crate::check::typed::build(
                 body,
                 holes,
-                |id| typed_facts.get(&id).map(scheme_view),
-                |id| shown_by_id.get(&id).cloned(),
-                |id| recorded_by_id.get(&id).copied(),
-                |id| self.resolutions.get(&(m, id)).cloned(),
-                |id| {
-                    // The choices recorded *at* this node's site, by hole.
-                    let mut at: Vec<(usize, Choice)> = recorded
-                        .iter()
-                        .filter(|((site, _), _)| *site == id)
-                        .map(|((_, hole), choice)| (*hole, *choice))
-                        .collect();
-                    at.sort_unstable_by_key(|(hole, _)| *hole);
-                    at
+                &crate::check::typed::NodeFacts {
+                    stages: if succeeded { stages.as_slice() } else { &[] },
+                    view: &|id| typed_facts.get(&id).map(scheme_view),
+                    shown: &|id| shown_by_id.get(&id).cloned(),
+                    recorded: &|id| recorded_by_id.get(&id).copied(),
+                    resolved: &|id| self.resolutions.get(&(m, id)).cloned(),
+                    choices: &|id| {
+                        // The choices recorded *at* this node's site, by hole.
+                        let mut at: Vec<(usize, Choice)> = recorded
+                            .iter()
+                            .filter(|((site, _), _)| *site == id)
+                            .map(|((_, hole), choice)| (*hole, *choice))
+                            .collect();
+                        at.sort_unstable_by_key(|(hole, _)| *hole);
+                        at
+                    },
                 },
             );
             self.typed_bodies.insert((m, i), tree);

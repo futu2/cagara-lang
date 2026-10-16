@@ -59,6 +59,16 @@ pub struct TypedExpr {
     /// the definition to be named before it could answer. Empty for the many
     /// nodes that are not a use site.
     pub choices: Vec<(usize, Choice)>,
+    /// The query stage this node applied, if it is one.
+    ///
+    /// A stage is a *function value* — `prefix "u_"` has the type
+    /// `query r -> query (keyMap m r)` — so applying one is an ordinary
+    /// application. What makes it a stage is the callee's own scheme, and the
+    /// facts recorded here are the checker's: the operation the definition
+    /// declared, and the rows that stage's signature instance read and
+    /// produced. They belong to the application node because that is where the
+    /// operation was read and the signature instantiated.
+    pub stage: Option<RowStageView>,
     /// Sub-expressions, as indices into the body's arena, in the order
     /// [`child_exprs`] states.
     children: Vec<usize>,
@@ -107,6 +117,14 @@ pub struct TypedBody {
     /// built, while the recording order is still known, rather than by every
     /// reader.
     by_span: Vec<(u32, u32, usize)>,
+    /// Stage applications by recording order: `(order, arena index)`.
+    ///
+    /// The fact is on the node; this is only where the chain's *order* lives.
+    /// It has to be kept, because the two orders differ: a stage chain is
+    /// recorded in application order, while the arena follows source order, and
+    /// `users & prefix "u_" & suffix "_v2"` applies the prefix first but writes
+    /// the suffix application outermost.
+    by_stage: Vec<(usize, usize)>,
 }
 
 impl TypedBody {
@@ -141,6 +159,16 @@ impl TypedBody {
         &self.by_span
     }
 
+    /// The stage applications of this body, in application order.
+    ///
+    /// Adjacent nodes chain: a stage's input row is the previous stage's output
+    /// row. Empty for a definition that applies no stage, and for one that
+    /// failed — its stages were dropped when it did, so a failed definition
+    /// never reports a chain it did not finish solving.
+    pub fn stages(&self) -> impl Iterator<Item = &TypedExpr> {
+        self.by_stage.iter().map(|&(_, at)| &self.nodes[at])
+    }
+
     /// A node's sub-expressions, in source order.
     pub fn children<'a>(&'a self, node: &'a TypedExpr) -> impl Iterator<Item = &'a TypedExpr> {
         node.children.iter().map(|&i| &self.nodes[i])
@@ -152,47 +180,76 @@ impl TypedBody {
     }
 }
 
+/// What the checker recorded, as the lookups the builder makes by `ExprId`.
+///
+/// One struct rather than six parameters, because every field answers the same
+/// kind of question — "what did the checker record at this node" — and the
+/// builder's own inputs are only the body and the definition's open-overload
+/// count. The `dyn` is deliberate: these are five closures of different types,
+/// and each is called once per node, so naming them all in one signature would
+/// cost more than the indirection does.
+pub(crate) struct NodeFacts<'a> {
+    /// The definition's stage applications, in application order.
+    ///
+    /// Each lands on the node whose `ExprId` it was recorded against, and the
+    /// order is kept in an index beside `by_id`: the arena follows source order
+    /// and a chain's order is not the same thing.
+    pub(crate) stages: &'a [RowStageView],
+    /// The type the node got, or `None` when the checker recorded none.
+    pub(crate) view: &'a dyn Fn(u32) -> Option<SchemeView>,
+    /// The printed type, as hover shows it.
+    pub(crate) shown: &'a dyn Fn(u32) -> Option<String>,
+    /// Where a use was filed and when it was recorded — `(key span, position in
+    /// the checker's recording order)`. The order is what resolves a repeated
+    /// key span the way the published map resolved it: the last write wins.
+    pub(crate) recorded: &'a dyn Fn(u32) -> Option<(Span, usize)>,
+    /// What a module-scope name occurrence resolved to.
+    pub(crate) resolved: &'a dyn Fn(u32) -> Option<Resolved>,
+    /// The overload choices recorded at the node, by hole.
+    pub(crate) choices: &'a dyn Fn(u32) -> Vec<(usize, Choice)>,
+}
+
 /// Build a definition's typed tree.
 ///
 /// Iterative, with an explicit stack: a deeply nested expression is exactly
 /// where a recursive builder would overflow, and the checker's budgets exist
 /// so that a program can be rejected rather than crash the compiler.
-///
-/// `recorded_of` answers where a use was filed and when it was recorded —
-/// `(key span, position in the checker's recording order)` — or `None` for a
-/// node the checker did not type. The order is what resolves a repeated key
-/// span the way the published map resolved it: the last write wins.
-pub(crate) fn build(
-    root_expr: &ast::Expr,
-    holes: usize,
-    view_of: impl Fn(u32) -> Option<SchemeView>,
-    shown_of: impl Fn(u32) -> Option<String>,
-    recorded_of: impl Fn(u32) -> Option<(Span, usize)>,
-    resolved_of: impl Fn(u32) -> Option<Resolved>,
-    choices_of: impl Fn(u32) -> Vec<(usize, Choice)>,
-) -> TypedBody {
+pub(crate) fn build(root_expr: &ast::Expr, holes: usize, facts: &NodeFacts<'_>) -> TypedBody {
+    // The stage facts, by the node they were recorded at. A site is an
+    // `ExprId`, so the node the operation was read at is the node that carries
+    // it; the order travels separately.
+    let mut stage_at: HashMap<u32, (usize, RowStageView)> = HashMap::new();
+    for (order, stage) in facts.stages.iter().enumerate() {
+        stage_at.insert(stage.site, (order, stage.clone()));
+    }
     let mut nodes: Vec<TypedExpr> = Vec::new();
     let mut by_id: Vec<(u32, usize)> = Vec::new();
     let mut by_span: Vec<(u32, u32, usize, usize)> = Vec::new();
+    let mut by_stage: Vec<(usize, usize)> = Vec::new();
     let mut root = 0usize;
     // `(expression, the node to attach it to)`.
     let mut stack: Vec<(&ast::Expr, Option<usize>)> = vec![(root_expr, None)];
     while let Some((e, parent)) = stack.pop() {
         let at = nodes.len();
-        let recorded = recorded_of(e.id);
+        let recorded = (facts.recorded)(e.id);
+        let stage = stage_at.get(&e.id);
         nodes.push(TypedExpr {
             id: e.id,
             span: e.span,
             key_span: recorded.map_or(e.span, |(span, _)| span),
-            view: view_of(e.id),
-            shown: shown_of(e.id).unwrap_or_default(),
-            resolved: resolved_of(e.id),
-            choices: choices_of(e.id),
+            view: (facts.view)(e.id),
+            shown: (facts.shown)(e.id).unwrap_or_default(),
+            resolved: (facts.resolved)(e.id),
+            choices: (facts.choices)(e.id),
+            stage: stage.map(|(_, stage)| stage.clone()),
             children: Vec::new(),
         });
         by_id.push((e.id, at));
         if let Some((span, write)) = recorded {
             by_span.push((span.start, span.end, write, at));
+        }
+        if let Some((order, _)) = stage {
+            by_stage.push((*order, at));
         }
         match parent {
             Some(p) => nodes[p].children.push(at),
@@ -214,11 +271,13 @@ pub(crate) fn build(
         .into_iter()
         .map(|(start, end, _, at)| (start, end, at))
         .collect();
+    by_stage.sort_unstable_by_key(|(order, _)| *order);
     TypedBody {
         nodes,
         root,
         by_id,
         by_span,
+        by_stage,
         holes,
     }
 }
@@ -234,11 +293,14 @@ mod tests {
         let tree = build(
             body,
             0,
-            |_| None,
-            |_| None,
-            |_| None,
-            |_| None,
-            |_| Vec::new(),
+            &NodeFacts {
+                stages: &[],
+                view: &|_| None,
+                shown: &|_| None,
+                recorded: &|_| None,
+                resolved: &|_| None,
+                choices: &|_| Vec::new(),
+            },
         );
 
         // Every AST node is in the tree, exactly once, and the shapes agree.
@@ -281,15 +343,18 @@ mod tests {
         let tree = build(
             body,
             0,
-            |_| None,
-            |id| Some(format!("t{id}")),
-            |id| match id {
-                id if id == first => Some((shared, 0)),
-                id if id == second => Some((shared, 1)),
-                _ => None,
+            &NodeFacts {
+                stages: &[],
+                view: &|_| None,
+                shown: &|id| Some(format!("t{id}")),
+                recorded: &|id| match id {
+                    id if id == first => Some((shared, 0)),
+                    id if id == second => Some((shared, 1)),
+                    _ => None,
+                },
+                resolved: &|_| None,
+                choices: &|_| Vec::new(),
             },
-            |_| None,
-            |_| Vec::new(),
         );
 
         assert_eq!(

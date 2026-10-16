@@ -159,12 +159,13 @@ impl TypeCheck {
     }
 
     /// Number of open overloads a definition leaves to its users.
+    ///
+    /// Read off the definition's typed tree. A definition with no tree — a
+    /// `sql` template, whose signature is its type, or one the checker never
+    /// reached — leaves none open, because an open overload needs an
+    /// expression to be open at.
     pub fn holes(&self, module: usize, def: usize) -> usize {
-        self.modules
-            .get(module)
-            .and_then(|m| m.holes.get(&(module, def)))
-            .copied()
-            .unwrap_or(0)
+        self.typed_body(module, def).map_or(0, |b| b.holes)
     }
 
     /// Choice for hole `k` at use site `site` inside definition `(module, def)`.
@@ -175,13 +176,17 @@ impl TypeCheck {
     /// happen to collide, **another use's choice**. Prefer
     /// [`TypeCheck::choices_of`], which takes the pairs the checker actually
     /// recorded and cannot be called with the wrong key.
+    ///
+    /// The choice is read off the node the use was written at; `def` is
+    /// accepted for that key's sake but is not needed to find it, because an
+    /// `ExprId` already identifies the node.
     pub fn choice(&self, module: usize, def: usize, site: u32, k: usize) -> Option<Choice> {
-        self.modules
-            .get(module)?
+        let _ = def;
+        self.typed_node(module, site)?
             .choices
-            .get(&(module, def))?
-            .get(&(site, k))
-            .copied()
+            .iter()
+            .find(|(hole, _)| *hole == k)
+            .map(|(_, choice)| *choice)
     }
 
     /// Every resolved overload choice of a definition, as
@@ -189,22 +194,23 @@ impl TypeCheck {
     ///
     /// `use site` is the `ExprId` of the use expression. This is the accessor
     /// for a phase that wants *all* the choices of a definition and has no way
-    /// to know the site ids in advance; it reads the same map
+    /// to know the site ids in advance; it reads the same nodes
     /// [`TypeCheck::choice`] does, so the two cannot disagree.
     pub fn choices_of(&self, module: usize, def: usize) -> Vec<(u32, usize, Choice)> {
-        let Some(by_site) = self
-            .modules
-            .get(module)
-            .and_then(|m| m.choices.get(&(module, def)))
-        else {
+        let Some(body) = self.typed_body(module, def) else {
             return Vec::new();
         };
-        // HashMap iteration order is not stable, so sort: a phase that records
-        // these in a `Vec` needs the same answer on every run, and `ExprId`s
-        // are assigned in source order, which makes this a reading order.
-        let mut out: Vec<(u32, usize, Choice)> = by_site
+        // Every node's choices, in the order the tree holds them: the walk
+        // assigns `ExprId`s in source order and the arena follows it, so this
+        // is a reading order without a sort.
+        let mut out: Vec<(u32, usize, Choice)> = body
+            .nodes()
             .iter()
-            .map(|(&(site, k), &c)| (site, k, c))
+            .flat_map(|node| {
+                node.choices
+                    .iter()
+                    .map(move |(hole, choice)| (node.id, *hole, *choice))
+            })
             .collect();
         out.sort_by_key(|&(site, k, _)| (site, k));
         out
@@ -516,8 +522,6 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         schemes: out.schemes,
         errors,
         types: out.types,
-        holes: out.holes,
-        choices: out.choices,
         probe_fields: out.probe_fields,
         use_tys: out.use_tys,
         use_types: out.use_types,
@@ -548,8 +552,6 @@ struct ModuleOutput {
     schemes: HashMap<(usize, usize), Scheme>,
     errors: Vec<RawTypeError>,
     types: HashMap<(usize, usize), String>,
-    holes: HashMap<(usize, usize), usize>,
-    choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
     probe_fields: Option<(usize, Vec<(String, String)>)>,
     use_tys: HashMap<(usize, u32), Ty>,
     use_types: HashMap<(usize, u32, u32), String>,
@@ -575,8 +577,6 @@ struct ModuleCheck {
     schemes: HashMap<(usize, usize), Scheme>,
     errors: Vec<TypeError>,
     types: HashMap<(usize, usize), String>,
-    holes: HashMap<(usize, usize), usize>,
-    choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
     probe_fields: Option<(usize, Vec<(String, String)>)>,
     use_tys: HashMap<(usize, u32), Ty>,
     use_types: HashMap<(usize, u32, u32), String>,
@@ -628,8 +628,6 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         span: Span::default(),
         trail: Vec::new(),
         fit_cache: HashMap::new(),
-        holes: HashMap::new(),
-        choices: HashMap::new(),
         probe: None,
         probe_fields: None,
         uses: Vec::new(),
@@ -637,6 +635,8 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         use_tys: HashMap::new(),
         resolutions: HashMap::new(),
         row_stages: Vec::new(),
+        holes: HashMap::new(),
+        choices: HashMap::new(),
         row_stage_nodes: HashMap::new(),
         typed_bodies: HashMap::new(),
         unify_depth: 0,
@@ -667,8 +667,6 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         schemes: c.schemes,
         errors: c.errors,
         types,
-        holes: c.holes,
-        choices: c.choices,
         probe_fields,
         use_types,
         use_tys,

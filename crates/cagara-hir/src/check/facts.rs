@@ -37,19 +37,24 @@ pub(crate) fn definition_facts(
     let checked = module_check(db, input);
     let scheme = checked.schemes.get(&(module, def));
     let scope = module_scope(db, input);
-    let mut choices: Vec<_> = checked
-        .choices
-        .get(&(module, def))
+    // Both facts come off the definition's typed tree: the choices recorded at
+    // each node's site, and the count of overloads it leaves open.
+    let typed = checked.typed.get(&(module, def));
+    let mut choices: Vec<(u32, usize, Choice)> = typed
         .into_iter()
-        .flat_map(|choices| choices.iter())
-        .map(|(&(site, hole), &choice)| (site, hole, choice))
+        .flat_map(|body| body.nodes())
+        .flat_map(|node| {
+            node.choices
+                .iter()
+                .map(move |(hole, choice)| (node.id, *hole, *choice))
+        })
         .collect();
     choices.sort_by_key(|&(site, hole, _)| (site, hole));
     let mut facts = DefinitionFacts {
         source: file.text(db)[definition.span.start as usize..definition.span.end as usize].into(),
         span: definition.span,
         failed: scheme.is_none_or(|s| s.failed),
-        holes: checked.holes.get(&(module, def)).copied().unwrap_or(0),
+        holes: typed.map_or(0, |body| body.holes),
         scheme: scheme.map(|s| scheme_view(&s.ty)),
         result: scheme.and_then(|s| scheme_result_expr(&s.ty)),
         choices,

@@ -237,8 +237,47 @@ fn the_typed_tree_agrees_with_the_maps_on_every_shipped_program() {
                 path.display(),
                 def.name
             );
+            // The definition's open-overload count, and every choice, are the
+            // tree's account of the definition rather than of one node.
+            assert_eq!(
+                tree.holes,
+                tc.holes(ws.root, i),
+                "{} / `{}`: open overloads",
+                path.display(),
+                def.name
+            );
+            let mut from_nodes: Vec<(u32, usize, crate::check::Choice)> = tree
+                .nodes()
+                .iter()
+                .flat_map(|node| {
+                    node.choices
+                        .iter()
+                        .map(move |(hole, choice)| (node.id, *hole, *choice))
+                })
+                .collect();
+            from_nodes.sort_by_key(|&(site, hole, _)| (site, hole));
+            assert_eq!(
+                from_nodes,
+                tc.choices_of(ws.root, i),
+                "{} / `{}`: the choices the nodes hold are the definition's",
+                path.display(),
+                def.name
+            );
 
             for node in tree.nodes() {
+                // The choices recorded at this node's site, which is what
+                // `choice` and `choices_of` read.
+                for (hole, choice) in &node.choices {
+                    assert_eq!(
+                        tc.choice(ws.root, i, node.id, *hole),
+                        Some(*choice),
+                        "{} / `{}`: node {} hole {}",
+                        path.display(),
+                        def.name,
+                        node.id,
+                        hole
+                    );
+                }
                 assert_eq!(
                     node.ty,
                     tc.use_ty(ws.root, node.id),

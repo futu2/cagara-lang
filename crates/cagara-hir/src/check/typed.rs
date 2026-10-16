@@ -72,6 +72,13 @@ pub struct TypedExpr {
     pub shown: String,
     /// What a module-scope name occurrence resolved to, if it was one.
     pub resolved: Option<Resolved>,
+    /// The overload choices recorded at this node, by hole index, ascending.
+    ///
+    /// A use site is an `ExprId`, so a choice belongs to the node the use was
+    /// written at — which is why the map this replaces needed the site *and*
+    /// the definition to be named before it could answer. Empty for the many
+    /// nodes that are not a use site.
+    pub choices: Vec<(usize, Choice)>,
     /// Sub-expressions, as indices into the body's arena, in the order
     /// [`child_exprs`] states.
     children: Vec<usize>,
@@ -82,6 +89,12 @@ pub struct TypedExpr {
 pub struct TypedBody {
     nodes: Vec<TypedExpr>,
     root: usize,
+    /// How many overloads the definition leaves open to its users.
+    ///
+    /// A fact about the definition, not about a node: an open overload can be
+    /// inherited through resolution and need not have a site of its own, which
+    /// is why this cannot be counted from the nodes' choices.
+    pub holes: usize,
     /// `ExprId` to arena index, ascending by id, so a lookup is a binary
     /// search rather than a second map of facts.
     by_id: Vec<(u32, usize)>,
@@ -117,9 +130,11 @@ impl TypedBody {
 /// so that a program can be rejected rather than crash the compiler.
 pub(crate) fn build(
     root_expr: &ast::Expr,
+    holes: usize,
     ty_of: impl Fn(u32) -> Option<Ty>,
     shown_of: impl Fn(u32) -> Option<String>,
     resolved_of: impl Fn(u32) -> Option<Resolved>,
+    choices_of: impl Fn(u32) -> Vec<(usize, Choice)>,
 ) -> TypedBody {
     let mut nodes: Vec<TypedExpr> = Vec::new();
     let mut by_id: Vec<(u32, usize)> = Vec::new();
@@ -137,6 +152,7 @@ pub(crate) fn build(
             row: facts.as_ref().and_then(|f| f.row.clone()),
             shown: facts.map(|f| f.shown).unwrap_or_default(),
             resolved: resolved_of(e.id),
+            choices: choices_of(e.id),
             children: Vec::new(),
         });
         by_id.push((e.id, at));
@@ -151,7 +167,12 @@ pub(crate) fn build(
         }
     }
     by_id.sort_unstable_by_key(|(id, _)| *id);
-    TypedBody { nodes, root, by_id }
+    TypedBody {
+        nodes,
+        root,
+        by_id,
+        holes,
+    }
 }
 
 #[cfg(test)]
@@ -162,7 +183,7 @@ mod tests {
     fn a_built_tree_matches_the_ast_and_answers_by_id() {
         let ws = Workspace::from_source("q = f 1 (g 2)\n");
         let body = &ws.modules[ws.root].module.defs[0].body;
-        let tree = build(body, |_| None, |_| None, |_| None);
+        let tree = build(body, 0, |_| None, |_| None, |_| None, |_| Vec::new());
 
         // Every AST node is in the tree, exactly once, and the shapes agree.
         fn ids(e: &ast::Expr, out: &mut Vec<u32>) {

@@ -144,19 +144,6 @@ impl<'w> Checker<'w> {
             self.use_tys.insert((m, id), zonked.clone());
             typed_facts.insert(id, zonked);
         }
-        // The same facts as a tree over the body, which is what a consumer
-        // walks: the maps above are read by `ExprId`, which is a question only
-        // a consumer that already knows the id can ask.
-        if !typed_facts.is_empty() {
-            let body = &self.env.defs[i].body;
-            let tree = crate::check::typed::build(
-                body,
-                |id| typed_facts.get(&id).cloned(),
-                |id| shown_by_id.get(&id).cloned(),
-                |id| self.resolutions.get(&(m, id)).cloned(),
-            );
-            self.typed_bodies.insert((m, i), tree);
-        }
         // Whatever the definition learned about the probe's row, even if it
         // failed later on. Only the definition that actually referenced the
         // probe may record it, and it must *not* consume the probe otherwise:
@@ -221,6 +208,36 @@ impl<'w> Checker<'w> {
                 }
             }
         };
+        // The tree is built *after* generalization: the open overloads
+        // become holes there, and a tree built earlier would report a
+        // definition with none.
+        // The same facts as a tree over the body, which is what a consumer
+        // walks: the maps above are read by `ExprId`, which is a question only
+        // a consumer that already knows the id can ask.
+        if !typed_facts.is_empty() {
+            let body = &self.env.defs[i].body;
+            let holes = self.holes.get(&(m, i)).copied().unwrap_or(0);
+            let recorded = self.choices.get(&(m, i)).cloned().unwrap_or_default();
+            let tree = crate::check::typed::build(
+                body,
+                holes,
+                |id| typed_facts.get(&id).cloned(),
+                |id| shown_by_id.get(&id).cloned(),
+                |id| self.resolutions.get(&(m, id)).cloned(),
+                |id| {
+                    // The choices recorded *at* this node's site, by hole.
+                    let mut at: Vec<(usize, Choice)> = recorded
+                        .iter()
+                        .filter(|((site, _), _)| *site == id)
+                        .map(|((_, hole), choice)| (*hole, *choice))
+                        .collect();
+                    at.sort_unstable_by_key(|(hole, _)| *hole);
+                    at
+                },
+            );
+            self.typed_bodies.insert((m, i), tree);
+        }
+
         self.row_stages = saved_stages;
         self.schemes.insert((m, i), scheme.clone());
         self.fit_cache.clear();

@@ -292,11 +292,17 @@ when the helper's own rows are open, while checking any closed helper rows
 against the instantiated rows. Each witness can be a closed helper literal or a
 string literal passed to the corresponding helper parameter.
 
+Overloaded query helpers use the checker's `Choice::Def` at the helper use
+site, so the typed route instantiates the selected definition and retains its
+stage identity. A test selects two overloads by their input rows and compares
+both typed results with the normalized route.
+
 The slice deliberately declines helpers with witnesses that cannot be tied to
-a supplied literal, unsupported relational stages, and overload-dependent
-bodies; those uses stay on the normalized term route. Repeated direct stages
-are already covered by the first slice. General overload selection still needs
-use-site substitutions in the typed graph before this step can close.
+a supplied literal, unsupported relational stages, and helper uses whose
+choice remains an open `Choice::Hole`; those uses stay on the normalized term
+route. Repeated direct stages are already covered by the first slice. Helper
+bodies with expression-bearing relational stages also await their expression
+builders in step 6.
 
 Slice 1 is a **builder** that walks a definition's stage records and populates
 the arena, then a `CheckedQuery` constructed from the tree. The feasibility claim

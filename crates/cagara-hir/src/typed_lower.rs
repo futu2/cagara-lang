@@ -537,10 +537,23 @@ fn helper_application(
         ExprKind::App(head, args) => (&**head, args.to_vec()),
         _ => (expr, Vec::new()),
     };
-    let Resolved::Def(target) = tc.resolution(module, head.id)? else {
-        return None;
+    let target = match tc.resolution(module, head.id) {
+        Some(Resolved::Def(target)) => *target,
+        _ => {
+            let mut choices = tc.typed_node(module, head.id)?.choices.iter().filter_map(
+                |(_, choice)| match choice {
+                    crate::check::Choice::Def(module, def) => Some((*module, *def)),
+                    crate::check::Choice::Hole(_) => None,
+                },
+            );
+            let target = choices.next()?;
+            if choices.any(|choice| choice != target) {
+                return None;
+            }
+            target
+        }
     };
-    Some((*target, args))
+    Some((target, args))
 }
 
 fn lambda_params(expr: &Expr) -> Vec<String> {
@@ -967,6 +980,49 @@ mod tests {
             typed.node(chain[0]).output_row().unwrap().names(),
             vec!["h_id_v2"]
         );
+    }
+
+    #[test]
+    fn overloaded_helper_uses_the_checker_selected_definition() {
+        let src = "ints : query { id = int } = table \"s\" \"ints\"\n\
+             strings : query { name = string } = table \"s\" \"strings\"\n\
+             helper : query { id = int } -> query { h_id = int } = q => q & prefix \"h_\"\n\
+             helper : query { name = string } -> query { name_v2 = string } = q => q & suffix \"_v2\"\n\
+             q1 = ints & helper\n\
+             q2 = strings & helper\n";
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let input = CompilerInput::new(&ws, &tc);
+        let helper_defs: Vec<_> = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, def)| (def.name == "helper").then_some(index))
+            .collect();
+        for (name, expected, helper_def) in [
+            ("q1", "h_id", helper_defs[0]),
+            ("q2", "name_v2", helper_defs[1]),
+        ] {
+            let def = ws.modules[ws.root]
+                .module
+                .defs
+                .iter()
+                .position(|d| d.name == name)
+                .unwrap();
+            let body = &ws.modules[ws.root].module.defs[def].body;
+            let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
+            let terms =
+                crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+            compare_with_terms(input, &typed, &checked, &terms).unwrap();
+            assert_eq!(checked.row().names(), &[expected]);
+            let stage = typed
+                .nodes()
+                .find(|node| node.kind() != QueryNodeKind::Table)
+                .unwrap();
+            assert_eq!(stage.site().definition, helper_def);
+        }
     }
 
     #[test]

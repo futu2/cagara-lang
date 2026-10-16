@@ -17,6 +17,33 @@
 //! two-key-stage defect violated.
 
 use super::*;
+use crate::ir::{JoinKind, SetKind};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombineKind {
+    Join(JoinKind),
+    Set(SetKind),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PendingCombine {
+    pub(crate) kind: CombineKind,
+    pub(crate) site: u32,
+    pub(crate) node: NodeRef,
+    pub(crate) span: Span,
+    pub(crate) inputs: Vec<Ty>,
+    pub(crate) output: Ty,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CombineView {
+    pub kind: CombineKind,
+    pub site: u32,
+    pub node: NodeRef,
+    pub span: Span,
+    pub inputs: Vec<Option<Vec<(String, ScalarType)>>>,
+    pub output: Option<Vec<(String, ScalarType)>>,
+}
 
 /// The **stable identity** of one checked node, independent of where it was
 /// written.
@@ -173,6 +200,43 @@ pub struct RowStageView {
 }
 
 impl<'w> Checker<'w> {
+    pub(crate) fn callee_combine_kind(&self, f: &ast::Expr) -> Option<CombineKind> {
+        if let ast::ExprKind::App(head, _) = &f.kind {
+            return self.callee_combine_kind(head);
+        }
+        let Resolved::Def((m, i)) = self.resolutions.get(&(self.module, f.id))? else {
+            return None;
+        };
+        let scheme = if *m == self.module {
+            self.schemes.get(&(*m, *i))?
+        } else {
+            self.env.schemes.get(m)?.get(&(*m, *i))?
+        };
+        scheme.combine
+    }
+
+    pub(crate) fn record_combine(
+        &mut self,
+        kind: CombineKind,
+        site: u32,
+        span: Span,
+        inputs: Vec<Ty>,
+        output: Ty,
+    ) {
+        let node = match self.active.last() {
+            Some(&(module, def)) => NodeRef::new(module, def, site),
+            None => NodeRef::new(self.module, usize::MAX, site),
+        };
+        self.combines.push(PendingCombine {
+            kind,
+            site,
+            node,
+            span,
+            inputs,
+            output,
+        });
+    }
+
     /// The stage the callee expression denotes, when it is a stage definition.
     ///
     /// Read from the *callee's scheme*, which is where the operation is owned:
@@ -293,6 +357,28 @@ impl<'w> Checker<'w> {
             });
         }
         out
+    }
+
+    pub(crate) fn finish_combines(&mut self) -> Vec<CombineView> {
+        std::mem::take(&mut self.combines)
+            .into_iter()
+            .map(|c| CombineView {
+                kind: c.kind,
+                site: c.site,
+                node: c.node,
+                span: c.span,
+                inputs: c.inputs.iter().map(|t| self.query_fields(t)).collect(),
+                output: self.query_fields(&c.output),
+            })
+            .collect()
+    }
+
+    fn query_fields(&self, t: &Ty) -> Option<Vec<(String, ScalarType)>> {
+        let t = self.zonk(t);
+        match t {
+            Ty::Con("query", args) if args.len() == 1 => self.closed_fields(&args[0]),
+            _ => self.closed_fields(&t),
+        }
     }
 
     /// The columns of a row, when it is closed. `None` means "not known yet",

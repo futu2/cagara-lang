@@ -90,7 +90,7 @@ pub(crate) use query::{NodeId, QueryErr, QueryNodeKind, Row, TypedQuery};
 /// `check::stage`, and re-exported here for the crate's own modules.
 pub(crate) use stage::NodeRef;
 /// The query stage a definition is, and one stage application's rows.
-pub use stage::{RowStage, RowStageView};
+pub use stage::{CombineKind, CombineView, RowStage, RowStageView};
 pub use ty::Choice;
 /// What shape a definition's scheme has.
 ///
@@ -683,6 +683,8 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         uses: Vec::new(),
         resolutions: HashMap::new(),
         row_stages: Vec::new(),
+        combines: Vec::new(),
+        combine_partials: HashMap::new(),
         holes: HashMap::new(),
         choices: HashMap::new(),
         typed_bodies: HashMap::new(),

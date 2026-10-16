@@ -2386,6 +2386,58 @@ fn every_node_records_its_whole_type() {
     }
 }
 
+#[test]
+fn join_and_set_nodes_record_both_query_boundaries() {
+    let ws = Workspace::from_source(
+        "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+         orders : query { id = int, uid = int } = table \"s\" \"orders\"\n\
+         vips : query { id = int, name = string } = table \"s\" \"vips\"\n\
+         joined = users & innerJoin orders (.<id == .>uid)\n\
+         combined = users & union vips\n",
+    );
+    let tc = check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    let root = ws.root;
+    for (name, kind, output) in [
+        (
+            "joined",
+            crate::check::CombineKind::Join(crate::ir::JoinKind::Inner),
+            vec!["id", "name", "uid"],
+        ),
+        (
+            "combined",
+            crate::check::CombineKind::Set(crate::ir::SetKind::Union),
+            vec!["id", "name"],
+        ),
+    ] {
+        let def = ws.modules[root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == name)
+            .expect("definition");
+        let combine = tc
+            .typed_body(root, def)
+            .expect("typed body")
+            .nodes()
+            .iter()
+            .find_map(|node| node.combine.as_ref());
+        let combine = combine.expect("combine record");
+        assert_eq!(combine.kind, kind);
+        assert_eq!(combine.inputs.len(), 2);
+        assert_eq!(
+            combine
+                .output
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>(),
+            output
+        );
+    }
+}
+
 /// A typed node answers by the span it was filed under, and an untyped one not
 /// at all.
 ///

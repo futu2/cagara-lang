@@ -114,6 +114,8 @@ impl<'w> Checker<'w> {
         let saved = std::mem::take(&mut self.pending);
         let saved_uses = std::mem::take(&mut self.uses);
         let saved_stages = std::mem::take(&mut self.row_stages);
+        let saved_combines = std::mem::take(&mut self.combines);
+        let saved_combine_partials = std::mem::take(&mut self.combine_partials);
         let r = self.check_def(i);
         self.depth -= 1;
         // Use types as far as checking got, even if it failed later on. The
@@ -166,6 +168,7 @@ impl<'w> Checker<'w> {
         // read and produced. They are closed here, once the definition's rows
         // are solved, and dropped for a definition that failed.
         let stages = self.finish_row_stages();
+        let combines = self.finish_combines();
         let succeeded = r.is_ok();
         let scheme = match r {
             Ok(t) => {
@@ -194,6 +197,7 @@ impl<'w> Checker<'w> {
                 }
                 let mut scheme = self.generalize(&t, cons);
                 scheme.stage = self.def_stage(i);
+                scheme.combine = self.def_combine(i);
                 scheme
             }
             Err(e) => {
@@ -230,6 +234,7 @@ impl<'w> Checker<'w> {
                 holes,
                 &crate::check::typed::NodeFacts {
                     stages: if succeeded { stages.as_slice() } else { &[] },
+                    combines: if succeeded { combines.as_slice() } else { &[] },
                     view: &|id| typed_facts.get(&id).map(scheme_view),
                     shown: &|id| shown_by_id.get(&id).cloned(),
                     recorded: &|id| recorded_by_id.get(&id).copied(),
@@ -250,6 +255,8 @@ impl<'w> Checker<'w> {
         }
 
         self.row_stages = saved_stages;
+        self.combines = saved_combines;
+        self.combine_partials = saved_combine_partials;
         self.schemes.insert((m, i), scheme.clone());
         self.fit_cache.clear();
         Some(scheme)
@@ -1113,6 +1120,7 @@ impl<'w> Checker<'w> {
             cons: out,
             gens,
             stage: None,
+            combine: None,
             failed: false,
         }
     }
@@ -1124,6 +1132,17 @@ impl<'w> Checker<'w> {
             ExprKind::Primitive(name) => {
                 crate::primitive::prim_of(name).and_then(RowStage::of_prim)
             }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn def_combine(&self, i: usize) -> Option<CombineKind> {
+        match &self.env.defs[i].body.kind {
+            ExprKind::Primitive(name) => match crate::primitive::prim_of(name) {
+                Some(crate::primitive::Prim::Join(kind)) => Some(CombineKind::Join(kind)),
+                Some(crate::primitive::Prim::Set(kind)) => Some(CombineKind::Set(kind)),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1507,6 +1526,8 @@ impl<'w> Checker<'w> {
             unreachable!("dispatched on ExprKind::App")
         };
         let mut ft = self.infer(env, f)?;
+        let combine_kind = self.callee_combine_kind(f);
+        let mut combine_inputs = Vec::new();
         for arg in args {
             if let Ty::Fun(p, r) = self.resolve(&ft) {
                 // A key argument (`omit "k"`, `prefix "p"`, `suffix "s"`) names
@@ -1587,9 +1608,11 @@ impl<'w> Checker<'w> {
             // self-describing (`.age`, `1`, `upper`) — which is why this went
             // unnoticed — but leaves the expectation to unification when it is
             // not.
+            let combine_param;
             ft = match self.resolve(&ft) {
                 Ty::Fun(p, r) => {
                     let p = *p;
+                    combine_param = Some(p.clone());
                     // `check` re-records a literal argument at the type it was
                     // lifted to (`18` in `.age >= 18` has the value type it was
                     // lifted to), so no special case is needed here.
@@ -1598,6 +1621,7 @@ impl<'w> Checker<'w> {
                 }
                 Ty::Var(_) => {
                     let at_ = self.infer(env, arg)?;
+                    combine_param = Some(at_.clone());
                     let r = self.fresh();
                     self.unify(&ft, &fun(at_, r.clone()))
                         .map_err(at(arg.span))?;
@@ -1619,6 +1643,13 @@ impl<'w> Checker<'w> {
                     });
                 }
             };
+            if (combine_kind.is_some() || !self.combine_partials.is_empty())
+                && combine_param
+                    .as_ref()
+                    .is_some_and(|p| matches!(self.resolve(p), Ty::Con("query", _)))
+            {
+                combine_inputs.push(self.zonk(combine_param.as_ref().expect("checked above")));
+            }
             self.solve()?;
         }
         // Record the **application's own** type after solving, not before.
@@ -1630,6 +1661,86 @@ impl<'w> Checker<'w> {
         // a reader sees as `Unknown` — a type that looks recorded and is not
         // usable, which is worse than recording nothing.
         self.solve()?;
+        let actual_query_inputs: Vec<Ty> = args
+            .iter()
+            .filter_map(|arg| self.uses.iter().rev().find(|(id, _, _, _)| *id == arg.id))
+            .map(|(_, _, ty, _)| self.zonk(ty))
+            .filter(|ty| matches!(self.resolve(ty), Ty::Con("query", _)))
+            .collect();
+        if let Some(kind) = combine_kind {
+            let expected = match kind {
+                CombineKind::Join(_) => 3,
+                CombineKind::Set(_) => 2,
+            };
+            if args.len() == expected && combine_inputs.len() == 2 {
+                let mut combine_inputs = if actual_query_inputs.len() == 2 {
+                    actual_query_inputs
+                } else {
+                    combine_inputs
+                };
+                if let Ty::Con("query", _) = self.resolve(&ft) {
+                    if matches!(kind, CombineKind::Join(_)) {
+                        combine_inputs.reverse();
+                    }
+                    self.record_combine(kind, e.id, f.span, combine_inputs, self.zonk(&ft));
+                }
+            } else if args.len() == expected - 1
+                && combine_inputs.len() == 1
+                && !matches!(f.kind, ast::ExprKind::App(..))
+            {
+                // The pipe operator applies the final query argument in a
+                // separate application. Keep the first query boundary on the
+                // partially applied primitive until that outer application is
+                // checked.
+                let first = actual_query_inputs
+                    .into_iter()
+                    .next()
+                    .or_else(|| combine_inputs.pop())
+                    .expect("combine query argument");
+                self.combine_partials.insert(e.id, (kind, first));
+            } else if args.len() == 1 {
+                // A piped application whose callee is the partially applied
+                // primitive completes the operation.
+                if let ast::ExprKind::App(partial, _) = &f.kind {
+                    if let Some((partial_kind, first)) = self.combine_partials.remove(&partial.id) {
+                        if partial_kind == kind && combine_inputs.len() == 1 {
+                            let mut inputs = vec![combine_inputs.remove(0), first];
+                            if matches!(kind, CombineKind::Set(_)) {
+                                inputs.swap(0, 1);
+                            }
+                            if let Ty::Con("query", _) = self.resolve(&ft) {
+                                self.record_combine(kind, e.id, f.span, inputs, self.zonk(&ft));
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // The pipeline combinator applies a partially applied join or set
+            // primitive as its second argument. The primitive itself is not
+            // the callee of this application, so recover its recorded first
+            // boundary from that argument's identity.
+            for arg in args {
+                if let Some((kind, first)) = self.combine_partials.remove(&arg.id) {
+                    let left = actual_query_inputs
+                        .first()
+                        .cloned()
+                        .or_else(|| combine_inputs.first().cloned())
+                        .or_else(|| {
+                            self.uses.iter().rev().find_map(|(id, _, ty, _)| {
+                                args.iter().any(|a| a.id == *id).then(|| self.zonk(ty))
+                            })
+                        });
+                    if let Some(left) = left {
+                        let inputs = vec![left, first];
+                        if let Ty::Con("query", _) = self.resolve(&ft) {
+                            self.record_combine(kind, arg.id, arg.span, inputs, self.zonk(&ft));
+                        }
+                    }
+                    break;
+                }
+            }
+        }
         self.uses.push((e.id, e.span, self.resolve(&ft), None));
         Ok(ft)
     }

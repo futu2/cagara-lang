@@ -219,11 +219,18 @@ the term route remain later work.
 
 `TypedQuery` now has ordered multi-input edges for joins and set operations, and
 records each child's checked output row. The lowering slice still does not
-construct those nodes: joins and sets are not `RowStage`s, and the checker does
-not yet record their operation identity, child query identities, and closed
-input/output rows together. The next slice needs to add that checker evidence
-and build the two child subtrees before lowering joins and sets. Windows remain
+construct those nodes: joins and sets are not `RowStage`s, and typed lowering
+still needs to consume the checker records for their operation identity, child
+query identities, and closed input/output rows. The next slice needs to build
+the two child subtrees before lowering joins and sets. Windows remain
 deferred until the expression payload bridge is carried by typed nodes.
+
+The checker now records join and set applications on the typed expression node,
+including piped forms where the primitive is partially applied first. Each
+record has a stable application identity, operation kind, both operand rows in
+operand order, and the output row. Typed lowering still needs to consume these
+records and construct the corresponding two child subtrees; it remains on the
+term route until that consumer lands.
 
 ### Step 1, done
 

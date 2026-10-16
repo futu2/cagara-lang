@@ -69,6 +69,7 @@ pub struct TypedExpr {
     /// produced. They belong to the application node because that is where the
     /// operation was read and the signature instantiated.
     pub stage: Option<RowStageView>,
+    pub combine: Option<CombineView>,
     /// Sub-expressions, as indices into the body's arena, in the order
     /// [`child_exprs`] states.
     children: Vec<usize>,
@@ -193,6 +194,7 @@ pub(crate) struct NodeFacts<'a> {
     /// order is kept in an index beside `by_id`: the arena follows source order
     /// and a chain's order is not the same thing.
     pub(crate) stages: &'a [RowStageView],
+    pub(crate) combines: &'a [CombineView],
     /// The type the node got, or `None` when the checker recorded none.
     pub(crate) view: &'a dyn Fn(u32) -> Option<SchemeView>,
     /// The printed type, as hover shows it.
@@ -220,6 +222,12 @@ pub(crate) fn build(root_expr: &ast::Expr, holes: usize, facts: &NodeFacts<'_>) 
     for (order, stage) in facts.stages.iter().enumerate() {
         stage_at.insert(stage.site, (order, stage.clone()));
     }
+    let combine_at: HashMap<u32, CombineView> = facts
+        .combines
+        .iter()
+        .cloned()
+        .map(|combine| (combine.site, combine))
+        .collect();
     let mut nodes: Vec<TypedExpr> = Vec::new();
     let mut by_id: Vec<(u32, usize)> = Vec::new();
     let mut by_span: Vec<(u32, u32, usize, usize)> = Vec::new();
@@ -240,6 +248,7 @@ pub(crate) fn build(root_expr: &ast::Expr, holes: usize, facts: &NodeFacts<'_>) 
             resolved: (facts.resolved)(e.id),
             choices: (facts.choices)(e.id),
             stage: stage.map(|(_, stage)| stage.clone()),
+            combine: combine_at.get(&e.id).cloned(),
             children: Vec::new(),
         });
         by_id.push((e.id, at));
@@ -294,6 +303,7 @@ mod tests {
             0,
             &NodeFacts {
                 stages: &[],
+                combines: &[],
                 view: &|_| None,
                 shown: &|_| None,
                 recorded: &|_| None,
@@ -344,6 +354,7 @@ mod tests {
             0,
             &NodeFacts {
                 stages: &[],
+                combines: &[],
                 view: &|_| None,
                 shown: &|id| Some(format!("t{id}")),
                 recorded: &|id| match id {

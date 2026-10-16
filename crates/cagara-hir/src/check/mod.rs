@@ -261,6 +261,24 @@ impl TypeCheck {
         checked.typed.get(&(module, def))?.nodes().get(node)
     }
 
+    /// The typed node for one expression of a module, found by the span the
+    /// checker filed it under.
+    ///
+    /// The span twin of [`TypeCheck::typed_node`]: that one is asked with an
+    /// `ExprId`, this with the key of [`TypeCheck::use_type`]. The index holds
+    /// positions, not facts.
+    pub fn typed_node_at(&self, module: usize, span: Span) -> Option<&TypedExpr> {
+        let checked = self.modules.get(module)?;
+        let at = checked
+            .typed_spans
+            .binary_search_by_key(&(span.start, span.end), |(start, end, _, _)| {
+                (*start, *end)
+            })
+            .ok()?;
+        let (_, _, def, node) = checked.typed_spans[at];
+        checked.typed.get(&(module, def))?.nodes().get(node)
+    }
+
     /// Printed type of the name use whose expression spans `span` in `module`.
     pub fn use_type(&self, module: usize, span: Span) -> Option<&str> {
         self.modules
@@ -528,6 +546,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         row_stages: out.row_stages,
         typed: out.typed,
         typed_index: out.typed_index,
+        typed_spans: out.typed_spans,
     })
 }
 
@@ -563,6 +582,13 @@ struct ModuleOutput {
     /// this is what lets an id-keyed reader find one without scanning every
     /// definition.
     typed_index: Vec<(u32, usize, usize)>,
+    /// Key span to the definition that has it and the node's place in that
+    /// body, ascending by span. The span twin of `typed_index`, and the same
+    /// rule: positions only, facts on the node. A definition's body occupies
+    /// one range of the module text, so two definitions cannot share a key
+    /// span; a repeated span within one body was already resolved by the tree
+    /// keeping its last write.
+    typed_spans: Vec<(u32, u32, usize, usize)>,
 }
 
 /// A checked module with its diagnostics already rendered.
@@ -591,6 +617,9 @@ struct ModuleCheck {
     /// this is what lets an id-keyed reader find one without scanning every
     /// definition.
     typed_index: Vec<(u32, usize, usize)>,
+    /// Key span to the definition that has it and the node's place in that
+    /// body, ascending by span. See [`ModuleOutput::typed_spans`].
+    typed_spans: Vec<(u32, u32, usize, usize)>,
 }
 
 /// What checking one module reads: its definitions and scope, and every
@@ -656,6 +685,13 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         }
     }
     typed_index.sort_unstable_by_key(|(id, _, _)| *id);
+    let mut typed_spans: Vec<(u32, u32, usize, usize)> = Vec::new();
+    for (&(_, def), body) in &typed {
+        for &(start, end, at) in body.span_index() {
+            typed_spans.push((start, end, def, at));
+        }
+    }
+    typed_spans.sort_unstable_by_key(|(start, end, _, _)| (*start, *end));
     ModuleOutput {
         schemes: c.schemes,
         errors: c.errors,
@@ -665,6 +701,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         row_stages,
         typed,
         typed_index,
+        typed_spans,
     }
 }
 

@@ -119,13 +119,22 @@ impl<'w> Checker<'w> {
         // Use types as far as checking got, even if it failed later on.
         let mut typed_facts: HashMap<u32, Ty> = HashMap::new();
         let mut shown_by_id: HashMap<u32, String> = HashMap::new();
-        for (id, sp, t, lit) in std::mem::replace(&mut self.uses, saved_uses) {
+        // Where each use was filed, and when: the key of the span map below,
+        // plus the position in the recording order that map's last-write
+        // tie-break needs. A node recorded twice keeps its last entry, which is
+        // also the `shown` its `shown_by_id` entry holds.
+        let mut recorded_by_id: HashMap<u32, (Span, usize)> = HashMap::new();
+        for (write, (id, sp, t, lit)) in std::mem::replace(&mut self.uses, saved_uses)
+            .into_iter()
+            .enumerate()
+        {
             let shown = match (lit, self.resolve(&t)) {
                 (Some(l), Ty::Var(_)) => l.to_string(),
                 _ => self.show(&t),
             };
             self.use_types.insert((m, sp.start, sp.end), shown.clone());
             shown_by_id.insert(id, shown);
+            recorded_by_id.insert(id, (sp, write));
             // The same facts keyed by `ExprId`, which is what a phase building a
             // typed tree from source needs: it walks the AST and asks "what type
             // did *this* node get?". The span map above cannot answer that — it
@@ -223,6 +232,7 @@ impl<'w> Checker<'w> {
                 holes,
                 |id| typed_facts.get(&id).map(scheme_view),
                 |id| shown_by_id.get(&id).cloned(),
+                |id| recorded_by_id.get(&id).copied(),
                 |id| self.resolutions.get(&(m, id)).cloned(),
                 |id| {
                     // The choices recorded *at* this node's site, by hole.

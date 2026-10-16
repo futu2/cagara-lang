@@ -1,4 +1,4 @@
-use super::{check, RowStage};
+use super::{check, RowStage, Span};
 use crate::core::ScalarType;
 use crate::workspace::Workspace;
 use std::collections::HashMap;
@@ -2385,6 +2385,81 @@ fn every_node_records_its_whole_type() {
         });
         assert_eq!(names(&got), want, "`{src}` recorded the wrong row: {got:?}");
     }
+}
+
+/// The tree answers every span-keyed use type the map answers.
+///
+/// `use_types` is the last published side map. It is keyed by the span the
+/// checker *filed* a use under — not by the node — and a repeated key span
+/// keeps the last write. The tree now carries that key on the node and
+/// resolves the tie-break while it is built, so before the map goes the two
+/// accounts are compared key by key: every key the map has, the tree answers
+/// with the map's value, and the tree holds no key the map lacks. A program
+/// that fails partway is included on purpose — a partial tree is exactly where
+/// a span index built from "every node" rather than "every typed node" would
+/// grow an entry the map never had.
+#[test]
+fn the_tree_answers_every_span_keyed_use_type() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let mut programs: Vec<(String, Workspace)> = vec![
+        (
+            "names, columns, and literals".into(),
+            Workspace::from_source(&format!(
+                "{TABLES}q = users & select {{ x = upper .name, y = 1 + 2.0 }}\n"
+            )),
+        ),
+        (
+            "a literal lifted to its signature".into(),
+            Workspace::from_source("d : date = \"2025-12-31\"\n"),
+        ),
+        (
+            "a case whose forks disagree on a type".into(),
+            Workspace::from_source(&format!(
+                "{TABLES}q = case {{ .active => 1; true => 2.0 }}\n"
+            )),
+        ),
+        (
+            "a definition that failed partway".into(),
+            Workspace::from_source(&format!("{TABLES}q = 1 + nosuch\n")),
+        ),
+    ];
+    for f in [
+        "report.cagara",
+        "public.cagara",
+        "schema.cagara",
+        "errors.cagara",
+    ] {
+        programs.push((f.to_string(), Workspace::open(&dir.join(f))));
+    }
+
+    let mut compared = 0usize;
+    for (what, ws) in &programs {
+        let tc = check(ws);
+        for m in 0..ws.modules.len() {
+            let map = &tc.modules[m].use_types;
+            let keys = &tc.modules[m].typed_spans;
+            assert_eq!(
+                keys.len(),
+                map.len(),
+                "{what}: module {m} has {} span-keyed uses and the tree {} keys",
+                map.len(),
+                keys.len()
+            );
+            for ((_, start, end), want) in map {
+                let span = Span {
+                    start: *start,
+                    end: *end,
+                };
+                assert_eq!(
+                    tc.typed_node_at(m, span).map(|n| n.shown.as_str()),
+                    Some(want.as_str()),
+                    "{what}: module {m}, span {start}..{end}"
+                );
+                compared += 1;
+            }
+        }
+    }
+    assert!(compared > 0, "no span-keyed use types were compared");
 }
 
 /// Every expression in a body, for a test locating a node by its source text.

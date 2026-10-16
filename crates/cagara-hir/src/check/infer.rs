@@ -192,9 +192,6 @@ impl<'w> Checker<'w> {
                 if k > 0 {
                     self.holes.insert((m, i), k);
                 }
-                if !stages.is_empty() {
-                    self.row_stage_nodes.insert((m, i), stages.clone());
-                }
                 let mut scheme = self.generalize(&t, cons);
                 scheme.stage = self.def_stage(i);
                 scheme
@@ -222,7 +219,7 @@ impl<'w> Checker<'w> {
         // a consumer that already knows the id can ask.
         //
         // A definition that failed contributes no stage nodes, exactly as it
-        // contributes none to `row_stage_nodes`: the chain is closed only when
+        // contributes none to the tree's stages: the chain is closed only when
         // the definition's rows are solved.
         if !typed_facts.is_empty() {
             let body = &self.env.defs[i].body;

@@ -754,9 +754,6 @@ pub(crate) struct Checker<'w> {
     pub(crate) resolutions: HashMap<(usize, u32), Resolved>,
     /// The stage applications of the definition being checked, in order.
     pub(crate) row_stages: Vec<PendingRowStage>,
-    /// The finished stage nodes of every definition checked so far, by
-    /// `(module, def)`.
-    pub(crate) row_stage_nodes: HashMap<(usize, usize), Vec<RowStageView>>,
     /// Each definition's body as a typed tree, by `(module, def)`.
     pub(crate) typed_bodies: HashMap<(usize, usize), TypedBody>,
     /// Recursion depth of `unify`, to turn a cyclic reduction into a

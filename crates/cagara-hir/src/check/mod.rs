@@ -223,13 +223,20 @@ impl TypeCheck {
     /// input row is the previous stage's output row — which is the boundary a
     /// later pass must not have to recover from a composed type.
     ///
+    /// Read off the tree, at the application node that recorded each stage. The
+    /// order comes from the body's stage index, because a chain is recorded in
+    /// application order while the tree's arena follows source order.
+    ///
     /// Empty for a definition that applies no stage, and for one that failed.
-    pub fn row_stages(&self, module: usize, def: usize) -> &[RowStageView] {
-        self.modules
-            .get(module)
-            .and_then(|m| m.row_stages.get(&(module, def)))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+    pub fn row_stages(
+        &self,
+        module: usize,
+        def: usize,
+    ) -> impl Iterator<Item = &RowStageView> + '_ {
+        self.typed_body(module, def)
+            .into_iter()
+            .flat_map(TypedBody::stages)
+            .filter_map(|node| node.stage.as_ref())
     }
 
     /// A definition's body as a typed tree, if the checker built one.
@@ -541,7 +548,6 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         errors,
         types: out.types,
         probe_fields: out.probe_fields,
-        row_stages: out.row_stages,
         typed: out.typed,
         typed_index: out.typed_index,
         typed_spans: out.typed_spans,
@@ -569,8 +575,6 @@ struct ModuleOutput {
     errors: Vec<RawTypeError>,
     types: HashMap<(usize, usize), String>,
     probe_fields: Option<(usize, Vec<(String, String)>)>,
-    /// The stage nodes each definition recorded, by `(module, def)`.
-    row_stages: HashMap<(usize, usize), Vec<RowStageView>>,
     /// Each definition's body as a typed tree, by `(module, def)`.
     typed: HashMap<(usize, usize), TypedBody>,
     /// `ExprId` to the definition that has it and the node's place in that
@@ -597,8 +601,6 @@ struct ModuleCheck {
     errors: Vec<TypeError>,
     types: HashMap<(usize, usize), String>,
     probe_fields: Option<(usize, Vec<(String, String)>)>,
-    /// The stage nodes each definition recorded, by `(module, def)`.
-    row_stages: HashMap<(usize, usize), Vec<RowStageView>>,
     /// Each definition's body as a typed tree, by `(module, def)`.
     typed: HashMap<(usize, usize), TypedBody>,
     /// `ExprId` to the definition that has it and the node's place in that
@@ -648,7 +650,6 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         row_stages: Vec::new(),
         holes: HashMap::new(),
         choices: HashMap::new(),
-        row_stage_nodes: HashMap::new(),
         typed_bodies: HashMap::new(),
         unify_depth: 0,
     };
@@ -662,7 +663,6 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         .map(|(k, s)| (*k, c.show_scheme(s)))
         .collect();
     let probe_fields = c.probe_fields.map(|fs| (m, fs));
-    let row_stages = c.row_stage_nodes;
     let typed = c.typed_bodies;
     let mut typed_index: Vec<(u32, usize, usize)> = Vec::new();
     for (&(_, def), body) in &typed {
@@ -683,7 +683,6 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         errors: c.errors,
         types,
         probe_fields,
-        row_stages,
         typed,
         typed_index,
         typed_spans,

@@ -80,6 +80,31 @@ use crate::core::Origin;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(test)]
+thread_local! {
+    /// Every expression the bridge visited, in visit order, as
+    /// `(module, def, ExprId)`.
+    ///
+    /// The bridge walks source syntax, and the checker's typed tree is its own
+    /// account of the same body. This is how a test compares the two walks:
+    /// they have to cover the same nodes before a phase can take its children
+    /// from the tree instead of re-deriving them from syntax.
+    static VISITED: std::cell::RefCell<Vec<(usize, usize, u32)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The nodes the bridge has visited since the last [`clear_visited`].
+#[cfg(test)]
+pub(crate) fn visited_nodes() -> Vec<(usize, usize, u32)> {
+    VISITED.with(|v| v.borrow().clone())
+}
+
+/// Forget the visits so far, so one test can attribute them to one program.
+#[cfg(test)]
+pub(crate) fn clear_visited() {
+    VISITED.with(|v| v.borrow_mut().clear());
+}
+
 /// A definition's identity: module index and source-order position.
 pub type DefId = (usize, usize);
 
@@ -1349,6 +1374,8 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
     let module = body.module;
     let e = &body.expr;
     let origin = Origin::new(module, e.span);
+    #[cfg(test)]
+    VISITED.with(|v| v.borrow_mut().push((module, body.def, e.id)));
 
     match &e.kind {
         // A local binder wins over the module scope, exactly as lexical

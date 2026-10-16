@@ -111,6 +111,136 @@ fn stage_nodes_agree_with_the_relational_rows() {
     }
 }
 
+/// The bridge visits every node the typed tree holds, except a projection's
+/// base.
+///
+/// Normalization walks source syntax, and the checker's tree is its own account
+/// of the same body. The two have to cover the same nodes before a phase can
+/// take its children from the tree rather than re-deriving them from syntax: a
+/// node the tree holds and the bridge never visited would be dropped by that
+/// switch, and a node the bridge visited and the tree lacks would have no facts
+/// to read.
+///
+/// The one deliberate difference is `base.field`. The checker records what the
+/// *projection* resolved to — `infer_proj` writes the field's binding at the
+/// projection node's own `ExprId` — so `base` is syntax whose meaning the
+/// projection already carries, and the bridge resolves the projection without
+/// stepping into it. The tree still holds the base, because the tree covers the
+/// AST exactly. The test states that difference rather than tolerating it: the
+/// nodes the bridge did not visit must be exactly the subtrees rooted at a
+/// projection's base, so a second difference cannot hide behind the first.
+///
+/// Compared per definition, because the bridge moves to a callee's module and
+/// definition when it inlines one: the visit log carries where each node was
+/// written, so a definition's visits can be compared with its own tree.
+#[test]
+fn the_bridge_visits_every_node_the_typed_tree_holds_except_projection_bases() {
+    let mut files = Vec::new();
+    for dir in [
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples"),
+    ] {
+        collect_cagara(&dir, &mut files);
+    }
+    files.sort();
+    assert!(!files.is_empty(), "no shipped programs were found");
+
+    let mut compared = 0usize;
+    let mut mismatched = Vec::new();
+    for path in files {
+        let ws = Workspace::open(&path);
+        let tc = crate::check::check(&ws);
+        crate::normalize::clear_visited();
+        let compilation = compile_checked(&ws, &tc);
+        let mut visited: std::collections::HashMap<(usize, usize), std::collections::BTreeSet<u32>> =
+            Default::default();
+        for (module, def, id) in crate::normalize::visited_nodes() {
+            visited.entry((module, def)).or_default().insert(id);
+        }
+        // A definition the compiler built was walked: the comparison below
+        // cannot silently skip one by never having visited it.
+        for query in &compilation.queries {
+            if query.result.is_ok() {
+                assert!(
+                    visited.contains_key(&(query.id.module, query.id.def)),
+                    "{} / `{}` compiled but the bridge never walked it",
+                    path.display(),
+                    query.name
+                );
+            }
+        }
+        for (&(module, def), ids) in &visited {
+            let Some(tree) = tc.typed_body(module, def) else {
+                continue;
+            };
+            // What the walk skips by design: every node under a projection's
+            // base, which is the one place syntax is not a semantic step.
+            let mut skipped = std::collections::BTreeSet::new();
+            projection_bases(
+                &ws.modules[module].module.defs[def].body,
+                &mut skipped,
+            );
+            let mut expected: Vec<u32> = tree
+                .nodes()
+                .iter()
+                .map(|n| n.id)
+                .filter(|id| !skipped.contains(id))
+                .collect();
+            expected.sort_unstable();
+            let visited_ids: Vec<u32> = ids.iter().copied().collect();
+            if visited_ids != expected {
+                let text = &ws.modules[module].text;
+                let describe = |ids: &[u32]| -> String {
+                    ids.iter()
+                        .map(|id| {
+                            let node = tree.node(*id).expect("an id from the tree");
+                            let src = text
+                                .get(node.span.start as usize..node.span.end as usize)
+                                .unwrap_or("<out of range>");
+                            format!("{id}@{:?}={src:?}", node.span)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                mismatched.push(format!(
+                    "{} / module {module} def {def}:\n  visited:  {}\n  expected: {}",
+                    path.display(),
+                    describe(&visited_ids),
+                    describe(&expected)
+                ));
+            }
+            compared += 1;
+        }
+    }
+    assert!(
+        mismatched.is_empty(),
+        "the bridge and the typed tree disagree about which nodes a body has:\n{}",
+        mismatched.join("\n")
+    );
+    assert!(
+        compared > 0,
+        "no shipped program had both a bridge walk and a typed tree"
+    );
+}
+
+/// Every node under a projection's base, for the bridge/tree agreement test.
+///
+/// The whole base subtree is skipped, not only its root: `a.b.c` is a projection
+/// of a projection, and the bridge resolves the outer field without walking the
+/// inner one either.
+fn projection_bases(e: &cagara_syntax::ast::Expr, out: &mut std::collections::BTreeSet<u32>) {
+    if let cagara_syntax::ast::ExprKind::Proj(base, _) = &e.kind {
+        let mut subtree = vec![base.as_ref()];
+        while let Some(e) = subtree.pop() {
+            out.insert(e.id);
+            subtree.extend(crate::check::child_exprs(e));
+        }
+    }
+    for child in crate::check::child_exprs(e) {
+        projection_bases(child, out);
+    }
+}
+
 /// The same agreement, over every program the repository ships.
 ///
 /// The unit test above writes down the shapes a rename chain and an `omit`

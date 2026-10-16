@@ -75,7 +75,7 @@
 //! the difference that matters: a re-walk can observe the spelling of a
 //! program, and this cannot.
 
-use crate::check::Choice;
+use crate::check::{Choice, RowStage, RowStageView};
 use crate::core::Origin;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1472,13 +1472,8 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
         }
         // A lambda: record the binders, normalize the body under them.
         ExprKind::Lambda(param, body_expr) => {
-            let inner = cx.with_binder(param, |cx| {
-                expression(
-                    facts,
-                    cx,
-                    &body.child(body_expr),
-                )
-            })?;
+            let inner =
+                cx.with_binder(param, |cx| expression(facts, cx, &body.child(body_expr)))?;
             Ok(Term::Lambda {
                 params: vec![param.clone()],
                 body: Box::new(inner),
@@ -1513,11 +1508,7 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
                 let head_term = expression(facts, cx, &body.child(head))?;
                 let mut arg_terms = Vec::with_capacity(args.len());
                 for arg in args.iter() {
-                    arg_terms.push(expression(
-                        facts,
-                        cx,
-                        &body.child(arg),
-                    )?);
+                    arg_terms.push(expression(facts, cx, &body.child(arg))?);
                 }
                 // Reduce as far as the head allows. An application that cannot
                 // reduce is *kept*, not rejected: `f x` inside `f => f x`
@@ -1576,23 +1567,11 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
             let mut out = Vec::with_capacity(whens.len());
             for (c, v) in whens {
                 out.push((
-                    expression(
-                        facts,
-                        cx,
-                        &body.child(c),
-                    )?,
-                    expression(
-                        facts,
-                        cx,
-                        &body.child(v),
-                    )?,
+                    expression(facts, cx, &body.child(c))?,
+                    expression(facts, cx, &body.child(v))?,
                 ));
             }
-            let default = expression(
-                facts,
-                cx,
-                &body.child(default),
-            )?;
+            let default = expression(facts, cx, &body.child(default))?;
             Ok(Term::Case {
                 arms: out,
                 default: Box::new(default),
@@ -1605,11 +1584,7 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
         ExprKind::List(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(expression(
-                    facts,
-                    cx,
-                    &body.child(item),
-                )?);
+                out.push(expression(facts, cx, &body.child(item))?);
             }
             Ok(Term::List { items: out, origin })
         }
@@ -1620,14 +1595,7 @@ pub fn expression(facts: &dyn Facts, cx: &mut Normalizer<'_>, body: &Body) -> Re
         ExprKind::Record(fields) => {
             let mut out = Vec::with_capacity(fields.len());
             for (name, value) in fields {
-                out.push((
-                    name.clone(),
-                    expression(
-                        facts,
-                        cx,
-                        &body.child(value),
-                    )?,
-                ));
+                out.push((name.clone(), expression(facts, cx, &body.child(value))?));
             }
             Ok(Term::Record {
                 fields: out,
@@ -1858,7 +1826,15 @@ pub fn elaborate_query_via_terms(
     // `substitute` is where the copying happens — which needs a failure channel
     // through `Term::apply`; see `docs/PLAN.md`.
     check_term_size(&term).map_err(to_error)?;
-    lower_query(&term).map_err(to_error)
+    // The boundary the lowering recovers from the term is the checker's to
+    // state, and it is recorded on the stage nodes. Comparing the two here is
+    // what keeps the record load-bearing in production rather than only in the
+    // corpus test: the constructors still state each stage's rule, and the
+    // record says whether the boundary they were handed is the one the checker
+    // proved.
+    let (query, stages) = lower_query_recorded(&term).map_err(to_error)?;
+    check_stage_records(facts.input.type_check(), module, owner, &stages);
+    Ok(query)
 }
 
 /// Refuse a normal form larger than [`MAX_TERM_NODES`].
@@ -3244,19 +3220,49 @@ mod prelude_covers_the_bridge {
 ///
 /// `spec` completes window applications, as in the expression lowering.
 pub fn lower_query(t: &Term) -> Result<crate::checked::CheckedQuery, Gap> {
+    lower_query_recorded(t).map(|(query, _)| query)
+}
+
+/// One stage the lowering built, for comparison with the checker's record.
+///
+/// The checked constructor states the rule and computes the rows; this is what
+/// it computed, so a caller holding the checker's own record of the same
+/// application can ask whether the two agree. `input`/`output` are `None` when
+/// the term did not carry the row, which is the same "nothing to compare"
+/// meaning [`RowStageView`]'s `None` has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoweredStage {
+    pub kind: RowStage,
+    pub origin: Origin,
+    pub input: Option<Vec<(String, crate::core::ScalarType)>>,
+    pub output: Option<Vec<(String, crate::core::ScalarType)>>,
+}
+
+/// Lower a query term, also reporting the stages it built.
+///
+/// The report exists so the boundary can be checked rather than trusted: the
+/// checker recorded every stage application's operation and both rows on its
+/// node (`TypedExpr::stage`), and this says what the lowering recovered from
+/// the term. See [`check_stage_records`].
+pub fn lower_query_recorded(
+    t: &Term,
+) -> Result<(crate::checked::CheckedQuery, Vec<LoweredStage>), Gap> {
     // A query lowering **must** complete window specifications: a window is
     // written in a `select`'s field, so it is reached through this walk rather
     // than beside it. `lower_winspec` is the same hook the production expression
     // path passes, so the spec's rules — which fields exist, that an order key
     // must name a column, what a frame bound may be — keep one implementation
     // instead of growing a second reading here.
-    lower_query_with(t, &lower_winspec)
+    let mut stages = Vec::new();
+    let query = lower_query_with(t, &lower_winspec, &mut stages)?;
+    Ok((query, stages))
 }
 
 /// Lower a query term, completing window specs with `spec`.
 pub fn lower_query_with(
     t: &Term,
     spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
+    stages: &mut Vec<LoweredStage>,
 ) -> Result<crate::checked::CheckedQuery, Gap> {
     let Term::Primitive {
         name,
@@ -3271,13 +3277,129 @@ pub fn lower_query_with(
             "a query term must be a stage application or a table",
         ));
     };
-    lower_query_primitive(
+    let built = lower_query_primitive(
         name,
         args,
         row.as_ref().map(|r| r.as_slice()),
         *origin,
         spec,
-    )
+        stages,
+    )?;
+    // A stage reports what it built, so the checker's own record of the same
+    // application can be compared with it. `table` and the joins and set
+    // operations are not stages — a stage reads one row and produces one — and
+    // they have no record to compare with.
+    if let Some(kind) = crate::primitive::prim_of(name).and_then(RowStage::of_prim) {
+        let input = match args.last() {
+            Some(Term::Primitive { row, .. }) => row.as_ref().map(|r| r.as_ref().clone()),
+            _ => None,
+        };
+        stages.push(LoweredStage {
+            kind,
+            origin: *origin,
+            input,
+            output: Some(built.row().columns.clone()),
+        });
+    }
+    Ok(built)
+}
+
+/// Whether the lowering recovered each stage the checker recorded, and the same
+/// rows.
+///
+/// The checker owns the boundary: each stage application carries the operation
+/// it applied and the rows its *own* signature instance read and produced
+/// (`TypedExpr::stage`), never a row recovered from a composed result type.
+/// The lowering has to recover the same boundary from the normalized term,
+/// because the checked constructors are what state each stage's rule. This is
+/// where the two accounts are compared on **every** program, not only the ones
+/// the corpus happens to contain: a disagreement is a compiler bug — the two
+/// sides read the same checker facts — so it is an assertion rather than a
+/// diagnostic, like the stage invariant in `check::stage`.
+///
+/// Matched through the node the record names. A record's own `span` is the
+/// *callee's* — `where` in `where (.age > 1)` — while the tree node at its
+/// `site` carries the application's span. The normalized primitive carries the
+/// span of the whole reduced pipeline application, which encloses that node;
+/// the interval comparison below uses that relationship and avoids relying on
+/// a lossy span equality.
+///
+/// A stage reached through an inlined helper is recorded in the helper's own
+/// tree, so its application lies outside this definition's body and it is not
+/// this definition's record to check; the helper is checked when its own body
+/// is lowered, if it is a query.
+///
+/// A recorded row of `None` means the checker left it open — a helper's stage
+/// applied to a parameter — and there is nothing to compare, which is the same
+/// meaning [`RowStageView`] gives it.
+fn check_stage_records(
+    tc: &crate::check::TypeCheck,
+    module: usize,
+    def: usize,
+    lowered: &[LoweredStage],
+) {
+    let recorded: Vec<&RowStageView> = tc.row_stages(module, def).collect();
+    let mut matched = vec![false; recorded.len()];
+    for stage in lowered {
+        if stage.origin.module != module {
+            continue;
+        }
+        let Some(at) = recorded.iter().enumerate().find_map(|(at, r)| {
+            (!matched[at]
+                && r.kind == stage.kind
+                && tc.typed_node(module, r.site).is_some_and(|node| {
+                    // The normalized primitive is stamped with the span of
+                    // the whole pipeline application (`users & prefix "u_"`),
+                    // while the checker records the stage at the callee
+                    // application (`prefix "u_"`). The latter is therefore
+                    // contained in the former. Matching the interval, rather
+                    // than just its end or a single span, also keeps adjacent
+                    // stages distinct.
+                    stage.origin.span.start <= node.span.start
+                        && node.span.end <= stage.origin.span.end
+                }))
+            .then_some(at)
+        }) else {
+            continue;
+        };
+        let r = recorded[at];
+        matched[at] = true;
+        assert_eq!(
+            stage.kind, r.kind,
+            "the lowering built {:?} where the checker recorded {:?} at {:?}",
+            stage.kind, r.kind, stage.origin.span
+        );
+        if let Some(input) = &r.input {
+            assert_eq!(
+                stage.input.as_ref(),
+                Some(input),
+                "the lowering read a different input row than the checker recorded for \
+                 {:?} at {:?}",
+                r.kind,
+                stage.origin.span
+            );
+        }
+        if let Some(output) = &r.output {
+            assert_eq!(
+                stage.output.as_ref(),
+                Some(output),
+                "the lowering produced a different output row than the checker recorded for \
+                 {:?} at {:?}",
+                r.kind,
+                stage.origin.span
+            );
+        }
+    }
+    assert!(
+        matched.iter().all(|m| *m),
+        "the checker recorded a stage the lowering never built in module {module} def {def}: {:?}",
+        recorded
+            .iter()
+            .zip(&matched)
+            .filter(|(_, m)| !**m)
+            .map(|(r, _)| (r.kind, r.span))
+            .collect::<Vec<_>>()
+    );
 }
 
 fn lower_query_primitive(
@@ -3286,6 +3408,7 @@ fn lower_query_primitive(
     row: Option<&[(String, crate::core::ScalarType)]>,
     origin: Origin,
     spec: &dyn Fn(&Term) -> Result<crate::checked::WinSpecChecked, Gap>,
+    stages: &mut Vec<LoweredStage>,
 ) -> Result<crate::checked::CheckedQuery, Gap> {
     use crate::checked::CheckedQuery as Q;
     // A constructor's rejection is carried through **with its fault**, not
@@ -3311,7 +3434,7 @@ fn lower_query_primitive(
         }
         Ok((&args[..n], &args[n]))
     };
-    let lower_input = |t: &Term| lower_query_with(t, spec);
+    let mut lower_input = |t: &Term| lower_query_with(t, spec, stages);
     let expr = |t: &Term| lower_expr_with(t, spec);
 
     match name {

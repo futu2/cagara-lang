@@ -278,9 +278,7 @@ impl TypeCheck {
         let checked = self.modules.get(module)?;
         let at = checked
             .typed_spans
-            .binary_search_by_key(&(span.start, span.end), |(start, end, _, _)| {
-                (*start, *end)
-            })
+            .binary_search_by_key(&(span.start, span.end), |(start, end, _, _)| (*start, *end))
             .ok()?;
         let (_, _, def, node) = checked.typed_spans[at];
         checked.typed.get(&(module, def))?.nodes().get(node)

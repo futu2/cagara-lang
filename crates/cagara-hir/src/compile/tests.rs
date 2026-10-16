@@ -151,8 +151,10 @@ fn the_bridge_visits_every_node_the_typed_tree_holds_except_projection_bases() {
         let tc = crate::check::check(&ws);
         crate::normalize::clear_visited();
         let compilation = compile_checked(&ws, &tc);
-        let mut visited: std::collections::HashMap<(usize, usize), std::collections::BTreeSet<u32>> =
-            Default::default();
+        let mut visited: std::collections::HashMap<
+            (usize, usize),
+            std::collections::BTreeSet<u32>,
+        > = Default::default();
         for (module, def, id) in crate::normalize::visited_nodes() {
             visited.entry((module, def)).or_default().insert(id);
         }
@@ -175,10 +177,7 @@ fn the_bridge_visits_every_node_the_typed_tree_holds_except_projection_bases() {
             // What the walk skips by design: every node under a projection's
             // base, which is the one place syntax is not a semantic step.
             let mut skipped = std::collections::BTreeSet::new();
-            projection_bases(
-                &ws.modules[module].module.defs[def].body,
-                &mut skipped,
-            );
+            projection_bases(&ws.modules[module].module.defs[def].body, &mut skipped);
             let mut expected: Vec<u32> = tree
                 .nodes()
                 .iter()

@@ -146,9 +146,7 @@ impl TypedBody {
     pub fn node_at(&self, span: Span) -> Option<&TypedExpr> {
         let at = self
             .by_span
-            .binary_search_by_key(&(span.start, span.end), |(start, end, _)| {
-                (*start, *end)
-            })
+            .binary_search_by_key(&(span.start, span.end), |(start, end, _)| (*start, *end))
             .ok()?;
         Some(&self.nodes[self.by_span[at].2])
     }
@@ -265,7 +263,8 @@ pub(crate) fn build(root_expr: &ast::Expr, holes: usize, facts: &NodeFacts<'_>) 
     // Ascending by key and, within one key, by recording order *descending*,
     // so the first of a repeated key is its last write. Dropping the rest is
     // what makes the index answer what the map answered.
-    by_span.sort_unstable_by_key(|(start, end, write, _)| (*start, *end, std::cmp::Reverse(*write)));
+    by_span
+        .sort_unstable_by_key(|(start, end, write, _)| (*start, *end, std::cmp::Reverse(*write)));
     by_span.dedup_by_key(|(start, end, _, _)| (*start, *end));
     let by_span: Vec<(u32, u32, usize)> = by_span
         .into_iter()

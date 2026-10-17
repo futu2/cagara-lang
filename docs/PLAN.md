@@ -230,6 +230,11 @@ longer maintains a Rust table of prelude names or SQL spellings, so changing or
 extending `prelude.cagara` does not require a Rust change. A focused test covers
 both a user-defined template and an alias to it.
 
+Plain sort keys follow resolved `__asc` and `__desc` primitive identities, so
+aliases for direction helpers work in direct orders and window specifications
+without Rust recognizing their source names. Window-spec field lookup uses the
+shared checker rule constants as well.
+
 `TypedQuery` now has ordered multi-input edges for joins and set operations, and
 records each child's checked output row. Typed lowering constructs those nodes
 recursively, including both child subtrees, and carries checked join predicates

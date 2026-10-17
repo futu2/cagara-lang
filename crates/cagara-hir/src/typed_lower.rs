@@ -617,6 +617,22 @@ fn declared_primitive(
     Some((primitive, args))
 }
 
+/// Resolve a sort-key constructor through its primitive definition. The
+/// spelling (`asc`, `desc`, or an alias) belongs to the prelude; typed lowering
+/// only needs the primitive identity and therefore follows the selected
+/// definition metadata.
+fn sort_direction(input: CompilerInput<'_>, module: usize, expr: &Expr) -> Option<bool> {
+    let (primitive, args) = declared_primitive(input, module, expr)?;
+    if args.len() != 1 {
+        return None;
+    }
+    match primitive.as_str() {
+        "__asc" => Some(true),
+        "__desc" => Some(false),
+        _ => None,
+    }
+}
+
 fn primitive_definition(
     input: CompilerInput<'_>,
     module: usize,
@@ -673,7 +689,7 @@ fn lower_plain_window_spec(
     let mut order = Vec::new();
     for (key, value) in fields {
         match key.as_str() {
-            "partition" => {
+            crate::rules::winspec::PARTITION => {
                 let ExprKind::List(items) = &value.kind else {
                     return Ok(None);
                 };
@@ -684,17 +700,18 @@ fn lower_plain_window_spec(
                     partition.push(item);
                 }
             }
-            "order" => {
+            crate::rules::winspec::ORDER => {
                 let ExprKind::List(items) = &value.kind else {
                     return Ok(None);
                 };
                 for item in items {
                     let (value, ascending) = match &item.kind {
-                        ExprKind::App(head, args) if args.len() == 1 => match &head.kind {
-                            ExprKind::Name(name) if name == "asc" => (&args[0], true),
-                            ExprKind::Name(name) if name == "desc" => (&args[0], false),
-                            _ => return Ok(None),
-                        },
+                        ExprKind::App(_, args) if args.len() == 1 => {
+                            let Some(ascending) = sort_direction(input, module, item) else {
+                                return Ok(None);
+                            };
+                            (&args[0], ascending)
+                        }
                         _ => (item, true),
                     };
                     let Some(value) = lower_plain_expr_with_row(input, module, value, row)? else {
@@ -705,7 +722,7 @@ fn lower_plain_window_spec(
             }
             // The frame grammar has source-level constructors whose primitive
             // identities are not represented in the typed expression tree yet.
-            "frame" => return Ok(None),
+            crate::rules::winspec::FRAME => return Ok(None),
             _ => return Ok(None),
         }
     }
@@ -749,7 +766,7 @@ fn lower_simple_order_pipeline(
     };
     let mut keys = Vec::with_capacity(items.len());
     for item in items {
-        let ExprKind::App(head, args) = &item.kind else {
+        let ExprKind::App(_, args) = &item.kind else {
             return Ok(None);
         };
         let Some(value) = args.first() else {
@@ -758,10 +775,8 @@ fn lower_simple_order_pipeline(
         let ExprKind::Field(side, column) = &value.kind else {
             return Ok(None);
         };
-        let direction = match &head.kind {
-            ExprKind::Name(name) if name == "asc" => true,
-            ExprKind::Name(name) if name == "desc" => false,
-            _ => return Ok(None),
+        let Some(direction) = sort_direction(input, module, item) else {
+            return Ok(None);
         };
         let Some(ty) = tc.typed_node(module, value.id).and_then(|node| node.ty()) else {
             return Ok(None);
@@ -943,16 +958,14 @@ fn lower_plain_expression_chain(
                 };
                 let mut lowered = Vec::with_capacity(items.len());
                 for item in items {
-                    let ExprKind::App(head, item_args) = &item.kind else {
+                    let ExprKind::App(_, item_args) = &item.kind else {
                         return Ok(None);
                     };
                     let Some(expr) = item_args.first() else {
                         return Ok(None);
                     };
-                    let direction = match &head.kind {
-                        ExprKind::Name(name) if name == "asc" => true,
-                        ExprKind::Name(name) if name == "desc" => false,
-                        _ => return Ok(None),
+                    let Some(direction) = sort_direction(input, module, item) else {
+                        return Ok(None);
                     };
                     let Some(expr) =
                         lower_plain_expr_with_row(input, module, expr, Some(&expression_row))?
@@ -1462,23 +1475,21 @@ fn lower_plain_composed_expr(
             };
             let mut lowered = Vec::with_capacity(items.len());
             for item in items {
-                let ExprKind::App(direction, item_args) = &item.kind else {
+                let ExprKind::App(_, item_args) = &item.kind else {
                     return Ok(None);
                 };
                 let Some(expr) = item_args.first() else {
                     return Ok(None);
                 };
-                let descending = match &direction.kind {
-                    ExprKind::Name(name) if name == "asc" => false,
-                    ExprKind::Name(name) if name == "desc" => true,
-                    _ => return Ok(None),
+                let Some(ascending) = sort_direction(input, module, item) else {
+                    return Ok(None);
                 };
                 let Some(expr) =
                     lower_plain_expr_with_row(input, module, expr, Some(&expression_row))?
                 else {
                     return Ok(None);
                 };
-                lowered.push((expr, !descending));
+                lowered.push((expr, ascending));
             }
             keys = Some(lowered);
         }
@@ -3232,16 +3243,14 @@ fn apply_plain_helper_pipeline(
                 };
                 let mut keys = Vec::with_capacity(items.len());
                 for item in items {
-                    let ExprKind::App(head, item_args) = &item.kind else {
+                    let ExprKind::App(_, item_args) = &item.kind else {
                         return Ok(None);
                     };
                     let Some(value) = item_args.first() else {
                         return Ok(None);
                     };
-                    let direction = match &head.kind {
-                        ExprKind::Name(name) if name == "asc" => true,
-                        ExprKind::Name(name) if name == "desc" => false,
-                        _ => return Ok(None),
+                    let Some(direction) = sort_direction(input, helper_module, item) else {
+                        return Ok(None);
                     };
                     let Some(value) =
                         lower_plain_expr_with_row(input, helper_module, value, Some(&input_row))?
@@ -4288,6 +4297,25 @@ mod tests {
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].1.kind(), crate::checked::ExprKind::Template);
         assert_eq!(checked.row().names(), &["name"]);
+    }
+
+    #[test]
+    fn plain_sort_keys_follow_resolved_direction_primitives() {
+        let (typed, checked) = lower_source(
+            "ascending : expr r a -> sortkey r = asc\n\
+             descending : expr r a -> sortkey r = desc\n\
+             users : query { id = int } = table \"s\" \"users\"\n\
+             q = users & order [descending .id] & select { id = .id, rn = rowNumber {order = [ascending .id]} }\n",
+            "q",
+        );
+        let order = typed
+            .chain()
+            .into_iter()
+            .map(|id| typed.node(id))
+            .find(|node| node.kind() == QueryNodeKind::Order)
+            .expect("typed order node");
+        assert!(!order.order_keys().expect("order keys")[0].1);
+        assert_eq!(checked.row().names(), &["id", "rn"]);
     }
 
     #[test]

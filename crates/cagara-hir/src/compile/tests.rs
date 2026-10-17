@@ -735,6 +735,40 @@ fn plain_join_and_stages_bypass_normalized_elaboration() {
     );
 }
 
+#[test]
+fn multi_stage_helper_operand_bypasses_normalized_elaboration() {
+    let ws = Workspace::from_source(
+        "users : query { id = int, name = string } = table \"public\" \"users\"\n\
+         admins : query { id = int, x = int } = table \"public\" \"admins\"\n\
+         shaped : query { id = int, name = string } -> query { id = int, x = int } = q => q & select { id = .id } & update { x = .id }\n\
+         q = users & shaped & union admins\n",
+    );
+    let tc = crate::check::check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    crate::normalize::clear_visited();
+    let compiled = compile_checked(&ws, &tc);
+    assert!(
+        compiled
+            .queries
+            .iter()
+            .any(|query| query.name == "q" && query.result.is_ok()),
+        "multi-stage helper combine operand failed to compile: {:?}",
+        compiled.diagnostics
+    );
+    let q = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .position(|def| def.name == "q")
+        .unwrap();
+    assert!(
+        !crate::normalize::visited_nodes()
+            .iter()
+            .any(|(module, def, _)| *module == ws.root && *def == q),
+        "multi-stage helper combine operand unexpectedly walked normalized terms"
+    );
+}
+
 /// Every node under a projection's base, for the bridge/tree agreement test.
 ///
 /// The whole base subtree is skipped, not only its root: `a.b.c` is a projection

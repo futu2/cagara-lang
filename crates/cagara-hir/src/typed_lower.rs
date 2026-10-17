@@ -1710,20 +1710,6 @@ fn lower_composed_pipeline(
     def: usize,
     body: &Expr,
 ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
-    // A simple combine has no surrounding stages to compose. Let the direct
-    // combine slice construct sets from its typed children, so their checked
-    // relation does not need the normalized bridge.
-    let direct_set = match &body.kind {
-        ExprKind::App(head, args) if args.len() == 2 && is_pipe_head(head) => input
-            .type_check()
-            .typed_node(module, args[1].id)
-            .and_then(|node| node.combine.as_ref())
-            .is_some_and(|combine| matches!(combine.kind, CombineKind::Set(_))),
-        _ => false,
-    };
-    if direct_set {
-        return Ok(None);
-    }
     let mut typed = TypedQuery::new();
     if let Some((root, checked)) =
         lower_plain_composed_expr(context, input, module, def, body, &mut typed)?
@@ -1853,6 +1839,17 @@ fn lower_plain_composed_expr(
                 None,
             )
             .map_err(query_error)?;
+        return Ok(Some((id, checked)));
+    }
+
+    // A query-valued helper can itself be one side of a combine. Reuse the
+    // checker-driven helper pipeline here so its intermediate projection and
+    // aggregate rows are instantiated before the combine consumes them.
+    let mut helper_typed = TypedQuery::new();
+    if let Some((root, checked)) =
+        lower_helper_expr(context, input, module, def, expr, &mut helper_typed)?
+    {
+        let id = copy_typed_graph(&helper_typed.finish(root), typed)?;
         return Ok(Some((id, checked)));
     }
 
@@ -2071,14 +2068,10 @@ fn lower_composed_expr(
         // stage, so it has no `RowStageView` at the use site. Let the helper
         // instantiation path build its own typed nodes before this expression
         // is used as one side of a combine.
-        let rhs = &args[1];
-        let has_combine = combine_record_in(input.type_check(), module, rhs).is_some();
-        let has_stage = stage_record(input.type_check(), module, def, rhs.id).is_some();
-        if !has_combine && !has_stage {
-            if let Some(id) = lower_composed_helper(context, input, module, def, expr, typed)? {
-                return Ok(Some(id));
-            }
+        if let Some(id) = lower_composed_helper(context, input, module, def, expr, typed)? {
+            return Ok(Some(id));
         }
+        let rhs = &args[1];
         let Some(left) = lower_composed_expr(context, input, module, def, &args[0], typed)? else {
             return Ok(None);
         };
@@ -2179,110 +2172,15 @@ fn lower_composed_helper(
     expr: &Expr,
     target: &mut TypedQuery,
 ) -> Result<Option<NodeId>, Error> {
-    let ExprKind::App(head, args) = &expr.kind else {
+    // Helper instantiation already has a checker-driven implementation that
+    // threads the concrete row and payload through every stage. Reuse it for
+    // combine operands so a helper with multiple projections or aggregates is
+    // not downgraded merely because it appears below a join or set operation.
+    let mut source = TypedQuery::new();
+    let Some((root, _)) = lower_helper_expr(context, input, module, def, expr, &mut source)? else {
         return Ok(None);
     };
-    if args.len() != 2 || !is_pipe_head(head) {
-        return Ok(None);
-    }
-    let tc = input.type_check();
-    let Some(((helper_module, helper_def), _helper_args)) =
-        helper_application(tc, module, &args[1])
-    else {
-        return Ok(None);
-    };
-    let helper_stages: Vec<_> = tc.row_stages(helper_module, helper_def).cloned().collect();
-    if helper_stages.is_empty() {
-        return Ok(None);
-    }
-    let projections = helper_stages
-        .iter()
-        .filter(|stage| {
-            matches!(
-                stage.kind,
-                RowStage::Select | RowStage::Update | RowStage::Agg
-            )
-        })
-        .count();
-    if helper_stages.iter().any(|stage| {
-        !matches!(
-            stage.kind,
-            RowStage::Where
-                | RowStage::Order
-                | RowStage::Limit
-                | RowStage::Offset
-                | RowStage::Distinct
-                | RowStage::Select
-                | RowStage::Update
-                | RowStage::Agg
-        )
-    }) {
-        let mut source = TypedQuery::new();
-        let Some((root, _)) = lower_helper_expr(context, input, module, def, expr, &mut source)?
-        else {
-            return Ok(None);
-        };
-        return copy_typed_graph(&source.finish(root), target).map(Some);
-    }
-    let Some(child) = lower_composed_expr(context, input, module, def, &args[0], target)? else {
-        return Ok(None);
-    };
-    let mut syntax = HashMap::new();
-    index_exprs(
-        &input.module(helper_module).def(helper_def).body,
-        &mut syntax,
-    );
-    let mut child = child;
-    let helper_output = tc
-        .typed_node(module, expr.id)
-        .and_then(|node| node.row())
-        .map(Row::new);
-    // A single projection can use the instantiated call-site output row. More
-    // than one projection needs intermediate rows that this typed skeleton
-    // does not yet expose, so decline and let the route coordinator select the
-    // transitional adapter.
-    if projections > 1 || (projections > 0 && helper_output.is_none()) {
-        return Ok(None);
-    }
-    for stage in helper_stages {
-        let origin = Origin::new(
-            helper_module,
-            syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
-        );
-        let projected_row = helper_output.clone();
-        let id = match stage.kind {
-            RowStage::Select | RowStage::Update | RowStage::Agg => target
-                .project(
-                    stage.node,
-                    match stage.kind {
-                        RowStage::Select => QueryNodeKind::Select,
-                        RowStage::Update => QueryNodeKind::Update,
-                        RowStage::Agg => QueryNodeKind::Agg,
-                        _ => unreachable!(),
-                    },
-                    child,
-                    projected_row,
-                    origin,
-                    None,
-                )
-                .map_err(query_error)?,
-            _ => typed_keep_stage(target, child, stage.kind, stage.node, origin)?,
-        };
-        let node = target.node(id);
-        if !rows_match(
-            stage.kind,
-            stage.input.as_deref(),
-            node.input_row().map(Row::columns),
-        ) || !rows_match(
-            stage.kind,
-            stage.output.as_deref(),
-            node.output_row().map(Row::columns),
-        ) {
-            return Ok(None);
-        }
-        child = id;
-    }
-    Ok(Some(child))
+    copy_typed_graph(&source.finish(root), target).map(Some)
 }
 
 fn typed_keep_stage(

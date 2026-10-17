@@ -397,10 +397,10 @@ are now instantiated inside combine operands too. A helper with one `select`,
 can use the closed row on its call expression as the projection boundary. The
 projection and aggregate payloads use checker types and resolved SQL template
 metadata, including callable scalar expressions. Helpers with multiple
-projection or aggregate stages still decline to the explicit legacy route
-because their intermediate rows are not yet supplied by typed checker facts.
-Extending checker-owned helper instantiation to those chains is still part of
-the migration.
+projection or aggregate stages thread each instantiated intermediate row through
+the typed arena as well, including when the helper is used as a join or set
+operand. Unsupported payloads and unresolved witnesses still decline to the
+explicit legacy route.
 
 ### Step 1, done
 

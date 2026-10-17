@@ -1114,11 +1114,312 @@ fn lower_composed_pipeline(
         return Ok(None);
     }
     let mut typed = TypedQuery::new();
+    if let Some((root, checked)) = lower_plain_composed_expr(input, module, def, body, &mut typed)?
+    {
+        return Ok(Some((typed.finish(root), checked)));
+    }
+    let mut typed = TypedQuery::new();
     let Some(root) = lower_composed_expr(input, module, def, body, &mut typed)? else {
         return Ok(None);
     };
     let checked = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
     Ok(Some((typed.finish(root), checked)))
+}
+
+/// Source-build a composed query when all joins and stages have plain
+/// expression payloads. The checked relation travels with each typed node, so
+/// a join and its surrounding stages need no normalized query template.
+fn lower_plain_composed_expr(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    expr: &Expr,
+    typed: &mut TypedQuery,
+) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    if let Some((schema, table, columns)) = table_parts(input, module, expr) {
+        let origin = table_origin(input, module, expr);
+        let checked =
+            CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
+                .map_err(|error| Error::unsupported(error.message).at(origin))?;
+        let id = typed
+            .table(NodeRef::new(module, def, expr.id), origin, columns)
+            .map_err(query_error)?;
+        return Ok(Some((id, checked)));
+    }
+    if let Some((target_module, target_def)) = query_target(input.type_check(), module, expr) {
+        if (target_module, target_def) == (module, def) {
+            return Ok(None);
+        }
+        let target_body = &input.module(target_module).def(target_def).body;
+        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
+        else {
+            return Ok(None);
+        };
+        let id = copy_typed_graph(&target_typed, typed)?;
+        return Ok(Some((id, checked)));
+    }
+    let ExprKind::App(head, args) = &expr.kind else {
+        return Ok(None);
+    };
+    if args.len() != 2 || !is_pipe_head(head) {
+        return Ok(None);
+    }
+    let left_expr = &args[0];
+    let rhs = &args[1];
+    if let Some((combine, operation)) =
+        combine_record_in(input.type_check(), module, rhs).filter(|(combine, _)| {
+            combine.node.definition_module == module && combine.node.definition == def
+        })
+    {
+        let Some((left, checked_left)) =
+            lower_plain_composed_expr(input, module, def, left_expr, typed)?
+        else {
+            return Ok(None);
+        };
+        let mut operands = query_operand_args(input, module, operation);
+        let Some(right_expr) = operands.next() else {
+            return Ok(None);
+        };
+        let Some((right, checked_right)) =
+            lower_plain_composed_expr(input, module, def, right_expr, typed)?
+        else {
+            return Ok(None);
+        };
+        let origin = Origin::new(combine.node.definition_module, operation.span);
+        let kind = combine_query_kind(combine.kind);
+        let output = combine.output.clone().map(Row::new);
+        let (typed_left, typed_right, checked) = match combine.kind {
+            CombineKind::Join(join_kind) => {
+                let ExprKind::App(_, join_args) = &operation.kind else {
+                    return Ok(None);
+                };
+                let Some(predicate_expr) = join_args.get(1) else {
+                    return Ok(None);
+                };
+                let Some(predicate) = lower_plain_expr(input, module, predicate_expr)? else {
+                    return Ok(None);
+                };
+                let checked = CheckedQuery::join(
+                    join_kind,
+                    checked_left,
+                    checked_right,
+                    predicate.clone(),
+                    origin,
+                )
+                .map_err(|error| Error::unsupported(error.message).at(origin))?;
+                let id = typed
+                    .combine(
+                        combine.node,
+                        kind,
+                        left,
+                        right,
+                        output,
+                        origin,
+                        Some(predicate),
+                    )
+                    .map_err(query_error)?;
+                return Ok(Some((id, checked)));
+            }
+            CombineKind::Set(set_kind) => {
+                // The source pipe supplies the first operand; set primitives
+                // record their explicit argument first.
+                (
+                    right,
+                    left,
+                    CheckedQuery::set(set_kind, checked_right, checked_left, origin)
+                        .map_err(|error| Error::unsupported(error.message).at(origin))?,
+                )
+            }
+        };
+        let id = typed
+            .combine(
+                combine.node,
+                kind,
+                typed_left,
+                typed_right,
+                output,
+                origin,
+                None,
+            )
+            .map_err(query_error)?;
+        return Ok(Some((id, checked)));
+    }
+
+    let Some(stage) = stage_record(input.type_check(), module, def, rhs.id)
+        .filter(|stage| stage.node.definition_module == module && stage.node.definition == def)
+    else {
+        return Ok(None);
+    };
+    let Some((child, checked)) = lower_plain_composed_expr(input, module, def, left_expr, typed)?
+    else {
+        return Ok(None);
+    };
+    let ExprKind::App(_, stage_args) = &rhs.kind else {
+        return Ok(None);
+    };
+    let origin = Origin::new(stage.node.definition_module, rhs.span);
+    let input_row = checked.row().clone();
+    if !rows_match(
+        stage.kind,
+        stage.input.as_deref(),
+        Some(input_row.columns()),
+    ) {
+        return Ok(None);
+    }
+    let expression_row = RowType::new(input_row.columns().to_vec());
+    let mut predicate = None;
+    let mut keys = None;
+    let mut fields = None;
+    let mut label = stage.label.clone();
+    let mut count = None;
+    match stage.kind {
+        RowStage::Where => {
+            let Some(expr) = stage_args.first() else {
+                return Ok(None);
+            };
+            predicate = lower_plain_expr_with_row(input, module, expr, Some(&expression_row))?;
+            if predicate.is_none() {
+                return Ok(None);
+            }
+        }
+        RowStage::Select | RowStage::Update | RowStage::Agg => {
+            let Some(record) = stage_args.first() else {
+                return Ok(None);
+            };
+            let ExprKind::Record(source_fields) = &record.kind else {
+                return Ok(None);
+            };
+            let mut lowered = Vec::with_capacity(source_fields.len());
+            for (name, expr) in source_fields {
+                let Some(expr) =
+                    lower_plain_expr_with_row(input, module, expr, Some(&expression_row))?
+                else {
+                    return Ok(None);
+                };
+                lowered.push((name.clone(), expr));
+            }
+            fields = Some(lowered);
+        }
+        RowStage::Order => {
+            let Some(list) = stage_args.first() else {
+                return Ok(None);
+            };
+            let ExprKind::List(items) = &list.kind else {
+                return Ok(None);
+            };
+            let mut lowered = Vec::with_capacity(items.len());
+            for item in items {
+                let ExprKind::App(direction, item_args) = &item.kind else {
+                    return Ok(None);
+                };
+                let Some(expr) = item_args.first() else {
+                    return Ok(None);
+                };
+                let descending = match &direction.kind {
+                    ExprKind::Name(name) if name == "asc" => false,
+                    ExprKind::Name(name) if name == "desc" => true,
+                    _ => return Ok(None),
+                };
+                let Some(expr) =
+                    lower_plain_expr_with_row(input, module, expr, Some(&expression_row))?
+                else {
+                    return Ok(None);
+                };
+                lowered.push((expr, !descending));
+            }
+            keys = Some(lowered);
+        }
+        RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => {
+            if label.is_none() {
+                return Ok(None);
+            }
+        }
+        RowStage::Limit | RowStage::Offset => {
+            count = stage_count(&rhs);
+            if count.is_none() {
+                return Ok(None);
+            }
+        }
+        RowStage::Distinct => return Ok(None),
+    }
+    let kind = match stage.kind {
+        RowStage::Prefix => QueryNodeKind::Prefix,
+        RowStage::Suffix => QueryNodeKind::Suffix,
+        RowStage::Omit => QueryNodeKind::Omit,
+        RowStage::MapValue => QueryNodeKind::MapValue,
+        RowStage::Where => QueryNodeKind::Where,
+        RowStage::Select => QueryNodeKind::Select,
+        RowStage::Update => QueryNodeKind::Update,
+        RowStage::Agg => QueryNodeKind::Agg,
+        RowStage::Order => QueryNodeKind::Order,
+        RowStage::Limit => QueryNodeKind::Limit,
+        RowStage::Offset => QueryNodeKind::Offset,
+        RowStage::Distinct => QueryNodeKind::Distinct,
+    };
+    let id = match stage.kind {
+        RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => typed
+            .rewrite(
+                stage.node,
+                kind,
+                child,
+                stage.input.clone().map(Row::new),
+                stage.output.clone().map(Row::new),
+                origin,
+            )
+            .map_err(query_error)?,
+        RowStage::Select | RowStage::Update | RowStage::Agg => typed
+            .project(
+                stage.node,
+                kind,
+                child,
+                stage.output.clone().map(Row::new),
+                origin,
+                fields.clone(),
+            )
+            .map_err(query_error)?,
+        _ => typed
+            .keep_row_with_payload(
+                stage.node,
+                kind,
+                child,
+                origin,
+                predicate.clone(),
+                keys.clone(),
+                None,
+                None,
+            )
+            .map_err(query_error)?,
+    };
+    let checked = match stage.kind {
+        RowStage::Prefix => CheckedQuery::prefix(checked, label.take().expect("label"), origin),
+        RowStage::Suffix => CheckedQuery::suffix(checked, label.take().expect("label"), origin),
+        RowStage::Omit => CheckedQuery::omit(checked, label.take().expect("label"), origin),
+        RowStage::MapValue => {
+            CheckedQuery::map_value(checked, label.take().expect("label"), origin)
+        }
+        RowStage::Where => CheckedQuery::where_(checked, predicate.expect("predicate"), origin),
+        RowStage::Select => CheckedQuery::select(checked, fields.expect("fields"), origin),
+        RowStage::Update => CheckedQuery::update(checked, fields.expect("fields"), origin),
+        RowStage::Agg => CheckedQuery::agg(checked, fields.expect("fields"), origin),
+        RowStage::Order => CheckedQuery::order(checked, keys.expect("keys"), origin),
+        RowStage::Limit => CheckedQuery::limit(checked, count.expect("count"), origin),
+        RowStage::Offset => CheckedQuery::offset(checked, count.expect("count"), origin),
+        RowStage::Distinct => return Ok(None),
+    }
+    .map_err(|error| Error::unsupported(error.message).at(origin))?;
+    let node = typed.node(id);
+    if !rows_match(
+        stage.kind,
+        stage.input.as_deref(),
+        node.input_row().map(Row::columns),
+    ) || !rows_match(
+        stage.kind,
+        stage.output.as_deref(),
+        node.output_row().map(Row::columns),
+    ) {
+        return Ok(None);
+    }
+    Ok(Some((id, checked)))
 }
 
 fn lower_composed_expr(

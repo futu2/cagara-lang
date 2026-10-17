@@ -575,6 +575,12 @@ fn lower_plain_expr_with_row(
                     "rtrim" => ("RTRIM($1)", 1),
                     "length" => ("CAGARA_LENGTH($1)", 1),
                     "coalesce" => ("COALESCE($2, $1)", 2),
+                    "_??_" => ("COALESCE($1, $2)", 2),
+                    "just" => ("$1", 1),
+                    "eqMaybe" => (
+                        "COALESCE(($1 = $2) OR ($1 IS NULL AND $2 IS NULL), FALSE)",
+                        2,
+                    ),
                     "ifThenElse" | "caseWhen" => ("CASE WHEN $1 THEN $2 ELSE $3 END", 3),
                     "like" => ("$2 LIKE $1", 2),
                     "ilike" => ("$2 ILIKE $1", 2),
@@ -4375,6 +4381,26 @@ mod tests {
         assert_eq!(
             checked.row().names(),
             &["month", "added", "truncated", "decimal"]
+        );
+    }
+
+    #[test]
+    fn direct_plain_null_templates_build_typed_fields() {
+        let (typed, checked) = lower_source(
+            "users : query { id = int, nickname = maybe string, active = maybe bool } = table \"s\" \"users\"\n\
+             q = users & select { name = coalesce \"unknown\" .nickname, \
+             present = isNotNull .nickname, enabled = isTrue .active, same = eqMaybe .nickname .nickname }\n",
+            "q",
+        );
+        let node = typed.node(typed.root());
+        let fields = node.projection_fields().expect("typed select has fields");
+        assert_eq!(fields.len(), 4);
+        assert!(fields
+            .iter()
+            .all(|(_, field)| field.kind() == crate::checked::ExprKind::Template));
+        assert_eq!(
+            checked.row().names(),
+            &["name", "present", "enabled", "same"]
         );
     }
 

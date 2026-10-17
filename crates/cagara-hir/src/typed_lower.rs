@@ -69,6 +69,9 @@ fn lower_unhydrated(
     if let Some(lowered) = lower_simple_order_pipeline(input, module, def, body)? {
         return Ok(Some(lowered));
     }
+    if let Some(lowered) = lower_plain_expression_chain(input, module, def, body)? {
+        return Ok(Some(lowered));
+    }
     // The expression-bearing stages use the checked payload bridge for their
     // predicates, fields, and sort keys. Their relational boundaries still
     // come from the typed stage records, so the query arena does not recover
@@ -625,6 +628,283 @@ fn lower_simple_order_pipeline(
     let checked = CheckedQuery::order(checked, keys, origin)
         .map_err(|error| Error::unsupported(error.message).at(origin))?;
     Ok(Some((typed.finish(id), checked)))
+}
+
+/// Lower a complete direct pipeline when every expression payload fits the
+/// plain checked-expression subset. This extends the single-stage slices to
+/// mixed chains, using each recorded input row to type fields after earlier
+/// projections and rewrites without consulting normalized terms.
+fn lower_plain_expression_chain(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
+    let tc = input.type_check();
+    let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
+    if stages.len() < 2
+        || contains_distinct_stage(input, module, body)
+        || stages.iter().any(|stage| {
+            stage.node.definition_module != module
+                || stage.node.definition != def
+                || stage.input.is_none()
+                || stage.output.is_none()
+                || stage.kind == RowStage::Agg
+        })
+        || !is_direct_pipeline(input, module, body)
+    {
+        return Ok(None);
+    }
+    let stage_sites: HashSet<_> = stages.iter().map(|stage| stage.site).collect();
+    let Some(base) = find_base(body, &stage_sites, tc, module) else {
+        return Ok(None);
+    };
+    let mut syntax = HashMap::new();
+    index_exprs(body, &mut syntax);
+    let (mut child, mut checked, mut typed) = if let Some((schema, table, columns)) =
+        table_parts(input, module, base)
+    {
+        let origin = table_origin(input, module, base);
+        let checked =
+            CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
+                .map_err(|error| Error::unsupported(error.message).at(origin))?;
+        let mut typed = TypedQuery::new();
+        let child = typed
+            .table(NodeRef::new(module, def, base.id), origin, columns)
+            .map_err(query_error)?;
+        (child, checked, typed)
+    } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
+        if (target_module, target_def) == (module, def)
+            || !matches!(
+                tc.scheme_view(target_module, target_def),
+                Some(crate::check::SchemeView::Query { .. })
+            )
+        {
+            return Ok(None);
+        }
+        let target_body = &input.module(target_module).def(target_def).body;
+        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
+        else {
+            return Ok(None);
+        };
+        let mut typed = TypedQuery::new();
+        let child = copy_typed_graph(&target_typed, &mut typed)?;
+        (child, checked, typed)
+    } else {
+        return Ok(None);
+    };
+
+    for stage in stages {
+        let Some(stage_expr) = syntax.get(&stage.site).copied() else {
+            return Ok(None);
+        };
+        let ExprKind::App(_, args) = &stage_expr.kind else {
+            return Ok(None);
+        };
+        let origin = Origin::new(stage.node.definition_module, stage_expr.span);
+        let checked_origin = origin;
+        let input_row = Row::new(stage.input.clone().expect("checked above"));
+        let output_row = Row::new(stage.output.clone().expect("checked above"));
+        let expression_row = RowType::new(input_row.columns().to_vec());
+        let mut predicate = None;
+        let mut keys = None;
+        let mut fields = None;
+        let mut label = None;
+        let mut count = None;
+
+        match stage.kind {
+            RowStage::Where => {
+                let Some(expr) = args.first() else {
+                    return Ok(None);
+                };
+                predicate = lower_plain_expr_with_row(input, module, expr, Some(&expression_row))?;
+                if predicate.is_none() {
+                    return Ok(None);
+                }
+            }
+            RowStage::Select | RowStage::Update => {
+                let Some(record) = args.first() else {
+                    return Ok(None);
+                };
+                let ExprKind::Record(source_fields) = &record.kind else {
+                    return Ok(None);
+                };
+                let mut lowered = Vec::with_capacity(source_fields.len());
+                for (name, expr) in source_fields {
+                    let Some(expr) =
+                        lower_plain_expr_with_row(input, module, expr, Some(&expression_row))?
+                    else {
+                        return Ok(None);
+                    };
+                    lowered.push((name.clone(), expr));
+                }
+                fields = Some(lowered);
+            }
+            RowStage::Order => {
+                let Some(list) = args.first() else {
+                    return Ok(None);
+                };
+                let ExprKind::List(items) = &list.kind else {
+                    return Ok(None);
+                };
+                let mut lowered = Vec::with_capacity(items.len());
+                for item in items {
+                    let ExprKind::App(head, item_args) = &item.kind else {
+                        return Ok(None);
+                    };
+                    let Some(expr) = item_args.first() else {
+                        return Ok(None);
+                    };
+                    let direction = match &head.kind {
+                        ExprKind::Name(name) if name == "asc" => true,
+                        ExprKind::Name(name) if name == "desc" => false,
+                        _ => return Ok(None),
+                    };
+                    let Some(expr) =
+                        lower_plain_expr_with_row(input, module, expr, Some(&expression_row))?
+                    else {
+                        return Ok(None);
+                    };
+                    lowered.push((expr, direction));
+                }
+                keys = Some(lowered);
+            }
+            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => {
+                label = stage.label.clone();
+                if label.is_none() {
+                    return Ok(None);
+                }
+            }
+            RowStage::Limit | RowStage::Offset => {
+                count = stage_count(&stage_expr);
+                if count.is_none() {
+                    return Ok(None);
+                }
+            }
+            RowStage::Distinct => {}
+            RowStage::Agg => return Ok(None),
+        }
+
+        let kind = match stage.kind {
+            RowStage::Prefix => QueryNodeKind::Prefix,
+            RowStage::Suffix => QueryNodeKind::Suffix,
+            RowStage::Omit => QueryNodeKind::Omit,
+            RowStage::MapValue => QueryNodeKind::MapValue,
+            RowStage::Where => QueryNodeKind::Where,
+            RowStage::Select => QueryNodeKind::Select,
+            RowStage::Update => QueryNodeKind::Update,
+            RowStage::Order => QueryNodeKind::Order,
+            RowStage::Limit => QueryNodeKind::Limit,
+            RowStage::Offset => QueryNodeKind::Offset,
+            RowStage::Distinct => QueryNodeKind::Distinct,
+            RowStage::Agg => unreachable!(),
+        };
+        let id = match stage.kind {
+            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => typed
+                .rewrite(
+                    stage.node,
+                    kind,
+                    child,
+                    Some(input_row.clone()),
+                    Some(output_row.clone()),
+                    origin,
+                )
+                .map_err(query_error)?,
+            RowStage::Select | RowStage::Update => typed
+                .project(
+                    stage.node,
+                    kind,
+                    child,
+                    Some(output_row.clone()),
+                    origin,
+                    fields.clone(),
+                )
+                .map_err(query_error)?,
+            _ => typed
+                .keep_row_with_payload(
+                    stage.node,
+                    kind,
+                    child,
+                    origin,
+                    predicate.clone(),
+                    keys.clone(),
+                    None,
+                    None,
+                )
+                .map_err(query_error)?,
+        };
+        checked = match stage.kind {
+            RowStage::Prefix => {
+                CheckedQuery::prefix(checked, label.expect("label"), checked_origin)
+            }
+            RowStage::Suffix => {
+                CheckedQuery::suffix(checked, label.expect("label"), checked_origin)
+            }
+            RowStage::Omit => CheckedQuery::omit(checked, label.expect("label"), checked_origin),
+            RowStage::MapValue => {
+                CheckedQuery::map_value(checked, label.expect("label"), checked_origin)
+            }
+            RowStage::Where => {
+                CheckedQuery::where_(checked, predicate.expect("predicate"), checked_origin)
+            }
+            RowStage::Select => {
+                CheckedQuery::select(checked, fields.expect("fields"), checked_origin)
+            }
+            RowStage::Update => {
+                CheckedQuery::update(checked, fields.expect("fields"), checked_origin)
+            }
+            RowStage::Order => CheckedQuery::order(checked, keys.expect("keys"), checked_origin),
+            RowStage::Limit => CheckedQuery::limit(checked, count.expect("count"), checked_origin),
+            RowStage::Offset => {
+                CheckedQuery::offset(checked, count.expect("count"), checked_origin)
+            }
+            RowStage::Distinct => CheckedQuery::distinct(checked, checked_origin),
+            RowStage::Agg => unreachable!(),
+        }
+        .map_err(|error| Error::unsupported(error.message).at(origin))?;
+        let node = typed.node(id);
+        if !rows_match(
+            stage.kind,
+            stage.input.as_deref(),
+            node.input_row().map(Row::columns),
+        ) || !rows_match(
+            stage.kind,
+            stage.output.as_deref(),
+            node.output_row().map(Row::columns),
+        ) {
+            return Err(Error::unsupported(format!(
+                "typed stage {:?} produced rows different from its checked record",
+                stage.kind
+            ))
+            .at(origin));
+        }
+        child = id;
+    }
+    Ok(Some((typed.finish(child), checked)))
+}
+
+fn contains_distinct_stage(input: CompilerInput<'_>, module: usize, body: &Expr) -> bool {
+    let tc = input.type_check();
+    let mut stack = vec![body];
+    while let Some(expr) = stack.pop() {
+        if matches!(&expr.kind, ExprKind::Name(_) | ExprKind::Proj(_, _)) {
+            if let Some(Resolved::Def((target_module, target_def))) = tc.resolution(module, expr.id)
+            {
+                if let ExprKind::Primitive(name) =
+                    &input.module(*target_module).def(*target_def).body.kind
+                {
+                    if crate::primitive::prim_of(name)
+                        .and_then(RowStage::of_prim)
+                        .is_some_and(|stage| stage == RowStage::Distinct)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        stack.extend(crate::check::child_exprs(expr));
+    }
+    false
 }
 
 fn contains_other_stage(

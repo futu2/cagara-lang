@@ -401,11 +401,24 @@ fn lower_plain_expr(
     module: usize,
     expr: &Expr,
 ) -> Result<Option<crate::checked::CheckedExpr>, Error> {
+    lower_plain_expr_with_row(input, module, expr, None)
+}
+
+fn lower_plain_expr_with_row(
+    input: CompilerInput<'_>,
+    module: usize,
+    expr: &Expr,
+    row: Option<&RowType>,
+) -> Result<Option<crate::checked::CheckedExpr>, Error> {
     let tc = input.type_check();
     let origin = Origin::new(module, expr.span);
     match &expr.kind {
         ExprKind::Field(side, column) => {
-            let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
+            let ty = row
+                .filter(|_| *side == cagara_syntax::ast::Side::Single)
+                .and_then(|row| row.get(column).cloned())
+                .or_else(|| tc.typed_node(module, expr.id).and_then(|node| node.ty()));
+            let Some(ty) = ty else {
                 return Ok(None);
             };
             Ok(Some(crate::checked::CheckedExpr::column(
@@ -435,12 +448,12 @@ fn lower_plain_expr(
                 let ExprKind::List(items) = &args[0].kind else {
                     return Ok(None);
                 };
-                let Some(value) = lower_plain_expr(input, module, &args[1])? else {
+                let Some(value) = lower_plain_expr_with_row(input, module, &args[1], row)? else {
                     return Ok(None);
                 };
                 let mut list = Vec::with_capacity(items.len());
                 for item in items {
-                    let Some(item) = lower_plain_expr(input, module, item)? else {
+                    let Some(item) = lower_plain_expr_with_row(input, module, item, row)? else {
                         return Ok(None);
                     };
                     list.push(item);
@@ -480,7 +493,7 @@ fn lower_plain_expr(
             }
             let mut checked_args = Vec::with_capacity(arity);
             for arg in args.iter() {
-                let Some(arg) = lower_plain_expr(input, module, arg)? else {
+                let Some(arg) = lower_plain_expr_with_row(input, module, arg, row)? else {
                     return Ok(None);
                 };
                 checked_args.push(arg);
@@ -2082,6 +2095,23 @@ fn apply_helper(
     if params.iter().collect::<HashSet<_>>().len() != params.len() {
         return Ok(None);
     }
+    if helper_stages.len() == 1 {
+        let plain = apply_plain_helper(
+            input,
+            use_module,
+            use_def,
+            use_site,
+            child,
+            checked.clone(),
+            helper_module,
+            &helper_stages[0],
+            use_expr,
+            typed,
+        )?;
+        if let Some(lowered) = plain {
+            return Ok(Some(lowered));
+        }
+    }
     let mut syntax = HashMap::new();
     index_exprs(helper_syntax, &mut syntax);
     let projections = helper_stages
@@ -2287,6 +2317,157 @@ fn apply_helper(
     // helper inlining. Keep it as the public checked template while the typed
     // graph above remains the source of stage structure and payload ownership.
     Ok(Some((child, normalized.expect("normalized helper query"))))
+}
+
+/// Instantiate a one-stage helper when its payload is in the plain checked
+/// expression subset. The helper's source node keeps its identity; the use
+/// expression supplies the closed output row for a projection.
+fn apply_plain_helper(
+    input: CompilerInput<'_>,
+    use_module: usize,
+    _use_def: usize,
+    use_site: u32,
+    child: NodeId,
+    checked: CheckedQuery,
+    helper_module: usize,
+    stage: &crate::check::RowStageView,
+    _use_expr: &Expr,
+    typed: &mut TypedQuery,
+) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    if !matches!(
+        stage.kind,
+        RowStage::Where | RowStage::Order | RowStage::Select | RowStage::Update
+    ) {
+        return Ok(None);
+    }
+    let helper_body = &input.module(helper_module).def(stage.node.definition).body;
+    let stage_expr = find_expr_id(helper_body, stage.site).unwrap_or(helper_body);
+    let ExprKind::App(_, args) = &stage_expr.kind else {
+        return Ok(None);
+    };
+    let origin = Origin::new(helper_module, stage_expr.span);
+    let output_row = input
+        .type_check()
+        .typed_node(use_module, use_site)
+        .and_then(|node| node.row())
+        .map(Row::new);
+    let (predicate, order_keys, fields) = match stage.kind {
+        RowStage::Where => {
+            let Some(expr) = args.first() else {
+                return Ok(None);
+            };
+            let Some(predicate) =
+                lower_plain_expr_with_row(input, helper_module, expr, Some(checked.row()))?
+            else {
+                return Ok(None);
+            };
+            (Some(predicate), None, None)
+        }
+        RowStage::Order => {
+            let Some(list) = args.first() else {
+                return Ok(None);
+            };
+            let ExprKind::List(items) = &list.kind else {
+                return Ok(None);
+            };
+            let mut keys = Vec::with_capacity(items.len());
+            for item in items {
+                let ExprKind::App(head, item_args) = &item.kind else {
+                    return Ok(None);
+                };
+                let Some(value) = item_args.first() else {
+                    return Ok(None);
+                };
+                let direction = match &head.kind {
+                    ExprKind::Name(name) if name == "asc" => true,
+                    ExprKind::Name(name) if name == "desc" => false,
+                    _ => return Ok(None),
+                };
+                let Some(value) =
+                    lower_plain_expr_with_row(input, helper_module, value, Some(checked.row()))?
+                else {
+                    return Ok(None);
+                };
+                keys.push((value, direction));
+            }
+            (None, Some(keys), None)
+        }
+        RowStage::Select | RowStage::Update => {
+            let Some(record) = args.first() else {
+                return Ok(None);
+            };
+            let ExprKind::Record(source_fields) = &record.kind else {
+                return Ok(None);
+            };
+            let mut fields = Vec::with_capacity(source_fields.len());
+            for (name, value) in source_fields {
+                let Some(value) =
+                    lower_plain_expr_with_row(input, helper_module, value, Some(checked.row()))?
+                else {
+                    return Ok(None);
+                };
+                fields.push((name.clone(), value));
+            }
+            (None, None, Some(fields))
+        }
+        _ => unreachable!(),
+    };
+    let checked = match stage.kind {
+        RowStage::Where => {
+            CheckedQuery::where_(checked, predicate.clone().expect("predicate"), origin)
+        }
+        RowStage::Order => {
+            CheckedQuery::order(checked, order_keys.clone().expect("order keys"), origin)
+        }
+        RowStage::Select => CheckedQuery::select(checked, fields.clone().expect("fields"), origin),
+        RowStage::Update => CheckedQuery::update(checked, fields.clone().expect("fields"), origin),
+        _ => unreachable!(),
+    }
+    .map_err(|error| Error::unsupported(error.message).at(origin))?;
+    if let Some(expected) = stage.output.as_deref() {
+        if expected != checked.row().columns() {
+            return Ok(None);
+        }
+    }
+    if let Some(output_row) = &output_row {
+        if !unordered_rows_match(Some(output_row.columns()), Some(checked.row().columns())) {
+            return Ok(None);
+        }
+    }
+    let id = match stage.kind {
+        RowStage::Where | RowStage::Order => typed
+            .keep_row_with_payload(
+                stage.node,
+                match stage.kind {
+                    RowStage::Where => QueryNodeKind::Where,
+                    RowStage::Order => QueryNodeKind::Order,
+                    _ => unreachable!(),
+                },
+                child,
+                origin,
+                predicate,
+                order_keys,
+                None,
+                None,
+            )
+            .map_err(query_error)?,
+        RowStage::Select | RowStage::Update => typed
+            .project(
+                stage.node,
+                match stage.kind {
+                    RowStage::Select => QueryNodeKind::Select,
+                    RowStage::Update => QueryNodeKind::Update,
+                    _ => unreachable!(),
+                },
+                child,
+                output_row,
+                origin,
+                fields,
+            )
+            .map_err(query_error)?,
+        _ => unreachable!(),
+    };
+    Ok(Some((id, checked)))
 }
 
 #[derive(Clone)]

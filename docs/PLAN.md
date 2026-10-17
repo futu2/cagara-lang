@@ -266,6 +266,10 @@ expressions continue through the payload bridge.
 Direct `order` stages whose keys are plain columns with literal `asc` or
 `desc` directions use the same typed path, retaining their checked sort keys
 without entering normalized elaboration.
+Single-stage helpers for `where`, `order`, `select`, and `update` now use that
+plain expression builder at the helper's recorded stage identity. The caller's
+typed row supplies field types and projection output boundaries, so chains of
+these helpers can stay outside normalized elaboration too.
 Window expressions in projection payloads are carried by the typed projection
 node as `WinTemplate`, including when the pipeline starts from a typed query
 alias. They are no longer deferred from this slice.

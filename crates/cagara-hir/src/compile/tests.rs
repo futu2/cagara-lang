@@ -475,6 +475,37 @@ fn direct_plain_where_bypasses_normalized_elaboration() {
     );
 }
 
+#[test]
+fn plain_expression_helper_bypasses_normalized_elaboration() {
+    let ws = Workspace::from_source(
+        "users : query { id = int, age = int, name = string } = table \"public\" \"users\"\nfiltered = q => q & where (.age > 18)\nsorted = q => q & order [desc .name]\nprojected = q => q & select { id = .id, name = upper .name }\nq = users & filtered & sorted & projected\n",
+    );
+    let tc = crate::check::check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    crate::normalize::clear_visited();
+    let compiled = compile_checked(&ws, &tc);
+    assert!(
+        compiled
+            .queries
+            .iter()
+            .any(|query| query.name == "q" && query.result.is_ok()),
+        "the typed helper projection failed to compile: {:?}",
+        compiled.diagnostics
+    );
+    let q = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .position(|def| def.name == "q")
+        .unwrap();
+    assert!(
+        !crate::normalize::visited_nodes()
+            .iter()
+            .any(|(module, def, _)| *module == ws.root && *def == q),
+        "plain expression helper unexpectedly walked normalized terms"
+    );
+}
+
 /// Every node under a projection's base, for the bridge/tree agreement test.
 ///
 /// The whole base subtree is skipped, not only its root: `a.b.c` is a projection

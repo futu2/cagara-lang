@@ -235,41 +235,59 @@ fn lower_combine_pipeline(
     let Some(right_expr) = args.first() else {
         return Ok(None);
     };
-    let terms = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
     let mut typed = TypedQuery::new();
-    let Some((left, _)) = lower_combine_input(input, module, def, left_expr, &mut typed)? else {
+    let Some((left, left_checked)) =
+        lower_combine_input(input, module, def, left_expr, &mut typed)?
+    else {
         return Ok(None);
     };
-    let Some((right, _)) = lower_combine_input(input, module, def, right_expr, &mut typed)? else {
+    let Some((right, right_checked)) =
+        lower_combine_input(input, module, def, right_expr, &mut typed)?
+    else {
         return Ok(None);
     };
     let kind = match combine.kind {
         CombineKind::Join(kind) => QueryNodeKind::Join(kind),
         CombineKind::Set(kind) => QueryNodeKind::Set(kind),
     };
+    // Set primitives declare their explicit operand before the piped input,
+    // while the source spelling puts the piped input on the left. Preserve
+    // the checked operation's operand order in both the typed graph and the
+    // direct checked constructor.
+    let (typed_left, typed_right, checked_left, checked_right) = match combine.kind {
+        CombineKind::Join(_) => (left, right, left_checked, right_checked),
+        CombineKind::Set(_) => (right, left, right_checked, left_checked),
+    };
     let output_row = combine.output.clone().map(Row::new);
     let origin = Origin::new(combine.node.definition_module, operation.span);
+    let checked = match combine.kind {
+        CombineKind::Set(kind) => CheckedQuery::set(kind, checked_left, checked_right, origin)
+            .map_err(|error| Error::unsupported(error.message).at(origin))?,
+        CombineKind::Join(_) => {
+            crate::normalize::elaborate_query_via_terms(input, module, def, body)?
+        }
+    };
     let root = typed
         .combine(
             combine.node,
             kind,
-            left,
-            right,
+            typed_left,
+            typed_right,
             output_row.clone(),
             origin,
-            checked_join_predicate(&terms, origin),
+            checked_join_predicate(&checked, origin),
         )
         .map_err(query_error)?;
     let Some(output_row) = output_row else {
         return Ok(None);
     };
-    if terms.row().columns() != output_row.columns() {
+    if checked.row().columns() != output_row.columns() {
         return Err(
             Error::unsupported("typed combine output row differs from its checked query")
                 .at(origin),
         );
     }
-    Ok(Some((typed.finish(root), terms)))
+    Ok(Some((typed.finish(root), checked)))
 }
 
 /// Lower a query whose syntax contains a combine and any number of ordinary
@@ -283,6 +301,20 @@ fn lower_composed_pipeline(
     def: usize,
     body: &Expr,
 ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
+    // A simple combine has no surrounding stages to compose. Let the direct
+    // combine slice construct sets from its typed children, so their checked
+    // relation does not need the normalized bridge.
+    let direct_set = match &body.kind {
+        ExprKind::App(head, args) if args.len() == 2 && is_pipe_head(head) => input
+            .type_check()
+            .typed_node(module, args[1].id)
+            .and_then(|node| node.combine.as_ref())
+            .is_some_and(|combine| matches!(combine.kind, CombineKind::Set(_))),
+        _ => false,
+    };
+    if direct_set {
+        return Ok(None);
+    }
     let mut typed = TypedQuery::new();
     let Some(root) = lower_composed_expr(input, module, def, body, &mut typed)? else {
         return Ok(None);
@@ -752,7 +784,7 @@ fn lower_combine_input(
     typed: &mut TypedQuery,
 ) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
     if let Some((schema, table, columns)) = table_parts(input, module, expr) {
-        let origin = Origin::new(module, expr.span);
+        let origin = table_origin(input, module, expr);
         let checked =
             CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
                 .map_err(|error| Error::unsupported(error.message).at(origin))?;
@@ -771,6 +803,22 @@ fn lower_combine_input(
         return Ok(Some((id, checked)));
     }
     Ok(None)
+}
+
+fn table_origin(input: CompilerInput<'_>, module: usize, expr: &Expr) -> Origin {
+    match &expr.kind {
+        ExprKind::App(_, _) => Origin::new(module, expr.span),
+        ExprKind::Name(_) | ExprKind::Proj(_, _) => {
+            if let Some(Resolved::Def((target_module, target_def))) =
+                input.type_check().resolution(module, expr.id)
+            {
+                let target = &input.module(*target_module).def(*target_def).body;
+                return table_origin(input, *target_module, target);
+            }
+            Origin::new(module, expr.span)
+        }
+        _ => Origin::new(module, expr.span),
+    }
 }
 
 fn copy_typed_graph(source: &TypedQuery, target: &mut TypedQuery) -> Result<NodeId, Error> {

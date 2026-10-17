@@ -226,6 +226,8 @@ payloads for this migration slice, and removing that route remains later work.
 records each child's checked output row. Typed lowering constructs those nodes
 recursively, including both child subtrees, and carries checked join predicates
 on typed join nodes. Other expression payloads still use the normalized bridge.
+Simple two-input set operations now build their checked relation directly from
+the typed child queries; joins continue to use the bridge for their predicates.
 The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be

@@ -442,98 +442,109 @@ fn lower_plain_expr_with_row(
             },
             origin,
         ))),
-        ExprKind::Name(name) if name == "count" => {
+        ExprKind::Name(_) => {
+            let Some((sql, kind, arity)) = declared_template(input, module, expr) else {
+                return Ok(None);
+            };
+            if arity != 0 {
+                return Ok(None);
+            }
             let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
                 return Ok(None);
             };
-            crate::checked::CheckedExpr::agg_template("COUNT(*)", Vec::new(), ty, origin)
-                .map(Some)
-                .map_err(|error| Error::unsupported(error.message).at(origin))
+            match kind {
+                crate::normalize::TemplateKind::Scalar => {
+                    crate::checked::CheckedExpr::template(sql, Vec::new(), ty, origin)
+                }
+                crate::normalize::TemplateKind::Agg => {
+                    crate::checked::CheckedExpr::agg_template(sql, Vec::new(), ty, origin)
+                }
+                crate::normalize::TemplateKind::Win => return Ok(None),
+            }
+            .map(Some)
+            .map_err(|error| Error::unsupported(error.message).at(origin))
         }
-        ExprKind::Name(name) => {
-            let Some(sql) = plain_zero_arg_sql(name) else {
-                return Ok(None);
-            };
-            let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
-                return Ok(None);
-            };
-            crate::checked::CheckedExpr::template(sql, Vec::new(), ty, origin)
-                .map(Some)
-                .map_err(|error| Error::unsupported(error.message).at(origin))
-        }
-        ExprKind::App(head, args) => {
-            let ExprKind::Name(name) = &head.kind else {
-                return Ok(None);
-            };
-            if let Some(sql) = window_template_sql(name) {
-                let Some((spec_expr, values)) = args.split_first() else {
+        ExprKind::App(_head, args) => {
+            if let Some((sql, kind, arity)) = declared_template(input, module, expr) {
+                if args.len() != arity {
                     return Ok(None);
-                };
-                let Some(spec) = lower_plain_window_spec(input, module, spec_expr, row, 0)? else {
-                    return Ok(None);
-                };
-                let mut checked_args = Vec::with_capacity(values.len());
-                for value in values {
-                    let Some(value) = lower_plain_expr_with_row(input, module, value, row)? else {
+                }
+                if kind == crate::normalize::TemplateKind::Win {
+                    let Some((spec_expr, values)) = args.split_first() else {
                         return Ok(None);
                     };
-                    checked_args.push(value);
+                    let Some(spec) = lower_plain_window_spec(input, module, spec_expr, row, 0)?
+                    else {
+                        return Ok(None);
+                    };
+                    let mut checked_args = Vec::with_capacity(values.len());
+                    for value in values {
+                        let Some(value) = lower_plain_expr_with_row(input, module, value, row)?
+                        else {
+                            return Ok(None);
+                        };
+                        checked_args.push(value);
+                    }
+                    let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
+                        return Ok(None);
+                    };
+                    return crate::checked::CheckedExpr::win_template(
+                        sql,
+                        checked_args,
+                        spec,
+                        ty,
+                        origin,
+                    )
+                    .map(Some)
+                    .map_err(|error| Error::unsupported(error.message).at(origin));
+                }
+                let mut checked_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    let Some(arg) = lower_plain_expr_with_row(input, module, arg, row)? else {
+                        return Ok(None);
+                    };
+                    checked_args.push(arg);
                 }
                 let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
                     return Ok(None);
                 };
-                return crate::checked::CheckedExpr::win_template(
-                    sql,
-                    checked_args,
-                    spec,
-                    ty,
-                    origin,
-                )
+                return match kind {
+                    crate::normalize::TemplateKind::Scalar => {
+                        crate::checked::CheckedExpr::template(sql, checked_args, ty, origin)
+                    }
+                    crate::normalize::TemplateKind::Agg => {
+                        crate::checked::CheckedExpr::agg_template(sql, checked_args, ty, origin)
+                    }
+                    crate::normalize::TemplateKind::Win => unreachable!(),
+                }
                 .map(Some)
                 .map_err(|error| Error::unsupported(error.message).at(origin));
             }
-            if name == "group" {
-                if args.len() != 1 {
+            let Some((primitive, primitive_args)) = declared_primitive(input, module, expr) else {
+                return Ok(None);
+            };
+            if primitive == "__group" {
+                if primitive_args.len() != 1 {
                     return Ok(None);
                 }
-                let Some(key) = lower_plain_expr_with_row(input, module, &args[0], row)? else {
+                let Some(key) = lower_plain_expr_with_row(input, module, &primitive_args[0], row)?
+                else {
                     return Ok(None);
                 };
                 return crate::checked::CheckedExpr::group(key, origin)
                     .map(Some)
                     .map_err(|error| Error::unsupported(error.message).at(origin));
             }
-            let aggregate_sql = match name.as_str() {
-                "sum" => Some("SUM($1)"),
-                "avg" => Some("AVG($1)"),
-                "min" => Some("MIN($1)"),
-                "max" => Some("MAX($1)"),
-                "countOf" => Some("COUNT($1)"),
-                "countDistinct" => Some("COUNT(DISTINCT $1)"),
-                _ => None,
-            };
-            if let Some(sql) = aggregate_sql {
-                if args.len() != 1 {
+            if primitive == "__in" {
+                if primitive_args.len() != 2 {
                     return Ok(None);
                 }
-                let Some(arg) = lower_plain_expr_with_row(input, module, &args[0], row)? else {
+                let ExprKind::List(items) = &primitive_args[0].kind else {
                     return Ok(None);
                 };
-                let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
-                    return Ok(None);
-                };
-                return crate::checked::CheckedExpr::agg_template(sql, vec![arg], ty, origin)
-                    .map(Some)
-                    .map_err(|error| Error::unsupported(error.message).at(origin));
-            }
-            if matches!(name.as_str(), "in" | "inList") {
-                if args.len() != 2 {
-                    return Ok(None);
-                }
-                let ExprKind::List(items) = &args[0].kind else {
-                    return Ok(None);
-                };
-                let Some(value) = lower_plain_expr_with_row(input, module, &args[1], row)? else {
+                let Some(value) =
+                    lower_plain_expr_with_row(input, module, &primitive_args[1], row)?
+                else {
                     return Ok(None);
                 };
                 let mut list = Vec::with_capacity(items.len());
@@ -547,105 +558,88 @@ fn lower_plain_expr_with_row(
                     .map(Some)
                     .map_err(|error| Error::unsupported(error.message).at(origin));
             }
-            let dynamic = plain_dynamic_template(input, module, name, args);
-            let (sql, arity) = if let Some(dynamic) = dynamic {
-                dynamic
-            } else {
-                let (sql, arity) = match name.as_str() {
-                    "_==_" => ("$1 = $2", 2),
-                    "_!=_" => ("$1 <> $2", 2),
-                    "_<_" => ("$1 < $2", 2),
-                    "_<=_" => ("$1 <= $2", 2),
-                    "_>_" => ("$1 > $2", 2),
-                    "_>=_" => ("$1 >= $2", 2),
-                    "_&&_" => ("$1 AND $2", 2),
-                    "_||_" => ("$1 OR $2", 2),
-                    "_+_" => ("$1 + $2", 2),
-                    "_-_" => ("$1 - $2", 2),
-                    "_*_" => ("$1 * $2", 2),
-                    "_/_" => ("$1 / $2", 2),
-                    "_%_" => ("$1 % $2", 2),
-                    "_<>_" | "concat" => ("$1 || $2", 2),
-                    "not" => ("NOT $1", 1),
-                    "negate" => ("-$1", 1),
-                    "upper" => ("UPPER($1)", 1),
-                    "lower" => ("LOWER($1)", 1),
-                    "trim" => ("TRIM($1)", 1),
-                    "ltrim" => ("LTRIM($1)", 1),
-                    "rtrim" => ("RTRIM($1)", 1),
-                    "length" => ("CAGARA_LENGTH($1)", 1),
-                    "coalesce" => ("COALESCE($2, $1)", 2),
-                    "_??_" => ("COALESCE($1, $2)", 2),
-                    "just" => ("$1", 1),
-                    "eqMaybe" => (
-                        "COALESCE(($1 = $2) OR ($1 IS NULL AND $2 IS NULL), FALSE)",
-                        2,
-                    ),
-                    "ifThenElse" | "caseWhen" => ("CASE WHEN $1 THEN $2 ELSE $3 END", 3),
-                    "like" => ("$2 LIKE $1", 2),
-                    "ilike" => ("$2 ILIKE $1", 2),
-                    "substring" => ("SUBSTRING($3, $1, $2)", 3),
-                    "left" => ("CAGARA_LEFT($2, $1)", 2),
-                    "right" => ("CAGARA_RIGHT($2, $1)", 2),
-                    "replaceAll" => ("REPLACE($3, $1, $2)", 3),
-                    "strpos" => ("CAGARA_STRPOS($2, $1)", 2),
-                    "contains" => ("CAGARA_STRPOS($2, $1) > 0", 2),
-                    "startsWith" => ("CAGARA_LEFT($2, CAGARA_LENGTH($1)) = $1", 2),
-                    "endsWith" => ("CAGARA_RIGHT($2, CAGARA_LENGTH($1)) = $1", 2),
-                    "toString" => ("CAGARA_TO_STRING($1)", 1),
-                    "toInt" => ("CAST($1 AS INT)", 1),
-                    "toFloat" => ("CAST($1 AS FLOAT)", 1),
-                    "toBool" => ("CAST($1 AS BOOLEAN)", 1),
-                    "toDate" => ("CAGARA_TO_DATE($1)", 1),
-                    "toTimestamp" => ("CAGARA_TO_TIMESTAMP($1)", 1),
-                    "tryInt" => ("CAGARA_TRY_INT($1)", 1),
-                    "tryFloat" => ("CAGARA_TRY_FLOAT($1)", 1),
-                    "isNull" => ("$1 IS NULL", 1),
-                    "isNotNull" => ("$1 IS NOT NULL", 1),
-                    "isTrue" => ("COALESCE($1, FALSE)", 1),
-                    "nullIf" => ("NULLIF($1, $2)", 2),
-                    _ => return Ok(None),
-                };
-                (sql.to_string(), arity)
-            };
-            if args.len() != arity {
-                return Ok(None);
-            }
-            let mut checked_args = Vec::with_capacity(arity);
-            for arg in args.iter() {
-                let Some(arg) = lower_plain_expr_with_row(input, module, arg, row)? else {
-                    return Ok(None);
-                };
-                checked_args.push(arg);
-            }
-            let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
-                return Ok(None);
-            };
-            let sql = match (name.as_str(), &ty) {
-                ("_/_", crate::core::ScalarType::Int) => "CAGARA_IDIV($1, $2)".to_string(),
-                ("_%_", crate::core::ScalarType::Int) => "CAGARA_MOD($1, $2)".to_string(),
-                _ => sql,
-            };
-            crate::checked::CheckedExpr::template(sql, checked_args, ty, origin)
-                .map(Some)
-                .map_err(|error| Error::unsupported(error.message).at(origin))
+            Ok(None)
         }
         _ => Ok(None),
     }
 }
 
-fn window_template_sql(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "rowNumber" => "ROW_NUMBER()",
-        "rank" => "RANK()",
-        "denseRank" => "DENSE_RANK()",
-        "lag" => "LAG($1)",
-        "lead" => "LEAD($1)",
-        "sumOver" => "SUM($1)",
-        "avgOver" => "AVG($1)",
-        "countOver" => "COUNT(*)",
-        _ => return None,
-    })
+/// Resolve a SQL template from the selected definition. The declaration's
+/// body and declared result kind are authoritative, so editable prelude names
+/// and aliases do not need a Rust dispatch table.
+fn declared_template(
+    input: CompilerInput<'_>,
+    module: usize,
+    expr: &Expr,
+) -> Option<(String, crate::normalize::TemplateKind, usize)> {
+    let ((target_module, target_def), args) = helper_application(input.type_check(), module, expr)?;
+    let (sql, kind) = template_definition(input, target_module, target_def, 0)?;
+    Some((sql, kind, args.len()))
+}
+
+fn template_definition(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    depth: usize,
+) -> Option<(String, crate::normalize::TemplateKind)> {
+    if depth > 32 {
+        return None;
+    }
+    let declaration = input.module(module).def(def);
+    if let ExprKind::Sql(sql) = &declaration.body.kind {
+        return Some((
+            sql.clone(),
+            crate::normalize::declared_template_kind(declaration),
+        ));
+    }
+    let target = match &declaration.body.kind {
+        ExprKind::Name(_) | ExprKind::Proj(_, _) => {
+            input.type_check().resolution(module, declaration.body.id)
+        }
+        _ => None,
+    }?;
+    let Resolved::Def((target_module, target_def)) = target else {
+        return None;
+    };
+    template_definition(input, *target_module, *target_def, depth + 1)
+}
+
+/// Resolve a primitive declaration, following ordinary aliases. Primitive
+/// identity is metadata (`__group`, `__in`), not a prelude name.
+fn declared_primitive(
+    input: CompilerInput<'_>,
+    module: usize,
+    expr: &Expr,
+) -> Option<(String, Vec<Expr>)> {
+    let ((target_module, target_def), args) = helper_application(input.type_check(), module, expr)?;
+    let primitive = primitive_definition(input, target_module, target_def, 0)?;
+    Some((primitive, args))
+}
+
+fn primitive_definition(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    depth: usize,
+) -> Option<String> {
+    if depth > 32 {
+        return None;
+    }
+    let declaration = input.module(module).def(def);
+    if let ExprKind::Primitive(name) = &declaration.body.kind {
+        return Some(name.clone());
+    }
+    let target = match &declaration.body.kind {
+        ExprKind::Name(_) | ExprKind::Proj(_, _) => {
+            input.type_check().resolution(module, declaration.body.id)
+        }
+        _ => None,
+    }?;
+    let Resolved::Def((target_module, target_def)) = target else {
+        return None;
+    };
+    primitive_definition(input, *target_module, *target_def, depth + 1)
 }
 
 /// Build the plain window specification subset directly from source. Named
@@ -718,111 +712,6 @@ fn lower_plain_window_spec(
     crate::checked::window_spec(partition, order, None)
         .map(Some)
         .map_err(|error| Error::unsupported(error.message).at(Origin::new(module, expr.span)))
-}
-
-fn plain_dynamic_template(
-    input: CompilerInput<'_>,
-    module: usize,
-    name: &str,
-    args: &[Expr],
-) -> Option<(String, usize)> {
-    use crate::core::ScalarType;
-
-    let scalar = |expr: &Expr| {
-        input
-            .type_check()
-            .typed_node(module, expr.id)
-            .and_then(|node| node.ty())
-    };
-    let date_kind = |expr: &Expr| match scalar(expr) {
-        Some(ScalarType::Date) => Some("DATE"),
-        Some(ScalarType::Timestamp) => Some("TIMESTAMP"),
-        _ => None,
-    };
-    let unary_date = args.first().and_then(date_kind);
-    let binary_date = args.get(1).and_then(date_kind);
-    let sql = match name {
-        "toDecimal" if args.len() == 3 => "CAGARA_TO_DECIMAL($3, $1, $2)",
-        "tryDecimal" if args.len() == 3 => "CAGARA_TRY_DECIMAL($3, $1, $2)",
-        "daysBetween" if args.len() == 2 => "CAGARA_DAYS_BETWEEN($1, $2)",
-        "addDays" | "addWeeks" | "addMonths" | "addQuarters" | "addYears" if args.len() == 2 => {
-            let kind = binary_date?;
-            let unit = match name {
-                "addDays" | "addWeeks" => "DAY",
-                "addMonths" | "addQuarters" => "MONTH",
-                "addYears" => "YEAR",
-                _ => unreachable!(),
-            };
-            let offset = match name {
-                "addWeeks" => "$1 * 7",
-                "addQuarters" => "$1 * 3",
-                _ => "$1",
-            };
-            return Some((format!("CAGARA_ADD('{kind}', '{unit}', $2, {offset})"), 2));
-        }
-        "addHours" | "addMinutes" | "addSeconds" if args.len() == 2 => {
-            if binary_date? != "TIMESTAMP" {
-                return None;
-            }
-            let unit = match name {
-                "addHours" => "HOUR",
-                "addMinutes" => "MINUTE",
-                "addSeconds" => "SECOND",
-                _ => unreachable!(),
-            };
-            return Some((format!("CAGARA_ADD('TIMESTAMP', '{unit}', $2, $1)"), 2));
-        }
-        "truncYear" | "truncQuarter" | "truncMonth" | "truncWeek" | "truncDay" | "truncHour"
-        | "truncMinute"
-            if args.len() == 1 =>
-        {
-            let kind = unary_date?;
-            if matches!(name, "truncHour" | "truncMinute" | "truncDay") && kind != "TIMESTAMP" {
-                return None;
-            }
-            let unit = match name {
-                "truncYear" => "YEAR",
-                "truncQuarter" => "QUARTER",
-                "truncMonth" => "MONTH",
-                "truncWeek" => "WEEK",
-                "truncDay" => "DAY",
-                "truncHour" => "HOUR",
-                "truncMinute" => "MINUTE",
-                _ => unreachable!(),
-            };
-            return Some((format!("CAGARA_TRUNC('{kind}', '{unit}', $1)"), 1));
-        }
-        "year" | "quarter" | "month" | "day" | "dayOfWeek" | "dayOfYear" | "hour" | "minute"
-            if args.len() == 1 =>
-        {
-            let kind = unary_date?;
-            if matches!(name, "hour" | "minute") && kind != "TIMESTAMP" {
-                return None;
-            }
-            let part = match name {
-                "year" => "YEAR",
-                "quarter" => "QUARTER",
-                "month" => "MONTH",
-                "day" => "DAY",
-                "dayOfWeek" => "DOW",
-                "dayOfYear" => "DOY",
-                "hour" => "HOUR",
-                "minute" => "MINUTE",
-                _ => unreachable!(),
-            };
-            return Some((format!("CAGARA_PART('{kind}', '{part}', $1)"), 1));
-        }
-        _ => return None,
-    };
-    Some((sql.to_string(), args.len()))
-}
-
-fn plain_zero_arg_sql(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "currentDate" => "CURRENT_DATE",
-        "currentTimestamp" | "now" => "CAGARA_NOW()",
-        _ => return None,
-    })
 }
 
 /// Lower a direct order whose keys are plain columns with literal directions.
@@ -3279,7 +3168,8 @@ fn apply_plain_helper_pipeline(
     let mut helper_exprs = HashMap::new();
     index_exprs(helper_body, &mut helper_exprs);
     if helper_exprs.values().any(|expr| {
-        matches!(&expr.kind, ExprKind::App(head, _) if matches!(&head.kind, ExprKind::Name(name) if window_template_sql(name).is_some()))
+        matches!(&expr.kind, ExprKind::App(_, _) if declared_template(input, helper_module, expr)
+            .is_some_and(|(_, kind, _)| kind == crate::normalize::TemplateKind::Win))
     }) {
         return Ok(None);
     }
@@ -4382,6 +4272,22 @@ mod tests {
             checked.row().names(),
             &["month", "added", "truncated", "decimal"]
         );
+    }
+
+    #[test]
+    fn direct_plain_templates_follow_resolved_sql_definitions_and_aliases() {
+        let (typed, checked) = lower_source(
+            "shout : expr r string -> expr r string = sql \"UPPER($1)\"\n\
+             loud : expr r string -> expr r string = shout\n\
+             users : query { name = string } = table \"s\" \"users\"\n\
+             q = users & select { name = loud .name }\n",
+            "q",
+        );
+        let node = typed.node(typed.root());
+        let fields = node.projection_fields().expect("typed select has fields");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].1.kind(), crate::checked::ExprKind::Template);
+        assert_eq!(checked.row().names(), &["name"]);
     }
 
     #[test]

@@ -222,6 +222,14 @@ checked shapes align, the checked relation is rebuilt from the typed arena;
 the normalized route still supplies the comparison tree and expression
 payloads for this migration slice, and removing that route remains later work.
 
+Plain expression lowering now reads SQL templates and their declared phase from
+resolved definition metadata. Scalar, aggregate, and window templates use the
+selected `sql` body, aliases are followed through their definitions, and
+grouping and membership use resolved primitive identities. The typed path no
+longer maintains a Rust table of prelude names or SQL spellings, so changing or
+extending `prelude.cagara` does not require a Rust change. A focused test covers
+both a user-defined template and an alias to it.
+
 `TypedQuery` now has ordered multi-input edges for joins and set operations, and
 records each child's checked output row. Typed lowering constructs those nodes
 recursively, including both child subtrees, and carries checked join predicates

@@ -447,7 +447,7 @@ fn direct_plain_order_bypasses_normalized_elaboration() {
 #[test]
 fn direct_plain_where_bypasses_normalized_elaboration() {
     let ws = Workspace::from_source(
-        "users : query { id = int, age = int, name = string } = table \"public\" \"users\"\nq = users & where (.age > 18 && .name != \"guest\")\n",
+        "users : query { id = int, age = int, name = string } = table \"public\" \"users\"\nq = users & where (in [18, 21] .age && .name != \"guest\")\n",
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());

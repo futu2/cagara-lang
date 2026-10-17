@@ -443,6 +443,27 @@ fn lower_plain_where_expr(
             let ExprKind::Name(name) = &head.kind else {
                 return Ok(None);
             };
+            if matches!(name.as_str(), "in" | "inList") {
+                if args.len() != 2 {
+                    return Ok(None);
+                }
+                let ExprKind::List(items) = &args[0].kind else {
+                    return Ok(None);
+                };
+                let Some(value) = lower_plain_where_expr(input, module, &args[1])? else {
+                    return Ok(None);
+                };
+                let mut list = Vec::with_capacity(items.len());
+                for item in items {
+                    let Some(item) = lower_plain_where_expr(input, module, item)? else {
+                        return Ok(None);
+                    };
+                    list.push(item);
+                }
+                return crate::checked::CheckedExpr::in_(value, list, false, origin)
+                    .map(Some)
+                    .map_err(|error| Error::unsupported(error.message).at(origin));
+            }
             let (sql, arity) = match name.as_str() {
                 "_==_" => ("$1 = $2", 2),
                 "_!=_" => ("$1 <> $2", 2),

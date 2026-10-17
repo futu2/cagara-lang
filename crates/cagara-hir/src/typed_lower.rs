@@ -1312,6 +1312,10 @@ fn lower_keep_pipeline(
                 | QueryNodeKind::Limit
                 | QueryNodeKind::Offset
                 | QueryNodeKind::Distinct
+                | QueryNodeKind::Prefix
+                | QueryNodeKind::Suffix
+                | QueryNodeKind::Omit
+                | QueryNodeKind::MapValue
         )
     }) {
         return Ok(None);
@@ -1362,13 +1366,53 @@ fn lower_keep_expr(
         Some(crate::primitive::Prim::Limit) if stage_args.len() == 1 => QueryNodeKind::Limit,
         Some(crate::primitive::Prim::Offset) if stage_args.len() == 1 => QueryNodeKind::Offset,
         Some(crate::primitive::Prim::Distinct) if stage_args.is_empty() => QueryNodeKind::Distinct,
+        Some(crate::primitive::Prim::Prefix) if stage_args.len() == 1 => QueryNodeKind::Prefix,
+        Some(crate::primitive::Prim::Suffix) if stage_args.len() == 1 => QueryNodeKind::Suffix,
+        Some(crate::primitive::Prim::Omit) if stage_args.len() == 1 => QueryNodeKind::Omit,
+        Some(crate::primitive::Prim::MapValue) if stage_args.len() == 1 => QueryNodeKind::MapValue,
         _ => return Ok(None),
     };
     let origin = Origin::new(module, args[1].span);
-    let site = NodeRef::new(module, def, args[1].id);
-    let id = typed
-        .keep_row(site, kind, child, origin)
-        .map_err(query_error)?;
+    let (id, rewrite_label) = match kind {
+        QueryNodeKind::Prefix
+        | QueryNodeKind::Suffix
+        | QueryNodeKind::Omit
+        | QueryNodeKind::MapValue => {
+            let Some(record) = input
+                .type_check()
+                .row_stages(module, def)
+                .find(|record| record.site == args[1].id)
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            let (Some(input_row), Some(output_row), Some(label)) =
+                (record.input, record.output, record.label)
+            else {
+                return Ok(None);
+            };
+            let id = typed
+                .rewrite(
+                    record.node,
+                    kind,
+                    child,
+                    Some(Row::new(input_row)),
+                    Some(Row::new(output_row)),
+                    origin,
+                )
+                .map_err(query_error)?;
+            (id, Some(label))
+        }
+        _ => {
+            let site = NodeRef::new(module, def, args[1].id);
+            (
+                typed
+                    .keep_row(site, kind, child, origin)
+                    .map_err(query_error)?,
+                None,
+            )
+        }
+    };
     checked = match kind {
         QueryNodeKind::Limit => {
             let Some(ExprKind::Lit(Lit::Int(count))) = stage_args.first().map(|arg| &arg.kind)
@@ -1385,6 +1429,18 @@ fn lower_keep_expr(
             CheckedQuery::offset(checked, *count, origin)
         }
         QueryNodeKind::Distinct => CheckedQuery::distinct(checked, origin),
+        QueryNodeKind::Prefix => {
+            CheckedQuery::prefix(checked, rewrite_label.expect("rewrite label"), origin)
+        }
+        QueryNodeKind::Suffix => {
+            CheckedQuery::suffix(checked, rewrite_label.expect("rewrite label"), origin)
+        }
+        QueryNodeKind::Omit => {
+            CheckedQuery::omit(checked, rewrite_label.expect("rewrite label"), origin)
+        }
+        QueryNodeKind::MapValue => {
+            CheckedQuery::map_value(checked, rewrite_label.expect("rewrite label"), origin)
+        }
         _ => unreachable!(),
     }
     .map_err(|error| Error::unsupported(error.message).at(origin))?;

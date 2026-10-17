@@ -252,6 +252,9 @@ and distinct in one chain over an already typed query alias, and asserts that
 the definition never enters normalized elaboration. The alias's original
 typed stage chain and identities are copied into the consumer before its new
 stages are appended.
+Expression-bearing stages can now follow that same alias path: the copied
+typed graph supplies the relational child and rows, while the existing
+normalized bridge supplies only predicates, projections, and sort payloads.
 The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be

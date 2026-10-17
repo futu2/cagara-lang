@@ -914,7 +914,16 @@ fn copy_typed_graph(source: &TypedQuery, target: &mut TypedQuery) -> Result<Node
                     )
                     .ok_or_else(|| Error::unsupported("typed stage child was not copied"))?;
                 target
-                    .keep_row(node.site(), node.kind(), child, node.origin())
+                    .keep_row_with_payload(
+                        node.site(),
+                        node.kind(),
+                        child,
+                        node.origin(),
+                        node.predicate().cloned(),
+                        node.order_keys().map(<[_]>::to_vec),
+                        None,
+                        None,
+                    )
                     .map_err(query_error)?
             }
         };
@@ -995,37 +1004,61 @@ fn lower_expression_pipeline(
     let Some(base) = find_base(body, &stage_sites, tc, module) else {
         return Ok(None);
     };
-    let Some((schema, table, columns)) = table_parts(input, module, base) else {
+    let mut typed = TypedQuery::new();
+    let (mut child, mut checked) = if let Some((schema, table, columns)) =
+        table_parts(input, module, base)
+    {
+        let base_origin = table_origin(input, module, base);
+        let checked = CheckedQuery::table(
+            schema,
+            table,
+            Some(RowType::new(columns.clone())),
+            base_origin,
+        )
+        .map_err(|error| Error::unsupported(error.message).at(base_origin))?;
+        let child = typed
+            .table(NodeRef::new(module, def, base.id), base_origin, columns)
+            .map_err(query_error)?;
+        (child, checked)
+    } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
+        if (target_module, target_def) == (module, def)
+            || !matches!(
+                tc.scheme_view(target_module, target_def),
+                Some(crate::check::SchemeView::Query { .. })
+            )
+        {
+            return Ok(None);
+        }
+        let target_body = &input.module(target_module).def(target_def).body;
+        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
+        else {
+            return Ok(None);
+        };
+        let child = copy_typed_graph(&target_typed, &mut typed)?;
+        (child, checked)
+    } else {
         return Ok(None);
     };
     let terms = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
-    let base_origin = table_origin(input, module, base);
-    let mut checked = CheckedQuery::table(
-        schema,
-        table,
-        Some(RowType::new(columns.clone())),
-        base_origin,
-    )
-    .map_err(|error| Error::unsupported(error.message).at(base_origin))?;
-    let mut typed = TypedQuery::new();
-    let mut child = typed
-        .table(NodeRef::new(module, def, base.id), base_origin, columns)
-        .map_err(query_error)?;
+    let base_node_count = checked.node_chain().len();
     let mut syntax = HashMap::new();
     index_exprs(body, &mut syntax);
     let mut where_payloads = terms
         .node_chain_predicates()
         .into_iter()
+        .skip(base_node_count)
         .filter(|(kind, _)| *kind == crate::checked::QueryKind::Where)
         .map(|(_, predicate)| predicate);
     let mut order_payloads = terms
         .node_chain_order_keys()
         .into_iter()
+        .skip(base_node_count)
         .filter(|(kind, _)| *kind == crate::checked::QueryKind::Order)
         .map(|(_, keys)| keys);
     let mut projection_payloads = terms
         .node_chain_projection_fields()
         .into_iter()
+        .skip(base_node_count)
         .filter(|(kind, _)| {
             matches!(
                 kind,
@@ -1038,6 +1071,7 @@ fn lower_expression_pipeline(
     let mut checked_origins = terms
         .node_chain()
         .into_iter()
+        .skip(base_node_count)
         .filter(|(kind, _, _)| *kind != crate::checked::QueryKind::Table)
         .map(|(_, origin, _)| origin);
 
@@ -1236,6 +1270,14 @@ fn lower_expression_pipeline(
 fn is_direct_pipeline(input: CompilerInput<'_>, module: usize, expr: &Expr) -> bool {
     if table_parts(input, module, expr).is_some() {
         return true;
+    }
+    if let Some((target_module, target_def)) = query_target(input.type_check(), module, expr) {
+        if matches!(
+            input.type_check().scheme_view(target_module, target_def),
+            Some(crate::check::SchemeView::Query { .. })
+        ) {
+            return true;
+        }
     }
     let ExprKind::App(head, args) = &expr.kind else {
         return false;
@@ -2279,6 +2321,37 @@ fn relations_match(left: &crate::ir::Rel, right: &crate::ir::Rel) -> bool {
             ln == rn && relations_match(li, ri)
         }
         (Rel::Distinct(li), Rel::Distinct(ri)) => relations_match(li, ri),
+        (Rel::Where(li, lp), Rel::Where(ri, rp)) => lp == rp && relations_match(li, ri),
+        (Rel::Select(li, lp), Rel::Select(ri, rp))
+        | (Rel::Update(li, lp), Rel::Update(ri, rp))
+        | (Rel::Agg(li, lp), Rel::Agg(ri, rp)) => lp == rp && relations_match(li, ri),
+        (Rel::Order(li, lp), Rel::Order(ri, rp)) => lp == rp && relations_match(li, ri),
+        (
+            Rel::Join {
+                kind: lk,
+                left: ll,
+                right: lr,
+                on: lo,
+            },
+            Rel::Join {
+                kind: rk,
+                left: rl,
+                right: rr,
+                on: ro,
+            },
+        ) => lk == rk && lo == ro && relations_match(ll, rl) && relations_match(lr, rr),
+        (
+            Rel::Set {
+                kind: lk,
+                left: ll,
+                right: lr,
+            },
+            Rel::Set {
+                kind: rk,
+                left: rl,
+                right: rr,
+            },
+        ) => lk == rk && relations_match(ll, rl) && relations_match(lr, rr),
         _ => left == right,
     }
 }
@@ -2906,6 +2979,24 @@ mod tests {
             "q",
         );
         assert_eq!(typed.root_kind(), QueryNodeKind::Prefix);
+        assert_eq!(checked.row().names(), &["u_id"]);
+    }
+
+    #[test]
+    fn expression_pipeline_can_follow_a_typed_query_alias() {
+        let (typed, checked) = lower_source(
+            "users : query { id = int, age = int } = table \"s\" \"users\"\n\
+             renamed = users & prefix \"u_\"\n\
+             q = renamed & where (.u_age > 18) & select { .u_id }\n",
+            "q",
+        );
+        assert_eq!(typed.root_kind(), QueryNodeKind::Select);
+        assert!(typed
+            .nodes()
+            .any(|node| node.kind() == QueryNodeKind::Prefix));
+        assert!(typed
+            .nodes()
+            .any(|node| node.kind() == QueryNodeKind::Where));
         assert_eq!(checked.row().names(), &["u_id"]);
     }
 

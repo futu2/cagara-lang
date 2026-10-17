@@ -131,7 +131,7 @@ correctness, not as an optimization.
   and the definition-keyed stage list are all gone; the tree carries the type,
   row, choices, resolution, printed form, and stage of every expression, plus
   `holes` on the body.
-  The seam is one trait: `normalize::Facts` has seven methods (`use_ty`,
+  The seam is one trait: `normalize::Facts` has eight methods (`use_ty`,
   `use_row`, `def_result_ty`, `def_body`, `def_template`, `resolution`,
   `choice`, `holes_at`) and everything downstream reads facts through it, which
   is why each map could be deleted once its last reader read the tree instead.

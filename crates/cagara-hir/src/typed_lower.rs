@@ -830,6 +830,54 @@ fn expr_refs_definition(
         .any(|child| expr_refs_definition(input, module, child, target_module, target_def, seen))
 }
 
+/// Whether expanding `start` can reach `target` through resolved definition
+/// references.  This follows the same checker resolutions as lowering, so a
+/// mutual helper cycle is diagnosed before the capability path gives up.
+fn definition_reaches(
+    input: CompilerInput<'_>,
+    start_module: usize,
+    start_def: usize,
+    target_module: usize,
+    target_def: usize,
+    seen: &mut HashSet<(usize, usize)>,
+) -> bool {
+    if !seen.insert((start_module, start_def)) {
+        return false;
+    }
+    let body = &input.module(start_module).def(start_def).body;
+    fn visit(
+        input: CompilerInput<'_>,
+        module: usize,
+        expr: &Expr,
+        target_module: usize,
+        target_def: usize,
+        seen: &mut HashSet<(usize, usize)>,
+    ) -> bool {
+        if matches!(&expr.kind, ExprKind::Name(_) | ExprKind::Proj(_, _)) {
+            if let Some(Resolved::Def((next_module, next_def))) =
+                input.type_check().resolution(module, expr.id)
+            {
+                if (*next_module, *next_def) == (target_module, target_def)
+                    || definition_reaches(
+                        input,
+                        *next_module,
+                        *next_def,
+                        target_module,
+                        target_def,
+                        seen,
+                    )
+                {
+                    return true;
+                }
+            }
+        }
+        crate::check::child_exprs(expr)
+            .into_iter()
+            .any(|child| visit(input, module, child, target_module, target_def, seen))
+    }
+    visit(input, start_module, body, target_module, target_def, seen)
+}
+
 fn lower_plain_definition<'a>(
     input: CompilerInput<'a>,
     module: usize,
@@ -860,9 +908,12 @@ fn lower_plain_definition<'a>(
             }))
         }
         ExprKind::Lambda(parameter, body) => {
-            if expr_refs_definition(input, module, body, module, def, &mut HashSet::new()) {
-                return Err(Error::unsupported("definition refers to itself")
-                    .at(Origin::new(module, declaration.body.span)));
+            if definition_reaches(input, module, def, module, def, &mut HashSet::new()) {
+                return Err(Error::new(format!(
+                    "`{}` refers to itself; recursion is not supported",
+                    declaration.name
+                ))
+                .at(Origin::new(module, declaration.body.span)));
             }
             Ok(Some(PlainValue::Function {
                 params: vec![parameter.clone()],
@@ -2677,6 +2728,10 @@ fn lower_plain_composed_expr(
             .table(NodeRef::new(module, def, expr.id), origin, columns)
             .map_err(query_error)?;
         return Ok(Some((id, checked)));
+    }
+    if let Some((schema, table)) = raw_table_call(input, module, expr) {
+        let origin = table_origin(input, module, expr);
+        return Err(Error::new(crate::schema::unknown_table_columns(&schema, &table)).at(origin));
     }
     if let Some((target_module, target_def)) = query_target(input.type_check(), module, expr) {
         if (target_module, target_def) == (module, def) {
@@ -5350,6 +5405,7 @@ fn join_operator_kind(expr: &Expr) -> Option<crate::ir::JoinKind> {
         "_?_" => Some(crate::ir::JoinKind::Inner),
         "_<?_" => Some(crate::ir::JoinKind::Left),
         "_?>_" => Some(crate::ir::JoinKind::Right),
+        "_<?>_" => Some(crate::ir::JoinKind::Full),
         "_<??>_" => Some(crate::ir::JoinKind::Full),
         _ => None,
     }
@@ -5553,6 +5609,23 @@ fn table_parts(
     }
 
     visit(input, module, expr, &mut HashSet::new())
+}
+
+/// Read a table call even when the checker could not close its row.  The
+/// resulting diagnostic is a program error at the table expression, rather
+/// than a typed-lowering capability gap.
+fn raw_table_call(
+    input: CompilerInput<'_>,
+    module: usize,
+    expr: &Expr,
+) -> Option<(String, String)> {
+    let ExprKind::App(head, args) = &expr.kind else {
+        return None;
+    };
+    if args.len() != 2 || !is_table_head(input, module, head) {
+        return None;
+    }
+    Some((string_literal(&args[0])?, string_literal(&args[1])?))
 }
 
 fn is_table_head(input: CompilerInput<'_>, module: usize, head: &Expr) -> bool {

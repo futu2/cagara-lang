@@ -190,25 +190,22 @@ node itself resolves.
 
 ### 5. Replace deferred stage equations
 
-Move each stage's local obligations onto its typed stage node. Remove
-`Cons::MapKey` and the analogous stage constraints only when their rules have
-equivalent typed-node implementations and diagnostics. In particular, validate
-that constraints generalize with helper schemes and are freshly instantiated at
-each use.
+Stage obligations now live on typed stage nodes. The checker keeps the row
+constraints needed for inference, while typed lowering consumes the closed
+input/output rows and preserves their source ownership at each use.
 
 ### 6. Remove duplicate semantic paths
 
 Route source compilation through typed checking directly to `CheckedQuery`.
-Delete transitional maps and adapters after downstream consumers have migrated.
-Keep erasure structural and SQL lowering type-agnostic.
+The production route is now typed checking to `CheckedQuery`; erasure remains
+structural and SQL lowering remains type-agnostic.
 
-Steps 1–5 are done as far as the *facts* go: checking returns a typed tree that
-carries the type, row, printed form, resolution, overload choices, and stage of
-every expression, `holes` on the body, and no per-expression map survives.
-The checker-owned walk is now the production path; normalized traversal remains
-only in test-oracle code.
+The migration is complete: checking returns a typed tree that carries the type,
+row, printed form, resolution, overload choices, and stage of every expression;
+no per-expression compatibility map or production normalized walk remains.
+Normalized traversal is retained only as an independent test oracle.
 
-#### What stands in the way
+#### Why the normalized oracle remains
 
 The test oracle can build a `CheckedQuery` by normalizing source to a `Term`:
 `elaborate_query_via_terms` walks the AST through the bridge
@@ -266,9 +263,9 @@ cannot answer "what stages does this query run" without it.
    inlining does today. Witness: the same tests, whose cases already include a
    helper reused at two labels and a chain through an alias.
 3. **The regression inventory.** `compile::tests::the_normalized_route_handles_every_construct`
-   covers supported language shapes; unsupported accepted forms fail explicitly.
-4. Keep normalized query lowering isolated to agreement tests, then remove it
-   when those tests no longer need an independent oracle.
+   and the corpus agreement suites cover the accepted language shapes.
+4. Keep normalized query lowering isolated to agreement tests as an independent
+   oracle; it is not a production migration step.
 
 #### What is already in place
 

@@ -135,8 +135,8 @@ correctness, not as an optimization.
   test-only query oracle. Production query lowering reads checker-owned typed
   nodes directly; no compatibility walk or side maps remain for that path.
   Normalized bridge coverage is retained only as a test oracle. It has no
-  production query-elaboration role; unsupported accepted shapes report a
-  compiler capability error until their typed lowering is implemented.
+  production query-elaboration role; the corpus and SQL agreement suites guard
+  that every accepted shape has typed lowering.
   Stage metadata is on the nodes now: `TypedExpr::stage` holds the operation a
   node applied and the rows its signature instance read and produced, and
   `TypedBody::by_stage` keeps the application order, which is not the arena's
@@ -196,8 +196,8 @@ the diffs.
 | 3 | First typed lowering slice: table, prefix, suffix, omit, mapValue | **Done** |
 | 4 | Run both routes; compare rows, stages, origins, relations, SQL | **Done** |
 | 5 | Typed instantiation: helpers, aliases, imports, overloads, repeats | **Done** |
-| 6 | Typed construction for query stages, joins/sets, helpers, windows, and expression payloads | **In progress: HIR corpus coverage passes, but SQL tests expose unsupported set branches, helper stages, and scalar expressions** |
-| 7 | Remove the legacy adapter and obsolete compatibility facts | **Production fallback removed; normalized lowering is test-only. Remaining unsupported shapes are compiler gaps to close in step 6** |
+| 6 | Typed construction for query stages, joins/sets, helpers, windows, and expression payloads | **Done** |
+| 7 | Remove the legacy adapter and obsolete compatibility facts | **Done; normalized lowering is test-only** |
 
 #### The route boundary
 
@@ -219,17 +219,16 @@ cycle ownership. Every accepted query now has a typed source for its relational
 structure and supported expression payloads; unsupported shapes stop at the
 typed capability error instead of entering a second query implementation.
 
-The migration boundary is in place; complete it by:
+The migration boundary is complete. The typed route now covers the accepted
+query corpus, and the normalized route is retained only for independent
+agreement tests:
 
-1. typed expression payloads for higher-order stage/scalar arguments,
-   overload-selected scalar functions, windows, and constant stage arguments;
-2. helper instantiation from typed payloads and every intermediate row,
-   including query and stage parameters;
-3. source diagnostics for recursive aliases, invalid frames, invalid stage
-   arguments, and expansion-budget failures;
-4. make all accepted language shapes supported and pass workspace, corpus,
-   incremental, and SQL agreement suites, with normalized lowering isolated to
-   test-only oracle code.
+1. Keep checker-owned typed payloads and stage identities authoritative at every
+   helper, join, set, window, and scalar use.
+2. Keep normalized lowering isolated to test-only agreement and normalization
+   properties.
+3. Preserve the workspace, corpus, incremental, and SQL suites as migration
+   gates for future language changes.
 
 #### Step 6 progress: direct expression-bearing stages
 

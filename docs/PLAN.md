@@ -266,6 +266,11 @@ expressions continue through the payload bridge.
 Direct `order` stages whose keys are plain columns with literal `asc` or
 `desc` directions use the same typed path, retaining their checked sort keys
 without entering normalized elaboration.
+Direct `select` and `update` fields can also build the prelude's window
+functions directly when their named window spec contains plain partition and
+order keys. The checked window template is attached to the typed projection;
+specifications with frames and unsupported window expressions still use the
+normalized payload bridge.
 Direct joins whose predicates fit the plain expression subset now construct
 their checked predicate from checker-typed side-qualified fields, literals,
 comparisons, membership, and boolean operators. The typed join and checked

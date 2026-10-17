@@ -454,6 +454,33 @@ fn lower_plain_expr_with_row(
             let ExprKind::Name(name) = &head.kind else {
                 return Ok(None);
             };
+            if let Some(sql) = window_template_sql(name) {
+                let Some((spec_expr, values)) = args.split_first() else {
+                    return Ok(None);
+                };
+                let Some(spec) = lower_plain_window_spec(input, module, spec_expr, row, 0)? else {
+                    return Ok(None);
+                };
+                let mut checked_args = Vec::with_capacity(values.len());
+                for value in values {
+                    let Some(value) = lower_plain_expr_with_row(input, module, value, row)? else {
+                        return Ok(None);
+                    };
+                    checked_args.push(value);
+                }
+                let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
+                    return Ok(None);
+                };
+                return crate::checked::CheckedExpr::win_template(
+                    sql,
+                    checked_args,
+                    spec,
+                    ty,
+                    origin,
+                )
+                .map(Some)
+                .map_err(|error| Error::unsupported(error.message).at(origin));
+            }
             if name == "group" {
                 if args.len() != 1 {
                     return Ok(None);
@@ -559,6 +586,92 @@ fn lower_plain_expr_with_row(
         }
         _ => Ok(None),
     }
+}
+
+fn window_template_sql(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "rowNumber" => "ROW_NUMBER()",
+        "rank" => "RANK()",
+        "denseRank" => "DENSE_RANK()",
+        "lag" => "LAG($1)",
+        "lead" => "LEAD($1)",
+        "sumOver" => "SUM($1)",
+        "avgOver" => "AVG($1)",
+        "countOver" => "COUNT(*)",
+        _ => return None,
+    })
+}
+
+/// Build the plain window specification subset directly from source. Named
+/// specs are followed through their resolved definition; frames remain on the
+/// normalized bridge until their bounds can be built from checker facts.
+fn lower_plain_window_spec(
+    input: CompilerInput<'_>,
+    module: usize,
+    expr: &Expr,
+    row: Option<&RowType>,
+    depth: usize,
+) -> Result<Option<crate::checked::WinSpecChecked>, Error> {
+    if depth > 32 {
+        return Ok(None);
+    }
+    if let ExprKind::Name(_) | ExprKind::Proj(_, _) = expr.kind {
+        if let Some(Resolved::Def((target_module, target_def))) =
+            input.type_check().resolution(module, expr.id)
+        {
+            let target = &input.module(*target_module).def(*target_def).body;
+            if !matches!(target.kind, ExprKind::Name(_) | ExprKind::Proj(_, _)) {
+                return lower_plain_window_spec(input, *target_module, target, row, depth + 1);
+            }
+        }
+        return Ok(None);
+    }
+    let ExprKind::Record(fields) = &expr.kind else {
+        return Ok(None);
+    };
+    let mut partition = Vec::new();
+    let mut order = Vec::new();
+    for (key, value) in fields {
+        match key.as_str() {
+            "partition" => {
+                let ExprKind::List(items) = &value.kind else {
+                    return Ok(None);
+                };
+                for item in items {
+                    let Some(item) = lower_plain_expr_with_row(input, module, item, row)? else {
+                        return Ok(None);
+                    };
+                    partition.push(item);
+                }
+            }
+            "order" => {
+                let ExprKind::List(items) = &value.kind else {
+                    return Ok(None);
+                };
+                for item in items {
+                    let (value, ascending) = match &item.kind {
+                        ExprKind::App(head, args) if args.len() == 1 => match &head.kind {
+                            ExprKind::Name(name) if name == "asc" => (&args[0], true),
+                            ExprKind::Name(name) if name == "desc" => (&args[0], false),
+                            _ => return Ok(None),
+                        },
+                        _ => (item, true),
+                    };
+                    let Some(value) = lower_plain_expr_with_row(input, module, value, row)? else {
+                        return Ok(None);
+                    };
+                    order.push((value, ascending));
+                }
+            }
+            // The frame grammar has source-level constructors whose primitive
+            // identities are not represented in the typed expression tree yet.
+            "frame" => return Ok(None),
+            _ => return Ok(None),
+        }
+    }
+    crate::checked::window_spec(partition, order, None)
+        .map(Some)
+        .map_err(|error| Error::unsupported(error.message).at(Origin::new(module, expr.span)))
 }
 
 /// Lower a direct order whose keys are plain columns with literal directions.
@@ -3009,6 +3122,16 @@ fn apply_plain_helper_pipeline(
         return Ok(None);
     }
     let helper_body = &input.module(helper_module).def(helper_def).body;
+    // Helper expressions are checked once at their generic definition. Window
+    // templates need the instantiated call-site type, so keep them on the
+    // checked payload bridge until helper expression instantiation is typed.
+    let mut helper_exprs = HashMap::new();
+    index_exprs(helper_body, &mut helper_exprs);
+    if helper_exprs.values().any(|expr| {
+        matches!(&expr.kind, ExprKind::App(head, _) if matches!(&head.kind, ExprKind::Name(name) if window_template_sql(name).is_some()))
+    }) {
+        return Ok(None);
+    }
     let mut syntax = HashMap::new();
     index_exprs(helper_body, &mut syntax);
     let params = lambda_params(helper_body);
@@ -4052,8 +4175,9 @@ mod tests {
     #[test]
     fn direct_plain_select_bypasses_normalized_elaboration() {
         let ws = Workspace::from_source(
-            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             q = users & select { id = .id, name = .name }\n",
+            "spec = { order = [asc .id] }\n\
+             users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             q = users & select { id = .id, name = .name, rn = rowNumber spec }\n",
         );
         let tc = check::check(&ws);
         assert!(tc.errors().is_empty(), "{:?}", tc.errors());
@@ -4077,6 +4201,10 @@ mod tests {
             crate::normalize::visited_nodes().is_empty(),
             "simple select unexpectedly entered normalized elaboration"
         );
+        let node = result.0.node(result.0.root());
+        let fields = node.projection_fields().expect("typed select has fields");
+        assert_eq!(fields[2].0, "rn");
+        assert_eq!(fields[2].1.kind(), crate::checked::ExprKind::WinTemplate);
     }
 
     #[test]

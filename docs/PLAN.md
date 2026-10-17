@@ -274,6 +274,10 @@ normalized payload bridge.
 The plain expression subset also includes the prelude's typed conditional
 (`ifThenElse` and its `caseWhen` alias), which is emitted as a checked searched
 `CASE` template in direct stage payloads.
+It now covers common string matching and slicing operations, null checks,
+`toString`, explicit scalar/date casts, and the current date/time expressions;
+the checker supplies each selected expression's result type while the typed
+lowerer supplies its declared SQL template.
 Direct joins whose predicates fit the plain expression subset now construct
 their checked predicate from checker-typed side-qualified fields, literals,
 comparisons, membership, and boolean operators. The typed join and checked

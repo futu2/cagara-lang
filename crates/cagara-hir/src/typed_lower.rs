@@ -450,6 +450,17 @@ fn lower_plain_expr_with_row(
                 .map(Some)
                 .map_err(|error| Error::unsupported(error.message).at(origin))
         }
+        ExprKind::Name(name) => {
+            let Some(sql) = plain_zero_arg_sql(name) else {
+                return Ok(None);
+            };
+            let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
+                return Ok(None);
+            };
+            crate::checked::CheckedExpr::template(sql, Vec::new(), ty, origin)
+                .map(Some)
+                .map_err(|error| Error::unsupported(error.message).at(origin))
+        }
         ExprKind::App(head, args) => {
             let ExprKind::Name(name) = &head.kind else {
                 return Ok(None);
@@ -561,6 +572,28 @@ fn lower_plain_expr_with_row(
                 "length" => ("CAGARA_LENGTH($1)", 1),
                 "coalesce" => ("COALESCE($2, $1)", 2),
                 "ifThenElse" | "caseWhen" => ("CASE WHEN $1 THEN $2 ELSE $3 END", 3),
+                "like" => ("$2 LIKE $1", 2),
+                "ilike" => ("$2 ILIKE $1", 2),
+                "substring" => ("SUBSTRING($3, $1, $2)", 3),
+                "left" => ("CAGARA_LEFT($2, $1)", 2),
+                "right" => ("CAGARA_RIGHT($2, $1)", 2),
+                "replaceAll" => ("REPLACE($3, $1, $2)", 3),
+                "strpos" => ("CAGARA_STRPOS($2, $1)", 2),
+                "contains" => ("CAGARA_STRPOS($2, $1) > 0", 2),
+                "startsWith" => ("CAGARA_LEFT($2, CAGARA_LENGTH($1)) = $1", 2),
+                "endsWith" => ("CAGARA_RIGHT($2, CAGARA_LENGTH($1)) = $1", 2),
+                "toString" => ("CAGARA_TO_STRING($1)", 1),
+                "toInt" => ("CAST($1 AS INT)", 1),
+                "toFloat" => ("CAST($1 AS FLOAT)", 1),
+                "toBool" => ("CAST($1 AS BOOLEAN)", 1),
+                "toDate" => ("CAGARA_TO_DATE($1)", 1),
+                "toTimestamp" => ("CAGARA_TO_TIMESTAMP($1)", 1),
+                "tryInt" => ("CAGARA_TRY_INT($1)", 1),
+                "tryFloat" => ("CAGARA_TRY_FLOAT($1)", 1),
+                "isNull" => ("$1 IS NULL", 1),
+                "isNotNull" => ("$1 IS NOT NULL", 1),
+                "isTrue" => ("COALESCE($1, FALSE)", 1),
+                "nullIf" => ("NULLIF($1, $2)", 2),
                 _ => return Ok(None),
             };
             if args.len() != arity {
@@ -673,6 +706,14 @@ fn lower_plain_window_spec(
     crate::checked::window_spec(partition, order, None)
         .map(Some)
         .map_err(|error| Error::unsupported(error.message).at(Origin::new(module, expr.span)))
+}
+
+fn plain_zero_arg_sql(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "currentDate" => "CURRENT_DATE",
+        "currentTimestamp" | "now" => "CAGARA_NOW()",
+        _ => return None,
+    })
 }
 
 /// Lower a direct order whose keys are plain columns with literal directions.
@@ -4178,7 +4219,7 @@ mod tests {
         let ws = Workspace::from_source(
             "spec = { order = [asc .id] }\n\
              users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             q = users & select { id = .id, name = .name, label = ifThenElse (.id > 0) .name \"unknown\", rn = rowNumber spec }\n",
+             q = users & select { id = .id, name = .name, label = ifThenElse (.id > 0) .name \"unknown\", id_text = toString .id, has_u = contains \"u\" .name, rn = rowNumber spec }\n",
         );
         let tc = check::check(&ws);
         assert!(tc.errors().is_empty(), "{:?}", tc.errors());
@@ -4206,8 +4247,12 @@ mod tests {
         let fields = node.projection_fields().expect("typed select has fields");
         assert_eq!(fields[2].0, "label");
         assert_eq!(fields[2].1.kind(), crate::checked::ExprKind::Template);
-        assert_eq!(fields[3].0, "rn");
-        assert_eq!(fields[3].1.kind(), crate::checked::ExprKind::WinTemplate);
+        assert_eq!(fields[3].0, "id_text");
+        assert_eq!(fields[3].1.kind(), crate::checked::ExprKind::Template);
+        assert_eq!(fields[4].0, "has_u");
+        assert_eq!(fields[4].1.kind(), crate::checked::ExprKind::Template);
+        assert_eq!(fields[5].0, "rn");
+        assert_eq!(fields[5].1.kind(), crate::checked::ExprKind::WinTemplate);
     }
 
     #[test]

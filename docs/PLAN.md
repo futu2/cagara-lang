@@ -288,10 +288,10 @@ child and hydrated payloads, falling back to the normalized shape only when a
 wrapper was absorbed from the stage record.
 Helper application now instantiates recorded `where`, `order`, `limit`,
 `offset`, `select`, `update`, and `agg` stages into typed nodes. Predicate,
-sort-key, and projection payloads are copied onto those nodes, and their
-checked stages are constructed directly. The normalized query remains the
-source of instantiated helper payloads and intermediate projection rows;
-helper-expanded checked output still retains normalized call-site origins.
+sort-key, projection, and window payloads are built from checker facts at the
+helper use site, and their checked stages are constructed directly. Unsupported
+helper payloads decline to the route coordinator instead of normalizing a
+second query inside typed lowering.
 Projection and aggregate helpers can also mix those stages with prefix,
 suffix, omit, and map-value rewrites. Their instantiated checked rows provide
 the intermediate boundaries needed to connect rewrites around projections.
@@ -359,8 +359,8 @@ when each expression payload fits the plain subset. Plain aggregate expressions
 include grouping keys, count, sum, average, min/max, and count-of expressions.
 Each stage reads the row recorded by the checker, so expressions after
 projections, updates, and aggregation resolve against their actual intermediate
-schema. Unsupported payloads still leave the whole attempted chain for the
-normalized fallback.
+schema. Unsupported payloads leave the whole attempted chain for the explicit
+legacy route at `query_lowering.rs`.
 Helpers with chains of `where`, `order`, `select`, and `update` stages now use
 that plain expression builder at each recorded stage identity. The caller's
 typed row is threaded through every stage, supplying field types and each
@@ -368,7 +368,7 @@ projection boundary, so a reusable helper can mix those stages with `prefix`,
 `suffix`, `omit`, `mapValue`, `limit`, `offset`, and `distinct` while staying
 outside normalized elaboration. The plain path is transactional: if one stage
 uses an unsupported expression, the partially built typed arena is discarded
-before the normalized fallback runs.
+before the route coordinator handles the definition.
 Helper order stages accept computed keys from the same resolved template
 subset as direct orders; a regression covers a nullable column fallback inside
 a reusable sorting helper.
@@ -382,15 +382,13 @@ Projection helpers carry the same window payload through their instantiated
 typed projection node, preserving the helper's stage identity and checked
 output row. Plain window templates and specs are now built at the helper
 definition through resolved template, direction, and frame metadata; the helper
-does not need normalized expression payloads for these cases when its input row
-is closed by an explicit query signature. Polymorphic helper windows remain on
-the payload bridge until call-site expression instantiation is available.
+does not need normalized expression payloads for these cases, including when
+its input row is instantiated at a polymorphic call site.
 The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be
 used as either combine operand. Window expressions are retained in typed
-projection payloads; the normalized bridge remains their payload source during
-this migration slice.
+projection payloads throughout the recursive typed path.
 
 The checker records join and set applications on the typed expression node,
 including piped forms where the primitive is partially applied first. Each

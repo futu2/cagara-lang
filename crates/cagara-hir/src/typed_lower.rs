@@ -1967,27 +1967,19 @@ fn lower_composed_helper(
         .typed_node(module, expr.id)
         .and_then(|node| node.row())
         .map(Row::new);
-    let instantiated_rows = if projections > 0 {
-        helper_stage_rows(input, module, def, expr, &helper_stages)
-    } else {
-        None
-    };
-    if projections > 0 && helper_output.is_none() && instantiated_rows.is_none() {
+    // A single projection can use the instantiated call-site output row. More
+    // than one projection needs intermediate rows that this typed skeleton
+    // does not yet expose, so decline and let the route coordinator select the
+    // transitional adapter.
+    if projections > 1 || (projections > 0 && helper_output.is_none()) {
         return Ok(None);
     }
-    if projections > 1 && instantiated_rows.is_none() {
-        return Ok(None);
-    }
-    for (index, stage) in helper_stages.into_iter().enumerate() {
+    for stage in helper_stages {
         let origin = Origin::new(
             helper_module,
             syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
         );
-        let projected_row = instantiated_rows
-            .as_ref()
-            .and_then(|rows| rows.get(index))
-            .cloned()
-            .or_else(|| helper_output.clone());
+        let projected_row = helper_output.clone();
         let id = match stage.kind {
             RowStage::Select | RowStage::Update | RowStage::Agg => target
                 .project(
@@ -3093,8 +3085,8 @@ fn apply_helper(
     use_module: usize,
     use_def: usize,
     use_site: u32,
-    mut child: NodeId,
-    mut checked: CheckedQuery,
+    child: NodeId,
+    checked: CheckedQuery,
     helper_module: usize,
     helper_def: usize,
     helper_args: &[Expr],
@@ -3158,211 +3150,8 @@ fn apply_helper(
     if let Some(lowered) = plain {
         return Ok(Some(lowered));
     }
-    let mut syntax = HashMap::new();
-    index_exprs(helper_syntax, &mut syntax);
-    let projections = helper_stages
-        .iter()
-        .filter(|stage| {
-            matches!(
-                stage.kind,
-                RowStage::Select | RowStage::Update | RowStage::Agg
-            )
-        })
-        .count();
-    // The normalized relation remains the payload oracle while helper
-    // expressions are instantiated at their use site. The typed nodes below
-    // own those payloads; only their concrete intermediate rows need the
-    // checked tree's already-instantiated values.
-    let normalized = Some(crate::normalize::elaborate_query_via_terms(
-        input, use_module, use_def, use_expr,
-    )?);
-    let instantiated_rows = helper_stage_rows_from_checked(
-        input,
-        use_module,
-        use_def,
-        use_expr,
-        &helper_stages,
-        normalized.as_ref().expect("normalized helper query"),
-    );
-    if projections > 1 && instantiated_rows.is_none() {
-        return Ok(None);
-    }
-    let payloads = helper_stage_payloads(
-        normalized.as_ref().expect("normalized helper query"),
-        &helper_stages,
-    );
-    if payloads.is_none() {
-        return Ok(None);
-    }
-    let payloads = payloads.expect("checked helper payloads");
-    for (index, stage) in helper_stages.into_iter().enumerate() {
-        let origin = Origin::new(
-            helper_module,
-            syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
-        );
-        let input_columns = checked.row().columns().to_vec();
-        if stage
-            .input
-            .as_deref()
-            .is_some_and(|expected| expected != input_columns)
-        {
-            return Ok(None);
-        }
-        let input_row = Row::new(input_columns);
-        let projected_row = instantiated_rows
-            .as_ref()
-            .and_then(|rows| rows.get(index))
-            .cloned();
-        let payload = payloads[index].clone();
-        let kind = match stage.kind {
-            RowStage::Prefix => Some(QueryNodeKind::Prefix),
-            RowStage::Suffix => Some(QueryNodeKind::Suffix),
-            RowStage::Omit => Some(QueryNodeKind::Omit),
-            RowStage::MapValue => Some(QueryNodeKind::MapValue),
-            _ => None,
-        };
-        checked = match stage.kind {
-            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => {
-                let Some(label) = stage
-                    .label
-                    .clone()
-                    .or_else(|| helper_witness(&stage, &syntax, &params, helper_args))
-                else {
-                    return Ok(None);
-                };
-                match stage.kind {
-                    RowStage::Prefix => CheckedQuery::prefix(checked, label, origin),
-                    RowStage::Suffix => CheckedQuery::suffix(checked, label, origin),
-                    RowStage::Omit => CheckedQuery::omit(checked, label, origin),
-                    RowStage::MapValue => CheckedQuery::map_value(checked, label, origin),
-                    _ => unreachable!(),
-                }
-            }
-            RowStage::Where => {
-                let Some(predicate) = payload.predicate.clone() else {
-                    return Ok(None);
-                };
-                CheckedQuery::where_(checked, predicate, origin)
-            }
-            RowStage::Order => {
-                let Some(keys) = payload.order_keys.clone() else {
-                    return Ok(None);
-                };
-                CheckedQuery::order(checked, keys, origin)
-            }
-            RowStage::Limit => {
-                let Some(count) = syntax.get(&stage.site).and_then(stage_count) else {
-                    return Ok(None);
-                };
-                CheckedQuery::limit(checked, count, origin)
-            }
-            RowStage::Offset => {
-                let Some(count) = syntax.get(&stage.site).and_then(stage_count) else {
-                    return Ok(None);
-                };
-                CheckedQuery::offset(checked, count, origin)
-            }
-            RowStage::Distinct => CheckedQuery::distinct(checked, origin),
-            RowStage::Select => {
-                let Some(fields) = payload.projection_fields.clone() else {
-                    return Ok(None);
-                };
-                CheckedQuery::select(checked, fields, origin)
-            }
-            RowStage::Update => {
-                let Some(fields) = payload.projection_fields.clone() else {
-                    return Ok(None);
-                };
-                CheckedQuery::update(checked, fields, origin)
-            }
-            RowStage::Agg => {
-                let Some(fields) = payload.projection_fields.clone() else {
-                    return Ok(None);
-                };
-                CheckedQuery::agg(checked, fields, origin)
-            }
-        }
-        .map_err(|error| Error::unsupported(error.message).at(origin))?;
-        let output_columns = projected_row
-            .as_ref()
-            .map(|row| row.columns().to_vec())
-            .unwrap_or_else(|| checked.row().columns().to_vec());
-        if stage
-            .output
-            .as_deref()
-            .is_some_and(|expected| expected != output_columns.as_slice())
-        {
-            return Ok(None);
-        }
-        let output_row = Row::new(output_columns);
-        let id = match stage.kind {
-            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => typed
-                .rewrite(
-                    stage.node,
-                    kind.expect("rewrite stage has a rewrite kind"),
-                    child,
-                    Some(input_row),
-                    Some(output_row.clone()),
-                    origin,
-                )
-                .map_err(query_error)?,
-            RowStage::Where | RowStage::Order => typed
-                .keep_row_with_payload(
-                    stage.node,
-                    match stage.kind {
-                        RowStage::Where => QueryNodeKind::Where,
-                        RowStage::Order => QueryNodeKind::Order,
-                        _ => unreachable!(),
-                    },
-                    child,
-                    origin,
-                    payload.predicate.clone(),
-                    payload.order_keys.clone(),
-                    None,
-                    None,
-                )
-                .map_err(query_error)?,
-            RowStage::Limit | RowStage::Offset | RowStage::Distinct => {
-                typed_keep_stage(typed, child, stage.kind, stage.node, origin)?
-            }
-            RowStage::Select | RowStage::Update | RowStage::Agg => typed
-                .project(
-                    stage.node,
-                    match stage.kind {
-                        RowStage::Select => QueryNodeKind::Select,
-                        RowStage::Update => QueryNodeKind::Update,
-                        RowStage::Agg => QueryNodeKind::Agg,
-                        _ => unreachable!(),
-                    },
-                    child,
-                    projected_row,
-                    origin,
-                    payload.projection_fields.clone(),
-                )
-                .map_err(query_error)?,
-        };
-        child = id;
-    }
-    let result_row = tc
-        .typed_node(use_module, use_site)
-        .and_then(|node| node.row())
-        .or_else(|| {
-            normalized
-                .as_ref()
-                .map(|query| query.row().columns().to_vec())
-        })
-        .unwrap_or_else(|| checked.row().columns().to_vec());
-    if tc
-        .typed_node(use_module, use_site)
-        .and_then(|node| node.row())
-        .is_some_and(|expected| expected != result_row.as_slice())
-    {
-        return Ok(None);
-    }
-    // The normalized wrapper retains the call-site origins introduced by
-    // helper inlining. Keep it as the public checked template while the typed
-    // graph above remains the source of stage structure and payload ownership.
-    Ok(Some((child, normalized.expect("normalized helper query"))))
+    // Unsupported helper payloads decline to the single route boundary.
+    return Ok(None);
 }
 
 /// Instantiate a helper when every stage payload is in the plain checked
@@ -3370,8 +3159,8 @@ fn apply_helper(
 /// the caller's concrete row is threaded through the whole stage chain.
 ///
 /// This is deliberately transactional: a failed plain lowering must leave the
-/// caller's typed arena untouched so the normalized fallback can build the
-/// same child graph from the original `child` id.
+/// caller's typed arena untouched so the route coordinator can decline the
+/// helper without retaining partially appended nodes.
 fn apply_plain_helper_pipeline(
     input: CompilerInput<'_>,
     use_module: usize,
@@ -3390,31 +3179,13 @@ fn apply_plain_helper_pipeline(
     // between open helper rows (for example `upper = .name` after an open
     // `select`). Keep those on the established checked payload route until the
     // checker exposes per-use intermediate projection types directly.
-    if stages.len() > 1
-        && stages
-            .iter()
-            .any(|stage| matches!(stage.kind, RowStage::Select | RowStage::Update))
-    {
-        return Ok(None);
-    }
     let helper_body = &input.module(helper_module).def(helper_def).body;
-    // Generic helper expressions need call-site type instantiation for window
-    // templates. Closed helper signatures can use the source builder safely.
-    let mut helper_exprs = HashMap::new();
-    index_exprs(helper_body, &mut helper_exprs);
-    if helper_exprs.values().any(|expr| {
-        matches!(&expr.kind, ExprKind::App(_, _) if declared_template(input, helper_module, expr)
-            .is_some_and(|(_, kind, _)| kind == crate::normalize::TemplateKind::Win))
-    }) && stages.iter().any(|stage| stage.input.is_none())
-    {
-        return Ok(None);
-    }
     let mut syntax = HashMap::new();
     index_exprs(helper_body, &mut syntax);
     let params = lambda_params(helper_body);
 
-    // Build on a clone so any unsupported expression can cleanly fall back to
-    // the normalized route without retaining partially appended nodes.
+    // Build on a clone so any unsupported expression can cleanly decline
+    // without retaining partially appended nodes.
     let mut candidate = typed.clone();
     let mut current = child;
     for stage in stages {
@@ -3639,151 +3410,6 @@ fn apply_plain_helper_pipeline(
     Ok(Some((current, checked)))
 }
 
-#[derive(Clone)]
-struct HelperStagePayload {
-    predicate: Option<crate::checked::CheckedExpr>,
-    order_keys: Option<Vec<(crate::checked::CheckedExpr, bool)>>,
-    projection_fields: Option<Vec<(String, crate::checked::CheckedExpr)>>,
-}
-
-/// Align expression payloads from the instantiated checked helper query with
-/// the helper's stage records. The helper stages are the tail of the unary
-/// query chain; any stages on the caller's child precede them.
-fn helper_stage_payloads(
-    checked: &CheckedQuery,
-    stages: &[crate::check::RowStageView],
-) -> Option<Vec<HelperStagePayload>> {
-    let chain = checked.node_chain();
-    if stages.len() > chain.len() {
-        return None;
-    }
-    let start = chain.len() - stages.len();
-    let predicates = checked.node_chain_predicates();
-    let order_keys = checked.node_chain_order_keys();
-    let projection_fields = checked.node_chain_projection_fields();
-    stages
-        .iter()
-        .enumerate()
-        .map(|(index, stage)| {
-            let at = start + index;
-            if !checked_kind_matches(chain[at].0, stage.kind) {
-                return None;
-            }
-            Some(HelperStagePayload {
-                predicate: predicates.get(at).and_then(|(_, value)| value.clone()),
-                order_keys: order_keys.get(at).and_then(|(_, value)| value.clone()),
-                projection_fields: projection_fields
-                    .get(at)
-                    .and_then(|(_, value)| value.clone()),
-            })
-        })
-        .collect()
-}
-
-fn helper_stage_rows_from_checked(
-    input: CompilerInput<'_>,
-    module: usize,
-    _def: usize,
-    expr: &Expr,
-    stages: &[crate::check::RowStageView],
-    checked: &CheckedQuery,
-) -> Option<Vec<Row>> {
-    let chain = checked.node_chain();
-    if stages.len() > chain.len() {
-        return None;
-    }
-    let start = chain.len() - stages.len();
-    if !chain[start..]
-        .iter()
-        .zip(stages)
-        .all(|((kind, _, _), stage)| checked_kind_matches(*kind, stage.kind))
-    {
-        return None;
-    }
-    let final_row = input
-        .type_check()
-        .typed_node(module, expr.id)
-        .and_then(|node| node.row());
-    Some(
-        chain[start..]
-            .iter()
-            .map(|(_, _, row)| {
-                let columns = row
-                    .columns()
-                    .iter()
-                    .map(|(name, ty)| {
-                        if matches!(ty, crate::core::ScalarType::Unknown) {
-                            final_row
-                                .as_ref()
-                                .and_then(|fields| fields.iter().find(|(n, _)| n == name))
-                                .map_or((name.clone(), ty.clone()), |(_, ty)| {
-                                    (name.clone(), ty.clone())
-                                })
-                        } else {
-                            (name.clone(), ty.clone())
-                        }
-                    })
-                    .collect();
-                Row::new(columns)
-            })
-            .collect(),
-    )
-}
-
-/// Read the instantiated output row of each helper stage from the checked
-/// query for this use.  Helper definitions intentionally keep their stage
-/// rows open; the use expression is where the callee's scheme is instantiated
-/// and the checked bridge has the concrete intermediate rows.
-fn helper_stage_rows(
-    input: CompilerInput<'_>,
-    module: usize,
-    def: usize,
-    expr: &Expr,
-    stages: &[crate::check::RowStageView],
-) -> Option<Vec<Row>> {
-    let checked = crate::normalize::elaborate_query_via_terms(input, module, def, expr).ok()?;
-    let chain = checked.node_chain();
-    if stages.len() > chain.len() {
-        return None;
-    }
-    let start = chain.len() - stages.len();
-    let rows = chain[start..]
-        .iter()
-        .zip(stages)
-        .all(|((kind, _, _), stage)| checked_kind_matches(*kind, stage.kind));
-    if !rows {
-        return None;
-    }
-    let final_row = input
-        .type_check()
-        .typed_node(module, expr.id)
-        .and_then(|node| node.row());
-    Some(
-        chain[start..]
-            .iter()
-            .map(|(_, _, row)| {
-                let columns = row
-                    .columns()
-                    .iter()
-                    .map(|(name, ty)| {
-                        if matches!(ty, crate::core::ScalarType::Unknown) {
-                            final_row
-                                .as_ref()
-                                .and_then(|fields| fields.iter().find(|(n, _)| n == name))
-                                .map_or((name.clone(), ty.clone()), |(_, ty)| {
-                                    (name.clone(), ty.clone())
-                                })
-                        } else {
-                            (name.clone(), ty.clone())
-                        }
-                    })
-                    .collect();
-                Row::new(columns)
-            })
-            .collect(),
-    )
-}
-
 fn checked_kind_matches(kind: crate::checked::QueryKind, stage: RowStage) -> bool {
     matches!(
         (kind, stage),
@@ -3837,7 +3463,7 @@ pub(crate) fn compare_with_terms(
     terms: &CheckedQuery,
 ) -> Result<(), Error> {
     let fail = |message: &str| Error::unsupported(message).at(checked.origin());
-    if checked.row() != terms.row() {
+    if !rows_equivalent(checked.row().columns(), terms.row().columns()) {
         return Err(fail("typed and term query routes produced different rows"));
     }
     let typed_rel = crate::checked::erase(checked.clone())
@@ -4049,6 +3675,23 @@ fn unordered_rows_match(
         }
         _ => false,
     }
+}
+
+/// The normalized adapter may retain `Unknown` for a polymorphic helper's
+/// intermediate field even after the typed checker has instantiated the same
+/// field at a concrete use site. Treat that adapter placeholder as a wildcard
+/// during the migration comparison; concrete disagreements remain failures.
+fn rows_equivalent(
+    actual: &[(String, crate::core::ScalarType)],
+    expected: &[(String, crate::core::ScalarType)],
+) -> bool {
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|((an, at), (en, et))| {
+            an == en
+                && (at == et
+                    || matches!(at, crate::core::ScalarType::Unknown)
+                    || matches!(et, crate::core::ScalarType::Unknown))
+        })
 }
 
 fn relations_match(left: &crate::ir::Rel, right: &crate::ir::Rel) -> bool {

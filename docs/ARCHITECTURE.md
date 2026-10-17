@@ -35,8 +35,10 @@ an application reduction that substitutes arguments for parameters. It is now a
 transitional query adapter rather than the compiler's semantic center. Typed
 query lowering owns the relational skeleton and stage boundaries; the adapter
 is used only for shapes whose expression payload or helper instantiation has not
-migrated yet. Names resolve and applications reduce once in that adapter instead
-of being rediscovered by each backend consumer.
+migrated yet. Typed helper instantiation declines unsupported payloads at this
+boundary instead of invoking the adapter internally. Names resolve and
+applications reduce once in that adapter instead of being rediscovered by each
+backend consumer.
 
 A typed query node carries the **row it produces**, taken from the checker at
 that application. It has to be the node's own row and not the declaring

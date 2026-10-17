@@ -258,10 +258,10 @@ normalized bridge supplies only predicates, projections, and sort payloads.
 Direct `where` stages whose predicates use plain fields, literals, comparisons,
 membership lists, and boolean operators now build their checked expressions
 from checker types and also bypass normalized elaboration.
-Direct `select` and `update` stages whose fields are plain column references
-or literals now have a small source checked-expression path: field types come
-from the checker, and the typed projection and `CheckedQuery` are built
-without entering normalized elaboration. Computed fields and aggregate
+Direct `select` and `update` stages whose fields use the plain expression
+subset now have a source checked-expression path: expression types come from
+the checker, and the typed projection and `CheckedQuery` are built without
+entering normalized elaboration. Aggregate, window, and other unsupported
 expressions continue through the payload bridge.
 Direct `order` stages whose keys are plain columns with literal `asc` or
 `desc` directions use the same typed path, retaining their checked sort keys

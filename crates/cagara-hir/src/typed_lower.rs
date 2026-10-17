@@ -209,9 +209,10 @@ fn lower_unhydrated(
     Ok(Some((typed.finish(child), checked)))
 }
 
-/// Lower a direct projection whose fields are plain column references. This
-/// small expression slice needs no normalized term: the checker supplies each
-/// field's scalar type and the stage record supplies the closed output row.
+/// Lower a direct projection whose fields use the plain checked expression
+/// subset. This small expression slice needs no normalized term: the checker
+/// supplies each expression's scalar type and the stage record supplies the
+/// closed output row.
 fn lower_simple_projection_pipeline(
     input: CompilerInput<'_>,
     module: usize,
@@ -246,24 +247,8 @@ fn lower_simple_projection_pipeline(
     };
     let mut checked_fields = Vec::with_capacity(fields.len());
     for (name, value) in fields {
-        let origin = Origin::new(module, value.span);
-        let checked = match &value.kind {
-            ExprKind::Field(side, column) => {
-                let Some(ty) = tc.typed_node(module, value.id).and_then(|node| node.ty()) else {
-                    return Ok(None);
-                };
-                crate::checked::CheckedExpr::column(*side, column.clone(), ty, origin)
-            }
-            ExprKind::Lit(lit) => crate::checked::CheckedExpr::lit(
-                match lit {
-                    Lit::Int(value) => crate::ir::Lit::Int(*value),
-                    Lit::Float(value) => crate::ir::Lit::Float(value.clone()),
-                    Lit::Str(value) => crate::ir::Lit::Str(value.clone()),
-                    Lit::Bool(value) => crate::ir::Lit::Bool(*value),
-                },
-                origin,
-            ),
-            _ => return Ok(None),
+        let Some(checked) = lower_plain_expr(input, module, value)? else {
+            return Ok(None);
         };
         checked_fields.push((name.clone(), checked));
     }
@@ -359,7 +344,7 @@ fn lower_simple_where_pipeline(
     let Some(predicate_expr) = args.first() else {
         return Ok(None);
     };
-    let Some(predicate) = lower_plain_where_expr(input, module, predicate_expr)? else {
+    let Some(predicate) = lower_plain_expr(input, module, predicate_expr)? else {
         return Ok(None);
     };
     let origin = Origin::new(module, stage_expr.span);
@@ -411,7 +396,7 @@ fn lower_simple_where_pipeline(
     Ok(Some((typed.finish(id), checked)))
 }
 
-fn lower_plain_where_expr(
+fn lower_plain_expr(
     input: CompilerInput<'_>,
     module: usize,
     expr: &Expr,
@@ -450,12 +435,12 @@ fn lower_plain_where_expr(
                 let ExprKind::List(items) = &args[0].kind else {
                     return Ok(None);
                 };
-                let Some(value) = lower_plain_where_expr(input, module, &args[1])? else {
+                let Some(value) = lower_plain_expr(input, module, &args[1])? else {
                     return Ok(None);
                 };
                 let mut list = Vec::with_capacity(items.len());
                 for item in items {
-                    let Some(item) = lower_plain_where_expr(input, module, item)? else {
+                    let Some(item) = lower_plain_expr(input, module, item)? else {
                         return Ok(None);
                     };
                     list.push(item);
@@ -473,7 +458,21 @@ fn lower_plain_where_expr(
                 "_>=_" => ("$1 >= $2", 2),
                 "_&&_" => ("$1 AND $2", 2),
                 "_||_" => ("$1 OR $2", 2),
+                "_+_" => ("$1 + $2", 2),
+                "_-_" => ("$1 - $2", 2),
+                "_*_" => ("$1 * $2", 2),
+                "_/_" => ("$1 / $2", 2),
+                "_%_" => ("$1 % $2", 2),
+                "_<>_" | "concat" => ("$1 || $2", 2),
                 "not" => ("NOT $1", 1),
+                "negate" => ("-$1", 1),
+                "upper" => ("UPPER($1)", 1),
+                "lower" => ("LOWER($1)", 1),
+                "trim" => ("TRIM($1)", 1),
+                "ltrim" => ("LTRIM($1)", 1),
+                "rtrim" => ("RTRIM($1)", 1),
+                "length" => ("CAGARA_LENGTH($1)", 1),
+                "coalesce" => ("COALESCE($2, $1)", 2),
                 _ => return Ok(None),
             };
             if args.len() != arity {
@@ -481,13 +480,18 @@ fn lower_plain_where_expr(
             }
             let mut checked_args = Vec::with_capacity(arity);
             for arg in args.iter() {
-                let Some(arg) = lower_plain_where_expr(input, module, arg)? else {
+                let Some(arg) = lower_plain_expr(input, module, arg)? else {
                     return Ok(None);
                 };
                 checked_args.push(arg);
             }
             let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
                 return Ok(None);
+            };
+            let sql = match (name.as_str(), &ty) {
+                ("_/_", crate::core::ScalarType::Int) => "CAGARA_IDIV($1, $2)",
+                ("_%_", crate::core::ScalarType::Int) => "CAGARA_MOD($1, $2)",
+                _ => sql,
             };
             crate::checked::CheckedExpr::template(sql, checked_args, ty, origin)
                 .map(Some)

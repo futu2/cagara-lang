@@ -255,6 +255,9 @@ stages are appended.
 Expression-bearing stages can now follow that same alias path: the copied
 typed graph supplies the relational child and rows, while the existing
 normalized bridge supplies only predicates, projections, and sort payloads.
+Direct `where` stages whose predicates use plain fields, literals, comparisons,
+and boolean operators now build their checked templates from checker types and
+also bypass normalized elaboration.
 Direct `select` and `update` stages whose fields are plain column references
 or literals now have a small source checked-expression path: field types come
 from the checker, and the typed projection and `CheckedQuery` are built

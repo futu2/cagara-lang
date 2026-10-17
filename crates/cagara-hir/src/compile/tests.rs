@@ -556,6 +556,18 @@ fn closed_window_projection_helper_bypasses_normalized_elaboration() {
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "closed window projection helper unexpectedly walked normalized terms"
     );
+    let numbered = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .position(|def| def.name == "numbered")
+        .unwrap();
+    assert!(
+        !crate::normalize::visited_nodes()
+            .iter()
+            .any(|(module, def, _)| *module == ws.root && *def == numbered),
+        "closed window helper definition unexpectedly walked normalized terms"
+    );
 }
 
 #[test]

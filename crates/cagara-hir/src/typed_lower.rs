@@ -3121,8 +3121,8 @@ fn copy_typed_chain(source: &TypedQuery, target: &mut TypedQuery) -> Result<Node
     copy_typed_graph(source, target)
 }
 
-/// Check the first typed slice against the normalized term route before its
-/// result is allowed onto the production path.
+/// Regression comparison between typed and legacy lowering routes.
+#[cfg(test)]
 pub(crate) fn compare_with_terms(
     input: CompilerInput<'_>,
     typed: &TypedQuery,
@@ -3348,6 +3348,7 @@ fn unordered_rows_match(
 /// intermediate field even after the typed checker has instantiated the same
 /// field at a concrete use site. Treat that adapter placeholder as a wildcard
 /// during the migration comparison; concrete disagreements remain failures.
+#[cfg(test)]
 fn rows_equivalent(
     actual: &[(String, crate::core::ScalarType)],
     expected: &[(String, crate::core::ScalarType)],
@@ -3361,6 +3362,7 @@ fn rows_equivalent(
         })
 }
 
+#[cfg(test)]
 fn relations_match(left: &crate::ir::Rel, right: &crate::ir::Rel) -> bool {
     use crate::ir::Rel;
     match (left, right) {

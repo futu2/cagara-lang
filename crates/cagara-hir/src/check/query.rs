@@ -455,6 +455,204 @@ impl TypedQuery {
         self.raw(self.root()).output_row.as_ref()
     }
 
+    /// Copy checked expression payloads onto the structurally corresponding
+    /// typed nodes. This keeps payload ownership independent of whether the
+    /// relational skeleton came from a direct pipeline or helper expansion.
+    pub(crate) fn carry_checked_payloads(
+        &mut self,
+        checked: &crate::checked::CheckedQuery,
+    ) -> Result<(), QueryErr> {
+        fn visit(
+            nodes: &mut [TypedQueryNode],
+            id: NodeId,
+            checked: &crate::checked::CheckedQuery,
+        ) -> Result<(), QueryErr> {
+            let typed_kind = nodes[id.index()].kind;
+            let checked_kind = TypedQuery::checked_node_kind(checked.node_ref());
+            if typed_kind != checked_kind {
+                match checked.node_ref() {
+                    // Payload-free checked wrappers may be absorbed by the
+                    // typed skeleton. Walk through them to align descendants.
+                    crate::checked::CheckedQueryNode::Distinct(input) => {
+                        return visit(nodes, id, input);
+                    }
+                    // Some helper expansions currently omit the combine node
+                    // from the typed skeleton. Keep hydrating any child whose
+                    // operation is present, and leave the absent combine's
+                    // payload unset.
+                    crate::checked::CheckedQueryNode::Join { left, right, .. }
+                    | crate::checked::CheckedQueryNode::Set { left, right, .. } => {
+                        for child in [left.as_ref(), right.as_ref()] {
+                            if TypedQuery::checked_node_kind(child.node_ref()) == typed_kind {
+                                return visit(nodes, id, child);
+                            }
+                        }
+                        return Ok(());
+                    }
+                    _ => return Ok(()),
+                }
+            }
+            let (expected_kind, child_ids, payload) = match checked.node_ref() {
+                crate::checked::CheckedQueryNode::Table { .. } => {
+                    (QueryNodeKind::Table, Vec::new(), Payload::None)
+                }
+                crate::checked::CheckedQueryNode::Where { pred, .. } => (
+                    QueryNodeKind::Where,
+                    vec![id_at(nodes, id, 0)?],
+                    Payload::Predicate(pred.clone()),
+                ),
+                crate::checked::CheckedQueryNode::Select { fields, .. } => (
+                    QueryNodeKind::Select,
+                    vec![id_at(nodes, id, 0)?],
+                    Payload::Projection(fields.clone()),
+                ),
+                crate::checked::CheckedQueryNode::Update { fields, .. } => (
+                    QueryNodeKind::Update,
+                    vec![id_at(nodes, id, 0)?],
+                    Payload::Projection(fields.clone()),
+                ),
+                crate::checked::CheckedQueryNode::Agg { fields, .. } => (
+                    QueryNodeKind::Agg,
+                    vec![id_at(nodes, id, 0)?],
+                    Payload::Projection(fields.clone()),
+                ),
+                crate::checked::CheckedQueryNode::Order { keys, .. } => (
+                    QueryNodeKind::Order,
+                    vec![id_at(nodes, id, 0)?],
+                    Payload::Order(keys.clone()),
+                ),
+                crate::checked::CheckedQueryNode::Join { kind, on, .. } => (
+                    QueryNodeKind::Join(*kind),
+                    ids_at(nodes, id, 2)?,
+                    Payload::Join(on.clone()),
+                ),
+                crate::checked::CheckedQueryNode::Set { kind, .. } => (
+                    QueryNodeKind::Set(*kind),
+                    ids_at(nodes, id, 2)?,
+                    Payload::None,
+                ),
+                node => {
+                    let kind = match node {
+                        crate::checked::CheckedQueryNode::Omit { .. } => QueryNodeKind::Omit,
+                        crate::checked::CheckedQueryNode::Rename { prefix, .. } => {
+                            if *prefix {
+                                QueryNodeKind::Prefix
+                            } else {
+                                QueryNodeKind::Suffix
+                            }
+                        }
+                        crate::checked::CheckedQueryNode::MapValue { .. } => {
+                            QueryNodeKind::MapValue
+                        }
+                        crate::checked::CheckedQueryNode::Limit { .. } => QueryNodeKind::Limit,
+                        crate::checked::CheckedQueryNode::Offset { .. } => QueryNodeKind::Offset,
+                        crate::checked::CheckedQueryNode::Distinct(_) => QueryNodeKind::Distinct,
+                        _ => unreachable!("handled checked query node above"),
+                    };
+                    (kind, vec![id_at(nodes, id, 0)?], Payload::None)
+                }
+            };
+            let node = &mut nodes[id.index()];
+            if node.kind != expected_kind {
+                return Err(QueryErr::new(
+                    node,
+                    format!(
+                        "typed {:?} node does not match checked {expected_kind:?}",
+                        node.kind
+                    ),
+                ));
+            }
+            match payload {
+                Payload::None => {}
+                Payload::Predicate(value) => node.predicate = Some(value),
+                Payload::Order(value) => node.order_keys = Some(value),
+                Payload::Projection(value) => node.projection_fields = Some(value),
+                Payload::Join(value) => node.join_predicate = Some(value),
+            }
+            let checked_children: Vec<_> = match checked.node_ref() {
+                crate::checked::CheckedQueryNode::Table { .. } => Vec::new(),
+                crate::checked::CheckedQueryNode::Where { input, .. }
+                | crate::checked::CheckedQueryNode::Select { input, .. }
+                | crate::checked::CheckedQueryNode::Update { input, .. }
+                | crate::checked::CheckedQueryNode::Omit { input, .. }
+                | crate::checked::CheckedQueryNode::Rename { input, .. }
+                | crate::checked::CheckedQueryNode::MapValue { input, .. }
+                | crate::checked::CheckedQueryNode::Agg { input, .. }
+                | crate::checked::CheckedQueryNode::Order { input, .. }
+                | crate::checked::CheckedQueryNode::Limit { input, .. }
+                | crate::checked::CheckedQueryNode::Offset { input, .. } => vec![input.as_ref()],
+                crate::checked::CheckedQueryNode::Distinct(input) => vec![input.as_ref()],
+                crate::checked::CheckedQueryNode::Join { left, right, .. }
+                | crate::checked::CheckedQueryNode::Set { left, right, .. } => {
+                    vec![left.as_ref(), right.as_ref()]
+                }
+            };
+            for (child_id, child) in child_ids.into_iter().zip(checked_children) {
+                visit(nodes, child_id, child)?;
+            }
+            Ok(())
+        }
+
+        enum Payload {
+            None,
+            Predicate(CheckedExpr),
+            Order(Vec<(CheckedExpr, bool)>),
+            Projection(Vec<(String, CheckedExpr)>),
+            Join(CheckedExpr),
+        }
+        fn id_at(nodes: &[TypedQueryNode], id: NodeId, index: usize) -> Result<NodeId, QueryErr> {
+            nodes[id.index()].inputs.get(index).copied().ok_or_else(|| {
+                QueryErr::new(&nodes[id.index()], "typed node is missing a checked child")
+            })
+        }
+        fn ids_at(
+            nodes: &[TypedQueryNode],
+            id: NodeId,
+            count: usize,
+        ) -> Result<Vec<NodeId>, QueryErr> {
+            let inputs = &nodes[id.index()].inputs;
+            if inputs.len() != count {
+                return Err(QueryErr::new(
+                    &nodes[id.index()],
+                    format!(
+                        "typed {:?} node has {} children but checked tree expects {count}",
+                        nodes[id.index()].kind,
+                        inputs.len()
+                    ),
+                ));
+            }
+            Ok(inputs.clone())
+        }
+
+        let root = self.root();
+        visit(&mut self.nodes, root, checked)
+    }
+
+    fn checked_node_kind(node: &crate::checked::CheckedQueryNode) -> QueryNodeKind {
+        match node {
+            crate::checked::CheckedQueryNode::Table { .. } => QueryNodeKind::Table,
+            crate::checked::CheckedQueryNode::Where { .. } => QueryNodeKind::Where,
+            crate::checked::CheckedQueryNode::Select { .. } => QueryNodeKind::Select,
+            crate::checked::CheckedQueryNode::Update { .. } => QueryNodeKind::Update,
+            crate::checked::CheckedQueryNode::Omit { .. } => QueryNodeKind::Omit,
+            crate::checked::CheckedQueryNode::Rename { prefix, .. } => {
+                if *prefix {
+                    QueryNodeKind::Prefix
+                } else {
+                    QueryNodeKind::Suffix
+                }
+            }
+            crate::checked::CheckedQueryNode::MapValue { .. } => QueryNodeKind::MapValue,
+            crate::checked::CheckedQueryNode::Agg { .. } => QueryNodeKind::Agg,
+            crate::checked::CheckedQueryNode::Order { .. } => QueryNodeKind::Order,
+            crate::checked::CheckedQueryNode::Limit { .. } => QueryNodeKind::Limit,
+            crate::checked::CheckedQueryNode::Offset { .. } => QueryNodeKind::Offset,
+            crate::checked::CheckedQueryNode::Distinct(_) => QueryNodeKind::Distinct,
+            crate::checked::CheckedQueryNode::Join { kind, .. } => QueryNodeKind::Join(*kind),
+            crate::checked::CheckedQueryNode::Set { kind, .. } => QueryNodeKind::Set(*kind),
+        }
+    }
+
     /// Add a node, returning its id.
     fn push(&mut self, node: TypedQueryNode) -> NodeId {
         let id = NodeId::at(self.nodes.len());

@@ -97,6 +97,11 @@ pub struct CheckedQuery {
 }
 
 impl CheckedQuery {
+    /// Borrow the checked node for consumers that mirror this relational tree.
+    pub(crate) fn node_ref(&self) -> &CheckedQueryNode {
+        &self.node
+    }
+
     /// The row this query produces: ordered `(column, type)` pairs.
     pub fn row(&self) -> &RowType {
         &self.row

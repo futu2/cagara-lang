@@ -22,6 +22,21 @@ pub(crate) fn lower(
     def: usize,
     body: &Expr,
 ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
+    let Some((mut typed, checked)) = lower_unhydrated(input, module, def, body)? else {
+        return Ok(None);
+    };
+    typed
+        .carry_checked_payloads(&checked)
+        .map_err(query_error)?;
+    Ok(Some((typed, checked)))
+}
+
+fn lower_unhydrated(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
     let tc = input.type_check();
 
     // A combine can occur below or above ordinary stages. Build the complete
@@ -889,8 +904,8 @@ fn find_expr_id(expr: &Expr, id: u32) -> Option<&Expr> {
 /// Lower a direct pipeline whose stages carry expressions (`where`, `select`,
 /// `update`, `agg`, and `order`), together with any row-preserving stages mixed
 /// into it. The expression bridge remains the normalized term lowering used by
-/// the established route; this slice moves the relational skeleton and its row
-/// boundaries onto `TypedQuery`.
+/// the checked query tree; this slice moves the relational skeleton and its row
+/// boundaries onto `TypedQuery` before the normalized relation is compared.
 fn lower_expression_pipeline(
     input: CompilerInput<'_>,
     module: usize,
@@ -1054,8 +1069,9 @@ fn lower_expression_pipeline(
         )
         .at(checked.origin()));
     }
-    // The checked value is intentionally the normalized expression bridge
-    // result, while every relational node is represented by the typed arena.
+    // The checked value remains the normalized relational result, while every
+    // relational node and supported expression payload is represented by the
+    // typed arena.
     Ok(Some((typed.finish(child), checked)))
 }
 
@@ -2594,6 +2610,17 @@ mod tests {
             typed.node(typed.chain()[1]).output_row().unwrap().names(),
             vec!["name"]
         );
+        let chain = typed.chain();
+        let select_node = typed.node(chain[1]);
+        let select_fields = select_node
+            .projection_fields()
+            .expect("expanded select carries checked fields");
+        assert_eq!(select_fields[0].1.kind(), crate::checked::ExprKind::Column);
+        let update_node = typed.node(chain[0]);
+        let update_fields = update_node
+            .projection_fields()
+            .expect("expanded update carries checked fields");
+        assert_eq!(update_fields[0].0, "upper");
     }
 
     #[test]
@@ -2618,6 +2645,10 @@ mod tests {
         assert!(typed
             .nodes()
             .any(|node| matches!(node.kind(), QueryNodeKind::Agg)));
+        assert!(typed
+            .nodes()
+            .filter(|node| matches!(node.kind(), QueryNodeKind::Select | QueryNodeKind::Agg))
+            .all(|node| node.projection_fields().is_some()));
         assert_eq!(checked.row().names(), &["name", "n"]);
     }
 
@@ -2653,6 +2684,13 @@ mod tests {
                 QueryNodeKind::Table
             ]
         );
+        let where_node = typed
+            .chain()
+            .into_iter()
+            .find(|id| typed.node(*id).kind() == QueryNodeKind::Where)
+            .map(|id| typed.node(id))
+            .expect("expanded helper has a where node");
+        assert!(where_node.predicate().is_some());
     }
 
     #[test]

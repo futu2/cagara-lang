@@ -2987,17 +2987,25 @@ mod tests {
         let (typed, checked) = lower_source(
             "users : query { id = int, age = int } = table \"s\" \"users\"\n\
              renamed = users & prefix \"u_\"\n\
-             q = renamed & where (.u_age > 18) & select { .u_id }\n",
+             q = renamed & where (.u_age > 18)\n\
+                 & select { id = .u_id, rn = rowNumber {order = [asc .u_age]} }\n\
+                 & order [asc .id] & limit 10\n",
             "q",
         );
-        assert_eq!(typed.root_kind(), QueryNodeKind::Select);
+        assert_eq!(typed.root_kind(), QueryNodeKind::Limit);
         assert!(typed
             .nodes()
             .any(|node| node.kind() == QueryNodeKind::Prefix));
         assert!(typed
             .nodes()
             .any(|node| node.kind() == QueryNodeKind::Where));
-        assert_eq!(checked.row().names(), &["u_id"]);
+        assert!(typed.nodes().any(|node| {
+            node.kind() == QueryNodeKind::Select
+                && node.projection_fields().is_some_and(|fields| {
+                    fields[1].1.kind() == crate::checked::ExprKind::WinTemplate
+                })
+        }));
+        assert_eq!(checked.row().names(), &["id", "rn"]);
     }
 
     #[test]

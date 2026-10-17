@@ -255,11 +255,15 @@ stages are appended.
 Expression-bearing stages can now follow that same alias path: the copied
 typed graph supplies the relational child and rows, while the existing
 normalized bridge supplies only predicates, projections, and sort payloads.
+Window expressions in projection payloads are carried by the typed projection
+node as `WinTemplate`, including when the pipeline starts from a typed query
+alias. They are no longer deferred from this slice.
 The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be
-used as either combine operand. Windows remain deferred until the expression
-payload bridge is carried by typed nodes.
+used as either combine operand. Window expressions are retained in typed
+projection payloads; the normalized bridge remains their payload source during
+this migration slice.
 
 The checker records join and set applications on the typed expression node,
 including piped forms where the primitive is partially applied first. Each

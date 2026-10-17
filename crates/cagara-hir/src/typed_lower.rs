@@ -296,7 +296,10 @@ fn lower_simple_projection_pipeline(
     let tc = input.type_check();
     let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
     if stages.len() != 1
-        || !matches!(stages[0].kind, RowStage::Select | RowStage::Update)
+        || !matches!(
+            stages[0].kind,
+            RowStage::Select | RowStage::Update | RowStage::Agg
+        )
         || stages[0].node.definition_module != module
         || stages[0].node.definition != def
         || !is_direct_pipeline(input, module, body)
@@ -366,6 +369,7 @@ fn lower_simple_projection_pipeline(
     let kind = match stage.kind {
         RowStage::Select => QueryNodeKind::Select,
         RowStage::Update => QueryNodeKind::Update,
+        RowStage::Agg => QueryNodeKind::Agg,
         _ => unreachable!(),
     };
     let id = typed
@@ -381,6 +385,7 @@ fn lower_simple_projection_pipeline(
     checked = match stage.kind {
         RowStage::Select => CheckedQuery::select(checked, checked_fields, stage_origin),
         RowStage::Update => CheckedQuery::update(checked, checked_fields, stage_origin),
+        RowStage::Agg => CheckedQuery::agg(checked, checked_fields, stage_origin),
         _ => unreachable!(),
     }
     .map_err(|error| Error::unsupported(error.message).at(stage_origin))?;
@@ -1291,7 +1296,7 @@ fn lower_plain_expression_chain(
 ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
     let tc = input.type_check();
     let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
-    if stages.len() < 2
+    if stages.is_empty()
         || contains_distinct_stage(input, module, body)
         || stages.iter().any(|stage| {
             stage.node.definition_module != module
@@ -2186,12 +2191,6 @@ fn lower_composed_helper(
     else {
         return Ok(None);
     };
-    if !matches!(
-        input.module(helper_module).def(helper_def).body.kind,
-        ExprKind::Lambda(_, _)
-    ) {
-        return Ok(None);
-    }
     let helper_stages: Vec<_> = tc.row_stages(helper_module, helper_def).cloned().collect();
     if helper_stages.is_empty() {
         return Ok(None);
@@ -3043,12 +3042,6 @@ fn apply_helper(
     typed: &mut TypedQuery,
 ) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
     let tc = input.type_check();
-    if !matches!(
-        input.module(helper_module).def(helper_def).body.kind,
-        ExprKind::Lambda(_, _)
-    ) {
-        return Ok(None);
-    }
     let mut helper_stages: Vec<_> = tc.row_stages(helper_module, helper_def).cloned().collect();
     if helper_stages.is_empty()
         || helper_stages.iter().any(|stage| {

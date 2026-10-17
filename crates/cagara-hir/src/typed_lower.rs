@@ -125,7 +125,7 @@ fn lower_unhydrated(
     // relational skeleton recursively so a stage never causes the combine
     // child to be dropped. Expression payloads still come from the normalized
     // route; this builder only owns node identity and row boundaries.
-    if contains_combine_tree(input, module, body) {
+    if contains_combine_tree(input, module, body) || contains_join_operator_tree(body) {
         if let Some(lowered) = lower_composed_pipeline(context, input, module, def, body)? {
             return Ok(Some(lowered));
         }
@@ -1721,6 +1721,149 @@ fn lower_composed_pipeline(
     Ok(None)
 }
 
+/// Lower one of the prelude's pipeline operators (`&?`, `&=`, `&+`, `&*`,
+/// `&.`, or `&-`). These are lambda helpers in source, so their stage records
+/// belong to the prelude definition rather than the caller. The checker still
+/// supplies the call-site result row and expression types; use those facts
+/// directly instead of requiring a caller-local `RowStageView`.
+fn lower_shorthand_stage(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    expr: &Expr,
+    child: NodeId,
+    mut checked: CheckedQuery,
+    typed: &mut TypedQuery,
+) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    let ExprKind::App(head, args) = &expr.kind else {
+        return Ok(None);
+    };
+    if args.len() != 2 || !is_stage_shorthand_head(head) {
+        return Ok(None);
+    }
+    let ExprKind::Name(name) = &head.kind else {
+        return Ok(None);
+    };
+    let origin = Origin::new(module, expr.span);
+    let input_row = Row::new(checked.row().columns().to_vec());
+    let expression_row = RowType::new(input_row.columns().to_vec());
+    let output_row = input
+        .type_check()
+        .typed_node(module, expr.id)
+        .and_then(|node| node.row())
+        .map(Row::new)
+        .ok_or_else(|| {
+            Error::unsupported("shorthand stage has no checked output row").at(origin)
+        })?;
+    let site = NodeRef::new(module, def, expr.id);
+    let (kind, predicate, keys, fields, count) = match name.as_str() {
+        "_&?_" => {
+            let Some(predicate) =
+                lower_plain_expr_with_row(input, module, &args[1], Some(&expression_row))?
+            else {
+                return Ok(None);
+            };
+            (QueryNodeKind::Where, Some(predicate), None, None, None)
+        }
+        "_&=_" | "_&+_" | "_&*_" => {
+            let ExprKind::Record(source_fields) = &args[1].kind else {
+                return Ok(None);
+            };
+            let mut fields = Vec::with_capacity(source_fields.len());
+            for (field, value) in source_fields {
+                let Some(value) =
+                    lower_plain_expr_with_row(input, module, value, Some(&expression_row))?
+                else {
+                    return Ok(None);
+                };
+                fields.push((field.clone(), value));
+            }
+            let kind = match name.as_str() {
+                "_&=_" => QueryNodeKind::Select,
+                "_&+_" => QueryNodeKind::Update,
+                "_&*_" => QueryNodeKind::Agg,
+                _ => unreachable!(),
+            };
+            (kind, None, None, Some(fields), None)
+        }
+        "_&._" => {
+            let ExprKind::List(items) = &args[1].kind else {
+                return Ok(None);
+            };
+            let mut keys = Vec::with_capacity(items.len());
+            for item in items {
+                let ExprKind::App(_, item_args) = &item.kind else {
+                    return Ok(None);
+                };
+                let Some(value) = item_args.first() else {
+                    return Ok(None);
+                };
+                let Some(direction) = sort_direction(input, module, item) else {
+                    return Ok(None);
+                };
+                let Some(value) =
+                    lower_plain_expr_with_row(input, module, value, Some(&expression_row))?
+                else {
+                    return Ok(None);
+                };
+                keys.push((value, direction));
+            }
+            (QueryNodeKind::Order, None, Some(keys), None, None)
+        }
+        "_&-_" => {
+            let Some(Lit::Int(count)) = args.get(1).and_then(|arg| match &arg.kind {
+                ExprKind::Lit(lit) => Some(lit),
+                _ => None,
+            }) else {
+                return Ok(None);
+            };
+            (QueryNodeKind::Limit, None, None, None, Some(*count))
+        }
+        _ => return Ok(None),
+    };
+    let id = match kind {
+        QueryNodeKind::Select | QueryNodeKind::Update | QueryNodeKind::Agg => typed
+            .project(
+                site,
+                kind,
+                child,
+                Some(output_row.clone()),
+                origin,
+                fields.clone(),
+            )
+            .map_err(query_error)?,
+        QueryNodeKind::Where | QueryNodeKind::Order | QueryNodeKind::Limit => typed
+            .keep_row_with_payload(
+                site,
+                kind,
+                child,
+                origin,
+                predicate.clone(),
+                keys.clone(),
+                None,
+                None,
+            )
+            .map_err(query_error)?,
+        _ => return Ok(None),
+    };
+    checked = match kind {
+        QueryNodeKind::Where => {
+            CheckedQuery::where_(checked, predicate.expect("predicate"), origin)
+        }
+        QueryNodeKind::Select => CheckedQuery::select(checked, fields.expect("fields"), origin),
+        QueryNodeKind::Update => CheckedQuery::update(checked, fields.expect("fields"), origin),
+        QueryNodeKind::Agg => CheckedQuery::agg(checked, fields.expect("fields"), origin),
+        QueryNodeKind::Order => CheckedQuery::order(checked, keys.expect("keys"), origin),
+        QueryNodeKind::Limit => CheckedQuery::limit(checked, count.expect("count"), origin),
+        _ => unreachable!(),
+    }
+    .map_err(|error| Error::unsupported(error.message).at(origin))?;
+    if checked.row().columns() != output_row.columns() {
+        return Ok(None);
+    }
+    Ok(Some((id, checked)))
+}
+
 /// Source-build a composed query when all joins and stages have plain
 /// expression payloads. The checked relation travels with each typed node, so
 /// a join and its surrounding stages need no normalized query template.
@@ -1755,19 +1898,71 @@ fn lower_plain_composed_expr(
         let id = copy_typed_graph(&target_typed, typed)?;
         return Ok(Some((id, checked)));
     }
+
     let ExprKind::App(head, args) = &expr.kind else {
         return Ok(None);
     };
+    if args.len() == 2 && is_stage_shorthand_head(head) {
+        let Some((child, checked)) =
+            lower_plain_composed_expr(context, input, module, def, &args[0], typed)?
+        else {
+            return Ok(None);
+        };
+        return lower_shorthand_stage(input, module, def, expr, child, checked, typed);
+    }
     if args.len() != 2 || !is_pipe_head(head) {
         return Ok(None);
     }
     let left_expr = &args[0];
     let rhs = &args[1];
-    if let Some((combine, operation)) =
-        combine_record_in(input.type_check(), module, rhs).filter(|(combine, _)| {
-            combine.node.definition_module == module && combine.node.definition == def
-        })
-    {
+    if let Some(join_kind) = join_operator_kind(rhs) {
+        let ExprKind::App(_, join_args) = &rhs.kind else {
+            return Ok(None);
+        };
+        let (Some(right_expr), Some(predicate_expr)) = (join_args.first(), join_args.get(1)) else {
+            return Ok(None);
+        };
+        let Some((left, checked_left)) =
+            lower_plain_composed_expr(context, input, module, def, left_expr, typed)?
+        else {
+            return Ok(None);
+        };
+        let Some((right, checked_right)) =
+            lower_plain_composed_expr(context, input, module, def, right_expr, typed)?
+        else {
+            return Ok(None);
+        };
+        let Some(predicate) = lower_plain_expr(input, module, predicate_expr)? else {
+            return Ok(None);
+        };
+        let origin = Origin::new(module, rhs.span);
+        let checked = CheckedQuery::join(
+            join_kind,
+            checked_left,
+            checked_right,
+            predicate.clone(),
+            origin,
+        )
+        .map_err(|error| Error::unsupported(error.message).at(origin))?;
+        let output = input
+            .type_check()
+            .typed_node(module, expr.id)
+            .and_then(|node| node.row())
+            .map(Row::new);
+        let id = typed
+            .combine(
+                NodeRef::new(module, def, rhs.id),
+                QueryNodeKind::Join(join_kind),
+                left,
+                right,
+                output,
+                origin,
+                Some(predicate),
+            )
+            .map_err(query_error)?;
+        return Ok(Some((id, checked)));
+    }
+    if let Some((combine, operation)) = combine_record_in(input.type_check(), module, rhs) {
         let Some((left, checked_left)) =
             lower_plain_composed_expr(context, input, module, def, left_expr, typed)?
         else {
@@ -2896,6 +3091,14 @@ fn lower_helper_expr(
     }
 
     if let ExprKind::App(head, args) = &body.kind {
+        if args.len() >= 2 && is_stage_shorthand_head(head) {
+            let Some((child, checked)) =
+                lower_helper_expr(context, input, module, def, &args[0], typed)?
+            else {
+                return Ok(None);
+            };
+            return lower_shorthand_stage(input, module, def, body, child, checked, typed);
+        }
         if args.len() == 2 && is_pipe_head(head) {
             let Some((child, checked)) =
                 lower_helper_expr(context, input, module, def, &args[0], typed)?
@@ -3649,6 +3852,40 @@ fn lambda_params(expr: &Expr) -> Vec<String> {
 
 fn is_pipe_head(head: &Expr) -> bool {
     matches!(&head.kind, ExprKind::Name(name) if name == "_&_")
+}
+
+fn is_stage_shorthand_head(head: &Expr) -> bool {
+    matches!(
+        &head.kind,
+        ExprKind::Name(name)
+            if matches!(
+                name.as_str(),
+                "_&?_" | "_&=_" | "_&+_" | "_&*_" | "_&._" | "_&-_"
+            )
+    )
+}
+
+fn join_operator_kind(expr: &Expr) -> Option<crate::ir::JoinKind> {
+    let ExprKind::App(head, _) = &expr.kind else {
+        return None;
+    };
+    let ExprKind::Name(name) = &head.kind else {
+        return None;
+    };
+    match name.as_str() {
+        "_?_" => Some(crate::ir::JoinKind::Inner),
+        "_<?_" => Some(crate::ir::JoinKind::Left),
+        "_?>_" => Some(crate::ir::JoinKind::Right),
+        "_<??>_" => Some(crate::ir::JoinKind::Full),
+        _ => None,
+    }
+}
+
+fn contains_join_operator_tree(expr: &Expr) -> bool {
+    join_operator_kind(expr).is_some()
+        || crate::check::child_exprs(expr)
+            .into_iter()
+            .any(contains_join_operator_tree)
 }
 
 fn contains_unmigrated_stage(input: CompilerInput<'_>, module: usize, body: &Expr) -> bool {

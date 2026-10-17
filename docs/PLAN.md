@@ -352,6 +352,10 @@ Each stage reads the row recorded by the checker, so expressions after
 projections, updates, and aggregation resolve against their actual intermediate
 schema. Unsupported payloads leave the whole attempted chain for the explicit
 legacy route at `query_lowering.rs`.
+The prelude's pipeline shorthands (`&?`, `&=`, `&+`, `&*`, `&.`, and `&-`) now
+instantiate their lambda bodies directly from the caller's checker facts as
+well. Operator-form joins such as `<?` are consumed by the same recursive typed
+composer, including when they are nested beneath those shorthands.
 Helpers with chains of `where`, `order`, `select`, and `update` stages now use
 that plain expression builder at each recorded stage identity. The caller's
 typed row is threaded through every stage, supplying field types and each

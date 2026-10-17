@@ -769,6 +769,50 @@ fn multi_stage_helper_operand_bypasses_normalized_elaboration() {
     );
 }
 
+#[test]
+fn active_totals_shorthand_pipeline_bypasses_normalized_elaboration() {
+    let ws = Workspace::from_source(
+        "users : query { id = int, name = string, active = bool } = table \"public\" \"users\"\n\
+         orders : query { user_id = int, amount = float, status = string, created_at = date } = table \"public\" \"orders\"\n\
+         active_totals = users &? .active & (orders & select { .user_id, .amount, .status, .created_at }) <? .<id == .>user_id &* { id = group .id, name = group .name, total = sum (coalesce 0.0 .amount) ?? 0.0 } &. [desc .total] &- 20\n",
+    );
+    let tc = crate::check::check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    let def = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .position(|definition| definition.name == "active_totals")
+        .unwrap();
+    let lowered = crate::query_lowering::lower(
+        CompilerInput::new(&ws, &tc),
+        ws.root,
+        def,
+        &ws.modules[ws.root].module.defs[def].body,
+    )
+    .unwrap();
+    assert!(
+        matches!(lowered, crate::query_lowering::LoweredQuery::Typed { .. }),
+        "active_totals lowered through legacy route: {lowered:?}"
+    );
+    crate::normalize::clear_visited();
+    let compiled = compile_checked(&ws, &tc);
+    assert!(
+        compiled
+            .queries
+            .iter()
+            .any(|query| query.name == "active_totals" && query.result.is_ok()),
+        "active_totals failed to compile: {:?}",
+        compiled.diagnostics
+    );
+    assert!(
+        !crate::normalize::visited_nodes()
+            .iter()
+            .any(|(module, visited, _)| *module == ws.root && *visited == def),
+        "active_totals unexpectedly walked normalized terms"
+    );
+}
+
 /// Every node under a projection's base, for the bridge/tree agreement test.
 ///
 /// The whole base subtree is skipped, not only its root: `a.b.c` is a projection

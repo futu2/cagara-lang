@@ -405,10 +405,10 @@ are now instantiated inside combine operands too. A helper with one `select`,
 `update`, or `agg`, surrounded by any number of those row-preserving stages,
 can use the closed row on its call expression as the projection boundary. The
 aggregate and projection expressions remain on the normalized bridge. Helpers
-with multiple projection or aggregate stages now instantiate each intermediate
-output row from the checked use expression, then build the complete typed chain
-with the helper stages' original identities. Those helpers can also mix
-projections with row rewrites, using instantiated checked rows at each boundary.
+with multiple projection or aggregate stages still decline to the explicit
+legacy route because their intermediate rows are not yet supplied by typed
+checker facts. Extending checker-owned helper instantiation to those chains is
+still part of the migration.
 
 ### Step 1, done
 

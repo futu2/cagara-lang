@@ -276,9 +276,12 @@ subset now have a source checked-expression path: expression types come from
 the checker, and the typed projection and `CheckedQuery` are built without
 entering normalized elaboration. Aggregate, window, and other unsupported
 expressions continue through the payload bridge.
-Direct `order` stages whose keys are plain columns with literal `asc` or
-`desc` directions use the same typed path, retaining their checked sort keys
-without entering normalized elaboration.
+Direct `order` stages whose keys fit the plain checked-expression subset use the
+same typed path, retaining checked sort keys without entering normalized
+elaboration. This includes computed keys built from resolved SQL templates,
+such as nullable-value fallbacks, as well as bare columns. Direction helpers
+are resolved by primitive identity, including aliases from the editable
+prelude.
 Direct `select` and `update` fields can also build the prelude's window
 functions directly when their named window spec contains plain partition and
 order keys. The checked window template is attached to the typed projection;

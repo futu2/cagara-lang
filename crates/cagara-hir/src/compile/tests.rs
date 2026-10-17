@@ -416,7 +416,7 @@ fn direct_plain_update_bypasses_normalized_elaboration() {
 #[test]
 fn direct_plain_order_bypasses_normalized_elaboration() {
     let ws = Workspace::from_source(
-        "users : query { id = int, name = string } = table \"public\" \"users\"\nq = users & order [desc .name]\n",
+        "users : query { id = int, name = maybe string } = table \"public\" \"users\"\nq = users & order [desc (coalesce \"\" .name)]\n",
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());

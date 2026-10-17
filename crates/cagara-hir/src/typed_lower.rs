@@ -731,7 +731,7 @@ fn lower_plain_window_spec(
         .map_err(|error| Error::unsupported(error.message).at(Origin::new(module, expr.span)))
 }
 
-/// Lower a direct order whose keys are plain columns with literal directions.
+/// Lower a direct order whose keys fit the source checked-expression subset.
 fn lower_simple_order_pipeline(
     input: CompilerInput<'_>,
     module: usize,
@@ -772,24 +772,13 @@ fn lower_simple_order_pipeline(
         let Some(value) = args.first() else {
             return Ok(None);
         };
-        let ExprKind::Field(side, column) = &value.kind else {
-            return Ok(None);
-        };
         let Some(direction) = sort_direction(input, module, item) else {
             return Ok(None);
         };
-        let Some(ty) = tc.typed_node(module, value.id).and_then(|node| node.ty()) else {
+        let Some(value) = lower_plain_expr(input, module, value)? else {
             return Ok(None);
         };
-        keys.push((
-            crate::checked::CheckedExpr::column(
-                *side,
-                column.clone(),
-                ty,
-                Origin::new(module, value.span),
-            ),
-            direction,
-        ));
+        keys.push((value, direction));
     }
     let origin = Origin::new(module, stage_expr.span);
     let (child, checked, mut typed) = if let Some((schema, table, columns)) =
@@ -4316,6 +4305,21 @@ mod tests {
             .expect("typed order node");
         assert!(!order.order_keys().expect("order keys")[0].1);
         assert_eq!(checked.row().names(), &["id", "rn"]);
+    }
+
+    #[test]
+    fn direct_order_lowers_supported_expression_keys_without_the_bridge() {
+        let (typed, checked) = lower_source(
+            "descending : expr r a -> sortkey r = desc\n\
+             users : query { id = maybe int } = table \"s\" \"users\"\n\
+             q = users & order [descending (coalesce 0 .id)]\n",
+            "q",
+        );
+        let order = typed.node(typed.root());
+        let key = &order.order_keys().expect("order keys")[0];
+        assert!(!key.1);
+        assert_eq!(key.0.kind(), crate::checked::ExprKind::Template);
+        assert_eq!(checked.row().names(), &["id"]);
     }
 
     #[test]

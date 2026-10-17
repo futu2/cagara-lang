@@ -526,8 +526,10 @@ fn plain_expression_helper_bypasses_normalized_elaboration() {
 fn closed_window_projection_helper_bypasses_normalized_elaboration() {
     let ws = Workspace::from_source(
         "users : query { id = int } = table \"public\" \"users\"\n\
-         numbered : query { id = int } -> query { id = int, rn = int } = q => \
-             q & select { id = .id, rn = rowNumber { order = [asc .id] } }\n\
+         frameRows : bound -> bound -> frame = rows\n\
+         running : frame = frameRows unboundedPreceding currentRow\n\
+         numbered : query { id = int } -> query { id = int, rn = maybe int } = q => \
+             q & select { id = .id, rn = sumOver { order = [asc .id], frame = running } .id }\n\
          q = users & numbered\n",
     );
     let tc = crate::check::check(&ws);

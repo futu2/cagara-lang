@@ -57,6 +57,9 @@ fn lower_unhydrated(
     if let Some(lowered) = lower_simple_projection_pipeline(input, module, def, body)? {
         return Ok(Some(lowered));
     }
+    if let Some(lowered) = lower_simple_order_pipeline(input, module, def, body)? {
+        return Ok(Some(lowered));
+    }
     // The expression-bearing stages use the checked payload bridge for their
     // predicates, fields, and sort keys. Their relational boundaries still
     // come from the typed stage records, so the query arena does not recover
@@ -319,6 +322,117 @@ fn lower_simple_projection_pipeline(
         _ => unreachable!(),
     }
     .map_err(|error| Error::unsupported(error.message).at(stage_origin))?;
+    Ok(Some((typed.finish(id), checked)))
+}
+
+/// Lower a direct order whose keys are plain columns with literal directions.
+fn lower_simple_order_pipeline(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
+    let tc = input.type_check();
+    let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
+    if stages.len() != 1
+        || stages[0].kind != RowStage::Order
+        || stages[0].node.definition_module != module
+        || stages[0].node.definition != def
+        || !is_direct_pipeline(input, module, body)
+        || contains_other_stage(input, module, body, RowStage::Order)
+    {
+        return Ok(None);
+    }
+    let stage = &stages[0];
+    let stage_sites = std::iter::once(stage.site).collect::<HashSet<_>>();
+    let Some(base) = find_base(body, &stage_sites, tc, module) else {
+        return Ok(None);
+    };
+    let stage_expr = find_expr_id(body, stage.site).unwrap_or(body);
+    let ExprKind::App(_, args) = &stage_expr.kind else {
+        return Ok(None);
+    };
+    let Some(list) = args.first() else {
+        return Ok(None);
+    };
+    let ExprKind::List(items) = &list.kind else {
+        return Ok(None);
+    };
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items {
+        let ExprKind::App(head, args) = &item.kind else {
+            return Ok(None);
+        };
+        let Some(value) = args.first() else {
+            return Ok(None);
+        };
+        let ExprKind::Field(side, column) = &value.kind else {
+            return Ok(None);
+        };
+        let direction = match &head.kind {
+            ExprKind::Name(name) if name == "asc" => true,
+            ExprKind::Name(name) if name == "desc" => false,
+            _ => return Ok(None),
+        };
+        let Some(ty) = tc.typed_node(module, value.id).and_then(|node| node.ty()) else {
+            return Ok(None);
+        };
+        keys.push((
+            crate::checked::CheckedExpr::column(
+                *side,
+                column.clone(),
+                ty,
+                Origin::new(module, value.span),
+            ),
+            direction,
+        ));
+    }
+    let origin = Origin::new(module, stage_expr.span);
+    let (child, checked, mut typed) = if let Some((schema, table, columns)) =
+        table_parts(input, module, base)
+    {
+        let checked =
+            CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
+                .map_err(|error| Error::unsupported(error.message).at(origin))?;
+        let mut typed = TypedQuery::new();
+        let child = typed
+            .table(NodeRef::new(module, def, base.id), origin, columns)
+            .map_err(query_error)?;
+        (child, checked, typed)
+    } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
+        if (target_module, target_def) == (module, def)
+            || !matches!(
+                tc.scheme_view(target_module, target_def),
+                Some(crate::check::SchemeView::Query { .. })
+            )
+        {
+            return Ok(None);
+        }
+        let target_body = &input.module(target_module).def(target_def).body;
+        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
+        else {
+            return Ok(None);
+        };
+        let mut typed = TypedQuery::new();
+        let child = copy_typed_graph(&target_typed, &mut typed)?;
+        (child, checked, typed)
+    } else {
+        return Ok(None);
+    };
+    let id = typed
+        .keep_row_with_payload(
+            stage.node,
+            QueryNodeKind::Order,
+            child,
+            origin,
+            None,
+            Some(keys.clone()),
+            None,
+            None,
+        )
+        .map_err(query_error)?;
+    let checked = CheckedQuery::order(checked, keys, origin)
+        .map_err(|error| Error::unsupported(error.message).at(origin))?;
     Ok(Some((typed.finish(id), checked)))
 }
 

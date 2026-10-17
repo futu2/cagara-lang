@@ -52,10 +52,8 @@ pub(crate) fn lower(
     }
 
     // Transitional adapter. It is the only place where the production query
-    // boundary is allowed to select normalized lowering after the typed route
-    // has declined a shape. Payload helpers inside typed lowering may still
-    // consult normalization while their own slices are being migrated, but
-    // they cannot choose the production route.
+    // boundary selects normalized lowering after the typed route declines a
+    // shape; typed lowering never invokes it internally.
     let checked = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
     Ok(LoweredQuery::Legacy { checked })
 }

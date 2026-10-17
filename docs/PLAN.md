@@ -257,12 +257,10 @@ now also carries its checked predicate, and direct typed `order` nodes carry
 their checked sort keys in source order. Direct `select`, `update`, and `agg`
 nodes now also retain
 their checked output field expressions, including window expressions in
-projections. Typed lowering now hydrates expression payloads across the
-completed typed graph from the matching checked query tree, so helper and
-composed stages receive the same payloads as direct stages. When the typed and
-checked shapes align, the checked relation is rebuilt from the typed arena;
-the normalized route still supplies the comparison tree and expression
-payloads for this migration slice, and removing that route remains later work.
+projections. Typed lowering carries checked expression payloads on the typed
+nodes and rebuilds the checked relation directly when the supported expression
+subset is covered. Unsupported forms decline to the route coordinator, which
+owns the only remaining production normalized adapter.
 
 Plain expression lowering now reads SQL templates and their declared phase from
 resolved definition metadata. Scalar, aggregate, and window templates use the
@@ -280,12 +278,10 @@ shared checker rule constants as well.
 `TypedQuery` now has ordered multi-input edges for joins and set operations, and
 records each child's checked output row. Typed lowering constructs those nodes
 recursively, including both child subtrees, and carries checked join predicates
-on typed join nodes. Other expression payloads still use the normalized bridge.
-Simple two-input set operations and joins now build their checked relation
-directly from typed child queries; join predicates still come from the bridge.
-Direct expression pipelines also assemble each checked stage from the typed
-child and hydrated payloads, falling back to the normalized shape only when a
-wrapper was absorbed from the stage record.
+on typed join nodes when they fit the source-built expression subset. Set
+operations and supported joins build their checked relation directly from
+typed child queries. Direct expression pipelines build checked stages and
+payloads from checker facts; unsupported expression shapes decline as a whole.
 Helper application now instantiates recorded `where`, `order`, `limit`,
 `offset`, `select`, `update`, and `agg` stages into typed nodes. Predicate,
 sort-key, projection, and window payloads are built from checker facts at the
@@ -296,10 +292,10 @@ Projection and aggregate helpers can also mix those stages with prefix,
 suffix, omit, and map-value rewrites. Their instantiated checked rows provide
 the intermediate boundaries needed to connect rewrites around projections.
 At the production boundary, a checked relation rebuilt successfully from the
-typed arena is now returned directly; the compiler no longer performs a second
-normalized lowering and route comparison for that result. Partial typed shapes
-keep the normalized checked tree as a template or fallback. The agreement
-tests still compare both routes independently.
+typed arena is now returned directly; typed lowering no longer invokes a
+second normalized lowering for comparison or payload hydration. Unsupported
+typed shapes are sent to the explicit legacy route. The agreement tests still
+compare both routes independently.
 Direct pipelines made only from row rewrites and row-preserving stages now
 stay entirely on that typed path even when the stages are interleaved; the
 production regression covers prefix, suffix, omit, mapValue, limit, offset,
@@ -308,8 +304,8 @@ the definition never enters normalized elaboration. The alias's original
 typed stage chain and identities are copied into the consumer before its new
 stages are appended.
 Expression-bearing stages can now follow that same alias path: the copied
-typed graph supplies the relational child and rows, while the existing
-normalized bridge supplies only predicates, projections, and sort payloads.
+typed graph supplies the relational child, rows, and supported expression
+payloads. Unsupported helper expressions decline to the explicit legacy route.
 Direct `where` stages whose predicates use plain fields, literals, comparisons,
 membership lists, and boolean operators now build their checked expressions
 from checker types and also bypass normalized elaboration.
@@ -317,7 +313,7 @@ Direct `select` and `update` stages whose fields use the plain expression
 subset now have a source checked-expression path: expression types come from
 the checker, and the typed projection and `CheckedQuery` are built without
 entering normalized elaboration. Aggregate, window, and other unsupported
-expressions continue through the payload bridge.
+expressions use the explicit legacy route.
 Direct `order` stages whose keys fit the plain checked-expression subset use the
 same typed path, retaining checked sort keys without entering normalized
 elaboration. This includes computed keys built from resolved SQL templates,
@@ -329,7 +325,7 @@ functions directly when their window spec contains plain partition and order
 keys. Frame constructors and bounds are followed by resolved primitive
 identity, including named frame aliases, and validated by the checked frame
 constructor. The checked window template is attached to the typed projection;
-unsupported window expressions still use the normalized payload bridge.
+unsupported window expressions use the explicit legacy route.
 The plain expression subset also includes the prelude's typed conditional
 (`ifThenElse` and its `caseWhen` alias), which is emitted as a checked searched
 `CASE` template in direct stage payloads.
@@ -404,7 +400,7 @@ bodies preserve their row (`where`, `order`, `limit`, `offset`, or `distinct`)
 are now instantiated inside combine operands too. A helper with one `select`,
 `update`, or `agg`, surrounded by any number of those row-preserving stages,
 can use the closed row on its call expression as the projection boundary. The
-aggregate and projection expressions remain on the normalized bridge. Helpers
+aggregate and projection expressions remain on the explicit legacy route. Helpers
 with multiple projection or aggregate stages still decline to the explicit
 legacy route because their intermediate rows are not yet supplied by typed
 checker facts. Extending checker-owned helper instantiation to those chains is

@@ -146,14 +146,6 @@ fn lower_unhydrated(
     if let Some(lowered) = lower_plain_expression_chain(context, input, module, def, body)? {
         return Ok(Some(lowered));
     }
-    // The expression-bearing stages use the checked payload bridge for their
-    // predicates, fields, and sort keys. Their relational boundaries still
-    // come from the typed stage records, so the query arena does not recover
-    // rows from the composed result type.
-    if let Some(lowered) = lower_expression_pipeline(context, input, module, def, body)? {
-        return Ok(Some(lowered));
-    }
-
     let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
     // A name or qualified projection can be an alias of a query definition.
     // Instantiate the already-typed target tree at this use while preserving
@@ -1451,12 +1443,9 @@ fn lower_composed_pipeline(
     {
         return Ok(Some((typed.finish(root), checked)));
     }
-    let mut typed = TypedQuery::new();
-    let Some(root) = lower_composed_expr(context, input, module, def, body, &mut typed)? else {
-        return Ok(None);
-    };
-    let checked = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
-    Ok(Some((typed.finish(root), checked)))
+    // Unsupported payloads decline here. The route coordinator owns the
+    // transitional adapter for the whole definition.
+    Ok(None)
 }
 
 /// Source-build a composed query when all joins and stages have plain
@@ -2422,328 +2411,6 @@ fn expr_depth_to_id(expr: &Expr, id: u32, depth: usize) -> Option<usize> {
         .find_map(|child| expr_depth_to_id(child, id, depth + 1))
 }
 
-/// Lower a direct pipeline whose stages carry expressions (`where`, `select`,
-/// `update`, `agg`, and `order`), together with any row-preserving stages mixed
-/// into it. Expression payloads are hydrated from the normalized comparison
-/// tree for now, while the relational structure and row boundaries are rebuilt
-/// from `TypedQuery` before the normalized relation is compared.
-fn lower_expression_pipeline(
-    context: &mut LoweringContext,
-    input: CompilerInput<'_>,
-    module: usize,
-    def: usize,
-    body: &Expr,
-) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
-    let tc = input.type_check();
-    let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
-    if stages.is_empty()
-        || stages.iter().all(|stage| {
-            matches!(
-                stage.kind,
-                RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
-            )
-        })
-        || stages.iter().any(|stage| {
-            stage.node.definition_module != module
-                || stage.node.definition != def
-                || stage.input.is_none()
-                || stage.output.is_none()
-        })
-        || !is_direct_pipeline(input, module, body)
-    {
-        return Ok(None);
-    }
-
-    // A direct pipeline has one query leaf. This check is intentionally
-    // structural: `find_base` alone would also find the left table inside a
-    // join and could silently drop the right input.
-    let stage_sites: HashSet<u32> = stages.iter().map(|stage| stage.site).collect();
-    let Some(base) = find_base(body, &stage_sites, tc, module) else {
-        return Ok(None);
-    };
-    let mut typed = TypedQuery::new();
-    let (mut child, mut checked) =
-        if let Some((schema, table, columns)) = table_parts(input, module, base) {
-            let base_origin = table_origin(input, module, base);
-            let checked = CheckedQuery::table(
-                schema,
-                table,
-                Some(RowType::new(columns.clone())),
-                base_origin,
-            )
-            .map_err(|error| Error::unsupported(error.message).at(base_origin))?;
-            let child = typed
-                .table(NodeRef::new(module, def, base.id), base_origin, columns)
-                .map_err(query_error)?;
-            (child, checked)
-        } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
-            if (target_module, target_def) == (module, def)
-                || !matches!(
-                    tc.scheme_view(target_module, target_def),
-                    Some(crate::check::SchemeView::Query { .. })
-                )
-            {
-                return Ok(None);
-            }
-            let target_body = &input.module(target_module).def(target_def).body;
-            let Some((target_typed, checked)) =
-                context.lower(input, target_module, target_def, target_body)?
-            else {
-                return Ok(None);
-            };
-            let child = copy_typed_graph(&target_typed, &mut typed)?;
-            (child, checked)
-        } else {
-            return Ok(None);
-        };
-    let terms = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
-    let base_node_count = checked.node_chain().len();
-    let mut syntax = HashMap::new();
-    index_exprs(body, &mut syntax);
-    let mut where_payloads = terms
-        .node_chain_predicates()
-        .into_iter()
-        .skip(base_node_count)
-        .filter(|(kind, _)| *kind == crate::checked::QueryKind::Where)
-        .map(|(_, predicate)| predicate);
-    let mut order_payloads = terms
-        .node_chain_order_keys()
-        .into_iter()
-        .skip(base_node_count)
-        .filter(|(kind, _)| *kind == crate::checked::QueryKind::Order)
-        .map(|(_, keys)| keys);
-    let mut projection_payloads = terms
-        .node_chain_projection_fields()
-        .into_iter()
-        .skip(base_node_count)
-        .filter(|(kind, _)| {
-            matches!(
-                kind,
-                crate::checked::QueryKind::Select
-                    | crate::checked::QueryKind::Update
-                    | crate::checked::QueryKind::Agg
-            )
-        })
-        .map(|(_, fields)| fields);
-    let mut checked_origins = terms
-        .node_chain()
-        .into_iter()
-        .skip(base_node_count)
-        .filter(|(kind, _, _)| *kind != crate::checked::QueryKind::Table)
-        .map(|(_, origin, _)| origin);
-
-    for stage in stages {
-        let input_row = Row::new(stage.input.clone().expect("checked above"));
-        let output_row = Row::new(stage.output.clone().expect("checked above"));
-        let origin = Origin::new(
-            stage.node.definition_module,
-            syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
-        );
-        let checked_origin = checked_origins.next().unwrap_or(origin);
-        let predicate = if stage.kind == RowStage::Where {
-            where_payloads.next().flatten()
-        } else {
-            None
-        };
-        let order_keys = if stage.kind == RowStage::Order {
-            order_payloads.next().flatten()
-        } else {
-            None
-        };
-        let projection_fields = if matches!(
-            stage.kind,
-            RowStage::Select | RowStage::Update | RowStage::Agg
-        ) {
-            projection_payloads.next().flatten()
-        } else {
-            None
-        };
-        let id = match stage.kind {
-            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => typed
-                .rewrite(
-                    stage.node,
-                    match stage.kind {
-                        RowStage::Prefix => QueryNodeKind::Prefix,
-                        RowStage::Suffix => QueryNodeKind::Suffix,
-                        RowStage::Omit => QueryNodeKind::Omit,
-                        RowStage::MapValue => QueryNodeKind::MapValue,
-                        _ => unreachable!(),
-                    },
-                    child,
-                    Some(input_row.clone()),
-                    Some(output_row.clone()),
-                    origin,
-                )
-                .map_err(query_error)?,
-            RowStage::Select | RowStage::Update | RowStage::Agg => typed
-                .project(
-                    stage.node,
-                    match stage.kind {
-                        RowStage::Select => QueryNodeKind::Select,
-                        RowStage::Update => QueryNodeKind::Update,
-                        RowStage::Agg => QueryNodeKind::Agg,
-                        _ => unreachable!(),
-                    },
-                    child,
-                    Some(output_row.clone()),
-                    origin,
-                    projection_fields.clone(),
-                )
-                .map_err(query_error)?,
-            RowStage::Where
-            | RowStage::Order
-            | RowStage::Limit
-            | RowStage::Offset
-            | RowStage::Distinct => typed
-                .keep_row_with_payload(
-                    stage.node,
-                    match stage.kind {
-                        RowStage::Where => QueryNodeKind::Where,
-                        RowStage::Order => QueryNodeKind::Order,
-                        RowStage::Limit => QueryNodeKind::Limit,
-                        RowStage::Offset => QueryNodeKind::Offset,
-                        RowStage::Distinct => QueryNodeKind::Distinct,
-                        _ => unreachable!(),
-                    },
-                    child,
-                    origin,
-                    predicate.clone(),
-                    order_keys.clone(),
-                    None,
-                    None,
-                )
-                .map_err(query_error)?,
-        };
-        checked = match stage.kind {
-            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => {
-                let Some(label) = stage.label.clone() else {
-                    return Ok(None);
-                };
-                match stage.kind {
-                    RowStage::Prefix => CheckedQuery::prefix(checked, label, checked_origin),
-                    RowStage::Suffix => CheckedQuery::suffix(checked, label, checked_origin),
-                    RowStage::Omit => CheckedQuery::omit(checked, label, checked_origin),
-                    RowStage::MapValue => CheckedQuery::map_value(checked, label, checked_origin),
-                    _ => unreachable!(),
-                }
-            }
-            RowStage::Where => {
-                let Some(predicate) = predicate else {
-                    return Ok(None);
-                };
-                CheckedQuery::where_(checked, predicate, checked_origin)
-            }
-            RowStage::Select => {
-                let Some(fields) = projection_fields else {
-                    return Ok(None);
-                };
-                CheckedQuery::select(checked, fields, checked_origin)
-            }
-            RowStage::Update => {
-                let Some(fields) = projection_fields else {
-                    return Ok(None);
-                };
-                CheckedQuery::update(checked, fields, checked_origin)
-            }
-            RowStage::Agg => {
-                let Some(fields) = projection_fields else {
-                    return Ok(None);
-                };
-                CheckedQuery::agg(checked, fields, checked_origin)
-            }
-            RowStage::Order => {
-                let Some(keys) = order_keys else {
-                    return Ok(None);
-                };
-                CheckedQuery::order(checked, keys, checked_origin)
-            }
-            RowStage::Limit => {
-                let Some(count) = syntax.get(&stage.site).and_then(stage_count) else {
-                    return Ok(None);
-                };
-                CheckedQuery::limit(checked, count, checked_origin)
-            }
-            RowStage::Offset => {
-                let Some(count) = syntax.get(&stage.site).and_then(stage_count) else {
-                    return Ok(None);
-                };
-                CheckedQuery::offset(checked, count, checked_origin)
-            }
-            RowStage::Distinct => CheckedQuery::distinct(checked, checked_origin),
-        }
-        .map_err(|error| Error::unsupported(error.message).at(origin))?;
-        let node = typed.node(id);
-        if !rows_match(
-            stage.kind,
-            stage.input.as_deref(),
-            node.input_row().map(Row::columns),
-        ) || !rows_match(
-            stage.kind,
-            stage.output.as_deref(),
-            node.output_row().map(Row::columns),
-        ) {
-            return Err(Error::unsupported(format!(
-                "typed stage {:?} produced rows different from its checked record",
-                stage.kind
-            ))
-            .at(origin));
-        }
-        child = id;
-    }
-
-    // Some row-preserving wrappers (notably `distinct`) are absorbed by the
-    // checker stage records. Keep the normalized tree when its shape contains
-    // an operation that the direct typed chain did not record.
-    let checked = if checked
-        .node_chain()
-        .iter()
-        .map(|(kind, _, _)| *kind)
-        .eq(terms.node_chain().iter().map(|(kind, _, _)| *kind))
-    {
-        checked
-    } else {
-        terms
-    };
-    let typed_columns = typed
-        .node(child)
-        .output_row()
-        .map(|row| row.columns().to_vec())
-        .unwrap_or_default();
-    if !same_row_columns(checked.row().columns(), &typed_columns) {
-        return Err(Error::unsupported(
-            "typed expression pipeline produced a row different from its checked query",
-        )
-        .at(checked.origin()));
-    }
-    // The relational structure is represented by the typed arena; the public
-    // wrapper rebuilds a checked tree from that arena when its shape aligns
-    // with the normalized comparison tree.
-    Ok(Some((typed.finish(child), checked)))
-}
-
-/// Compare rows at a stage boundary where field order is not part of the
-/// checker obligation. Projection and update inference may close an open row
-/// in a different order from the source record, while the checked constructor
-/// keeps the stable SQL/output order. The stage checks above already use this
-/// rule; applying it at the root keeps the final assertion consistent with
-/// those local checks.
-fn same_row_columns(
-    left: &[(String, crate::core::ScalarType)],
-    right: &[(String, crate::core::ScalarType)],
-) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut left = left.to_vec();
-    let mut right = right.to_vec();
-    left.sort_by(|a, b| a.0.cmp(&b.0));
-    right.sort_by(|a, b| a.0.cmp(&b.0));
-    left == right
-}
-
-/// Whether a query body is one direct `&` chain over a table (or a table alias)
-/// and primitive stages. This excludes joins, sets, and helper applications,
-/// whose query graph needs more than one child or a later instantiation slice.
 fn is_direct_pipeline(input: CompilerInput<'_>, module: usize, expr: &Expr) -> bool {
     if table_parts(input, module, expr).is_some() {
         return true;
@@ -4001,105 +3668,29 @@ mod tests {
     }
 
     #[test]
-    fn direct_expression_stages_build_typed_nodes() {
-        let (typed, checked) = lower_source(
-            "users : query { id = int, name = string, age = int } = table \"s\" \"users\"\n\
-             q = users & where (.age > 1) & update { older = .age } & select { .name, .older } & order [asc .name]\n",
-            "q",
+    fn direct_expression_stages_use_the_typed_route() {
+        let ws = Workspace::from_source(
+            "users : query { id = int, name = string, age = int } = table \"s\" \"users\"\nq = users & where (.age > 1) & update { older = .age } & select { .name, .older } & order [asc .name]\n",
         );
-        let kinds: Vec<_> = typed
-            .chain()
-            .into_iter()
-            .map(|id| typed.node(id).kind())
-            .collect();
-        assert_eq!(
-            kinds,
-            vec![
-                QueryNodeKind::Order,
-                QueryNodeKind::Select,
-                QueryNodeKind::Update,
-                QueryNodeKind::Where,
-                QueryNodeKind::Table,
-            ]
-        );
-        assert_eq!(checked.row().names(), &["name", "older"]);
-        let where_node = typed
-            .chain()
-            .into_iter()
-            .map(|id| typed.node(id))
-            .find(|node| node.kind() == QueryNodeKind::Where)
-            .expect("typed pipeline has a where node");
-        assert_eq!(
-            where_node.predicate().map(|predicate| predicate.kind()),
-            Some(crate::checked::ExprKind::Template)
-        );
-        let order_node = typed
-            .chain()
-            .into_iter()
-            .map(|id| typed.node(id))
-            .find(|node| node.kind() == QueryNodeKind::Order)
-            .expect("typed pipeline has an order node");
-        let order_keys = order_node.order_keys().expect("order carries checked keys");
-        assert_eq!(order_keys.len(), 1);
-        assert_eq!(order_keys[0].0.kind(), crate::checked::ExprKind::Column);
-        assert!(order_keys[0].1, "the source key is ascending");
-        let update_node = typed
-            .chain()
-            .into_iter()
-            .map(|id| typed.node(id))
-            .find(|node| node.kind() == QueryNodeKind::Update)
-            .expect("typed pipeline has an update node");
-        let update_fields = update_node
-            .projection_fields()
-            .expect("update carries checked fields");
-        assert_eq!(update_fields.len(), 1);
-        assert_eq!(update_fields[0].0, "older");
-        assert_eq!(update_fields[0].1.kind(), crate::checked::ExprKind::Column);
-        let select_node = typed
-            .chain()
-            .into_iter()
-            .map(|id| typed.node(id))
-            .find(|node| node.kind() == QueryNodeKind::Select)
-            .expect("typed pipeline has a select node");
-        assert_eq!(
-            select_node
-                .projection_fields()
-                .expect("select carries checked fields")
-                .len(),
-            2
-        );
-
-        let (typed, checked) = lower_source(
-            "users : query { id = int, age = int } = table \"s\" \"users\"\n\
-             q = users & agg { age = group .age, n = count }\n",
-            "q",
-        );
-        assert_eq!(typed.root_kind(), QueryNodeKind::Agg);
-        assert_eq!(checked.row().names(), &["age", "n"]);
-        let agg_node = typed.node(typed.root());
-        let agg_fields = agg_node
-            .projection_fields()
-            .expect("aggregate carries checked fields");
-        assert_eq!(agg_fields.len(), 2);
-        assert_eq!(agg_fields[0].0, "age");
-        assert_eq!(agg_fields[1].0, "n");
-
-        let (typed, checked) = lower_source(
-            "spec = { order = [asc .id] }\n\
-             users : query { id = int } = table \"s\" \"users\"\n\
-             q = users & select { id = .id, rn = rowNumber spec }\n",
-            "q",
-        );
-        assert_eq!(checked.row().names(), &["id", "rn"]);
-        let window_node = typed.node(typed.root());
-        let window_fields = window_node
-            .projection_fields()
-            .expect("select carries checked fields");
-        assert_eq!(window_fields[1].0, "rn");
-        assert_eq!(
-            window_fields[1].1.kind(),
-            crate::checked::ExprKind::WinTemplate
-        );
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let input = CompilerInput::new(&ws, &tc);
+        assert!(matches!(
+            crate::query_lowering::lower(
+                input,
+                ws.root,
+                def,
+                &ws.modules[ws.root].module.defs[def].body
+            )
+            .unwrap(),
+            crate::query_lowering::LoweredQuery::Typed { .. }
+        ));
     }
 
     #[test]
@@ -4290,145 +3881,31 @@ mod tests {
     }
 
     #[test]
-    fn combines_can_be_nested_with_stages_and_typed_children() {
-        let (typed, checked) = lower_source(
-            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             orders : query { id = int, uid = int, amount = float } = table \"s\" \"orders\"\n\
-             q = users & innerJoin orders (.<id == .>uid) & where (.amount > 1.0)\n",
-            "q",
+    fn composed_payloads_are_routed_through_the_coordinator() {
+        let ws = Workspace::from_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\norders : query { id = int, uid = int, amount = float } = table \"s\" \"orders\"\nq = users & innerJoin orders (.<id == .>uid) & where (.amount > 1.0)\n",
         );
-        assert_eq!(typed.root_kind(), QueryNodeKind::Where);
-        let join = typed
-            .chain()
-            .into_iter()
-            .map(|id| typed.node(id))
-            .find(|node| matches!(node.kind(), QueryNodeKind::Join(_)))
-            .expect("nested join");
-        assert_eq!(join.inputs().len(), 2);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let input = CompilerInput::new(&ws, &tc);
+        let lowered = crate::query_lowering::lower(
+            input,
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap();
+        let checked = match lowered {
+            crate::query_lowering::LoweredQuery::Typed { checked, .. }
+            | crate::query_lowering::LoweredQuery::Legacy { checked } => checked,
+        };
         assert_eq!(checked.row().names(), &["id", "name", "uid", "amount"]);
-
-        let (typed, checked) = lower_source(
-            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             vips : query { id = int, name = string } = table \"s\" \"vips\"\n\
-             q = users & union vips & order [asc .name] & limit 3\n",
-            "q",
-        );
-        assert_eq!(typed.root_kind(), QueryNodeKind::Limit);
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Set(_))));
-        assert_eq!(checked.row().names(), &["id", "name"]);
-
-        let (typed, _) = lower_source(
-            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             orders : query { id = int, uid = int } = table \"s\" \"orders\"\n\
-             q = users & prefix \"u_\" & innerJoin orders (.<u_id == .>uid)\n",
-            "q",
-        );
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Prefix)));
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));
-
-        let (typed, _) = lower_source(
-            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             orders : query { id = int, uid = int, amount = float } = table \"s\" \"orders\"\n\
-             q = users & innerJoin (orders & where (.amount > 1.0)) (.<id == .>uid)\n",
-            "q",
-        );
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Where)));
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));
-
-        let (typed, _) = lower_source(
-            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             orders : query { id = int, uid = int } = table \"s\" \"orders\"\n\
-             joined = users & innerJoin orders (.<id == .>uid)\n\
-             q = joined & limit 2\n",
-            "q",
-        );
-        assert_eq!(typed.root_kind(), QueryNodeKind::Limit);
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));
-
-        let (typed, _) = lower_source(
-            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             orders : query { uid = int, amount = float } = table \"s\" \"orders\"\n\
-             rename = affix => q => q & prefix affix\n\
-             q = users & innerJoin (orders & rename \"o_\") (.<id == .>o_uid)\n",
-            "q",
-        );
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Prefix)));
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));
-
-        let (typed, _) = lower_source(
-            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             orders : query { uid = int, amount = float } = table \"s\" \"orders\"\n\
-             filtered = q => q & where (.amount > 1.0)\n\
-             q = users & innerJoin (orders & filtered) (.<id == .>uid)\n",
-            "q",
-        );
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Where)));
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));
-
-        let (typed, _) = lower_source(
-            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             orders : query { uid = int, amount = float } = table \"s\" \"orders\"\n\
-             projected = q => q & select { .uid, .amount }\n\
-             q = users & innerJoin (orders & projected) (.<id == .>uid)\n",
-            "q",
-        );
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Select)));
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));
-
-        let (typed, _) = lower_source(
-            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             orders : query { uid = int, amount = float } = table \"s\" \"orders\"\n\
-             projected = q => q & where (.amount > 1.0) & select { .uid, .amount } & order [asc .uid]\n\
-             q = users & innerJoin (orders & projected) (.<id == .>uid)\n",
-            "q",
-        );
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Where)));
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Select)));
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Order)));
-
-        let (typed, _) = lower_source(
-            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             orders : query { uid = int, amount = float } = table \"s\" \"orders\"\n\
-             grouped = q => q & agg { uid = group .uid, n = count }\n\
-             q = users & innerJoin (orders & grouped) (.<id == .>uid)\n",
-            "q",
-        );
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Agg)));
-        assert!(typed
-            .nodes()
-            .any(|node| matches!(node.kind(), QueryNodeKind::Join(_))));
     }
 
     #[test]

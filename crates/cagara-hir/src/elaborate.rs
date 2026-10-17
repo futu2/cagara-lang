@@ -134,9 +134,10 @@ fn elaborate_def(
     ) {
         return Err(NOT_A_QUERY);
     }
-    // The first tree-driven slice is admitted only after comparing it with the
-    // normalized route. Unsupported source shapes continue through the
-    // established route until later slices cover them.
+    // The typed query builder reconstructs checked relations from the typed
+    // graph wherever its shape is complete. Partial shapes retain their
+    // normalized checked tree as a template, and unsupported shapes continue
+    // through normalization until later slices cover them.
     //
     // Normalization resolves every name, inlines every definition and reduces
     // every application, a stage's included, so by the time `lower_query` sees a
@@ -149,9 +150,7 @@ fn elaborate_def(
     // through its context are gone with it: normalization reads the checker's
     // records instead of re-resolving names, and reaches a callee's open
     // overloads through its own stack.
-    if let Some((typed, checked)) = crate::typed_lower::lower(input, module, def, &d.body)? {
-        let terms = crate::normalize::elaborate_query_via_terms(input, module, def, &d.body)?;
-        crate::typed_lower::compare_with_terms(input, &typed, &checked, &terms)?;
+    if let Some((_typed, checked)) = crate::typed_lower::lower(input, module, def, &d.body)? {
         return Ok(checked);
     }
     crate::normalize::elaborate_query_via_terms(input, module, def, &d.body)

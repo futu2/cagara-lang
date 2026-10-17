@@ -29,11 +29,8 @@ pub(crate) fn lower(
         .carry_checked_payloads(&checked)
         .map_err(query_error)?;
     typed.require_checked_payloads().map_err(query_error)?;
-    let checked = typed
-        .rebuild_checked(&checked)
-        .map_err(query_error)?
-        .unwrap_or(checked);
-    Ok(Some((typed, checked)))
+    let rebuilt = typed.rebuild_checked(&checked).map_err(query_error)?;
+    Ok(Some((typed, rebuilt.unwrap_or(checked))))
 }
 
 fn lower_unhydrated(
@@ -974,6 +971,12 @@ fn lower_expression_pipeline(
     let tc = input.type_check();
     let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
     if stages.is_empty()
+        || stages.iter().all(|stage| {
+            matches!(
+                stage.kind,
+                RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
+            )
+        })
         || stages.iter().any(|stage| {
             stage.node.definition_module != module
                 || stage.node.definition != def

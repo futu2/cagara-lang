@@ -240,6 +240,11 @@ helper-expanded checked output still retains normalized call-site origins.
 Projection and aggregate helpers can also mix those stages with prefix,
 suffix, omit, and map-value rewrites. Their instantiated checked rows provide
 the intermediate boundaries needed to connect rewrites around projections.
+At the production boundary, a checked relation rebuilt successfully from the
+typed arena is now returned directly; the compiler no longer performs a second
+normalized lowering and route comparison for that result. Partial typed shapes
+keep the normalized checked tree as a template or fallback. The agreement
+tests still compare both routes independently.
 The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be

@@ -218,15 +218,13 @@ fn a_stage_identity_names_the_node_that_applied_it() {
     );
 }
 
-/// The bridge visits every node the typed tree holds, except a projection's
-/// base.
+/// When normalization runs, the bridge visits every typed node except a
+/// projection's base.
 ///
 /// Normalization walks source syntax, and the checker's tree is its own account
-/// of the same body. The two have to cover the same nodes before a phase can
-/// take its children from the tree rather than re-deriving them from syntax: a
-/// node the tree holds and the bridge never visited would be dropped by that
-/// switch, and a node the bridge visited and the tree lacks would have no facts
-/// to read.
+/// of the same body. For query shapes that still use normalization, the two
+/// have to cover the same nodes before a phase can take children from the tree
+/// rather than re-deriving them from syntax.
 ///
 /// The one deliberate difference is `base.field`. The checker records what the
 /// *projection* resolved to — `infer_proj` writes the field's binding at the
@@ -241,7 +239,7 @@ fn a_stage_identity_names_the_node_that_applied_it() {
 /// definition when it inlines one: the visit log carries where each node was
 /// written, so a definition's visits can be compared with its own tree.
 #[test]
-fn the_bridge_visits_every_node_the_typed_tree_holds_except_projection_bases() {
+fn normalized_bridge_visits_every_typed_node_except_projection_bases() {
     let mut files = Vec::new();
     for dir in [
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus"),
@@ -258,25 +256,13 @@ fn the_bridge_visits_every_node_the_typed_tree_holds_except_projection_bases() {
         let ws = Workspace::open(&path);
         let tc = crate::check::check(&ws);
         crate::normalize::clear_visited();
-        let compilation = compile_checked(&ws, &tc);
+        let _compilation = compile_checked(&ws, &tc);
         let mut visited: std::collections::HashMap<
             (usize, usize),
             std::collections::BTreeSet<u32>,
         > = Default::default();
         for (module, def, id) in crate::normalize::visited_nodes() {
             visited.entry((module, def)).or_default().insert(id);
-        }
-        // A definition the compiler built was walked: the comparison below
-        // cannot silently skip one by never having visited it.
-        for query in &compilation.queries {
-            if query.result.is_ok() {
-                assert!(
-                    visited.contains_key(&(query.id.module, query.id.def)),
-                    "{} / `{}` compiled but the bridge never walked it",
-                    path.display(),
-                    query.name
-                );
-            }
         }
         for (&(module, def), ids) in &visited {
             let Some(tree) = tc.typed_body(module, def) else {
@@ -326,6 +312,38 @@ fn the_bridge_visits_every_node_the_typed_tree_holds_except_projection_bases() {
     assert!(
         compared > 0,
         "no shipped program had both a bridge walk and a typed tree"
+    );
+}
+
+#[test]
+fn direct_typed_pipeline_bypasses_normalized_elaboration() {
+    let ws = Workspace::from_source(
+        "users : query { id = int } = table \"public\" \"users\"\n\
+         q = users & prefix \"u_\" & suffix \"_v2\"\n",
+    );
+    let tc = crate::check::check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    crate::normalize::clear_visited();
+    let compiled = compile_checked(&ws, &tc);
+    assert!(
+        compiled
+            .queries
+            .iter()
+            .any(|query| query.name == "q" && query.result.is_ok()),
+        "the typed pipeline failed to compile: {:?}",
+        compiled.diagnostics
+    );
+    let q = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .position(|def| def.name == "q")
+        .unwrap();
+    assert!(
+        !crate::normalize::visited_nodes()
+            .iter()
+            .any(|(module, def, _)| *module == ws.root && *def == q),
+        "direct typed pipeline unexpectedly walked normalized terms"
     );
 }
 
@@ -1315,21 +1333,17 @@ fn equivalent_spellings_all_compile() {
     }
 }
 
-/// Every query a definition declares reaches the **term** route, not a gap.
+/// Every representative query shape compiles without a capability gap.
 ///
 /// The programs are the shapes that exercise the whole vocabulary: stages, a
 /// join, a set operation, an aggregate, a window, a named stage, a composed
 /// stage, an inline lambda, a `case`, and a pipeline.
 ///
-/// The signal is the **fault**, not a counter. This test used to assert that a
-/// discarded-gap sieve was empty, which became vacuous once the source walk was
-/// deleted: nothing wrote to the sieve any more, so it read zero whether the
-/// route worked or not. Verified by breaking a lowering case — this test passed
-/// while `no_corpus_program_hits_a_compiler_gap` failed and named the program.
-/// A `Fault::Compiler` verdict is raised by the route itself, so it cannot go
-/// quiet when the code it describes changes shape.
+/// The signal is the compiler fault attached to each definition, so this stays
+/// meaningful as production moves query shapes from the normalized route to
+/// typed reconstruction.
 #[test]
-fn every_query_is_built_by_the_term_route() {
+fn all_query_forms_compile_without_a_gap() {
     const PROGRAMS: &[(&str, &str)] = &[
         ("a filter", "q = users & where (.age > 1)\n"),
         ("a projection", "q = users & select { .name }\n"),
@@ -1379,8 +1393,7 @@ fn every_query_is_built_by_the_term_route() {
             assert_ne!(
                 fault,
                 Fault::Compiler,
-                "{label}: `{name}` hit a compiler capability gap, so the term \
-                 route could not express it"
+                "{label}: `{name}` hit a compiler capability gap"
             );
         }
         let compiled = compile_checked(&ws, &tc);

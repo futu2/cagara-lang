@@ -228,6 +228,9 @@ recursively, including both child subtrees, and carries checked join predicates
 on typed join nodes. Other expression payloads still use the normalized bridge.
 Simple two-input set operations and joins now build their checked relation
 directly from typed child queries; join predicates still come from the bridge.
+Direct expression pipelines also assemble each checked stage from the typed
+child and hydrated payloads, falling back to the normalized shape only when a
+wrapper was absorbed from the stage record.
 The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be

@@ -992,29 +992,35 @@ fn lower_expression_pipeline(
     let Some(base) = find_base(body, &stage_sites, tc, module) else {
         return Ok(None);
     };
-    let Some((_, _, columns)) = table_parts(input, module, base) else {
+    let Some((schema, table, columns)) = table_parts(input, module, base) else {
         return Ok(None);
     };
     let terms = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
-    let base_origin = Origin::new(module, base.span);
-    let checked = terms;
+    let base_origin = table_origin(input, module, base);
+    let mut checked = CheckedQuery::table(
+        schema,
+        table,
+        Some(RowType::new(columns.clone())),
+        base_origin,
+    )
+    .map_err(|error| Error::unsupported(error.message).at(base_origin))?;
     let mut typed = TypedQuery::new();
     let mut child = typed
         .table(NodeRef::new(module, def, base.id), base_origin, columns)
         .map_err(query_error)?;
     let mut syntax = HashMap::new();
     index_exprs(body, &mut syntax);
-    let mut where_payloads = checked
+    let mut where_payloads = terms
         .node_chain_predicates()
         .into_iter()
         .filter(|(kind, _)| *kind == crate::checked::QueryKind::Where)
         .map(|(_, predicate)| predicate);
-    let mut order_payloads = checked
+    let mut order_payloads = terms
         .node_chain_order_keys()
         .into_iter()
         .filter(|(kind, _)| *kind == crate::checked::QueryKind::Order)
         .map(|(_, keys)| keys);
-    let mut projection_payloads = checked
+    let mut projection_payloads = terms
         .node_chain_projection_fields()
         .into_iter()
         .filter(|(kind, _)| {
@@ -1026,6 +1032,11 @@ fn lower_expression_pipeline(
             )
         })
         .map(|(_, fields)| fields);
+    let mut checked_origins = terms
+        .node_chain()
+        .into_iter()
+        .filter(|(kind, _, _)| *kind != crate::checked::QueryKind::Table)
+        .map(|(_, origin, _)| origin);
 
     for stage in stages {
         let input_row = Row::new(stage.input.clone().expect("checked above"));
@@ -1034,6 +1045,25 @@ fn lower_expression_pipeline(
             stage.node.definition_module,
             syntax.get(&stage.site).map_or(stage.span, |expr| expr.span),
         );
+        let checked_origin = checked_origins.next().unwrap_or(origin);
+        let predicate = if stage.kind == RowStage::Where {
+            where_payloads.next().flatten()
+        } else {
+            None
+        };
+        let order_keys = if stage.kind == RowStage::Order {
+            order_payloads.next().flatten()
+        } else {
+            None
+        };
+        let projection_fields = if matches!(
+            stage.kind,
+            RowStage::Select | RowStage::Update | RowStage::Agg
+        ) {
+            projection_payloads.next().flatten()
+        } else {
+            None
+        };
         let id = match stage.kind {
             RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => typed
                 .rewrite(
@@ -1063,7 +1093,7 @@ fn lower_expression_pipeline(
                     child,
                     Some(output_row.clone()),
                     origin,
-                    projection_payloads.next().flatten(),
+                    projection_fields.clone(),
                 )
                 .map_err(query_error)?,
             RowStage::Where
@@ -1083,21 +1113,71 @@ fn lower_expression_pipeline(
                     },
                     child,
                     origin,
-                    if stage.kind == RowStage::Where {
-                        where_payloads.next().flatten()
-                    } else {
-                        None
-                    },
-                    if stage.kind == RowStage::Order {
-                        order_payloads.next().flatten()
-                    } else {
-                        None
-                    },
+                    predicate.clone(),
+                    order_keys.clone(),
                     None,
                     None,
                 )
                 .map_err(query_error)?,
         };
+        checked = match stage.kind {
+            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => {
+                let Some(label) = stage.label.clone() else {
+                    return Ok(None);
+                };
+                match stage.kind {
+                    RowStage::Prefix => CheckedQuery::prefix(checked, label, checked_origin),
+                    RowStage::Suffix => CheckedQuery::suffix(checked, label, checked_origin),
+                    RowStage::Omit => CheckedQuery::omit(checked, label, checked_origin),
+                    RowStage::MapValue => CheckedQuery::map_value(checked, label, checked_origin),
+                    _ => unreachable!(),
+                }
+            }
+            RowStage::Where => {
+                let Some(predicate) = predicate else {
+                    return Ok(None);
+                };
+                CheckedQuery::where_(checked, predicate, checked_origin)
+            }
+            RowStage::Select => {
+                let Some(fields) = projection_fields else {
+                    return Ok(None);
+                };
+                CheckedQuery::select(checked, fields, checked_origin)
+            }
+            RowStage::Update => {
+                let Some(fields) = projection_fields else {
+                    return Ok(None);
+                };
+                CheckedQuery::update(checked, fields, checked_origin)
+            }
+            RowStage::Agg => {
+                let Some(fields) = projection_fields else {
+                    return Ok(None);
+                };
+                CheckedQuery::agg(checked, fields, checked_origin)
+            }
+            RowStage::Order => {
+                let Some(keys) = order_keys else {
+                    return Ok(None);
+                };
+                CheckedQuery::order(checked, keys, checked_origin)
+            }
+            RowStage::Limit => {
+                let Some(count) = syntax.get(&stage.site).and_then(stage_count) else {
+                    return Ok(None);
+                };
+                CheckedQuery::limit(checked, count, checked_origin)
+            }
+            RowStage::Offset => {
+                let Some(count) = syntax.get(&stage.site).and_then(stage_count) else {
+                    return Ok(None);
+                };
+                CheckedQuery::offset(checked, count, checked_origin)
+            }
+            RowStage::Distinct => CheckedQuery::distinct(checked, checked_origin),
+        }
+        .map_err(|error| Error::unsupported(error.message).at(origin))?;
         let node = typed.node(id);
         if !rows_match(
             stage.kind,
@@ -1117,6 +1197,19 @@ fn lower_expression_pipeline(
         child = id;
     }
 
+    // Some row-preserving wrappers (notably `distinct`) are absorbed by the
+    // checker stage records. Keep the normalized tree when its shape contains
+    // an operation that the direct typed chain did not record.
+    let checked = if checked
+        .node_chain()
+        .iter()
+        .map(|(kind, _, _)| *kind)
+        .eq(terms.node_chain().iter().map(|(kind, _, _)| *kind))
+    {
+        checked
+    } else {
+        terms
+    };
     let typed_columns = typed
         .node(child)
         .output_row()
@@ -2091,6 +2184,16 @@ fn index_exprs<'a>(expr: &'a Expr, out: &mut HashMap<u32, &'a Expr>) {
     out.insert(expr.id, expr);
     for child in crate::check::child_exprs(expr) {
         index_exprs(child, out);
+    }
+}
+
+fn stage_count(expr: &&Expr) -> Option<i64> {
+    let ExprKind::App(_, args) = &expr.kind else {
+        return None;
+    };
+    match args.first().map(|arg| &arg.kind) {
+        Some(ExprKind::Lit(Lit::Int(count))) => Some(*count),
+        _ => None,
     }
 }
 

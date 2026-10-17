@@ -12,6 +12,7 @@ pub mod rules;
 pub mod schema;
 pub mod workspace;
 
+mod query_lowering;
 mod typed_lower;
 
 pub use check::{check, TypeCheck};

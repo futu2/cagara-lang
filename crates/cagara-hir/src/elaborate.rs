@@ -134,26 +134,13 @@ fn elaborate_def(
     ) {
         return Err(NOT_A_QUERY);
     }
-    // The typed query builder reconstructs checked relations from the typed
-    // graph wherever its shape is complete. Partial shapes retain their
-    // normalized checked tree as a template, and unsupported shapes continue
-    // through normalization until later slices cover them.
-    //
-    // Normalization resolves every name, inlines every definition and reduces
-    // every application, a stage's included, so by the time `lower_query` sees a
-    // term there is no syntax left to re-read and no chain to follow. A
-    // `Fault::Compiler` error here therefore means a construct reached the
-    // language without a term rule, which is reported rather than handled by a
-    // second implementation of the language that no longer exists.
-    //
-    // The scope, environment and hole assignment the source walk threaded
-    // through its context are gone with it: normalization reads the checker's
-    // records instead of re-resolving names, and reaches a callee's open
-    // overloads through its own stack.
-    if let Some((_typed, checked)) = crate::typed_lower::lower(input, module, def, &d.body)? {
-        return Ok(checked);
+    // The typed route is authoritative whenever its graph is complete. A
+    // declined shape is sent through one explicit transitional adapter; typed
+    // errors are never hidden by trying a second interpretation.
+    match crate::query_lowering::lower(input, module, def, &d.body)? {
+        crate::query_lowering::LoweredQuery::Typed { checked, .. }
+        | crate::query_lowering::LoweredQuery::Legacy { checked } => Ok(checked),
     }
-    crate::normalize::elaborate_query_via_terms(input, module, def, &d.body)
 }
 
 /// Elaborate one source definition for the compilation boundary.

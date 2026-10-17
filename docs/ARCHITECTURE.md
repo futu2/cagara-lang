@@ -3,46 +3,50 @@
 Cagara's semantic pipeline is a compiler, not an interpreter:
 
 ```text
-source -> syntax -> type checking -> normalization -> CheckedQuery
-       -> erasure -> Rel -> SQL AST -> dialect SQL
+source -> syntax -> typed checking
+       -> typed query lowering -> CheckedQuery -> erasure -> Rel
+       -> SQL AST -> dialect SQL
+                \-> normalized query adapter -> CheckedQuery (transitional)
 ```
 
 The relational IR is untyped. Type checking establishes scalar types, rows,
-phases, and overload choices. Normalization consumes those facts and reduces an
-expression to a normal form — resolving names, inlining definitions, and
-discharging applications through one reduction relation — before that normal
-form is lowered through checked constructors into a relational tree whose
-invariants are already known. Erasure drops the checked metadata at the SQL
-boundary.
+phases, and overload choices. Typed query lowering consumes checker-owned stage
+boundaries and builds checked relational constructors for supported shapes.
+The normalized term adapter still resolves names, inlines definitions, and
+reduces applications for shapes that have not migrated. Erasure drops checked
+metadata at the SQL boundary.
 
 ## Semantic layers
 
-The implementation has five semantic representations:
+The implementation has six semantic representations:
 
 ```text
 AST            names, source spans, and user syntax
-TypeCheck      inferred schemes, use types, rows, and overload choices
-Term           an expression's normal form, built from TypeCheck's facts
+TypeCheck      inferred schemes, typed expressions, rows, and overload choices
+TypedQuery     query operations, typed inputs, and checker-owned row boundaries
+Term           a transitional query normal form, built from TypeCheck's facts
 CheckedQuery   relational structure plus checked rows, phases, and origins
 Rel            backend-facing relational structure without type metadata
 ```
 
-`Term` is what makes the rest compositional. It is a small calculus — local
-binders, columns, literals, templates, lambdas, applications, `case`, records,
-lists, and relational primitives — with an application reduction that substitutes
-arguments for parameters. A term carries no AST node and no name waiting to be
-looked up, so it cannot silently depend on where it was written. Names resolve
-and applications reduce once, in the normal form, instead of being rediscovered by
-each consumer.
+`Term` remains a small calculus — local binders, columns, literals, templates,
+lambdas, applications, `case`, records, lists, and relational primitives — with
+an application reduction that substitutes arguments for parameters. It is now a
+transitional query adapter rather than the compiler's semantic center. Typed
+query lowering owns the relational skeleton and stage boundaries; the adapter
+is used only for shapes whose expression payload or helper instantiation has not
+migrated yet. Names resolve and applications reduce once in that adapter instead
+of being rediscovered by each backend consumer.
 
-A relational primitive also carries the **row it produces**, taken from the type
-the checker recorded at that application. It has to be the node's own type and not
-the declaring definition's signature, because a definition can inline two tables —
+A typed query node carries the **row it produces**, taken from the checker at
+that application. It has to be the node's own row and not the declaring
+definition's signature, because a definition can inline two tables —
 `innerJoin orders (.<id == .>uid)` over a joined pair — and each needs its own
-columns. That is the fact the query lowering rests on: `CheckedQuery::table`
-refuses to build without columns, and the term is where they come from.
+columns. The typed graph is the boundary source for migrated shapes. The legacy
+term adapter carries the same per-application row fact for shapes still using
+that route.
 
-The shapes are uniform enough to state: every stage is
+In the legacy adapter, the shapes are uniform enough to state: every stage is
 `Primitive "__stage" [own arguments…, piped input]`, in declaration order with the
 piped input last. `users & where p` is `__where [p, __table [schema, name]]`; a
 join is `__innerJoin [right, on, input]`. Pipe syntax, operator sugar, aliases and
@@ -59,15 +63,14 @@ refer to available columns, projections compute their output rows, joins compute
 nullable sides, and set operations require compatible rows. The node enums are
 private so callers cannot bypass those constructors.
 
-Ordinary functions are inlined by the reduction, not called. A definition that
-names itself is reported as recursion rather than expanded without end: the
-normalizer carries a stack of the definitions it is already inlining
-(`Normalizer::active`), and that stack is now the *only* place recursion is
-detected, because there is no longer a second walk to agree with.
+Ordinary functions in the legacy adapter are inlined by reduction, not called.
+Typed query helpers are instantiated by the checker-owned query graph. A
+definition that names itself is reported as recursion rather than expanded
+without end: the typed route carries an explicit per-attempt lowering context,
+and the legacy normalizer keeps its own reduction stack for the adapter path.
 
-Nothing here evaluates. A definition's normal form is built once and cached, and
-the result of elaborating a definition is a `CheckedQuery`; SQL lowering never
-sees an intermediate value representation.
+Nothing here evaluates. The typed graph or legacy adapter produces a
+`CheckedQuery`; SQL lowering never sees an intermediate value representation.
 
 The type checker records facts in `TypeCheck` and uses mutable inference state
 internally. Checking is bidirectional: `infer` synthesizes a type, and `check`
@@ -153,42 +156,44 @@ The current checked layer supports local, testable claims:
 - Outer-join nullability and set-operation compatibility are represented in
   output rows.
 - Erasure is structural and leaves no type-checking work to SQL lowering.
-- Normalization is total over the language: every expression form **and** every
-  relational construction reduces to a term, and a form without a rule is
-  reported as a compiler gap rather than silently lowered by a second path.
-  There is no fallback route, for expressions or for queries.
+- The query route has one explicit transitional fallback. Typed lowering
+  returns its graph and records whether it aligned with the checked tree well
+  enough to reconstruct its nodes. A typed compiler error is never retried through the adapter; if
+  the builder declines the whole shape, `query_lowering::lower` invokes the
+  normalized adapter. The final architecture removes this branch after the
+  remaining expression payloads and helper instantiation slices migrate.
 
-  This is the claim the architecture is built to make, so it is worth saying how
-  it is held rather than only that it is asserted. Three gates, all on the signal
-  the compiler raises itself — `Fault::Compiler`, which means a construct reached
-  the language without a rule:
+This is the claim the architecture is built to make, so it is worth saying how
+it is held rather than only that it is asserted. Three gates, all on the signal
+the compiler raises itself — `Fault::Compiler`, which means a construct reached
+the language without a rule:
 
-  * `the_normalized_route_handles_every_construct` runs a program per expression
-    shape and requires no compiler gap on any of them;
-  * `every_query_is_built_by_the_term_route` does the same for a program per
-    *stage*: filter, projection, join, set operation, aggregate, window, named
-    stage, composed stage, inline lambda, `case`, pipeline;
-  * `no_corpus_program_hits_a_compiler_gap` extends it to every shipped example
-    and every corpus case.
+* `the_normalized_route_handles_every_construct` runs a program per expression
+  shape and requires no compiler gap on any of them;
+* `every_query_is_built_by_the_term_route` currently guards that the legacy
+  adapter handles every query shape that can still reach it. Typed slices have
+  separate tests that require their builders to bypass normalization for the
+  shapes they claim;
+* `no_corpus_program_hits_a_compiler_gap` extends it to every shipped example
+  and every corpus case.
 
-  These replaced two counters — a gap tally and a discarded-gap sieve — that had
-  become **vacuous**: when the source walk was deleted, nothing wrote to either,
-  so both read zero whether the route worked or not. That is not a hypothetical.
-  Breaking one lowering case made the counter-based gate *pass* while
-  `no_corpus_program_hits_a_compiler_gap` failed and named the program. A counter
-  is only evidence while something increments it; a fault is raised by the code
-  under test.
+These replaced two counters — a gap tally and a discarded-gap sieve — that had
+become **vacuous**: when the source walk was deleted, nothing wrote to either,
+so both read zero whether the route worked or not. That is not a hypothetical.
+Breaking one lowering case made the counter-based gate *pass* while
+`no_corpus_program_hits_a_compiler_gap` failed and named the program. A counter
+is only evidence while something increments it; a fault is raised by the code
+under test.
 
-  The honest limit that remains: these gates say the constructs they exercise
-  have a rule, not that every construct does. The corpus is the defence against
-  the second — adding a language feature without a lowering case fails it, because
-  the case for that feature would be written before the rule.
+The honest limit that remains: these gates say the constructs they exercise
+have a rule, not that every construct does. The corpus is the defence against
+the second — adding a language feature without a lowering case fails it, because
+the case for that feature would be written before the rule.
 
-  Until recently the second half was not true: a definition whose body was a
-  query was built by re-walking its source, and that layer could report a
-  capability gap *and* try its next reading of an expression. Both are gone —
-  `elaborate.rs` is 270 lines where it was 2329 — and no grammar rule or runtime
-  path in this crate re-reads source to decide what something means.
+The old source elaboration walk is gone — `elaborate.rs` is 270 lines where it
+was 2329. The remaining normalized query adapter is a named, temporary route
+in `query_lowering.rs`; it is not a second attempt after a typed error, and no
+grammar rule or runtime path may add another fallback beside it.
 
 The compiler uses an explicit immutable input view and produces an owned
 compilation result. The shell still owns Salsa state and the checker uses

@@ -15,6 +15,55 @@ use crate::normalize::Resolved;
 use cagara_syntax::ast::{Expr, ExprKind, Lit};
 use std::collections::{HashMap, HashSet};
 
+/// State for one typed-query lowering attempt.
+///
+/// Lowering follows aliases and helper definitions, so it has a graph-shaped
+/// dependency walk even though the source definition is a tree. This state is
+/// deliberately owned by the attempt and threaded through the builders. A
+/// thread-local active set made the result depend on ambient execution state
+/// and could not be reused by an incremental compiler or a concurrent request.
+struct LoweringContext {
+    active: HashSet<(usize, usize)>,
+}
+
+impl LoweringContext {
+    fn new() -> Self {
+        Self {
+            active: HashSet::new(),
+        }
+    }
+
+    fn lower(
+        &mut self,
+        input: CompilerInput<'_>,
+        module: usize,
+        def: usize,
+        body: &Expr,
+    ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
+        Ok(self
+            .lower_with_status(input, module, def, body)?
+            .map(|(typed, checked, _)| (typed, checked)))
+    }
+
+    fn lower_with_status(
+        &mut self,
+        input: CompilerInput<'_>,
+        module: usize,
+        def: usize,
+        body: &Expr,
+    ) -> Result<Option<(TypedQuery, CheckedQuery, bool)>, Error> {
+        let key = (module, def);
+        if !self.active.insert(key) {
+            // The checker/normalizer owns the user-facing recursion diagnostic.
+            // The typed route only needs to decline this speculative slice.
+            return Ok(None);
+        }
+        let result = lower_impl(self, input, module, def, body);
+        self.active.remove(&key);
+        result
+    }
+}
+
 /// Build the typed query and its checked counterpart when this slice applies.
 pub(crate) fn lower(
     input: CompilerInput<'_>,
@@ -22,7 +71,28 @@ pub(crate) fn lower(
     def: usize,
     body: &Expr,
 ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
-    let Some((mut typed, checked)) = lower_unhydrated(input, module, def, body)? else {
+    LoweringContext::new().lower(input, module, def, body)
+}
+
+/// Build the typed query and report whether its graph aligned with the checked
+/// adapter tree well enough to reconstruct its checked nodes.
+pub(crate) fn lower_with_status(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+) -> Result<Option<(TypedQuery, CheckedQuery, bool)>, Error> {
+    LoweringContext::new().lower_with_status(input, module, def, body)
+}
+
+fn lower_impl(
+    context: &mut LoweringContext,
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+) -> Result<Option<(TypedQuery, CheckedQuery, bool)>, Error> {
+    let Some((mut typed, checked)) = lower_unhydrated(context, input, module, def, body)? else {
         return Ok(None);
     };
     typed
@@ -30,10 +100,14 @@ pub(crate) fn lower(
         .map_err(query_error)?;
     typed.require_checked_payloads().map_err(query_error)?;
     let rebuilt = typed.rebuild_checked(&checked).map_err(query_error)?;
-    Ok(Some((typed, rebuilt.unwrap_or(checked))))
+    match rebuilt {
+        Some(checked) => Ok(Some((typed, checked, true))),
+        None => Ok(Some((typed, checked, false))),
+    }
 }
 
 fn lower_unhydrated(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -43,7 +117,7 @@ fn lower_unhydrated(
 
     // A standalone join/set can be rebuilt from its typed operands before
     // the composed pipeline route uses the normalized template.
-    if let Some(lowered) = lower_combine_pipeline(input, module, def, body)? {
+    if let Some(lowered) = lower_combine_pipeline(context, input, module, def, body)? {
         return Ok(Some(lowered));
     }
 
@@ -52,31 +126,31 @@ fn lower_unhydrated(
     // child to be dropped. Expression payloads still come from the normalized
     // route; this builder only owns node identity and row boundaries.
     if contains_combine_tree(input, module, body) {
-        if let Some(lowered) = lower_composed_pipeline(input, module, def, body)? {
+        if let Some(lowered) = lower_composed_pipeline(context, input, module, def, body)? {
             return Ok(Some(lowered));
         }
     }
 
-    if let Some(lowered) = lower_keep_pipeline(input, module, def, body)? {
+    if let Some(lowered) = lower_keep_pipeline(context, input, module, def, body)? {
         return Ok(Some(lowered));
     }
-    if let Some(lowered) = lower_simple_projection_pipeline(input, module, def, body)? {
+    if let Some(lowered) = lower_simple_projection_pipeline(context, input, module, def, body)? {
         return Ok(Some(lowered));
     }
-    if let Some(lowered) = lower_simple_where_pipeline(input, module, def, body)? {
+    if let Some(lowered) = lower_simple_where_pipeline(context, input, module, def, body)? {
         return Ok(Some(lowered));
     }
-    if let Some(lowered) = lower_simple_order_pipeline(input, module, def, body)? {
+    if let Some(lowered) = lower_simple_order_pipeline(context, input, module, def, body)? {
         return Ok(Some(lowered));
     }
-    if let Some(lowered) = lower_plain_expression_chain(input, module, def, body)? {
+    if let Some(lowered) = lower_plain_expression_chain(context, input, module, def, body)? {
         return Ok(Some(lowered));
     }
     // The expression-bearing stages use the checked payload bridge for their
     // predicates, fields, and sort keys. Their relational boundaries still
     // come from the typed stage records, so the query arena does not recover
     // rows from the composed result type.
-    if let Some(lowered) = lower_expression_pipeline(input, module, def, body)? {
+    if let Some(lowered) = lower_expression_pipeline(context, input, module, def, body)? {
         return Ok(Some(lowered));
     }
 
@@ -86,7 +160,7 @@ fn lower_unhydrated(
     // the target's stable stage identities. Plain table aliases fall through:
     // they have no stages and are handled by `table_parts` below.
     if stages.is_empty() {
-        if let Some(lowered) = lower_helper_pipeline(input, module, def, body)? {
+        if let Some(lowered) = lower_helper_pipeline(context, input, module, def, body)? {
             return Ok(Some(lowered));
         }
         if let Some((target_module, target_def)) = query_target(tc, module, body) {
@@ -97,7 +171,9 @@ fn lower_unhydrated(
                 )
             {
                 let target_body = &input.module(target_module).def(target_def).body;
-                if let Some(lowered) = lower(input, target_module, target_def, target_body)? {
+                if let Some(lowered) =
+                    context.lower(input, target_module, target_def, target_body)?
+                {
                     return Ok(Some(lowered));
                 }
             }
@@ -219,6 +295,7 @@ fn lower_unhydrated(
 /// supplies each expression's scalar type and the stage record supplies the
 /// closed output row.
 fn lower_simple_projection_pipeline(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -258,41 +335,41 @@ fn lower_simple_projection_pipeline(
         checked_fields.push((name.clone(), checked));
     }
     let stage_origin = Origin::new(module, stage_expr.span);
-    let (child, mut checked, mut typed) = if let Some((schema, table, columns)) =
-        table_parts(input, module, base)
-    {
-        let checked = CheckedQuery::table(
-            schema,
-            table,
-            Some(RowType::new(columns.clone())),
-            stage_origin,
-        )
-        .map_err(|error| Error::unsupported(error.message).at(stage_origin))?;
-        let mut typed = TypedQuery::new();
-        let child = typed
-            .table(NodeRef::new(module, def, base.id), stage_origin, columns)
-            .map_err(query_error)?;
-        (child, checked, typed)
-    } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
-        if (target_module, target_def) == (module, def)
-            || !matches!(
-                tc.scheme_view(target_module, target_def),
-                Some(crate::check::SchemeView::Query { .. })
+    let (child, mut checked, mut typed) =
+        if let Some((schema, table, columns)) = table_parts(input, module, base) {
+            let checked = CheckedQuery::table(
+                schema,
+                table,
+                Some(RowType::new(columns.clone())),
+                stage_origin,
             )
-        {
-            return Ok(None);
-        }
-        let target_body = &input.module(target_module).def(target_def).body;
-        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
-        else {
+            .map_err(|error| Error::unsupported(error.message).at(stage_origin))?;
+            let mut typed = TypedQuery::new();
+            let child = typed
+                .table(NodeRef::new(module, def, base.id), stage_origin, columns)
+                .map_err(query_error)?;
+            (child, checked, typed)
+        } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
+            if (target_module, target_def) == (module, def)
+                || !matches!(
+                    tc.scheme_view(target_module, target_def),
+                    Some(crate::check::SchemeView::Query { .. })
+                )
+            {
+                return Ok(None);
+            }
+            let target_body = &input.module(target_module).def(target_def).body;
+            let Some((target_typed, checked)) =
+                context.lower(input, target_module, target_def, target_body)?
+            else {
+                return Ok(None);
+            };
+            let mut typed = TypedQuery::new();
+            let child = copy_typed_graph(&target_typed, &mut typed)?;
+            (child, checked, typed)
+        } else {
             return Ok(None);
         };
-        let mut typed = TypedQuery::new();
-        let child = copy_typed_graph(&target_typed, &mut typed)?;
-        (child, checked, typed)
-    } else {
-        return Ok(None);
-    };
     let output_row = stage.output.clone().map(Row::new);
     let kind = match stage.kind {
         RowStage::Select => QueryNodeKind::Select,
@@ -321,6 +398,7 @@ fn lower_simple_projection_pipeline(
 /// Lower a direct filter whose predicate uses only fields, literals, and the
 /// scalar comparison/boolean operators declared in the prelude.
 fn lower_simple_where_pipeline(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -353,37 +431,37 @@ fn lower_simple_where_pipeline(
         return Ok(None);
     };
     let origin = Origin::new(module, stage_expr.span);
-    let (child, checked, mut typed) = if let Some((schema, table, columns)) =
-        table_parts(input, module, base)
-    {
-        let checked =
-            CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
-                .map_err(|error| Error::unsupported(error.message).at(origin))?;
-        let mut typed = TypedQuery::new();
-        let child = typed
-            .table(NodeRef::new(module, def, base.id), origin, columns)
-            .map_err(query_error)?;
-        (child, checked, typed)
-    } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
-        if (target_module, target_def) == (module, def)
-            || !matches!(
-                tc.scheme_view(target_module, target_def),
-                Some(crate::check::SchemeView::Query { .. })
-            )
-        {
-            return Ok(None);
-        }
-        let target_body = &input.module(target_module).def(target_def).body;
-        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
-        else {
+    let (child, checked, mut typed) =
+        if let Some((schema, table, columns)) = table_parts(input, module, base) {
+            let checked =
+                CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
+                    .map_err(|error| Error::unsupported(error.message).at(origin))?;
+            let mut typed = TypedQuery::new();
+            let child = typed
+                .table(NodeRef::new(module, def, base.id), origin, columns)
+                .map_err(query_error)?;
+            (child, checked, typed)
+        } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
+            if (target_module, target_def) == (module, def)
+                || !matches!(
+                    tc.scheme_view(target_module, target_def),
+                    Some(crate::check::SchemeView::Query { .. })
+                )
+            {
+                return Ok(None);
+            }
+            let target_body = &input.module(target_module).def(target_def).body;
+            let Some((target_typed, checked)) =
+                context.lower(input, target_module, target_def, target_body)?
+            else {
+                return Ok(None);
+            };
+            let mut typed = TypedQuery::new();
+            let child = copy_typed_graph(&target_typed, &mut typed)?;
+            (child, checked, typed)
+        } else {
             return Ok(None);
         };
-        let mut typed = TypedQuery::new();
-        let child = copy_typed_graph(&target_typed, &mut typed)?;
-        (child, checked, typed)
-    } else {
-        return Ok(None);
-    };
     let id = typed
         .keep_row_with_payload(
             stage.node,
@@ -829,6 +907,7 @@ fn lower_plain_bound(
 
 /// Lower a direct order whose keys fit the source checked-expression subset.
 fn lower_simple_order_pipeline(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -877,37 +956,37 @@ fn lower_simple_order_pipeline(
         keys.push((value, direction));
     }
     let origin = Origin::new(module, stage_expr.span);
-    let (child, checked, mut typed) = if let Some((schema, table, columns)) =
-        table_parts(input, module, base)
-    {
-        let checked =
-            CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
-                .map_err(|error| Error::unsupported(error.message).at(origin))?;
-        let mut typed = TypedQuery::new();
-        let child = typed
-            .table(NodeRef::new(module, def, base.id), origin, columns)
-            .map_err(query_error)?;
-        (child, checked, typed)
-    } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
-        if (target_module, target_def) == (module, def)
-            || !matches!(
-                tc.scheme_view(target_module, target_def),
-                Some(crate::check::SchemeView::Query { .. })
-            )
-        {
-            return Ok(None);
-        }
-        let target_body = &input.module(target_module).def(target_def).body;
-        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
-        else {
+    let (child, checked, mut typed) =
+        if let Some((schema, table, columns)) = table_parts(input, module, base) {
+            let checked =
+                CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
+                    .map_err(|error| Error::unsupported(error.message).at(origin))?;
+            let mut typed = TypedQuery::new();
+            let child = typed
+                .table(NodeRef::new(module, def, base.id), origin, columns)
+                .map_err(query_error)?;
+            (child, checked, typed)
+        } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
+            if (target_module, target_def) == (module, def)
+                || !matches!(
+                    tc.scheme_view(target_module, target_def),
+                    Some(crate::check::SchemeView::Query { .. })
+                )
+            {
+                return Ok(None);
+            }
+            let target_body = &input.module(target_module).def(target_def).body;
+            let Some((target_typed, checked)) =
+                context.lower(input, target_module, target_def, target_body)?
+            else {
+                return Ok(None);
+            };
+            let mut typed = TypedQuery::new();
+            let child = copy_typed_graph(&target_typed, &mut typed)?;
+            (child, checked, typed)
+        } else {
             return Ok(None);
         };
-        let mut typed = TypedQuery::new();
-        let child = copy_typed_graph(&target_typed, &mut typed)?;
-        (child, checked, typed)
-    } else {
-        return Ok(None);
-    };
     let id = typed
         .keep_row_with_payload(
             stage.node,
@@ -930,6 +1009,7 @@ fn lower_simple_order_pipeline(
 /// mixed chains, using each recorded input row to type fields after earlier
 /// projections and rewrites without consulting normalized terms.
 fn lower_plain_expression_chain(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -955,38 +1035,38 @@ fn lower_plain_expression_chain(
     };
     let mut syntax = HashMap::new();
     index_exprs(body, &mut syntax);
-    let (mut child, mut checked, mut typed) = if let Some((schema, table, columns)) =
-        table_parts(input, module, base)
-    {
-        let origin = table_origin(input, module, base);
-        let checked =
-            CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
-                .map_err(|error| Error::unsupported(error.message).at(origin))?;
-        let mut typed = TypedQuery::new();
-        let child = typed
-            .table(NodeRef::new(module, def, base.id), origin, columns)
-            .map_err(query_error)?;
-        (child, checked, typed)
-    } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
-        if (target_module, target_def) == (module, def)
-            || !matches!(
-                tc.scheme_view(target_module, target_def),
-                Some(crate::check::SchemeView::Query { .. })
-            )
-        {
-            return Ok(None);
-        }
-        let target_body = &input.module(target_module).def(target_def).body;
-        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
-        else {
+    let (mut child, mut checked, mut typed) =
+        if let Some((schema, table, columns)) = table_parts(input, module, base) {
+            let origin = table_origin(input, module, base);
+            let checked =
+                CheckedQuery::table(schema, table, Some(RowType::new(columns.clone())), origin)
+                    .map_err(|error| Error::unsupported(error.message).at(origin))?;
+            let mut typed = TypedQuery::new();
+            let child = typed
+                .table(NodeRef::new(module, def, base.id), origin, columns)
+                .map_err(query_error)?;
+            (child, checked, typed)
+        } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
+            if (target_module, target_def) == (module, def)
+                || !matches!(
+                    tc.scheme_view(target_module, target_def),
+                    Some(crate::check::SchemeView::Query { .. })
+                )
+            {
+                return Ok(None);
+            }
+            let target_body = &input.module(target_module).def(target_def).body;
+            let Some((target_typed, checked)) =
+                context.lower(input, target_module, target_def, target_body)?
+            else {
+                return Ok(None);
+            };
+            let mut typed = TypedQuery::new();
+            let child = copy_typed_graph(&target_typed, &mut typed)?;
+            (child, checked, typed)
+        } else {
             return Ok(None);
         };
-        let mut typed = TypedQuery::new();
-        let child = copy_typed_graph(&target_typed, &mut typed)?;
-        (child, checked, typed)
-    } else {
-        return Ok(None);
-    };
 
     for stage in stages {
         let Some(stage_expr) = syntax.get(&stage.site).copied() else {
@@ -1232,6 +1312,7 @@ fn contains_other_stage(
 /// operation kind and both closed operand rows; the checked query supplies a
 /// join predicate when this operation is a join.
 fn lower_combine_pipeline(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -1261,12 +1342,12 @@ fn lower_combine_pipeline(
     };
     let mut typed = TypedQuery::new();
     let Some((left, left_checked)) =
-        lower_combine_input(input, module, def, left_expr, &mut typed)?
+        lower_combine_input(context, input, module, def, left_expr, &mut typed)?
     else {
         return Ok(None);
     };
     let Some((right, right_checked)) =
-        lower_combine_input(input, module, def, right_expr, &mut typed)?
+        lower_combine_input(context, input, module, def, right_expr, &mut typed)?
     else {
         return Ok(None);
     };
@@ -1345,6 +1426,7 @@ fn plain_join_predicate(
 /// on its right or the right-hand stage. A query alias copies its already typed
 /// graph, including both-input nodes.
 fn lower_composed_pipeline(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -1365,12 +1447,13 @@ fn lower_composed_pipeline(
         return Ok(None);
     }
     let mut typed = TypedQuery::new();
-    if let Some((root, checked)) = lower_plain_composed_expr(input, module, def, body, &mut typed)?
+    if let Some((root, checked)) =
+        lower_plain_composed_expr(context, input, module, def, body, &mut typed)?
     {
         return Ok(Some((typed.finish(root), checked)));
     }
     let mut typed = TypedQuery::new();
-    let Some(root) = lower_composed_expr(input, module, def, body, &mut typed)? else {
+    let Some(root) = lower_composed_expr(context, input, module, def, body, &mut typed)? else {
         return Ok(None);
     };
     let checked = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
@@ -1381,6 +1464,7 @@ fn lower_composed_pipeline(
 /// expression payloads. The checked relation travels with each typed node, so
 /// a join and its surrounding stages need no normalized query template.
 fn lower_plain_composed_expr(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -1402,7 +1486,8 @@ fn lower_plain_composed_expr(
             return Ok(None);
         }
         let target_body = &input.module(target_module).def(target_def).body;
-        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
+        let Some((target_typed, checked)) =
+            context.lower(input, target_module, target_def, target_body)?
         else {
             return Ok(None);
         };
@@ -1423,7 +1508,7 @@ fn lower_plain_composed_expr(
         })
     {
         let Some((left, checked_left)) =
-            lower_plain_composed_expr(input, module, def, left_expr, typed)?
+            lower_plain_composed_expr(context, input, module, def, left_expr, typed)?
         else {
             return Ok(None);
         };
@@ -1432,7 +1517,7 @@ fn lower_plain_composed_expr(
             return Ok(None);
         };
         let Some((right, checked_right)) =
-            lower_plain_composed_expr(input, module, def, right_expr, typed)?
+            lower_plain_composed_expr(context, input, module, def, right_expr, typed)?
         else {
             return Ok(None);
         };
@@ -1501,7 +1586,8 @@ fn lower_plain_composed_expr(
     else {
         return Ok(None);
     };
-    let Some((child, checked)) = lower_plain_composed_expr(input, module, def, left_expr, typed)?
+    let Some((child, checked)) =
+        lower_plain_composed_expr(context, input, module, def, left_expr, typed)?
     else {
         return Ok(None);
     };
@@ -1672,6 +1758,7 @@ fn lower_plain_composed_expr(
 }
 
 fn lower_composed_expr(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -1692,7 +1779,9 @@ fn lower_composed_expr(
             return Ok(None);
         }
         let target_body = &input.module(target_module).def(target_def).body;
-        let Some((target_typed, _)) = lower(input, target_module, target_def, target_body)? else {
+        let Some((target_typed, _)) =
+            context.lower(input, target_module, target_def, target_body)?
+        else {
             return Ok(None);
         };
         return copy_typed_graph(&target_typed, typed).map(Some);
@@ -1711,18 +1800,19 @@ fn lower_composed_expr(
         let has_combine = combine_record_in(input.type_check(), module, rhs).is_some();
         let has_stage = stage_record(input.type_check(), module, def, rhs.id).is_some();
         if !has_combine && !has_stage {
-            if let Some(id) = lower_composed_helper(input, module, def, expr, typed)? {
+            if let Some(id) = lower_composed_helper(context, input, module, def, expr, typed)? {
                 return Ok(Some(id));
             }
         }
-        let Some(left) = lower_composed_expr(input, module, def, &args[0], typed)? else {
+        let Some(left) = lower_composed_expr(context, input, module, def, &args[0], typed)? else {
             return Ok(None);
         };
         if let Some((combine, operation)) = combine_record_in(input.type_check(), module, rhs) {
             let Some(right_expr) = query_operand_args(input, module, operation).next() else {
                 return Ok(None);
             };
-            let Some(right) = lower_composed_expr(input, module, def, right_expr, typed)? else {
+            let Some(right) = lower_composed_expr(context, input, module, def, right_expr, typed)?
+            else {
                 return Ok(None);
             };
             let kind = combine_query_kind(combine.kind);
@@ -1764,10 +1854,12 @@ fn lower_composed_expr(
         if operands.len() != 2 {
             return Ok(None);
         }
-        let Some(left) = lower_composed_expr(input, module, def, operands[0], typed)? else {
+        let Some(left) = lower_composed_expr(context, input, module, def, operands[0], typed)?
+        else {
             return Ok(None);
         };
-        let Some(right) = lower_composed_expr(input, module, def, operands[1], typed)? else {
+        let Some(right) = lower_composed_expr(context, input, module, def, operands[1], typed)?
+        else {
             return Ok(None);
         };
         let kind = combine_query_kind(combine.kind);
@@ -1794,13 +1886,14 @@ fn lower_composed_expr(
         return Ok(Some(id));
     }
 
-    if let Some(id) = lower_composed_helper(input, module, def, expr, typed)? {
+    if let Some(id) = lower_composed_helper(context, input, module, def, expr, typed)? {
         return Ok(Some(id));
     }
     Ok(None)
 }
 
 fn lower_composed_helper(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -1852,12 +1945,13 @@ fn lower_composed_helper(
         )
     }) {
         let mut source = TypedQuery::new();
-        let Some((root, _)) = lower_helper_expr(input, module, def, expr, &mut source)? else {
+        let Some((root, _)) = lower_helper_expr(context, input, module, def, expr, &mut source)?
+        else {
             return Ok(None);
         };
         return copy_typed_graph(&source.finish(root), target).map(Some);
     }
-    let Some(child) = lower_composed_expr(input, module, def, &args[0], target)? else {
+    let Some(child) = lower_composed_expr(context, input, module, def, &args[0], target)? else {
         return Ok(None);
     };
     let mut syntax = HashMap::new();
@@ -2125,6 +2219,7 @@ fn stage_record(
 }
 
 fn lower_combine_input(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -2143,7 +2238,8 @@ fn lower_combine_input(
     }
     if let Some((target_module, target_def)) = query_target(input.type_check(), module, expr) {
         let target_body = &input.module(target_module).def(target_def).body;
-        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
+        let Some((target_typed, checked)) =
+            context.lower(input, target_module, target_def, target_body)?
         else {
             return Ok(None);
         };
@@ -2154,19 +2250,30 @@ fn lower_combine_input(
 }
 
 fn table_origin(input: CompilerInput<'_>, module: usize, expr: &Expr) -> Origin {
-    match &expr.kind {
-        ExprKind::App(_, _) => Origin::new(module, expr.span),
-        ExprKind::Name(_) | ExprKind::Proj(_, _) => {
-            if let Some(Resolved::Def((target_module, target_def))) =
-                input.type_check().resolution(module, expr.id)
-            {
-                let target = &input.module(*target_module).def(*target_def).body;
-                return table_origin(input, *target_module, target);
+    fn visit(
+        input: CompilerInput<'_>,
+        module: usize,
+        expr: &Expr,
+        seen: &mut HashSet<(usize, usize)>,
+    ) -> Origin {
+        match &expr.kind {
+            ExprKind::App(_, _) => Origin::new(module, expr.span),
+            ExprKind::Name(_) | ExprKind::Proj(_, _) => {
+                if let Some(Resolved::Def((target_module, target_def))) =
+                    input.type_check().resolution(module, expr.id)
+                {
+                    if seen.insert((*target_module, *target_def)) {
+                        let target = &input.module(*target_module).def(*target_def).body;
+                        return visit(input, *target_module, target, seen);
+                    }
+                }
+                Origin::new(module, expr.span)
             }
-            Origin::new(module, expr.span)
+            _ => Origin::new(module, expr.span),
         }
-        _ => Origin::new(module, expr.span),
     }
+
+    visit(input, module, expr, &mut HashSet::new())
 }
 
 fn copy_typed_graph(source: &TypedQuery, target: &mut TypedQuery) -> Result<NodeId, Error> {
@@ -2326,6 +2433,7 @@ fn expr_depth_to_id(expr: &Expr, id: u32, depth: usize) -> Option<usize> {
 /// tree for now, while the relational structure and row boundaries are rebuilt
 /// from `TypedQuery` before the normalized relation is compared.
 fn lower_expression_pipeline(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -2359,40 +2467,40 @@ fn lower_expression_pipeline(
         return Ok(None);
     };
     let mut typed = TypedQuery::new();
-    let (mut child, mut checked) = if let Some((schema, table, columns)) =
-        table_parts(input, module, base)
-    {
-        let base_origin = table_origin(input, module, base);
-        let checked = CheckedQuery::table(
-            schema,
-            table,
-            Some(RowType::new(columns.clone())),
-            base_origin,
-        )
-        .map_err(|error| Error::unsupported(error.message).at(base_origin))?;
-        let child = typed
-            .table(NodeRef::new(module, def, base.id), base_origin, columns)
-            .map_err(query_error)?;
-        (child, checked)
-    } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
-        if (target_module, target_def) == (module, def)
-            || !matches!(
-                tc.scheme_view(target_module, target_def),
-                Some(crate::check::SchemeView::Query { .. })
+    let (mut child, mut checked) =
+        if let Some((schema, table, columns)) = table_parts(input, module, base) {
+            let base_origin = table_origin(input, module, base);
+            let checked = CheckedQuery::table(
+                schema,
+                table,
+                Some(RowType::new(columns.clone())),
+                base_origin,
             )
-        {
-            return Ok(None);
-        }
-        let target_body = &input.module(target_module).def(target_def).body;
-        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
-        else {
+            .map_err(|error| Error::unsupported(error.message).at(base_origin))?;
+            let child = typed
+                .table(NodeRef::new(module, def, base.id), base_origin, columns)
+                .map_err(query_error)?;
+            (child, checked)
+        } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
+            if (target_module, target_def) == (module, def)
+                || !matches!(
+                    tc.scheme_view(target_module, target_def),
+                    Some(crate::check::SchemeView::Query { .. })
+                )
+            {
+                return Ok(None);
+            }
+            let target_body = &input.module(target_module).def(target_def).body;
+            let Some((target_typed, checked)) =
+                context.lower(input, target_module, target_def, target_body)?
+            else {
+                return Ok(None);
+            };
+            let child = copy_typed_graph(&target_typed, &mut typed)?;
+            (child, checked)
+        } else {
             return Ok(None);
         };
-        let child = copy_typed_graph(&target_typed, &mut typed)?;
-        (child, checked)
-    } else {
-        return Ok(None);
-    };
     let terms = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
     let base_node_count = checked.node_chain().len();
     let mut syntax = HashMap::new();
@@ -2606,7 +2714,7 @@ fn lower_expression_pipeline(
         .output_row()
         .map(|row| row.columns().to_vec())
         .unwrap_or_default();
-    if checked.row().columns() != typed_columns.as_slice() {
+    if !same_row_columns(checked.row().columns(), &typed_columns) {
         return Err(Error::unsupported(
             "typed expression pipeline produced a row different from its checked query",
         )
@@ -2616,6 +2724,26 @@ fn lower_expression_pipeline(
     // wrapper rebuilds a checked tree from that arena when its shape aligns
     // with the normalized comparison tree.
     Ok(Some((typed.finish(child), checked)))
+}
+
+/// Compare rows at a stage boundary where field order is not part of the
+/// checker obligation. Projection and update inference may close an open row
+/// in a different order from the source record, while the checked constructor
+/// keeps the stable SQL/output order. The stage checks above already use this
+/// rule; applying it at the root keeps the final assertion consistent with
+/// those local checks.
+fn same_row_columns(
+    left: &[(String, crate::core::ScalarType)],
+    right: &[(String, crate::core::ScalarType)],
+) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort_by(|a, b| a.0.cmp(&b.0));
+    right.sort_by(|a, b| a.0.cmp(&b.0));
+    left == right
 }
 
 /// Whether a query body is one direct `&` chain over a table (or a table alias)
@@ -2692,13 +2820,15 @@ fn rows_match(
 /// checker row records yet: their boundaries are derived by the typed child,
 /// while the checker still owns the full expression-bearing stage bridge.
 fn lower_keep_pipeline(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
     body: &Expr,
 ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
     let mut typed = TypedQuery::new();
-    let Some((root, checked)) = lower_keep_expr(input, module, def, body, &mut typed)? else {
+    let Some((root, checked)) = lower_keep_expr(context, input, module, def, body, &mut typed)?
+    else {
         return Ok(None);
     };
     if typed.nodes().any(|node| {
@@ -2720,6 +2850,7 @@ fn lower_keep_pipeline(
 }
 
 fn lower_keep_expr(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -2738,7 +2869,7 @@ fn lower_keep_expr(
         {
             let target_body = &input.module(target_module).def(target_def).body;
             let Some((target_typed, checked)) =
-                lower(input, target_module, target_def, target_body)?
+                context.lower(input, target_module, target_def, target_body)?
             else {
                 return Ok(None);
             };
@@ -2762,7 +2893,8 @@ fn lower_keep_expr(
     if args.len() != 2 || !is_pipe_head(head) {
         return Ok(None);
     }
-    let Some((child, mut checked)) = lower_keep_expr(input, module, def, &args[0], typed)? else {
+    let Some((child, mut checked)) = lower_keep_expr(context, input, module, def, &args[0], typed)?
+    else {
         return Ok(None);
     };
     let (stage_head, stage_args) = match &args[1].kind {
@@ -2864,19 +2996,22 @@ fn lower_keep_expr(
 }
 
 fn lower_helper_pipeline(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
     body: &Expr,
 ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
     let mut typed = TypedQuery::new();
-    let Some((root, checked)) = lower_helper_expr(input, module, def, body, &mut typed)? else {
+    let Some((root, checked)) = lower_helper_expr(context, input, module, def, body, &mut typed)?
+    else {
         return Ok(None);
     };
     Ok(Some((typed.finish(root), checked)))
 }
 
 fn lower_helper_expr(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -2899,7 +3034,8 @@ fn lower_helper_expr(
             return Ok(None);
         }
         let target_body = &input.module(target_module).def(target_def).body;
-        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
+        let Some((target_typed, checked)) =
+            context.lower(input, target_module, target_def, target_body)?
         else {
             return Ok(None);
         };
@@ -2920,7 +3056,8 @@ fn lower_helper_expr(
 
     if let ExprKind::App(head, args) = &body.kind {
         if args.len() == 2 && is_pipe_head(head) {
-            let Some((child, checked)) = lower_helper_expr(input, module, def, &args[0], typed)?
+            let Some((child, checked)) =
+                lower_helper_expr(context, input, module, def, &args[0], typed)?
             else {
                 return Ok(None);
             };
@@ -4117,27 +4254,39 @@ fn table_parts(
     module: usize,
     expr: &Expr,
 ) -> Option<(String, String, Vec<(String, crate::core::ScalarType)>)> {
-    let tc = input.type_check();
-    match &expr.kind {
-        ExprKind::App(head, args) if args.len() == 2 && is_table_head(input, module, head) => {
-            let schema = string_literal(&args[0])?;
-            let table = string_literal(&args[1])?;
-            let columns = tc.typed_node(module, expr.id)?.row()?;
-            Some((schema, table, columns))
+    fn visit(
+        input: CompilerInput<'_>,
+        module: usize,
+        expr: &Expr,
+        seen: &mut HashSet<(usize, usize)>,
+    ) -> Option<(String, String, Vec<(String, crate::core::ScalarType)>)> {
+        let tc = input.type_check();
+        match &expr.kind {
+            ExprKind::App(head, args) if args.len() == 2 && is_table_head(input, module, head) => {
+                let schema = string_literal(&args[0])?;
+                let table = string_literal(&args[1])?;
+                let columns = tc.typed_node(module, expr.id)?.row()?;
+                Some((schema, table, columns))
+            }
+            ExprKind::Name(_) | ExprKind::Proj(_, _) => {
+                let Resolved::Def((target_module, target_def)) =
+                    tc.resolution(module, expr.id)?.clone()
+                else {
+                    return None;
+                };
+                if !seen.insert((target_module, target_def)) {
+                    return None;
+                }
+                let target = input.module(target_module).def(target_def);
+                let (schema, table, _) = visit(input, target_module, &target.body, seen)?;
+                let columns = tc.scheme_fields(target_module, target_def)?;
+                Some((schema, table, columns))
+            }
+            _ => None,
         }
-        ExprKind::Name(_) | ExprKind::Proj(_, _) => {
-            let Resolved::Def((target_module, target_def)) =
-                tc.resolution(module, expr.id)?.clone()
-            else {
-                return None;
-            };
-            let target = input.module(target_module).def(target_def);
-            let (schema, table, _) = table_parts(input, target_module, &target.body)?;
-            let columns = tc.scheme_fields(target_module, target_def)?;
-            Some((schema, table, columns))
-        }
-        _ => None,
     }
+
+    visit(input, module, expr, &mut HashSet::new())
 }
 
 fn is_table_head(input: CompilerInput<'_>, module: usize, head: &Expr) -> bool {

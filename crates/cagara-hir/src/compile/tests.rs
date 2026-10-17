@@ -1079,6 +1079,27 @@ fn dependency_walk_handles_long_chains_and_cycles_without_recursing() {
 }
 
 #[test]
+fn typed_lowering_rejects_a_recursive_query_alias_without_recursing() {
+    for source in [
+        "q : query { id = int } = q\n",
+        "a : query { id = int } = b\n\
+         b : query { id = int } = a\n",
+    ] {
+        let ws = Workspace::from_source(source);
+        let compilation = compile(&ws);
+        assert_eq!(compilation.queries.len(), source.lines().count());
+        assert!(compilation
+            .queries
+            .iter()
+            .all(|query| query.fault == Some(Fault::Compiler)));
+        assert!(compilation
+            .diagnostics
+            .iter()
+            .any(|diag| diag.message.contains("refers to itself")));
+    }
+}
+
+#[test]
 fn cached_relations_keep_current_source_locations() {
     let src = "q : query { a = int } = table \"public\" \"items\"\n";
     let mut ws = Workspace::from_source(src);

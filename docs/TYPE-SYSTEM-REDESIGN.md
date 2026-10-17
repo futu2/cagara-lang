@@ -1,5 +1,17 @@
 # Type system and pipeline redesign
 
+## Current implementation status
+
+The typed query arena and its first production lowering slices have landed.
+Production now routes query definitions through a typed builder first, with one
+explicit normalized adapter for declined shapes. Some typed slices still use
+normalized expression payloads or keep an adapter-built checked tree when the
+typed graph cannot rebuild it one-to-one. The builder's active-definition set
+is owned by a per-attempt `LoweringContext`, not ambient thread-local state.
+The remaining work is to move those payloads and helper instantiations onto the
+typed tree, then remove the adapter. The live slice status is maintained in
+[`PLAN.md`](PLAN.md).
+
 ## Why change it
 
 The deferred `prefix`/`suffix` defect is a symptom of a representation mismatch.
@@ -305,11 +317,12 @@ guess in it.
   composed result type — the property `check::stage::finish_row_stages` asserts.
 - Erasure stays structural and SQL lowering stays type-agnostic.
 
-The honest summary: this step is a rewrite of the query half of elaboration, not
-another fact migration, and it should be done slice by slice with the corpus as
-the witness at every step. Until slice 1 lands, the tree is authoritative for
-*what was checked* and the term route remains authoritative for *how a query is
-built*.
+The honest summary: this step is a rewrite of the query half of elaboration,
+not another fact migration, and it should be done slice by slice with the corpus
+as the witness at every step. The typed graph now owns structure and stage
+boundaries for supported slices. The normalized adapter still supplies missing
+payloads or complete checked trees for some shapes, so the migration is not yet
+authoritative end to end.
 
 ## Acceptance criteria
 

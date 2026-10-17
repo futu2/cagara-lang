@@ -7,9 +7,16 @@ normalization, relational IR, language server, and SQL backend.
 ## Pipeline
 
 ```text
-source -> syntax/AST -> type checker -> normalization -> checked relational tree
-        -> erasure -> schema validation -> SQL lowering -> dialect rewrite -> SQL
+source -> syntax/AST -> checker-owned typed facts
+       -> typed query lowering -> CheckedQuery -> erasure -> Rel
+       -> schema validation -> SQL lowering -> dialect rewrite -> SQL
+                \-> legacy normalized adapter -> CheckedQuery (transitional)
 ```
+
+The normalized adapter is a compatibility route for query shapes whose typed
+payload builder has not landed yet. It is selected only after typed lowering
+explicitly declines a shape; typed errors are returned directly. It is not a
+second interpretation of a typed failure.
 
 The intended simplification of this pipeline is described in
 [`ARCHITECTURE.md`](ARCHITECTURE.md). It separates the pure compiler kernel
@@ -154,13 +161,13 @@ correctness, not as an optimization.
   contained another; the identity is what tells a helper's stage from the
   caller's when the helper is inlined, since the caller records nothing at the
   use and the callee's stage names the callee.
-  `check::query::TypedQuery` is the other half of that step: the query skeleton
-  as its own arena, where a node carries its identity, its operation, a link to
-  its typed child, and the rows the checker closed for it — so a later pass can
-  read a stage's boundary instead of recovering it from a composed result type.
-  It is not yet on the production path; `docs/TYPE-SYSTEM-REDESIGN.md` step 6
-  lists the slices, and `check::query`'s own tests include the check that every
-  fact its nodes need is available from the checker where a stage is applied.
+  `check::query::TypedQuery` is the query skeleton as its own arena, where a
+  node carries its identity, operation, typed children, and checker-closed
+  rows. It is now on the production path for supported slices. The typed graph
+  can still be paired with an adapter-built checked tree when the current slice
+  cannot rebuild that tree one-to-one; `query_lowering::LoweredQuery` records
+  that distinction. `check::query` tests pin that every node fact is available
+  from the checker where a stage is applied.
   Two properties of `use_types` are worth keeping in mind because they are not
   obvious from the tree: it was keyed by the span the checker *filed* a use
   under, which is the node's own span in every program measured but is carried
@@ -201,7 +208,42 @@ the diffs.
 | 4 | Run both routes; compare rows, stages, origins, relations, SQL | **Done** |
 | 5 | Typed instantiation: helpers, aliases, imports, overloads, repeats | **Done** |
 | 6 | Remaining constructs: joins/sets → select/update/agg → windows → expressions | **In progress** |
-| 7 | Remove the source walk: `lower_query_recorded`, `check_stage_records`, `Facts` | Not started |
+| 7 | Remove the source walk: `lower_query_recorded`, `check_stage_records`, `Facts` | **In progress: route boundary established** |
+
+#### The route boundary
+
+`crates/cagara-hir/src/query_lowering.rs` is now the only production
+coordinator for query routes. It returns an explicit `LoweredQuery::Typed` or
+`LoweredQuery::Legacy` outcome. A typed result carries a
+`rebuilt_checked_tree` flag, distinguishing shapes where the typed graph
+reconstructed checked nodes from shapes where it remains paired with an
+adapter-built checked tree. Table metadata and literal stage arguments can
+still come from the adapter even when reconstruction succeeds.
+`typed_lower.rs` owns a per-attempt
+`LoweringContext` for alias expansion and cycle detection; no lowering state is
+stored in thread-local storage. This matters for incremental and concurrent
+requests: each compilation has its own dependency walk, and a recursive alias
+can only decline the typed slice before the normalizer reports the source
+recursion diagnostic.
+
+The context is the next slice's home for memoization and budgets. Builders must
+use it when expanding a query definition; they must not call the public typed
+entry point recursively, because that would create a fresh graph walk and lose
+cycle ownership. The legacy adapter remains deliberately visible until all
+payloads have a typed source, but new lowering code must enter through the typed
+context and return an explicit unsupported result for an unfinished shape.
+
+The remaining migration is therefore one boundary, not another collection of
+special cases:
+
+1. move normalized predicate, projection, sort, and window payloads into the
+   checker-owned typed expression nodes;
+2. make helper instantiation consume those payloads and intermediate rows from
+   the typed graph;
+3. remove normalized calls from `typed_lower.rs` and keep normalization only as
+   the legacy adapter in `query_lowering.rs`;
+4. delete the adapter and the source-walk compatibility checks once the corpus
+   and incremental suite pass through the typed route alone.
 
 #### Step 6 progress: direct expression-bearing stages
 

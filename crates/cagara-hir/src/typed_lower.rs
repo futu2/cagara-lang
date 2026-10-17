@@ -547,54 +547,60 @@ fn lower_plain_expr_with_row(
                     .map(Some)
                     .map_err(|error| Error::unsupported(error.message).at(origin));
             }
-            let (sql, arity) = match name.as_str() {
-                "_==_" => ("$1 = $2", 2),
-                "_!=_" => ("$1 <> $2", 2),
-                "_<_" => ("$1 < $2", 2),
-                "_<=_" => ("$1 <= $2", 2),
-                "_>_" => ("$1 > $2", 2),
-                "_>=_" => ("$1 >= $2", 2),
-                "_&&_" => ("$1 AND $2", 2),
-                "_||_" => ("$1 OR $2", 2),
-                "_+_" => ("$1 + $2", 2),
-                "_-_" => ("$1 - $2", 2),
-                "_*_" => ("$1 * $2", 2),
-                "_/_" => ("$1 / $2", 2),
-                "_%_" => ("$1 % $2", 2),
-                "_<>_" | "concat" => ("$1 || $2", 2),
-                "not" => ("NOT $1", 1),
-                "negate" => ("-$1", 1),
-                "upper" => ("UPPER($1)", 1),
-                "lower" => ("LOWER($1)", 1),
-                "trim" => ("TRIM($1)", 1),
-                "ltrim" => ("LTRIM($1)", 1),
-                "rtrim" => ("RTRIM($1)", 1),
-                "length" => ("CAGARA_LENGTH($1)", 1),
-                "coalesce" => ("COALESCE($2, $1)", 2),
-                "ifThenElse" | "caseWhen" => ("CASE WHEN $1 THEN $2 ELSE $3 END", 3),
-                "like" => ("$2 LIKE $1", 2),
-                "ilike" => ("$2 ILIKE $1", 2),
-                "substring" => ("SUBSTRING($3, $1, $2)", 3),
-                "left" => ("CAGARA_LEFT($2, $1)", 2),
-                "right" => ("CAGARA_RIGHT($2, $1)", 2),
-                "replaceAll" => ("REPLACE($3, $1, $2)", 3),
-                "strpos" => ("CAGARA_STRPOS($2, $1)", 2),
-                "contains" => ("CAGARA_STRPOS($2, $1) > 0", 2),
-                "startsWith" => ("CAGARA_LEFT($2, CAGARA_LENGTH($1)) = $1", 2),
-                "endsWith" => ("CAGARA_RIGHT($2, CAGARA_LENGTH($1)) = $1", 2),
-                "toString" => ("CAGARA_TO_STRING($1)", 1),
-                "toInt" => ("CAST($1 AS INT)", 1),
-                "toFloat" => ("CAST($1 AS FLOAT)", 1),
-                "toBool" => ("CAST($1 AS BOOLEAN)", 1),
-                "toDate" => ("CAGARA_TO_DATE($1)", 1),
-                "toTimestamp" => ("CAGARA_TO_TIMESTAMP($1)", 1),
-                "tryInt" => ("CAGARA_TRY_INT($1)", 1),
-                "tryFloat" => ("CAGARA_TRY_FLOAT($1)", 1),
-                "isNull" => ("$1 IS NULL", 1),
-                "isNotNull" => ("$1 IS NOT NULL", 1),
-                "isTrue" => ("COALESCE($1, FALSE)", 1),
-                "nullIf" => ("NULLIF($1, $2)", 2),
-                _ => return Ok(None),
+            let dynamic = plain_dynamic_template(input, module, name, args);
+            let (sql, arity) = if let Some(dynamic) = dynamic {
+                dynamic
+            } else {
+                let (sql, arity) = match name.as_str() {
+                    "_==_" => ("$1 = $2", 2),
+                    "_!=_" => ("$1 <> $2", 2),
+                    "_<_" => ("$1 < $2", 2),
+                    "_<=_" => ("$1 <= $2", 2),
+                    "_>_" => ("$1 > $2", 2),
+                    "_>=_" => ("$1 >= $2", 2),
+                    "_&&_" => ("$1 AND $2", 2),
+                    "_||_" => ("$1 OR $2", 2),
+                    "_+_" => ("$1 + $2", 2),
+                    "_-_" => ("$1 - $2", 2),
+                    "_*_" => ("$1 * $2", 2),
+                    "_/_" => ("$1 / $2", 2),
+                    "_%_" => ("$1 % $2", 2),
+                    "_<>_" | "concat" => ("$1 || $2", 2),
+                    "not" => ("NOT $1", 1),
+                    "negate" => ("-$1", 1),
+                    "upper" => ("UPPER($1)", 1),
+                    "lower" => ("LOWER($1)", 1),
+                    "trim" => ("TRIM($1)", 1),
+                    "ltrim" => ("LTRIM($1)", 1),
+                    "rtrim" => ("RTRIM($1)", 1),
+                    "length" => ("CAGARA_LENGTH($1)", 1),
+                    "coalesce" => ("COALESCE($2, $1)", 2),
+                    "ifThenElse" | "caseWhen" => ("CASE WHEN $1 THEN $2 ELSE $3 END", 3),
+                    "like" => ("$2 LIKE $1", 2),
+                    "ilike" => ("$2 ILIKE $1", 2),
+                    "substring" => ("SUBSTRING($3, $1, $2)", 3),
+                    "left" => ("CAGARA_LEFT($2, $1)", 2),
+                    "right" => ("CAGARA_RIGHT($2, $1)", 2),
+                    "replaceAll" => ("REPLACE($3, $1, $2)", 3),
+                    "strpos" => ("CAGARA_STRPOS($2, $1)", 2),
+                    "contains" => ("CAGARA_STRPOS($2, $1) > 0", 2),
+                    "startsWith" => ("CAGARA_LEFT($2, CAGARA_LENGTH($1)) = $1", 2),
+                    "endsWith" => ("CAGARA_RIGHT($2, CAGARA_LENGTH($1)) = $1", 2),
+                    "toString" => ("CAGARA_TO_STRING($1)", 1),
+                    "toInt" => ("CAST($1 AS INT)", 1),
+                    "toFloat" => ("CAST($1 AS FLOAT)", 1),
+                    "toBool" => ("CAST($1 AS BOOLEAN)", 1),
+                    "toDate" => ("CAGARA_TO_DATE($1)", 1),
+                    "toTimestamp" => ("CAGARA_TO_TIMESTAMP($1)", 1),
+                    "tryInt" => ("CAGARA_TRY_INT($1)", 1),
+                    "tryFloat" => ("CAGARA_TRY_FLOAT($1)", 1),
+                    "isNull" => ("$1 IS NULL", 1),
+                    "isNotNull" => ("$1 IS NOT NULL", 1),
+                    "isTrue" => ("COALESCE($1, FALSE)", 1),
+                    "nullIf" => ("NULLIF($1, $2)", 2),
+                    _ => return Ok(None),
+                };
+                (sql.to_string(), arity)
             };
             if args.len() != arity {
                 return Ok(None);
@@ -610,8 +616,8 @@ fn lower_plain_expr_with_row(
                 return Ok(None);
             };
             let sql = match (name.as_str(), &ty) {
-                ("_/_", crate::core::ScalarType::Int) => "CAGARA_IDIV($1, $2)",
-                ("_%_", crate::core::ScalarType::Int) => "CAGARA_MOD($1, $2)",
+                ("_/_", crate::core::ScalarType::Int) => "CAGARA_IDIV($1, $2)".to_string(),
+                ("_%_", crate::core::ScalarType::Int) => "CAGARA_MOD($1, $2)".to_string(),
                 _ => sql,
             };
             crate::checked::CheckedExpr::template(sql, checked_args, ty, origin)
@@ -706,6 +712,103 @@ fn lower_plain_window_spec(
     crate::checked::window_spec(partition, order, None)
         .map(Some)
         .map_err(|error| Error::unsupported(error.message).at(Origin::new(module, expr.span)))
+}
+
+fn plain_dynamic_template(
+    input: CompilerInput<'_>,
+    module: usize,
+    name: &str,
+    args: &[Expr],
+) -> Option<(String, usize)> {
+    use crate::core::ScalarType;
+
+    let scalar = |expr: &Expr| {
+        input
+            .type_check()
+            .typed_node(module, expr.id)
+            .and_then(|node| node.ty())
+    };
+    let date_kind = |expr: &Expr| match scalar(expr) {
+        Some(ScalarType::Date) => Some("DATE"),
+        Some(ScalarType::Timestamp) => Some("TIMESTAMP"),
+        _ => None,
+    };
+    let unary_date = args.first().and_then(date_kind);
+    let binary_date = args.get(1).and_then(date_kind);
+    let sql = match name {
+        "toDecimal" if args.len() == 3 => "CAGARA_TO_DECIMAL($3, $1, $2)",
+        "tryDecimal" if args.len() == 3 => "CAGARA_TRY_DECIMAL($3, $1, $2)",
+        "daysBetween" if args.len() == 2 => "CAGARA_DAYS_BETWEEN($1, $2)",
+        "addDays" | "addWeeks" | "addMonths" | "addQuarters" | "addYears" if args.len() == 2 => {
+            let kind = binary_date?;
+            let unit = match name {
+                "addDays" | "addWeeks" => "DAY",
+                "addMonths" | "addQuarters" => "MONTH",
+                "addYears" => "YEAR",
+                _ => unreachable!(),
+            };
+            let offset = match name {
+                "addWeeks" => "$1 * 7",
+                "addQuarters" => "$1 * 3",
+                _ => "$1",
+            };
+            return Some((format!("CAGARA_ADD('{kind}', '{unit}', $2, {offset})"), 2));
+        }
+        "addHours" | "addMinutes" | "addSeconds" if args.len() == 2 => {
+            if binary_date? != "TIMESTAMP" {
+                return None;
+            }
+            let unit = match name {
+                "addHours" => "HOUR",
+                "addMinutes" => "MINUTE",
+                "addSeconds" => "SECOND",
+                _ => unreachable!(),
+            };
+            return Some((format!("CAGARA_ADD('TIMESTAMP', '{unit}', $2, $1)"), 2));
+        }
+        "truncYear" | "truncQuarter" | "truncMonth" | "truncWeek" | "truncDay" | "truncHour"
+        | "truncMinute"
+            if args.len() == 1 =>
+        {
+            let kind = unary_date?;
+            if matches!(name, "truncHour" | "truncMinute" | "truncDay") && kind != "TIMESTAMP" {
+                return None;
+            }
+            let unit = match name {
+                "truncYear" => "YEAR",
+                "truncQuarter" => "QUARTER",
+                "truncMonth" => "MONTH",
+                "truncWeek" => "WEEK",
+                "truncDay" => "DAY",
+                "truncHour" => "HOUR",
+                "truncMinute" => "MINUTE",
+                _ => unreachable!(),
+            };
+            return Some((format!("CAGARA_TRUNC('{kind}', '{unit}', $1)"), 1));
+        }
+        "year" | "quarter" | "month" | "day" | "dayOfWeek" | "dayOfYear" | "hour" | "minute"
+            if args.len() == 1 =>
+        {
+            let kind = unary_date?;
+            if matches!(name, "hour" | "minute") && kind != "TIMESTAMP" {
+                return None;
+            }
+            let part = match name {
+                "year" => "YEAR",
+                "quarter" => "QUARTER",
+                "month" => "MONTH",
+                "day" => "DAY",
+                "dayOfWeek" => "DOW",
+                "dayOfYear" => "DOY",
+                "hour" => "HOUR",
+                "minute" => "MINUTE",
+                _ => unreachable!(),
+            };
+            return Some((format!("CAGARA_PART('{kind}', '{part}', $1)"), 1));
+        }
+        _ => return None,
+    };
+    Some((sql.to_string(), args.len()))
 }
 
 fn plain_zero_arg_sql(name: &str) -> Option<&'static str> {
@@ -4253,6 +4356,26 @@ mod tests {
         assert_eq!(fields[4].1.kind(), crate::checked::ExprKind::Template);
         assert_eq!(fields[5].0, "rn");
         assert_eq!(fields[5].1.kind(), crate::checked::ExprKind::WinTemplate);
+    }
+
+    #[test]
+    fn direct_plain_date_and_decimal_templates_build_typed_fields() {
+        let (typed, checked) = lower_source(
+            "users : query { id = int, created = date, created_at = timestamp } = table \"s\" \"users\"\n\
+             q = users & select { month = month .created, added = addDays 1 .created, \
+             truncated = truncMonth .created_at, decimal = toDecimal 18 2 .id }\n",
+            "q",
+        );
+        let node = typed.node(typed.root());
+        let fields = node.projection_fields().expect("typed select has fields");
+        assert_eq!(fields.len(), 4);
+        assert!(fields
+            .iter()
+            .all(|(_, field)| field.kind() == crate::checked::ExprKind::Template));
+        assert_eq!(
+            checked.row().names(),
+            &["month", "added", "truncated", "decimal"]
+        );
     }
 
     #[test]

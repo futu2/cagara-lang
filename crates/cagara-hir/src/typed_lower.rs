@@ -3104,6 +3104,16 @@ fn apply_plain_helper_pipeline(
                     };
                     fields.push((name.clone(), value));
                 }
+                if stage.kind == RowStage::Agg {
+                    if let Some(output) = stage.output.as_deref() {
+                        fields.sort_by_key(|(name, _)| {
+                            output
+                                .iter()
+                                .position(|(column, _)| column == name)
+                                .unwrap_or(usize::MAX)
+                        });
+                    }
+                }
                 projection_fields = Some(fields);
             }
             RowStage::Limit | RowStage::Offset => {

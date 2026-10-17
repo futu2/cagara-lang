@@ -217,9 +217,10 @@ nodes now also retain
 their checked output field expressions, including window expressions in
 projections. Typed lowering now hydrates expression payloads across the
 completed typed graph from the matching checked query tree, so helper and
-composed stages receive the same payloads as direct stages. The checked
-relational result is still supplied by the term route and compared with the
-typed skeleton; removing that route remains later work.
+composed stages receive the same payloads as direct stages. When the typed and
+checked shapes align, the checked relation is rebuilt from the typed arena;
+the normalized route still supplies the comparison tree and expression
+payloads for this migration slice, and removing that route remains later work.
 
 `TypedQuery` now has ordered multi-input edges for joins and set operations, and
 records each child's checked output row. Typed lowering constructs those nodes

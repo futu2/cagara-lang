@@ -29,6 +29,10 @@ pub(crate) fn lower(
         .carry_checked_payloads(&checked)
         .map_err(query_error)?;
     typed.require_checked_payloads().map_err(query_error)?;
+    let checked = typed
+        .rebuild_checked(&checked)
+        .map_err(query_error)?
+        .unwrap_or(checked);
     Ok(Some((typed, checked)))
 }
 
@@ -904,9 +908,9 @@ fn find_expr_id(expr: &Expr, id: u32) -> Option<&Expr> {
 
 /// Lower a direct pipeline whose stages carry expressions (`where`, `select`,
 /// `update`, `agg`, and `order`), together with any row-preserving stages mixed
-/// into it. The expression bridge remains the normalized term lowering used by
-/// the checked query tree; this slice moves the relational skeleton and its row
-/// boundaries onto `TypedQuery` before the normalized relation is compared.
+/// into it. Expression payloads are hydrated from the normalized comparison
+/// tree for now, while the relational structure and row boundaries are rebuilt
+/// from `TypedQuery` before the normalized relation is compared.
 fn lower_expression_pipeline(
     input: CompilerInput<'_>,
     module: usize,
@@ -1070,9 +1074,9 @@ fn lower_expression_pipeline(
         )
         .at(checked.origin()));
     }
-    // The checked value remains the normalized relational result, while every
-    // relational node and supported expression payload is represented by the
-    // typed arena.
+    // The relational structure is represented by the typed arena; the public
+    // wrapper rebuilds a checked tree from that arena when its shape aligns
+    // with the normalized comparison tree.
     Ok(Some((typed.finish(child), checked)))
 }
 

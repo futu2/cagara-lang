@@ -691,6 +691,262 @@ impl TypedQuery {
         Ok(())
     }
 
+    /// Rebuild a checked relation from this typed graph when the graph and the
+    /// existing checked tree have the same shape. The checked tree is used as
+    /// the source of table metadata and literal stage arguments; expression
+    /// payloads come from the typed nodes. A structural mismatch returns
+    /// `None`, allowing callers to keep the normalized route as a comparison
+    /// oracle for slices that have not reached one-to-one alignment yet.
+    pub(crate) fn rebuild_checked(
+        &self,
+        template: &crate::checked::CheckedQuery,
+    ) -> Result<Option<crate::checked::CheckedQuery>, QueryErr> {
+        fn build(
+            query: &TypedQuery,
+            id: NodeId,
+            template: &crate::checked::CheckedQuery,
+        ) -> Result<Option<crate::checked::CheckedQuery>, QueryErr> {
+            let node = &query.nodes[id.index()];
+            let one = || {
+                if node.inputs.len() != 1 {
+                    return Err(QueryErr::new(
+                        node,
+                        format!(
+                            "typed {:?} node has {} children but checked tree expects 1",
+                            node.kind,
+                            node.inputs.len()
+                        ),
+                    ));
+                }
+                Ok(node.inputs[0])
+            };
+            let two = || {
+                if node.inputs.len() != 2 {
+                    return Err(QueryErr::new(
+                        node,
+                        format!(
+                            "typed {:?} node has {} children but checked tree expects 2",
+                            node.kind,
+                            node.inputs.len()
+                        ),
+                    ));
+                }
+                Ok((node.inputs[0], node.inputs[1]))
+            };
+            let built = match (node.kind, template.node_ref()) {
+                (QueryNodeKind::Table, crate::checked::CheckedQueryNode::Table { .. }) => {
+                    Some(template.clone())
+                }
+                (QueryNodeKind::Where, crate::checked::CheckedQueryNode::Where { input, .. }) => {
+                    let Some(predicate) = node.predicate.clone() else {
+                        return Ok(None);
+                    };
+                    let Some(input) = build(query, one()?, input)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::where_(input, predicate, template.origin())
+                            .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                (QueryNodeKind::Select, crate::checked::CheckedQueryNode::Select { input, .. }) => {
+                    let Some(fields) = node.projection_fields.clone() else {
+                        return Ok(None);
+                    };
+                    let Some(input) = build(query, one()?, input)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::select(input, fields, template.origin())
+                            .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                (QueryNodeKind::Update, crate::checked::CheckedQueryNode::Update { input, .. }) => {
+                    let Some(fields) = node.projection_fields.clone() else {
+                        return Ok(None);
+                    };
+                    let Some(input) = build(query, one()?, input)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::update(input, fields, template.origin())
+                            .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                (QueryNodeKind::Agg, crate::checked::CheckedQueryNode::Agg { input, .. }) => {
+                    let Some(fields) = node.projection_fields.clone() else {
+                        return Ok(None);
+                    };
+                    let Some(input) = build(query, one()?, input)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::agg(input, fields, template.origin())
+                            .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                (QueryNodeKind::Order, crate::checked::CheckedQueryNode::Order { input, .. }) => {
+                    let Some(keys) = node.order_keys.clone() else {
+                        return Ok(None);
+                    };
+                    let Some(input) = build(query, one()?, input)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::order(input, keys, template.origin())
+                            .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                (QueryNodeKind::Omit, crate::checked::CheckedQueryNode::Omit { input, key }) => {
+                    let Some(input) = build(query, one()?, input)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::omit(input, key.clone(), template.origin())
+                            .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                (
+                    QueryNodeKind::Prefix,
+                    crate::checked::CheckedQueryNode::Rename {
+                        input,
+                        affix,
+                        prefix: true,
+                    },
+                )
+                | (
+                    QueryNodeKind::Suffix,
+                    crate::checked::CheckedQueryNode::Rename {
+                        input,
+                        affix,
+                        prefix: false,
+                    },
+                ) => {
+                    let Some(input) = build(query, one()?, input)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::rename(
+                            input,
+                            affix.clone(),
+                            node.kind == QueryNodeKind::Prefix,
+                            template.origin(),
+                        )
+                        .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                (
+                    QueryNodeKind::MapValue,
+                    crate::checked::CheckedQueryNode::MapValue { input, wrapper },
+                ) => {
+                    let Some(input) = build(query, one()?, input)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::map_value(
+                            input,
+                            wrapper.clone(),
+                            template.origin(),
+                        )
+                        .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                (QueryNodeKind::Limit, crate::checked::CheckedQueryNode::Limit { input, n }) => {
+                    let Some(input) = build(query, one()?, input)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::limit(input, *n, template.origin())
+                            .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                (QueryNodeKind::Offset, crate::checked::CheckedQueryNode::Offset { input, n }) => {
+                    let Some(input) = build(query, one()?, input)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::offset(input, *n, template.origin())
+                            .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                (QueryNodeKind::Distinct, crate::checked::CheckedQueryNode::Distinct(input)) => {
+                    let Some(input) = build(query, one()?, input)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::distinct(input, template.origin())
+                            .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                (
+                    QueryNodeKind::Join(kind),
+                    crate::checked::CheckedQueryNode::Join {
+                        kind: template_kind,
+                        left,
+                        right,
+                        ..
+                    },
+                ) if kind == *template_kind => {
+                    let Some(predicate) = node.join_predicate.clone() else {
+                        return Ok(None);
+                    };
+                    let (left_id, right_id) = two()?;
+                    let Some(left) = build(query, left_id, left)? else {
+                        return Ok(None);
+                    };
+                    let Some(right) = build(query, right_id, right)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::join(
+                            kind,
+                            left,
+                            right,
+                            predicate,
+                            template.origin(),
+                        )
+                        .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                (
+                    QueryNodeKind::Set(kind),
+                    crate::checked::CheckedQueryNode::Set {
+                        kind: template_kind,
+                        left,
+                        right,
+                        ..
+                    },
+                ) if kind == *template_kind => {
+                    let (left_id, right_id) = two()?;
+                    let Some(left) = build(query, left_id, left)? else {
+                        return Ok(None);
+                    };
+                    let Some(right) = build(query, right_id, right)? else {
+                        return Ok(None);
+                    };
+                    Some(
+                        crate::checked::CheckedQuery::set(kind, left, right, template.origin())
+                            .map_err(|error| QueryErr::new(node, error.message))?,
+                    )
+                }
+                _ => return Ok(None),
+            };
+            let Some(built) = built else {
+                return Ok(None);
+            };
+            if node
+                .output_row
+                .as_ref()
+                .is_some_and(|row| row.columns() != built.row().columns())
+            {
+                return Ok(None);
+            }
+            Ok(Some(built))
+        }
+
+        build(self, self.root(), template)
+    }
+
     fn checked_node_kind(node: &crate::checked::CheckedQueryNode) -> QueryNodeKind {
         match node {
             crate::checked::CheckedQueryNode::Table { .. } => QueryNodeKind::Table,
@@ -984,6 +1240,7 @@ impl TypedQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checked::CheckedQuery;
     use cagara_syntax::ast::Span;
 
     fn site(module: usize, def: usize, expr_id: u32) -> NodeRef {
@@ -1273,5 +1530,51 @@ mod tests {
                 None,
             )
             .is_err());
+    }
+
+    #[test]
+    fn checked_relation_can_be_rebuilt_from_typed_payloads() {
+        let origin = origin();
+        let columns = vec![("id".to_string(), ScalarType::Bool)];
+        let checked_table = CheckedQuery::table(
+            "s",
+            "users",
+            Some(crate::core::RowType::new(columns.clone())),
+            origin,
+        )
+        .expect("checked table");
+        let predicate = CheckedExpr::column(
+            cagara_syntax::ast::Side::Single,
+            "id",
+            ScalarType::Bool,
+            origin,
+        );
+        let checked =
+            CheckedQuery::where_(checked_table, predicate.clone(), origin).expect("checked where");
+
+        let mut typed = TypedQuery::new();
+        let table = typed
+            .table(site(0, 0, 1), origin, columns)
+            .expect("typed table");
+        let filtered = typed
+            .keep_row_with_predicate(
+                site(0, 0, 2),
+                QueryNodeKind::Where,
+                table,
+                origin,
+                Some(predicate),
+            )
+            .expect("typed where");
+        let typed = typed.finish(filtered);
+        let rebuilt = typed
+            .rebuild_checked(&checked)
+            .expect("rebuild succeeds")
+            .expect("shapes align");
+        assert_eq!(rebuilt.kind(), checked.kind());
+        assert_eq!(rebuilt.row(), checked.row());
+        assert_eq!(
+            rebuilt.node_chain_predicates(),
+            checked.node_chain_predicates()
+        );
     }
 }

@@ -266,6 +266,11 @@ expressions continue through the payload bridge.
 Direct `order` stages whose keys are plain columns with literal `asc` or
 `desc` directions use the same typed path, retaining their checked sort keys
 without entering normalized elaboration.
+Direct joins whose predicates fit the plain expression subset now construct
+their checked predicate from checker-typed side-qualified fields, literals,
+comparisons, membership, and boolean operators. The typed join and checked
+join are built from the recorded operand rows and that predicate without
+normalizing the query. More complex join predicates keep using the bridge.
 Helpers with chains of `where`, `order`, `select`, and `update` stages now use
 that plain expression builder at each recorded stage identity. The caller's
 typed row is threaded through every stage, supplying field types and each

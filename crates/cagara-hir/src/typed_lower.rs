@@ -41,6 +41,12 @@ fn lower_unhydrated(
 ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
     let tc = input.type_check();
 
+    // A standalone join/set can be rebuilt from its typed operands before
+    // the composed pipeline route uses the normalized template.
+    if let Some(lowered) = lower_combine_pipeline(input, module, def, body)? {
+        return Ok(Some(lowered));
+    }
+
     // A combine can occur below or above ordinary stages. Build the complete
     // relational skeleton recursively so a stage never causes the combine
     // child to be dropped. Expression payloads still come from the normalized
@@ -68,10 +74,6 @@ fn lower_unhydrated(
     // come from the typed stage records, so the query arena does not recover
     // rows from the composed result type.
     if let Some(lowered) = lower_expression_pipeline(input, module, def, body)? {
-        return Ok(Some(lowered));
-    }
-
-    if let Some(lowered) = lower_combine_pipeline(input, module, def, body)? {
         return Ok(Some(lowered));
     }
 
@@ -715,13 +717,16 @@ fn lower_combine_pipeline(
         CombineKind::Set(kind) => CheckedQuery::set(kind, checked_left, checked_right, origin)
             .map_err(|error| Error::unsupported(error.message).at(origin))?,
         CombineKind::Join(kind) => {
-            let terms = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
-            let predicate = checked_join_predicate(&terms, terms.origin()).ok_or_else(|| {
-                Error::unsupported("normalized join query has no checked predicate")
-                    .at(terms.origin())
-            })?;
-            CheckedQuery::join(kind, checked_left, checked_right, predicate, terms.origin())
-                .map_err(|error| Error::unsupported(error.message).at(terms.origin()))?
+            let predicate = plain_join_predicate(input, module, operation).or_else(|| {
+                crate::normalize::elaborate_query_via_terms(input, module, def, body)
+                    .ok()
+                    .and_then(|terms| checked_join_predicate(&terms, terms.origin()))
+            });
+            let Some(predicate) = predicate else {
+                return Ok(None);
+            };
+            CheckedQuery::join(kind, checked_left, checked_right, predicate, origin)
+                .map_err(|error| Error::unsupported(error.message).at(origin))?
         }
     };
     let root = typed
@@ -745,6 +750,22 @@ fn lower_combine_pipeline(
         );
     }
     Ok(Some((typed.finish(root), checked)))
+}
+
+/// Lower a join predicate directly from checker-typed fields and literals.
+/// Join fields retain their `left`/`right` side markers, so the checked join
+/// constructor can validate them against the two child rows without consulting
+/// a normalized relation.
+fn plain_join_predicate(
+    input: CompilerInput<'_>,
+    module: usize,
+    operation: &Expr,
+) -> Option<crate::checked::CheckedExpr> {
+    let ExprKind::App(_, args) = &operation.kind else {
+        return None;
+    };
+    let predicate = args.get(1)?;
+    lower_plain_expr(input, module, predicate).ok().flatten()
 }
 
 /// Lower a query whose syntax contains a combine and any number of ordinary

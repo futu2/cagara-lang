@@ -340,7 +340,9 @@ Projection helpers carry the same window payload through their instantiated
 typed projection node, preserving the helper's stage identity and checked
 output row. Plain window templates and specs are now built at the helper
 definition through resolved template, direction, and frame metadata; the helper
-does not need normalized expression payloads for these cases.
+does not need normalized expression payloads for these cases when its input row
+is closed by an explicit query signature. Polymorphic helper windows remain on
+the payload bridge until call-site expression instantiation is available.
 The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be

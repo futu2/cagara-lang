@@ -3258,15 +3258,15 @@ fn apply_plain_helper_pipeline(
         return Ok(None);
     }
     let helper_body = &input.module(helper_module).def(helper_def).body;
-    // Helper expressions are checked once at their generic definition. Window
-    // templates need the instantiated call-site type, so keep them on the
-    // checked payload bridge until helper expression instantiation is typed.
+    // Generic helper expressions need call-site type instantiation for window
+    // templates. Closed helper signatures can use the source builder safely.
     let mut helper_exprs = HashMap::new();
     index_exprs(helper_body, &mut helper_exprs);
     if helper_exprs.values().any(|expr| {
         matches!(&expr.kind, ExprKind::App(_, _) if declared_template(input, helper_module, expr)
             .is_some_and(|(_, kind, _)| kind == crate::normalize::TemplateKind::Win))
-    }) {
+    }) && stages.iter().any(|stage| stage.input.is_none())
+    {
         return Ok(None);
     }
     let mut syntax = HashMap::new();

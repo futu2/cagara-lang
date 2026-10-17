@@ -523,6 +523,40 @@ fn plain_expression_helper_bypasses_normalized_elaboration() {
 }
 
 #[test]
+fn closed_window_projection_helper_bypasses_normalized_elaboration() {
+    let ws = Workspace::from_source(
+        "users : query { id = int } = table \"public\" \"users\"\n\
+         numbered : query { id = int } -> query { id = int, rn = int } = q => \
+             q & select { id = .id, rn = rowNumber { order = [asc .id] } }\n\
+         q = users & numbered\n",
+    );
+    let tc = crate::check::check(&ws);
+    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+    crate::normalize::clear_visited();
+    let compiled = compile_checked(&ws, &tc);
+    assert!(
+        compiled
+            .queries
+            .iter()
+            .any(|query| query.name == "q" && query.result.is_ok()),
+        "the closed typed window helper failed to compile: {:?}",
+        compiled.diagnostics
+    );
+    let q = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .position(|def| def.name == "q")
+        .unwrap();
+    assert!(
+        !crate::normalize::visited_nodes()
+            .iter()
+            .any(|(module, def, _)| *module == ws.root && *def == q),
+        "closed window projection helper unexpectedly walked normalized terms"
+    );
+}
+
+#[test]
 fn plain_join_predicate_bypasses_normalized_elaboration() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string } = table \"public\" \"users\"\norders : query { user_id = int, total = int } = table \"public\" \"orders\"\nq = users & innerJoin orders (.<id == .>user_id)\n",

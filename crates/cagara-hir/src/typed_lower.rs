@@ -512,6 +512,46 @@ fn lower_plain_expr_with_row(
             },
             origin,
         ))),
+        ExprKind::Case(arms) => {
+            let Some(((default_condition, default_value), when_arms)) = arms.split_last() else {
+                return Ok(None);
+            };
+            if !matches!(default_condition.kind, ExprKind::Lit(Lit::Bool(true))) {
+                return Ok(None);
+            }
+            if when_arms.is_empty() {
+                return lower_plain_expr_with_row(input, module, default_value, row);
+            }
+            let mut args = Vec::with_capacity(when_arms.len() * 2 + 1);
+            let mut sql = String::from("CASE");
+            for (condition, value) in when_arms {
+                let Some(condition) = lower_plain_expr_with_row(input, module, condition, row)?
+                else {
+                    return Ok(None);
+                };
+                let Some(value) = lower_plain_expr_with_row(input, module, value, row)? else {
+                    return Ok(None);
+                };
+                let condition_index = args.len() + 1;
+                args.push(condition);
+                let value_index = args.len() + 1;
+                args.push(value);
+                sql.push_str(&format!(" WHEN ${condition_index} THEN ${value_index}"));
+            }
+            let Some(default) = lower_plain_expr_with_row(input, module, default_value, row)?
+            else {
+                return Ok(None);
+            };
+            let default_index = args.len() + 1;
+            args.push(default);
+            sql.push_str(&format!(" ELSE ${default_index} END"));
+            let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
+                return Ok(None);
+            };
+            crate::checked::CheckedExpr::template(sql, args, ty, origin)
+                .map(Some)
+                .map_err(|error| Error::unsupported(error.message).at(origin))
+        }
         ExprKind::Name(_) => {
             let Some((sql, kind, arity)) = declared_template(input, module, expr) else {
                 return Ok(None);

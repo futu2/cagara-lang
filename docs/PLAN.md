@@ -10,13 +10,13 @@ normalization, relational IR, language server, and SQL backend.
 source -> syntax/AST -> checker-owned typed facts
        -> typed query lowering -> CheckedQuery -> erasure -> Rel
        -> schema validation -> SQL lowering -> dialect rewrite -> SQL
-                \-> legacy normalized adapter -> CheckedQuery (transitional)
 ```
 
-The normalized adapter is a compatibility route for query shapes whose typed
-payload builder has not landed yet. It is selected only after typed lowering
-explicitly declines a shape; typed errors are returned directly. It is not a
-second interpretation of a typed failure.
+The normalized query adapter remains a single, explicit compatibility route
+for query shapes the typed builder has not covered. Typed errors are returned
+directly; only an explicit decline reaches the adapter. The active migration
+work is closing the remaining gaps and then removing this route without
+changing accepted programs or diagnostics.
 
 The intended simplification of this pipeline is described in
 [`ARCHITECTURE.md`](ARCHITECTURE.md). It separates the pure compiler kernel
@@ -135,15 +135,9 @@ correctness, not as an optimization.
   `use_row`, `def_result_ty`, `def_body`, `def_template`, `resolution`,
   `choice`, `holes_at`) and everything downstream reads facts through it, which
   is why each map could be deleted once its last reader read the tree instead.
-  What remains of the migration is the legacy adapter itself: it still walks
-  normalized terms and asks the tree per node, and
-  `docs/TYPE-SYSTEM-REDESIGN.md` step 4 is about feeding `CheckedQuery` from
-  the tree directly. The bridge and the tree have been shown to cover the same
-  nodes — `compile::tests::the_bridge_visits_every_node_the_typed_tree_holds_except_projection_bases`
-  — with one stated difference: a projection's base (`lib` in `lib.shout`) is
-  not a semantic step, because `infer_proj` records the field's binding at the
-  projection node's own `ExprId`. A walk that takes its children from the tree
-  must skip those bases too.
+  The normalized query adapter remains in production for shapes the typed route
+  explicitly declines. Normalized bridge coverage is still useful as a test
+  oracle, while the goal is to remove its production role after typed parity.
   Stage metadata is on the nodes now: `TypedExpr::stage` holds the operation a
   node applied and the rows its signature instance read and produced, and
   `TypedBody::by_stage` keeps the application order, which is not the arena's
@@ -202,7 +196,7 @@ the diffs.
 | 3 | First typed lowering slice: table, prefix, suffix, omit, mapValue | **Done** |
 | 4 | Run both routes; compare rows, stages, origins, relations, SQL | **Done** |
 | 5 | Typed instantiation: helpers, aliases, imports, overloads, repeats | **Done** |
-| 6 | Remaining constructs: joins/sets → select/update/agg → windows → expressions | **In progress** |
+| 6 | Typed construction for query stages, joins/sets, helpers, windows, and expression payloads | **In progress: common direct pipelines and composed helpers are covered; see remaining gaps below** |
 | 7 | Remove the legacy adapter and obsolete compatibility facts | **In progress: stage-report walk removed; adapter remains for declined shapes** |
 
 #### The route boundary
@@ -213,7 +207,7 @@ coordinator for query routes. It returns an explicit `LoweredQuery::Typed` or
 `rebuilt_checked_tree` flag, distinguishing shapes where the typed graph
 reconstructed checked nodes from shapes where it remains paired with an
 adapter-built checked tree. Table metadata and literal stage arguments can
-still come from the adapter even when reconstruction succeeds.
+still come from the adapter.
 `typed_lower.rs` owns a per-attempt
 `LoweringContext` for alias expansion and cycle detection; no lowering state is
 stored in thread-local storage. This matters for incremental and concurrent
@@ -221,24 +215,23 @@ requests: each compilation has its own dependency walk, and a recursive alias
 can only decline the typed slice before the normalizer reports the source
 recursion diagnostic.
 
-The context is the next slice's home for memoization and budgets. Builders must
+The context owns query expansion, bindings, and cycle detection. Builders must
 use it when expanding a query definition; they must not call the public typed
 entry point recursively, because that would create a fresh graph walk and lose
-cycle ownership. The legacy adapter remains deliberately visible until all
-payloads have a typed source, but new lowering code must enter through the typed
-context and return an explicit unsupported result for an unfinished shape.
+cycle ownership. The adapter remains until every accepted query has a typed
+source for its relational structure and expression payloads.
 
 The remaining migration is therefore one boundary, not another collection of
 special cases:
 
-1. move normalized predicate, projection, sort, and window payloads into the
-   checker-owned typed expression nodes;
-2. make helper instantiation consume those payloads and intermediate rows from
-   the typed graph;
-3. remove normalized calls from `typed_lower.rs` and keep normalization only as
-   the legacy adapter in `query_lowering.rs`;
-4. delete the adapter and the remaining normalized facts once the corpus
-   and incremental suite pass through the typed route alone.
+1. finish typed expression payloads for higher-order stage/scalar arguments,
+   overload-selected scalar functions, windows, and constant stage arguments;
+2. instantiate helpers from typed payloads and every intermediate row,
+   including query and stage parameters;
+3. preserve source diagnostics for recursive aliases, invalid frames, invalid
+   stage arguments, and expansion-budget failures;
+4. remove obsolete bridge-comparison tests and facts, then pass workspace,
+   corpus, incremental, and SQL agreement suites without capability gaps.
 
 #### Step 6 progress: direct expression-bearing stages
 
@@ -254,8 +247,8 @@ nodes now also retain
 their checked output field expressions, including window expressions in
 projections. Typed lowering carries checked expression payloads on the typed
 nodes and rebuilds the checked relation directly when the supported expression
-subset is covered. Unsupported forms decline to the route coordinator, which
-owns the only remaining production normalized adapter.
+subset is covered. Unsupported forms currently report a compiler capability
+error and are tracked as migration gaps.
 
 Plain expression lowering now reads SQL templates and their declared phase from
 resolved definition metadata. Scalar, aggregate, and window templates use the
@@ -276,21 +269,20 @@ recursively, including both child subtrees, and carries checked join predicates
 on typed join nodes when they fit the source-built expression subset. Set
 operations and supported joins build their checked relation directly from
 typed child queries. Direct expression pipelines build checked stages and
-payloads from checker facts; unsupported expression shapes decline as a whole.
+payloads from checker facts; unsupported expression shapes currently use the compatibility query route.
 Helper application now instantiates recorded `where`, `order`, `limit`,
 `offset`, `select`, `update`, and `agg` stages into typed nodes. Predicate,
 sort-key, projection, and window payloads are built from checker facts at the
 helper use site, and their checked stages are constructed directly. Unsupported
-helper payloads decline to the route coordinator instead of normalizing a
-second query inside typed lowering.
+helper payloads currently use the compatibility query route.
 Projection and aggregate helpers can also mix those stages with prefix,
 suffix, omit, and map-value rewrites. Their instantiated checked rows provide
 the intermediate boundaries needed to connect rewrites around projections.
 At the production boundary, a checked relation rebuilt successfully from the
 typed arena is now returned directly; typed lowering no longer invokes a
 second normalized lowering for comparison or payload hydration. Unsupported
-typed shapes are sent to the explicit legacy route. The agreement tests still
-compare both routes independently.
+typed shapes currently use the compatibility query route. The agreement tests
+compare typed lowering with the normalized route independently.
 Direct pipelines made only from row rewrites and row-preserving stages now
 stay entirely on that typed path even when the stages are interleaved; the
 production regression covers prefix, suffix, omit, mapValue, limit, offset,
@@ -300,7 +292,7 @@ typed stage chain and identities are copied into the consumer before its new
 stages are appended.
 Expression-bearing stages can now follow that same alias path: the copied
 typed graph supplies the relational child, rows, and supported expression
-payloads. Unsupported helper expressions decline to the explicit legacy route.
+payloads. Unsupported helper expressions use the compatibility query route.
 Direct `where` stages whose predicates use plain fields, literals, comparisons,
 membership lists, and boolean operators now build their checked expressions
 from checker types and also bypass normalized elaboration.
@@ -308,7 +300,7 @@ Direct `select` and `update` stages whose fields use the plain expression
 subset now have a source checked-expression path: expression types come from
 the checker, and the typed projection and `CheckedQuery` are built without
 entering normalized elaboration. Aggregate, window, and other unsupported
-expressions use the explicit legacy route.
+expressions use the compatibility query route.
 Direct `order` stages whose keys fit the plain checked-expression subset use the
 same typed path, retaining checked sort keys without entering normalized
 elaboration. This includes computed keys built from resolved SQL templates,
@@ -404,7 +396,7 @@ metadata, including callable scalar expressions. Helpers with multiple
 projection or aggregate stages thread each instantiated intermediate row through
 the typed arena as well, including when the helper is used as a join or set
 operand. Unsupported payloads and unresolved witnesses still decline to the
-explicit legacy route.
+typed lowering currently declines to the compatibility route.
 
 ### Step 1, done
 

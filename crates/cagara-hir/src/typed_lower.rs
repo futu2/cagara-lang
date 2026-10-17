@@ -24,12 +24,16 @@ use std::collections::{HashMap, HashSet};
 /// and could not be reused by an incremental compiler or a concurrent request.
 struct LoweringContext {
     active: HashSet<(usize, usize)>,
+    query_bindings: HashMap<(usize, u32), (TypedQuery, CheckedQuery)>,
+    stage_bindings: HashMap<(usize, u32), (usize, Expr)>,
 }
 
 impl LoweringContext {
     fn new() -> Self {
         Self {
             active: HashSet::new(),
+            query_bindings: HashMap::new(),
+            stage_bindings: HashMap::new(),
         }
     }
 
@@ -54,9 +58,8 @@ impl LoweringContext {
     ) -> Result<Option<(TypedQuery, CheckedQuery, bool)>, Error> {
         let key = (module, def);
         if !self.active.insert(key) {
-            // The checker/normalizer owns the user-facing recursion diagnostic.
-            // The typed route only needs to decline this speculative slice.
-            return Ok(None);
+            return Err(Error::unsupported("query definition refers to itself")
+                .at(Origin::new(module, body.span)));
         }
         let result = lower_impl(self, input, module, def, body);
         self.active.remove(&key);
@@ -114,6 +117,10 @@ fn lower_unhydrated(
     body: &Expr,
 ) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
     let tc = input.type_check();
+    if query_target(tc, module, body) == Some((module, def)) {
+        return Err(Error::unsupported("query definition refers to itself")
+            .at(Origin::new(module, body.span)));
+    }
 
     // A standalone join/set can be rebuilt from its typed operands before
     // the composed pipeline route uses the normalized template.
@@ -128,6 +135,18 @@ fn lower_unhydrated(
     if contains_combine_tree(input, module, body) || contains_join_operator_tree(body) {
         if let Some(lowered) = lower_composed_pipeline(context, input, module, def, body)? {
             return Ok(Some(lowered));
+        }
+    }
+
+    // `distinct` is row preserving and consequently has no checker row-stage
+    // record. Route pipelines containing it through the source composer so it
+    // cannot disappear when another recorded stage surrounds it.
+    if contains_distinct_stage(input, module, body) {
+        let mut typed = TypedQuery::new();
+        if let Some((root, checked)) =
+            lower_plain_composed_expr(context, input, module, def, body, &mut typed)?
+        {
+            return Ok(Some((typed.finish(root), checked)));
         }
     }
 
@@ -372,7 +391,7 @@ fn lower_simple_projection_pipeline(
         RowStage::Agg => QueryNodeKind::Agg,
         _ => unreachable!(),
     };
-    let id = typed
+    let mut id = typed
         .project(
             stage.node,
             kind,
@@ -389,6 +408,19 @@ fn lower_simple_projection_pipeline(
         _ => unreachable!(),
     }
     .map_err(|error| Error::unsupported(error.message).at(stage_origin))?;
+    if let Some(distinct) = find_pipeline_stage(input, module, body, RowStage::Distinct) {
+        let origin = Origin::new(module, distinct.span);
+        id = typed
+            .keep_row(
+                NodeRef::new(module, def, distinct.id),
+                QueryNodeKind::Distinct,
+                id,
+                origin,
+            )
+            .map_err(query_error)?;
+        checked = CheckedQuery::distinct(checked, origin)
+            .map_err(|error| Error::unsupported(error.message).at(origin))?;
+    }
     Ok(Some((typed.finish(id), checked)))
 }
 
@@ -546,18 +578,18 @@ fn lower_plain_value<'a>(
             if let Some(value) = env.get(name).cloned() {
                 return Ok(Some(value));
             }
-            let Some(Resolved::Def((target_module, target_def))) = tc.resolution(module, expr.id)
+            let Some((target_module, target_def)) = scalar_definition_target(tc, module, expr.id)
             else {
                 return Ok(None);
             };
-            lower_plain_definition(input, *target_module, *target_def, row, depth + 1)
+            lower_plain_definition(input, target_module, target_def, row, depth + 1)
         }
         ExprKind::Proj(_, _) => {
-            let Some(Resolved::Def((target_module, target_def))) = tc.resolution(module, expr.id)
+            let Some((target_module, target_def)) = scalar_definition_target(tc, module, expr.id)
             else {
                 return Ok(None);
             };
-            lower_plain_definition(input, *target_module, *target_def, row, depth + 1)
+            lower_plain_definition(input, target_module, target_def, row, depth + 1)
         }
         ExprKind::Lambda(parameter, body) => Ok(Some(PlainValue::Function {
             params: vec![parameter.clone()],
@@ -584,6 +616,28 @@ fn lower_plain_value<'a>(
         }
         _ => Ok(None),
     }
+}
+
+fn scalar_definition_target(
+    tc: &crate::check::TypeCheck,
+    module: usize,
+    expr_id: u32,
+) -> Option<(usize, usize)> {
+    if let Some(Resolved::Def(target)) = tc.resolution(module, expr_id) {
+        return Some(*target);
+    }
+    let mut choices = tc
+        .typed_node(module, expr_id)?
+        .choices
+        .iter()
+        .filter_map(|(_, choice)| match choice {
+            crate::check::Choice::Def(module, def) => Some((*module, *def)),
+            crate::check::Choice::Hole(_) => None,
+        });
+    let target = choices.next()?;
+    choices
+        .all(|candidate| candidate == target)
+        .then_some(target)
 }
 
 fn lower_plain_definition<'a>(
@@ -1131,7 +1185,7 @@ fn lower_plain_frame(
         Ok(frame) => Ok(Some(frame)),
         // Leave invalid or unsupported frame forms to the established route,
         // which owns the user-facing diagnostic.
-        Err(_) => Ok(None),
+        Err(error) => Err(Error::unsupported(error.message).at(Origin::new(module, expr.span))),
     }
 }
 
@@ -1297,7 +1351,6 @@ fn lower_plain_expression_chain(
     let tc = input.type_check();
     let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
     if stages.is_empty()
-        || contains_distinct_stage(input, module, body)
         || stages.iter().any(|stage| {
             stage.node.definition_module != module
                 || stage.node.definition != def
@@ -1309,6 +1362,7 @@ fn lower_plain_expression_chain(
         return Ok(None);
     }
     let stage_sites: HashSet<_> = stages.iter().map(|stage| stage.site).collect();
+    let had_distinct_record = stages.iter().any(|stage| stage.kind == RowStage::Distinct);
     let Some(base) = find_base(body, &stage_sites, tc, module) else {
         return Ok(None);
     };
@@ -1530,6 +1584,27 @@ fn lower_plain_expression_chain(
         }
         child = id;
     }
+    // `distinct` has no row-stage record because it carries no payload. A
+    // direct pipeline can therefore reach this chain with the projection
+    // recorded as its only stage; preserve a trailing distinct explicitly.
+    if !had_distinct_record {
+        if let Some(outer) = outer_pipeline_stage(body) {
+            if stage_kind(input, module, outer) == Some(RowStage::Distinct) {
+                let origin = Origin::new(module, outer.span);
+                let id = typed
+                    .keep_row(
+                        NodeRef::new(module, def, outer.id),
+                        QueryNodeKind::Distinct,
+                        child,
+                        origin,
+                    )
+                    .map_err(query_error)?;
+                let checked = CheckedQuery::distinct(checked, origin)
+                    .map_err(|error| Error::unsupported(error.message).at(origin))?;
+                return Ok(Some((typed.finish(id), checked)));
+            }
+        }
+    }
     Ok(Some((typed.finish(child), checked)))
 }
 
@@ -1555,6 +1630,52 @@ fn contains_distinct_stage(input: CompilerInput<'_>, module: usize, body: &Expr)
         stack.extend(crate::check::child_exprs(expr));
     }
     false
+}
+
+fn find_pipeline_stage<'a>(
+    input: CompilerInput<'_>,
+    module: usize,
+    expr: &'a Expr,
+    wanted: RowStage,
+) -> Option<&'a Expr> {
+    if let ExprKind::App(head, args) = &expr.kind {
+        if args.len() == 2 && is_pipe_head(head) {
+            let rhs = &args[1];
+            if stage_kind(input, module, rhs) == Some(wanted) {
+                return Some(rhs);
+            }
+            if let Some(found) = find_pipeline_stage(input, module, &args[0], wanted) {
+                return Some(found);
+            }
+        }
+    }
+    crate::check::child_exprs(expr)
+        .into_iter()
+        .find_map(|child| find_pipeline_stage(input, module, child, wanted))
+}
+
+fn outer_pipeline_stage<'a>(expr: &'a Expr) -> Option<&'a Expr> {
+    let ExprKind::App(head, args) = &expr.kind else {
+        return None;
+    };
+    (args.len() == 2 && is_pipe_head(head)).then(|| &args[1])
+}
+
+fn stage_kind(input: CompilerInput<'_>, module: usize, expr: &Expr) -> Option<RowStage> {
+    let head = match &expr.kind {
+        ExprKind::App(head, _) => head.as_ref(),
+        ExprKind::Name(_) | ExprKind::Proj(_, _) => expr,
+        _ => return None,
+    };
+    let Resolved::Def((stage_module, stage_def)) =
+        input.type_check().resolution(module, head.id)?
+    else {
+        return None;
+    };
+    let ExprKind::Primitive(name) = &input.module(*stage_module).def(*stage_def).body.kind else {
+        return None;
+    };
+    crate::primitive::prim_of(name).and_then(RowStage::of_prim)
 }
 
 fn contains_other_stage(
@@ -1610,13 +1731,28 @@ fn lower_combine_pipeline(
     else {
         return Ok(None);
     };
-    let Some((left_expr, operation)) = find_combine_context(body, combine.site) else {
-        return Ok(None);
+    let direct_combine = tc
+        .typed_node(module, body.id)
+        .and_then(|node| node.combine.as_ref())
+        .is_some();
+    let (left_expr, operation) = if direct_combine {
+        let ExprKind::App(_, args) = &body.kind else {
+            return Ok(None);
+        };
+        let Some(left) = args.first() else {
+            return Ok(None);
+        };
+        (left, body)
+    } else {
+        let Some(context) = find_combine_context(body, combine.site) else {
+            return Ok(None);
+        };
+        context
     };
     let ExprKind::App(_, args) = &operation.kind else {
         return Ok(None);
     };
-    let Some(right_expr) = args.first() else {
+    let Some(right_expr) = args.get(usize::from(direct_combine)) else {
         return Ok(None);
     };
     let mut typed = TypedQuery::new();
@@ -1640,9 +1776,13 @@ fn lower_combine_pipeline(
     // direct checked constructor.
     let (typed_left, typed_right, checked_left, checked_right) = match combine.kind {
         CombineKind::Join(_) => (left, right, left_checked, right_checked),
+        // In a direct call (`union users vips`) the source arguments already
+        // carry the operation's left-to-right order. The explicit swap is
+        // only needed for the infix/piped spelling where the primitive's
+        // declared argument precedes the piped input.
+        CombineKind::Set(_) if direct_combine => (left, right, left_checked, right_checked),
         CombineKind::Set(_) => (right, left, right_checked, left_checked),
     };
-    let output_row = combine.output.clone().map(Row::new);
     let origin = Origin::new(combine.node.definition_module, operation.span);
     let checked = match combine.kind {
         CombineKind::Set(kind) => CheckedQuery::set(kind, checked_left, checked_right, origin)
@@ -1659,20 +1799,18 @@ fn lower_combine_pipeline(
                 .map_err(|error| Error::unsupported(error.message).at(origin))?
         }
     };
+    let output_row = Row::new(checked.row().columns().to_vec());
     let root = typed
         .combine(
             combine.node,
             kind,
             typed_left,
             typed_right,
-            output_row.clone(),
+            Some(output_row.clone()),
             origin,
             checked_join_predicate(&checked, origin),
         )
         .map_err(query_error)?;
-    let Some(output_row) = output_row else {
-        return Ok(None);
-    };
     if checked.row().columns() != output_row.columns() {
         return Err(
             Error::unsupported("typed combine output row differs from its checked query")
@@ -1864,6 +2002,181 @@ fn lower_shorthand_stage(
     Ok(Some((id, checked)))
 }
 
+/// Apply one ordinary prelude stage expression to an already lowered child.
+/// This is shared by direct pipelines and anonymous/named stage values so an
+/// inline lambda does not require a normalized term to expose its body.
+fn apply_plain_stage_expr(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    expr: &Expr,
+    child: NodeId,
+    mut checked: CheckedQuery,
+    typed: &mut TypedQuery,
+) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    let ExprKind::App(head, args) = &expr.kind else {
+        return Ok(None);
+    };
+    let Some(Resolved::Def((stage_module, stage_def))) =
+        input.type_check().resolution(module, head.id)
+    else {
+        return Ok(None);
+    };
+    let ExprKind::Primitive(name) = &input.module(*stage_module).def(*stage_def).body.kind else {
+        return Ok(None);
+    };
+    let Some(stage) = crate::primitive::prim_of(name).and_then(RowStage::of_prim) else {
+        return Ok(None);
+    };
+    let origin = Origin::new(module, expr.span);
+    let row = RowType::new(checked.row().columns().to_vec());
+    let mut predicate = None;
+    let mut keys = None;
+    let mut fields = None;
+    let mut label = None;
+    let mut count = None;
+    match stage {
+        RowStage::Where => {
+            let Some(value) = args.first() else {
+                return Ok(None);
+            };
+            predicate = lower_plain_expr_with_row(input, module, value, Some(&row))?;
+            if predicate.is_none() {
+                return Ok(None);
+            }
+        }
+        RowStage::Select | RowStage::Update | RowStage::Agg => {
+            let Some(ExprKind::Record(source_fields)) = args.first().map(|arg| &arg.kind) else {
+                return Ok(None);
+            };
+            let mut lowered = Vec::with_capacity(source_fields.len());
+            for (name, value) in source_fields {
+                let Some(value) = lower_plain_expr_with_row(input, module, value, Some(&row))?
+                else {
+                    return Ok(None);
+                };
+                lowered.push((name.clone(), value));
+            }
+            fields = Some(lowered);
+        }
+        RowStage::Order => {
+            let Some(ExprKind::List(items)) = args.first().map(|arg| &arg.kind) else {
+                return Ok(None);
+            };
+            let mut lowered = Vec::with_capacity(items.len());
+            for item in items {
+                let ExprKind::App(_, item_args) = &item.kind else {
+                    return Ok(None);
+                };
+                let Some(value) = item_args.first() else {
+                    return Ok(None);
+                };
+                let Some(direction) = sort_direction(input, module, item) else {
+                    return Ok(None);
+                };
+                let Some(value) = lower_plain_expr_with_row(input, module, value, Some(&row))?
+                else {
+                    return Ok(None);
+                };
+                lowered.push((value, direction));
+            }
+            keys = Some(lowered);
+        }
+        RowStage::Limit | RowStage::Offset => {
+            let Some(ExprKind::Lit(Lit::Int(value))) = args.first().map(|arg| &arg.kind) else {
+                return Ok(None);
+            };
+            count = Some(*value);
+        }
+        RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => {
+            let Some(value) = args.first().and_then(string_literal) else {
+                return Ok(None);
+            };
+            label = Some(value);
+        }
+        RowStage::Distinct => {}
+    }
+    let site = input
+        .type_check()
+        .row_stages(module, def)
+        .find(|record| record.site == expr.id)
+        .map(|record| record.node)
+        .unwrap_or_else(|| NodeRef::new(module, def, expr.id));
+    let output_row = input
+        .type_check()
+        .typed_node(module, expr.id)
+        .and_then(|node| node.row())
+        .map(Row::new)
+        .unwrap_or_else(|| Row::new(checked.row().columns().to_vec()));
+    let kind = match stage {
+        RowStage::Prefix => QueryNodeKind::Prefix,
+        RowStage::Suffix => QueryNodeKind::Suffix,
+        RowStage::Omit => QueryNodeKind::Omit,
+        RowStage::MapValue => QueryNodeKind::MapValue,
+        RowStage::Where => QueryNodeKind::Where,
+        RowStage::Select => QueryNodeKind::Select,
+        RowStage::Update => QueryNodeKind::Update,
+        RowStage::Agg => QueryNodeKind::Agg,
+        RowStage::Order => QueryNodeKind::Order,
+        RowStage::Limit => QueryNodeKind::Limit,
+        RowStage::Offset => QueryNodeKind::Offset,
+        RowStage::Distinct => QueryNodeKind::Distinct,
+    };
+    let id = match stage {
+        RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => typed
+            .rewrite(
+                site,
+                kind,
+                child,
+                Some(Row::new(checked.row().columns().to_vec())),
+                Some(output_row.clone()),
+                origin,
+            )
+            .map_err(query_error)?,
+        RowStage::Select | RowStage::Update | RowStage::Agg => typed
+            .project(
+                site,
+                kind,
+                child,
+                Some(output_row.clone()),
+                origin,
+                fields.clone(),
+            )
+            .map_err(query_error)?,
+        _ => typed
+            .keep_row_with_payload(
+                site,
+                kind,
+                child,
+                origin,
+                predicate.clone(),
+                keys.clone(),
+                None,
+                None,
+            )
+            .map_err(query_error)?,
+    };
+    checked = match stage {
+        RowStage::Prefix => CheckedQuery::prefix(checked, label.expect("label"), origin),
+        RowStage::Suffix => CheckedQuery::suffix(checked, label.expect("label"), origin),
+        RowStage::Omit => CheckedQuery::omit(checked, label.expect("label"), origin),
+        RowStage::MapValue => CheckedQuery::map_value(checked, label.expect("label"), origin),
+        RowStage::Where => CheckedQuery::where_(checked, predicate.expect("predicate"), origin),
+        RowStage::Select => CheckedQuery::select(checked, fields.expect("fields"), origin),
+        RowStage::Update => CheckedQuery::update(checked, fields.expect("fields"), origin),
+        RowStage::Agg => CheckedQuery::agg(checked, fields.expect("fields"), origin),
+        RowStage::Order => CheckedQuery::order(checked, keys.expect("keys"), origin),
+        RowStage::Limit => CheckedQuery::limit(checked, count.expect("count"), origin),
+        RowStage::Offset => CheckedQuery::offset(checked, count.expect("count"), origin),
+        RowStage::Distinct => CheckedQuery::distinct(checked, origin),
+    }
+    .map_err(|error| Error::unsupported(error.message).at(origin))?;
+    if checked.row().columns() != output_row.columns() {
+        return Ok(None);
+    }
+    Ok(Some((id, checked)))
+}
+
 /// Source-build a composed query when all joins and stages have plain
 /// expression payloads. The checked relation travels with each typed node, so
 /// a join and its surrounding stages need no normalized query template.
@@ -1875,6 +2188,10 @@ fn lower_plain_composed_expr(
     expr: &Expr,
     typed: &mut TypedQuery,
 ) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    if let Some((bound, checked)) = context.query_bindings.get(&(module, expr.id)) {
+        let id = copy_typed_graph(bound, typed)?;
+        return Ok(Some((id, checked.clone())));
+    }
     if let Some((schema, table, columns)) = table_parts(input, module, expr) {
         let origin = table_origin(input, module, expr);
         let checked =
@@ -1911,10 +2228,35 @@ fn lower_plain_composed_expr(
         return lower_shorthand_stage(input, module, def, expr, child, checked, typed);
     }
     if args.len() != 2 || !is_pipe_head(head) {
+        let mut helper_typed = TypedQuery::new();
+        if let Some((root, checked)) =
+            lower_helper_expr(context, input, module, def, expr, &mut helper_typed)?
+        {
+            let id = copy_typed_graph(&helper_typed.finish(root), typed)?;
+            return Ok(Some((id, checked)));
+        }
         return Ok(None);
     }
     let left_expr = &args[0];
     let rhs = &args[1];
+    if let Some((stage_module, stage_expr)) = context.stage_bindings.get(&(module, rhs.id)) {
+        let stage_expr = stage_expr.clone();
+        let stage_module = *stage_module;
+        let Some((child, checked)) =
+            lower_plain_composed_expr(context, input, module, def, left_expr, typed)?
+        else {
+            return Ok(None);
+        };
+        return apply_plain_stage_expr(
+            input,
+            stage_module,
+            def,
+            &stage_expr,
+            child,
+            checked,
+            typed,
+        );
+    }
     if let Some(join_kind) = join_operator_kind(rhs) {
         let ExprKind::App(_, join_args) = &rhs.kind else {
             return Ok(None);
@@ -1968,8 +2310,14 @@ fn lower_plain_composed_expr(
         else {
             return Ok(None);
         };
-        let mut operands = query_operand_args(input, module, operation);
-        let Some(right_expr) = operands.next() else {
+        let right_expr = match combine.kind {
+            CombineKind::Join(_) => match &operation.kind {
+                ExprKind::App(_, args) => args.first(),
+                _ => None,
+            },
+            CombineKind::Set(_) => query_operand_args(input, module, operation).next(),
+        };
+        let Some(right_expr) = right_expr else {
             return Ok(None);
         };
         let Some((right, checked_right)) =
@@ -2005,7 +2353,7 @@ fn lower_plain_composed_expr(
                         kind,
                         left,
                         right,
-                        output,
+                        output.or_else(|| Some(Row::new(checked.row().columns().to_vec()))),
                         origin,
                         Some(predicate),
                     )
@@ -2041,21 +2389,35 @@ fn lower_plain_composed_expr(
     // checker-driven helper pipeline here so its intermediate projection and
     // aggregate rows are instantiated before the combine consumes them.
     let mut helper_typed = TypedQuery::new();
-    if let Some((root, checked)) =
-        lower_helper_expr(context, input, module, def, expr, &mut helper_typed)?
-    {
+    let helper_result = lower_helper_expr(context, input, module, def, expr, &mut helper_typed)?;
+    if let Some((root, checked)) = helper_result {
         let id = copy_typed_graph(&helper_typed.finish(root), typed)?;
         return Ok(Some((id, checked)));
     }
 
-    let Some(stage) = stage_record(input.type_check(), module, def, rhs.id)
-        .filter(|stage| stage.node.definition_module == module && stage.node.definition == def)
-    else {
-        return Ok(None);
-    };
     let Some((child, checked)) =
         lower_plain_composed_expr(context, input, module, def, left_expr, typed)?
     else {
+        return Ok(None);
+    };
+
+    let stage = stage_record(input.type_check(), module, def, rhs.id)
+        .filter(|stage| stage.node.definition_module == module && stage.node.definition == def);
+    if stage.is_none() && stage_kind(input, module, rhs) == Some(RowStage::Distinct) {
+        let origin = Origin::new(module, rhs.span);
+        let id = typed
+            .keep_row(
+                NodeRef::new(module, def, rhs.id),
+                QueryNodeKind::Distinct,
+                child,
+                origin,
+            )
+            .map_err(query_error)?;
+        let checked = CheckedQuery::distinct(checked, origin)
+            .map_err(|error| Error::unsupported(error.message).at(origin))?;
+        return Ok(Some((id, checked)));
+    }
+    let Some(stage) = stage else {
         return Ok(None);
     };
     let ExprKind::App(_, stage_args) = &rhs.kind else {
@@ -2142,7 +2504,7 @@ fn lower_plain_composed_expr(
                 return Ok(None);
             }
         }
-        RowStage::Distinct => return Ok(None),
+        RowStage::Distinct => {}
     }
     let kind = match stage.kind {
         RowStage::Prefix => QueryNodeKind::Prefix,
@@ -2206,7 +2568,7 @@ fn lower_plain_composed_expr(
         RowStage::Order => CheckedQuery::order(checked, keys.expect("keys"), origin),
         RowStage::Limit => CheckedQuery::limit(checked, count.expect("count"), origin),
         RowStage::Offset => CheckedQuery::offset(checked, count.expect("count"), origin),
-        RowStage::Distinct => return Ok(None),
+        RowStage::Distinct => CheckedQuery::distinct(checked, origin),
     }
     .map_err(|error| Error::unsupported(error.message).at(origin))?;
     let node = typed.node(id);
@@ -2529,6 +2891,23 @@ fn contains_combine_tree(input: CompilerInput<'_>, module: usize, expr: &Expr) -
     }
 
     visit(input, module, expr, &mut HashSet::new())
+}
+
+fn contains_query_source(input: CompilerInput<'_>, module: usize, expr: &Expr) -> bool {
+    if table_parts(input, module, expr).is_some() {
+        return true;
+    }
+    if let Some((target_module, target_def)) = query_target(input.type_check(), module, expr) {
+        if matches!(
+            input.type_check().scheme_view(target_module, target_def),
+            Some(crate::check::SchemeView::Query { .. })
+        ) {
+            return true;
+        }
+    }
+    crate::check::child_exprs(expr)
+        .into_iter()
+        .any(|child| contains_query_source(input, module, child))
 }
 
 fn combine_record_in<'a>(
@@ -3099,30 +3478,123 @@ fn lower_helper_expr(
             };
             return lower_shorthand_stage(input, module, def, body, child, checked, typed);
         }
+        // A query helper may be called in ordinary prefix form (`h users`)
+        // as well as through the pipeline spelling (`users & h`).  The
+        // checker has already recorded the helper's stage instances; locate
+        // the query argument and instantiate those stages against its typed
+        // child here.
+        if !is_pipe_head(head) {
+            if let Some(((helper_module, helper_def), helper_args)) =
+                helper_application(tc, module, body)
+            {
+                if let Some((query_index, query_arg)) =
+                    helper_args.iter().enumerate().find(|(_, arg)| {
+                        tc.use_scheme(module, arg.id).is_some_and(|scheme| {
+                            matches!(scheme, crate::check::SchemeView::Query { .. })
+                        }) || query_target(tc, module, arg).is_some()
+                            || table_parts(input, module, arg).is_some()
+                    })
+                {
+                    let Some((child, checked)) =
+                        lower_helper_expr(context, input, module, def, query_arg, typed)?
+                    else {
+                        return Ok(None);
+                    };
+                    let mut stage_args = helper_args;
+                    stage_args.remove(query_index);
+                    return apply_helper(
+                        context,
+                        input,
+                        module,
+                        def,
+                        body.id,
+                        child,
+                        checked,
+                        helper_module,
+                        helper_def,
+                        query_index,
+                        &stage_args,
+                        body,
+                        typed,
+                    );
+                }
+                // A higher-order helper can own its query source while taking
+                // a stage function as an argument (`h = p => users & ... & p`).
+                // Bind each stage parameter occurrence to the checked use-site
+                // expression, then lower the helper's query body in place.
+                let helper_syntax = &input.module(helper_module).def(helper_def).body;
+                let params = lambda_params(helper_syntax);
+                let helper_tail = lambda_tail(helper_syntax);
+                if contains_query_source(input, helper_module, helper_tail)
+                    && helper_args.len() <= params.len()
+                {
+                    let mut helper_nodes = HashMap::new();
+                    index_exprs(helper_tail, &mut helper_nodes);
+                    let mut bound_ids = Vec::new();
+                    for (parameter, argument) in params.iter().zip(&helper_args) {
+                        for expr in helper_nodes.values() {
+                            if matches!(&expr.kind, ExprKind::Name(name) if name == parameter) {
+                                context
+                                    .stage_bindings
+                                    .insert((helper_module, expr.id), (module, argument.clone()));
+                                bound_ids.push(expr.id);
+                            }
+                        }
+                    }
+                    let lowered = lower_plain_composed_expr(
+                        context,
+                        input,
+                        helper_module,
+                        helper_def,
+                        helper_tail,
+                        typed,
+                    )?;
+                    for id in bound_ids {
+                        context.stage_bindings.remove(&(helper_module, id));
+                    }
+                    if lowered.is_some() {
+                        return Ok(lowered);
+                    }
+                }
+            }
+        }
         if args.len() == 2 && is_pipe_head(head) {
             let Some((child, checked)) =
                 lower_helper_expr(context, input, module, def, &args[0], typed)?
             else {
                 return Ok(None);
             };
-            let Some(((helper_module, helper_def), helper_args)) =
+            if let Some(((helper_module, helper_def), helper_args)) =
                 helper_application(tc, module, &args[1])
-            else {
-                return Ok(None);
-            };
-            return apply_helper(
-                input,
-                module,
-                def,
-                body.id,
-                child,
-                checked,
-                helper_module,
-                helper_def,
-                &helper_args,
-                body,
-                typed,
-            );
+            {
+                return apply_helper(
+                    context,
+                    input,
+                    module,
+                    def,
+                    body.id,
+                    child,
+                    checked,
+                    helper_module,
+                    helper_def,
+                    0,
+                    &helper_args,
+                    body,
+                    typed,
+                );
+            }
+            if let Some(stage_expr) = inline_stage_expr(&args[1]) {
+                return apply_plain_stage_expr(
+                    input,
+                    module,
+                    def,
+                    &stage_expr,
+                    child,
+                    checked,
+                    typed,
+                );
+            }
+            return Ok(None);
         }
     }
 
@@ -3130,6 +3602,7 @@ fn lower_helper_expr(
 }
 
 fn apply_helper(
+    context: &mut LoweringContext,
     input: CompilerInput<'_>,
     use_module: usize,
     use_def: usize,
@@ -3138,6 +3611,7 @@ fn apply_helper(
     checked: CheckedQuery,
     helper_module: usize,
     helper_def: usize,
+    query_param_index: usize,
     helper_args: &[Expr],
     use_expr: &Expr,
     typed: &mut TypedQuery,
@@ -3175,6 +3649,48 @@ fn apply_helper(
     let params = lambda_params(helper_syntax);
     if params.iter().collect::<HashSet<_>>().len() != params.len() {
         return Ok(None);
+    }
+
+    // A helper body is checked once with an open query parameter. At a use
+    // site that parameter must denote the caller's concrete typed graph before
+    // we walk the body; otherwise a join or a stage after the parameter has no
+    // relational child to consume. Keep the binding local to this attempt so
+    // nested helper calls cannot leak it into another definition.
+    let helper_tail = lambda_tail(helper_syntax);
+    let has_combine = contains_combine_tree(input, helper_module, helper_tail)
+        || contains_join_operator_tree(helper_tail);
+    if has_combine {
+        if let Some(parameter) = params.get(query_param_index) {
+            let bound = typed.clone().finish(child);
+            let mut syntax = HashMap::new();
+            index_exprs(helper_tail, &mut syntax);
+            for expr in syntax.values() {
+                if matches!(&expr.kind, ExprKind::Name(name) if name == parameter) {
+                    context
+                        .query_bindings
+                        .insert((helper_module, expr.id), (bound.clone(), checked.clone()));
+                }
+            }
+            let mut body_typed = TypedQuery::new();
+            let composed = lower_plain_composed_expr(
+                context,
+                input,
+                helper_module,
+                helper_def,
+                helper_tail,
+                &mut body_typed,
+            )?;
+            for expr in syntax.values() {
+                if matches!(&expr.kind, ExprKind::Name(name) if name == parameter) {
+                    context.query_bindings.remove(&(helper_module, expr.id));
+                }
+            }
+            if let Some((root, body_checked)) = composed {
+                let copied = copy_typed_graph(&body_typed.finish(root), typed)?;
+                let root = copied;
+                return Ok(Some((root, body_checked)));
+            }
+        }
     }
     let plain = apply_plain_helper_pipeline(
         input,
@@ -3446,7 +3962,9 @@ fn apply_plain_helper_pipeline(
         .type_check()
         .typed_node(use_module, use_site)
         .and_then(|node| node.row());
-    if !unordered_rows_match(expected.as_deref(), Some(checked.row().columns())) {
+    if expected.is_some()
+        && !unordered_rows_match(expected.as_deref(), Some(checked.row().columns()))
+    {
         return Ok(None);
     }
     *typed = candidate;
@@ -3840,6 +4358,29 @@ fn helper_application(
     Some((target, args))
 }
 
+/// Extract the stage call from an inline stage lambda such as
+/// `x => where (.age > 1) x`. The final parameter application is a value-level
+/// encoding of the pipeline input and is omitted from the stage payload.
+fn inline_stage_expr(expr: &Expr) -> Option<Expr> {
+    let ExprKind::Lambda(parameter, body) = &expr.kind else {
+        return None;
+    };
+    let ExprKind::App(head, args) = &body.kind else {
+        return None;
+    };
+    let Some(last) = args.last() else {
+        return None;
+    };
+    if !matches!(&last.kind, ExprKind::Name(name) if name == parameter) {
+        return None;
+    }
+    Some(Expr {
+        id: body.id,
+        span: body.span,
+        kind: ExprKind::App(head.clone(), args[..args.len() - 1].to_vec().into()),
+    })
+}
+
 fn lambda_params(expr: &Expr) -> Vec<String> {
     let mut params = Vec::new();
     let mut body = expr;
@@ -3848,6 +4389,14 @@ fn lambda_params(expr: &Expr) -> Vec<String> {
         body = next;
     }
     params
+}
+
+fn lambda_tail(expr: &Expr) -> &Expr {
+    let mut body = expr;
+    while let ExprKind::Lambda(_, next) = &body.kind {
+        body = next;
+    }
+    body
 }
 
 fn is_pipe_head(head: &Expr) -> bool {
@@ -4314,8 +4863,10 @@ mod tests {
         )
         .unwrap();
         let checked = match lowered {
-            crate::query_lowering::LoweredQuery::Typed { checked, .. }
-            | crate::query_lowering::LoweredQuery::Legacy { checked } => checked,
+            crate::query_lowering::LoweredQuery::Typed { checked, .. } => checked,
+            crate::query_lowering::LoweredQuery::Legacy { .. } => {
+                panic!("supported query unexpectedly used normalized lowering")
+            }
         };
         assert_eq!(checked.row().names(), &["id", "name", "uid", "amount"]);
     }

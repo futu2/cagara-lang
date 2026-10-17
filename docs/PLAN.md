@@ -395,11 +395,12 @@ bodies preserve their row (`where`, `order`, `limit`, `offset`, or `distinct`)
 are now instantiated inside combine operands too. A helper with one `select`,
 `update`, or `agg`, surrounded by any number of those row-preserving stages,
 can use the closed row on its call expression as the projection boundary. The
-aggregate and projection expressions remain on the explicit legacy route. Helpers
-with multiple projection or aggregate stages still decline to the explicit
-legacy route because their intermediate rows are not yet supplied by typed
-checker facts. Extending checker-owned helper instantiation to those chains is
-still part of the migration.
+projection and aggregate payloads use checker types and resolved SQL template
+metadata, including callable scalar expressions. Helpers with multiple
+projection or aggregate stages still decline to the explicit legacy route
+because their intermediate rows are not yet supplied by typed checker facts.
+Extending checker-owned helper instantiation to those chains is still part of
+the migration.
 
 ### Step 1, done
 

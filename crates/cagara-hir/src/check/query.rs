@@ -482,14 +482,33 @@ impl TypedQuery {
                     // payload unset.
                     crate::checked::CheckedQueryNode::Join { left, right, .. }
                     | crate::checked::CheckedQueryNode::Set { left, right, .. } => {
-                        for child in [left.as_ref(), right.as_ref()] {
-                            if TypedQuery::checked_node_kind(child.node_ref()) == typed_kind {
-                                return visit(nodes, id, child);
-                            }
+                        let matches: Vec<_> = [left.as_ref(), right.as_ref()]
+                            .into_iter()
+                            .filter(|child| {
+                                TypedQuery::checked_node_kind(child.node_ref()) == typed_kind
+                            })
+                            .collect();
+                        if let [child] = matches.as_slice() {
+                            return visit(nodes, id, child);
                         }
-                        return Ok(());
+                        return Err(QueryErr::new(
+                            &nodes[id.index()],
+                            format!(
+                                "typed {:?} node does not align with checked {:?}",
+                                typed_kind,
+                                TypedQuery::checked_node_kind(checked.node_ref())
+                            ),
+                        ));
                     }
-                    _ => return Ok(()),
+                    _ => {
+                        return Err(QueryErr::new(
+                            &nodes[id.index()],
+                            format!(
+                                "typed {:?} node does not align with checked {:?}",
+                                typed_kind, checked_kind
+                            ),
+                        ));
+                    }
                 }
             }
             let (expected_kind, child_ids, payload) = match checked.node_ref() {
@@ -580,8 +599,14 @@ impl TypedQuery {
                 | crate::checked::CheckedQueryNode::Agg { input, .. }
                 | crate::checked::CheckedQueryNode::Order { input, .. }
                 | crate::checked::CheckedQueryNode::Limit { input, .. }
-                | crate::checked::CheckedQueryNode::Offset { input, .. } => vec![input.as_ref()],
-                crate::checked::CheckedQueryNode::Distinct(input) => vec![input.as_ref()],
+                | crate::checked::CheckedQueryNode::Offset { input, .. } => {
+                    one_child(nodes, id)?;
+                    vec![input.as_ref()]
+                }
+                crate::checked::CheckedQueryNode::Distinct(input) => {
+                    one_child(nodes, id)?;
+                    vec![input.as_ref()]
+                }
                 crate::checked::CheckedQueryNode::Join { left, right, .. }
                 | crate::checked::CheckedQueryNode::Set { left, right, .. } => {
                     vec![left.as_ref(), right.as_ref()]
@@ -623,9 +648,47 @@ impl TypedQuery {
             }
             Ok(inputs.clone())
         }
+        fn one_child(nodes: &[TypedQueryNode], id: NodeId) -> Result<NodeId, QueryErr> {
+            let inputs = &nodes[id.index()].inputs;
+            if inputs.len() != 1 {
+                return Err(QueryErr::new(
+                    &nodes[id.index()],
+                    format!(
+                        "typed {:?} node has {} children but checked tree expects 1",
+                        nodes[id.index()].kind,
+                        inputs.len()
+                    ),
+                ));
+            }
+            Ok(inputs[0])
+        }
 
         let root = self.root();
         visit(&mut self.nodes, root, checked)
+    }
+
+    /// Verify that every typed node which owns an expression has received its
+    /// checked payload. This is the boundary that lets later lowering consume
+    /// the typed graph without silently falling back to normalized terms.
+    pub(crate) fn require_checked_payloads(&self) -> Result<(), QueryErr> {
+        for node in &self.nodes {
+            let missing = match node.kind {
+                QueryNodeKind::Where => node.predicate.is_none(),
+                QueryNodeKind::Order => node.order_keys.is_none(),
+                QueryNodeKind::Select | QueryNodeKind::Update | QueryNodeKind::Agg => {
+                    node.projection_fields.is_none()
+                }
+                QueryNodeKind::Join(_) => node.join_predicate.is_none(),
+                _ => false,
+            };
+            if missing {
+                return Err(QueryErr::new(
+                    node,
+                    format!("typed {:?} node is missing its checked payload", node.kind),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn checked_node_kind(node: &crate::checked::CheckedQueryNode) -> QueryNodeKind {

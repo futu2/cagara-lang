@@ -28,6 +28,7 @@ pub(crate) fn lower(
     typed
         .carry_checked_payloads(&checked)
         .map_err(query_error)?;
+    typed.require_checked_payloads().map_err(query_error)?;
     Ok(Some((typed, checked)))
 }
 

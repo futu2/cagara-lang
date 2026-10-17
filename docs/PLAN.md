@@ -327,6 +327,9 @@ projection boundary, so a reusable helper can mix those stages with `prefix`,
 outside normalized elaboration. The plain path is transactional: if one stage
 uses an unsupported expression, the partially built typed arena is discarded
 before the normalized fallback runs.
+Helper order stages accept computed keys from the same resolved template
+subset as direct orders; a regression covers a nullable column fallback inside
+a reusable sorting helper.
 Single-stage aggregate helpers with plain grouping and aggregate expressions
 also instantiate directly in the caller's typed arena; their checked aggregate
 payload and output row are built without a normalized walk.
@@ -335,7 +338,9 @@ node as `WinTemplate`, including when the pipeline starts from a typed query
 alias. They are no longer deferred from this slice.
 Projection helpers carry the same window payload through their instantiated
 typed projection node, preserving the helper's stage identity and checked
-output row.
+output row. Plain window templates and specs are now built at the helper
+definition through resolved template, direction, and frame metadata; the helper
+does not need normalized expression payloads for these cases.
 The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be

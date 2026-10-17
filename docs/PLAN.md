@@ -293,6 +293,9 @@ projection boundary, so a reusable helper can mix those stages with `prefix`,
 outside normalized elaboration. The plain path is transactional: if one stage
 uses an unsupported expression, the partially built typed arena is discarded
 before the normalized fallback runs.
+Single-stage aggregate helpers with plain grouping and aggregate expressions
+also instantiate directly in the caller's typed arena; their checked aggregate
+payload and output row are built without a normalized walk.
 Window expressions in projection payloads are carried by the typed projection
 node as `WinTemplate`, including when the pipeline starts from a typed query
 alias. They are no longer deferred from this slice.

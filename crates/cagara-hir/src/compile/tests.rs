@@ -478,7 +478,7 @@ fn direct_plain_where_bypasses_normalized_elaboration() {
 #[test]
 fn plain_expression_helper_bypasses_normalized_elaboration() {
     let ws = Workspace::from_source(
-        "users : query { id = int, age = int, name = string } = table \"public\" \"users\"\npipeline = q => q & where (.age > 18) & order [desc .name] & limit 50 & offset 5 & distinct\nfiltered = q => q & where (.age > 18)\nsorted = q => q & order [desc .name]\nprojected = q => q & select { id = .id, name = upper .name }\nq = users & pipeline & filtered & sorted & projected\n",
+        "users : query { id = int, age = int, name = string } = table \"public\" \"users\"\npipeline = q => q & where (.age > 18) & order [desc .name] & limit 50 & offset 5 & distinct\nfiltered = q => q & where (.age > 18)\nsorted = q => q & order [desc .name]\nprojected = q => q & select { id = .id, name = upper .name }\ngrouped = q => q & agg { age = group .age, n = count }\nq = users & pipeline & filtered & sorted & projected\na = users & grouped\n",
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
@@ -503,6 +503,18 @@ fn plain_expression_helper_bypasses_normalized_elaboration() {
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "plain expression helper unexpectedly walked normalized terms"
+    );
+    let a = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .position(|def| def.name == "a")
+        .unwrap();
+    assert!(
+        !crate::normalize::visited_nodes()
+            .iter()
+            .any(|(module, def, _)| *module == ws.root && *def == a),
+        "plain aggregate helper unexpectedly walked normalized terms"
     );
 }
 

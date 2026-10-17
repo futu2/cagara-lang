@@ -3018,9 +3018,6 @@ fn apply_plain_helper_pipeline(
     let mut candidate = typed.clone();
     let mut current = child;
     for stage in stages {
-        if stage.kind == RowStage::Agg {
-            return Ok(None);
-        }
         let Some(stage_expr) = find_expr_id(helper_body, stage.site) else {
             return Ok(None);
         };
@@ -3116,7 +3113,24 @@ fn apply_plain_helper_pipeline(
                 }
             }
             RowStage::Distinct => {}
-            RowStage::Agg => unreachable!(),
+            RowStage::Agg => {
+                let Some(record) = args.first() else {
+                    return Ok(None);
+                };
+                let ExprKind::Record(source_fields) = &record.kind else {
+                    return Ok(None);
+                };
+                let mut fields = Vec::with_capacity(source_fields.len());
+                for (name, value) in source_fields {
+                    let Some(value) =
+                        lower_plain_expr_with_row(input, helper_module, value, Some(&input_row))?
+                    else {
+                        return Ok(None);
+                    };
+                    fields.push((name.clone(), value));
+                }
+                projection_fields = Some(fields);
+            }
         }
 
         checked = match stage.kind {
@@ -3139,7 +3153,9 @@ fn apply_plain_helper_pipeline(
             RowStage::Update => {
                 CheckedQuery::update(checked, projection_fields.clone().expect("fields"), origin)
             }
-            RowStage::Agg => unreachable!(),
+            RowStage::Agg => {
+                CheckedQuery::agg(checked, projection_fields.clone().expect("fields"), origin)
+            }
         }
         .map_err(|error| Error::unsupported(error.message).at(origin))?;
         if stage
@@ -3186,13 +3202,14 @@ fn apply_plain_helper_pipeline(
             RowStage::Limit | RowStage::Offset | RowStage::Distinct => {
                 typed_keep_stage(&mut candidate, current, stage.kind, stage.node, origin)?
             }
-            RowStage::Select | RowStage::Update => candidate
+            RowStage::Select | RowStage::Update | RowStage::Agg => candidate
                 .project(
                     stage.node,
-                    if stage.kind == RowStage::Select {
-                        QueryNodeKind::Select
-                    } else {
-                        QueryNodeKind::Update
+                    match stage.kind {
+                        RowStage::Select => QueryNodeKind::Select,
+                        RowStage::Update => QueryNodeKind::Update,
+                        RowStage::Agg => QueryNodeKind::Agg,
+                        _ => unreachable!(),
                     },
                     current,
                     Some(output_row),
@@ -3200,7 +3217,6 @@ fn apply_plain_helper_pipeline(
                     projection_fields,
                 )
                 .map_err(query_error)?,
-            RowStage::Agg => unreachable!(),
         };
     }
 

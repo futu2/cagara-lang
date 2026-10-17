@@ -237,6 +237,9 @@ sort-key, and projection payloads are copied onto those nodes, and their
 checked stages are constructed directly. The normalized query remains the
 source of instantiated helper payloads and intermediate projection rows;
 helper-expanded checked output still retains normalized call-site origins.
+Projection and aggregate helpers can also mix those stages with prefix,
+suffix, omit, and map-value rewrites. Their instantiated checked rows provide
+the intermediate boundaries needed to connect rewrites around projections.
 The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be
@@ -260,8 +263,8 @@ can use the closed row on its call expression as the projection boundary. The
 aggregate and projection expressions remain on the normalized bridge. Helpers
 with multiple projection or aggregate stages now instantiate each intermediate
 output row from the checked use expression, then build the complete typed chain
-with the helper stages' original identities. Helpers that mix those stages with
-row rewrites still wait for rewrite boundary facts.
+with the helper stages' original identities. Those helpers can also mix
+projections with row rewrites, using instantiated checked rows at each boundary.
 
 ### Step 1, done
 

@@ -1531,19 +1531,6 @@ fn apply_helper(
             )
         })
         .count();
-    if projections > 0
-        && helper_stages.iter().any(|stage| {
-            matches!(
-                stage.kind,
-                RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
-            )
-        })
-    {
-        // Rewrite helpers already have a dedicated instantiation path. A
-        // projection followed by a rewrite needs the rewrite's intermediate
-        // row facts, which this bridge slice does not carry yet.
-        return Ok(None);
-    }
     // The normalized relation remains the payload oracle while helper
     // expressions are instantiated at their use site. The typed nodes below
     // own those payloads; only their concrete intermediate rows need the
@@ -3032,6 +3019,40 @@ mod tests {
             .find(|node| node.kind() == QueryNodeKind::Order)
             .unwrap();
         assert_eq!(order_node.order_keys().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn projection_helper_instantiates_rewrite_boundaries() {
+        let src = "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             helper = q => q & select { .name } & prefix \"x_\" & update { upper = .x_name }\n\
+             q = users & helper\n";
+        let ws = Workspace::from_source(src);
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == "q")
+            .unwrap();
+        let input = CompilerInput::new(&ws, &tc);
+        let body = &ws.modules[ws.root].module.defs[def].body;
+        let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
+        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        compare_with_terms(input, &typed, &checked, &terms).unwrap();
+        let chain: Vec<_> = typed.chain().into_iter().map(|id| typed.node(id)).collect();
+        assert_eq!(
+            chain.iter().map(|node| node.kind()).collect::<Vec<_>>(),
+            vec![
+                QueryNodeKind::Update,
+                QueryNodeKind::Prefix,
+                QueryNodeKind::Select,
+                QueryNodeKind::Table,
+            ]
+        );
+        assert_eq!(chain[1].input_row().unwrap().names(), vec!["name"]);
+        assert_eq!(chain[1].output_row().unwrap().names(), vec!["x_name"]);
+        assert_eq!(checked.row().names(), &["x_name", "upper"]);
     }
 
     #[test]

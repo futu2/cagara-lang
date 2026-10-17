@@ -4,12 +4,14 @@
 
 The typed query arena and its first production lowering slices have landed.
 Production now routes query definitions through a typed builder first, with one
-explicit normalized adapter for declined shapes. Some typed slices still use
-normalized expression payloads or keep an adapter-built checked tree when the
-typed graph cannot rebuild it one-to-one. The builder's active-definition set
-is owned by a per-attempt `LoweringContext`, not ambient thread-local state.
-The remaining work is to move those payloads and helper instantiations onto the
-typed tree, then remove the adapter. The live slice status is maintained in
+explicit normalized adapter for declined shapes. Typed lowering builds checked
+expression payloads for its supported subset and no longer invokes normalization
+internally for payloads or comparison. Unsupported forms, including helper
+chains whose intermediate projection rows are unavailable from checker facts,
+decline to the route coordinator. The builder's active-definition set is owned
+by a per-attempt `LoweringContext`, not ambient thread-local state. The remaining
+work is to complete checker-owned payload and helper instantiation coverage,
+then remove the adapter. The live slice status is maintained in
 [`PLAN.md`](PLAN.md).
 
 ## Why change it

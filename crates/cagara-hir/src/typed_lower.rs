@@ -263,8 +263,14 @@ fn lower_combine_pipeline(
     let checked = match combine.kind {
         CombineKind::Set(kind) => CheckedQuery::set(kind, checked_left, checked_right, origin)
             .map_err(|error| Error::unsupported(error.message).at(origin))?,
-        CombineKind::Join(_) => {
-            crate::normalize::elaborate_query_via_terms(input, module, def, body)?
+        CombineKind::Join(kind) => {
+            let terms = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
+            let predicate = checked_join_predicate(&terms, terms.origin()).ok_or_else(|| {
+                Error::unsupported("normalized join query has no checked predicate")
+                    .at(terms.origin())
+            })?;
+            CheckedQuery::join(kind, checked_left, checked_right, predicate, terms.origin())
+                .map_err(|error| Error::unsupported(error.message).at(terms.origin()))?
         }
     };
     let root = typed

@@ -3009,6 +3009,24 @@ mod tests {
     }
 
     #[test]
+    fn projection_helper_carries_window_payloads_into_typed_nodes() {
+        let (typed, checked) = lower_source(
+            "users : query { id = int, age = int } = table \"s\" \"users\"\n\
+             ranked = q => q & select { id = .id, rn = rowNumber {order = [asc .age]} }\n\
+             q = users & ranked\n",
+            "q",
+        );
+        assert_eq!(typed.root_kind(), QueryNodeKind::Select);
+        let root = typed.node(typed.root());
+        let fields = root
+            .projection_fields()
+            .expect("helper projection carries checked fields");
+        assert_eq!(fields[1].0, "rn");
+        assert_eq!(fields[1].1.kind(), crate::checked::ExprKind::WinTemplate);
+        assert_eq!(checked.row().names(), &["id", "rn"]);
+    }
+
+    #[test]
     fn signed_helper_reuses_its_typed_stage_chain() {
         let src = "users : query { id = int } = table \"s\" \"users\"\n\
              helper : query { id = int } -> query { h_id = int } = q => q & prefix \"h_\"\n\

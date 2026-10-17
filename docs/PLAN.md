@@ -258,6 +258,9 @@ normalized bridge supplies only predicates, projections, and sort payloads.
 Window expressions in projection payloads are carried by the typed projection
 node as `WinTemplate`, including when the pipeline starts from a typed query
 alias. They are no longer deferred from this slice.
+Projection helpers carry the same window payload through their instantiated
+typed projection node, preserving the helper's stage identity and checked
+output row.
 The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be

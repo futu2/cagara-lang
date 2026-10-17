@@ -442,10 +442,52 @@ fn lower_plain_expr_with_row(
             },
             origin,
         ))),
+        ExprKind::Name(name) if name == "count" => {
+            let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
+                return Ok(None);
+            };
+            crate::checked::CheckedExpr::agg_template("COUNT(*)", Vec::new(), ty, origin)
+                .map(Some)
+                .map_err(|error| Error::unsupported(error.message).at(origin))
+        }
         ExprKind::App(head, args) => {
             let ExprKind::Name(name) = &head.kind else {
                 return Ok(None);
             };
+            if name == "group" {
+                if args.len() != 1 {
+                    return Ok(None);
+                }
+                let Some(key) = lower_plain_expr_with_row(input, module, &args[0], row)? else {
+                    return Ok(None);
+                };
+                return crate::checked::CheckedExpr::group(key, origin)
+                    .map(Some)
+                    .map_err(|error| Error::unsupported(error.message).at(origin));
+            }
+            let aggregate_sql = match name.as_str() {
+                "sum" => Some("SUM($1)"),
+                "avg" => Some("AVG($1)"),
+                "min" => Some("MIN($1)"),
+                "max" => Some("MAX($1)"),
+                "countOf" => Some("COUNT($1)"),
+                "countDistinct" => Some("COUNT(DISTINCT $1)"),
+                _ => None,
+            };
+            if let Some(sql) = aggregate_sql {
+                if args.len() != 1 {
+                    return Ok(None);
+                }
+                let Some(arg) = lower_plain_expr_with_row(input, module, &args[0], row)? else {
+                    return Ok(None);
+                };
+                let Some(ty) = tc.typed_node(module, expr.id).and_then(|node| node.ty()) else {
+                    return Ok(None);
+                };
+                return crate::checked::CheckedExpr::agg_template(sql, vec![arg], ty, origin)
+                    .map(Some)
+                    .map_err(|error| Error::unsupported(error.message).at(origin));
+            }
             if matches!(name.as_str(), "in" | "inList") {
                 if args.len() != 2 {
                     return Ok(None);
@@ -649,7 +691,6 @@ fn lower_plain_expression_chain(
                 || stage.node.definition != def
                 || stage.input.is_none()
                 || stage.output.is_none()
-                || stage.kind == RowStage::Agg
         })
         || !is_direct_pipeline(input, module, body)
     {
@@ -722,7 +763,7 @@ fn lower_plain_expression_chain(
                     return Ok(None);
                 }
             }
-            RowStage::Select | RowStage::Update => {
+            RowStage::Select | RowStage::Update | RowStage::Agg => {
                 let Some(record) = args.first() else {
                     return Ok(None);
                 };
@@ -782,7 +823,6 @@ fn lower_plain_expression_chain(
                 }
             }
             RowStage::Distinct => {}
-            RowStage::Agg => return Ok(None),
         }
 
         let kind = match stage.kind {
@@ -793,11 +833,11 @@ fn lower_plain_expression_chain(
             RowStage::Where => QueryNodeKind::Where,
             RowStage::Select => QueryNodeKind::Select,
             RowStage::Update => QueryNodeKind::Update,
+            RowStage::Agg => QueryNodeKind::Agg,
             RowStage::Order => QueryNodeKind::Order,
             RowStage::Limit => QueryNodeKind::Limit,
             RowStage::Offset => QueryNodeKind::Offset,
             RowStage::Distinct => QueryNodeKind::Distinct,
-            RowStage::Agg => unreachable!(),
         };
         let id = match stage.kind {
             RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue => typed
@@ -810,7 +850,7 @@ fn lower_plain_expression_chain(
                     origin,
                 )
                 .map_err(query_error)?,
-            RowStage::Select | RowStage::Update => typed
+            RowStage::Select | RowStage::Update | RowStage::Agg => typed
                 .project(
                     stage.node,
                     kind,
@@ -853,13 +893,13 @@ fn lower_plain_expression_chain(
             RowStage::Update => {
                 CheckedQuery::update(checked, fields.expect("fields"), checked_origin)
             }
+            RowStage::Agg => CheckedQuery::agg(checked, fields.expect("fields"), checked_origin),
             RowStage::Order => CheckedQuery::order(checked, keys.expect("keys"), checked_origin),
             RowStage::Limit => CheckedQuery::limit(checked, count.expect("count"), checked_origin),
             RowStage::Offset => {
                 CheckedQuery::offset(checked, count.expect("count"), checked_origin)
             }
             RowStage::Distinct => CheckedQuery::distinct(checked, checked_origin),
-            RowStage::Agg => unreachable!(),
         }
         .map_err(|error| Error::unsupported(error.message).at(origin))?;
         let node = typed.node(id);

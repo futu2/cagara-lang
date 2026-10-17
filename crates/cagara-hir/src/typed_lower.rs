@@ -1330,6 +1330,26 @@ fn lower_keep_expr(
     expr: &Expr,
     typed: &mut TypedQuery,
 ) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    // Keep an already typed query alias as the child when expression-free
+    // stages are appended to it. Resolving only to the backing table would
+    // discard the alias's relational chain.
+    if let Some((target_module, target_def)) = query_target(input.type_check(), module, expr) {
+        if (target_module, target_def) != (module, def)
+            && matches!(
+                input.type_check().scheme_view(target_module, target_def),
+                Some(crate::check::SchemeView::Query { .. })
+            )
+        {
+            let target_body = &input.module(target_module).def(target_def).body;
+            let Some((target_typed, checked)) =
+                lower(input, target_module, target_def, target_body)?
+            else {
+                return Ok(None);
+            };
+            let root = copy_typed_chain(&target_typed, typed)?;
+            return Ok(Some((root, checked)));
+        }
+    }
     if let Some((schema, table, columns)) = table_parts(input, module, expr) {
         let origin = Origin::new(module, expr.span);
         let checked =

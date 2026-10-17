@@ -54,6 +54,9 @@ fn lower_unhydrated(
     if let Some(lowered) = lower_keep_pipeline(input, module, def, body)? {
         return Ok(Some(lowered));
     }
+    if let Some(lowered) = lower_simple_select_pipeline(input, module, def, body)? {
+        return Ok(Some(lowered));
+    }
     // The expression-bearing stages use the checked payload bridge for their
     // predicates, fields, and sort keys. Their relational boundaries still
     // come from the typed stage records, so the query arena does not recover
@@ -198,6 +201,140 @@ fn lower_unhydrated(
     }
 
     Ok(Some((typed.finish(child), checked)))
+}
+
+/// Lower a direct projection whose fields are plain column references. This
+/// small expression slice needs no normalized term: the checker supplies each
+/// field's scalar type and the stage record supplies the closed output row.
+fn lower_simple_select_pipeline(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+) -> Result<Option<(TypedQuery, CheckedQuery)>, Error> {
+    let tc = input.type_check();
+    let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
+    if stages.len() != 1
+        || stages[0].kind != RowStage::Select
+        || stages[0].node.definition_module != module
+        || stages[0].node.definition != def
+        || !is_direct_pipeline(input, module, body)
+        || contains_other_stage(input, module, body, RowStage::Select)
+    {
+        return Ok(None);
+    }
+    let stage = &stages[0];
+    let stage_sites = std::iter::once(stage.site).collect::<HashSet<_>>();
+    let Some(base) = find_base(body, &stage_sites, tc, module) else {
+        return Ok(None);
+    };
+    let stage_expr = find_expr_id(body, stage.site).unwrap_or(body);
+    let ExprKind::App(_, args) = &stage_expr.kind else {
+        return Ok(None);
+    };
+    let Some(record) = args.first() else {
+        return Ok(None);
+    };
+    let ExprKind::Record(fields) = &record.kind else {
+        return Ok(None);
+    };
+    let mut checked_fields = Vec::with_capacity(fields.len());
+    for (name, value) in fields {
+        let ExprKind::Field(side, column) = &value.kind else {
+            return Ok(None);
+        };
+        let Some(ty) = tc.typed_node(module, value.id).and_then(|node| node.ty()) else {
+            return Ok(None);
+        };
+        checked_fields.push((
+            name.clone(),
+            crate::checked::CheckedExpr::column(
+                *side,
+                column.clone(),
+                ty,
+                Origin::new(module, value.span),
+            ),
+        ));
+    }
+    let stage_origin = Origin::new(module, stage_expr.span);
+    let (child, mut checked, mut typed) = if let Some((schema, table, columns)) =
+        table_parts(input, module, base)
+    {
+        let checked = CheckedQuery::table(
+            schema,
+            table,
+            Some(RowType::new(columns.clone())),
+            stage_origin,
+        )
+        .map_err(|error| Error::unsupported(error.message).at(stage_origin))?;
+        let mut typed = TypedQuery::new();
+        let child = typed
+            .table(NodeRef::new(module, def, base.id), stage_origin, columns)
+            .map_err(query_error)?;
+        (child, checked, typed)
+    } else if let Some((target_module, target_def)) = query_target(tc, module, base) {
+        if (target_module, target_def) == (module, def)
+            || !matches!(
+                tc.scheme_view(target_module, target_def),
+                Some(crate::check::SchemeView::Query { .. })
+            )
+        {
+            return Ok(None);
+        }
+        let target_body = &input.module(target_module).def(target_def).body;
+        let Some((target_typed, checked)) = lower(input, target_module, target_def, target_body)?
+        else {
+            return Ok(None);
+        };
+        let mut typed = TypedQuery::new();
+        let child = copy_typed_graph(&target_typed, &mut typed)?;
+        (child, checked, typed)
+    } else {
+        return Ok(None);
+    };
+    let output_row = stage.output.clone().map(Row::new);
+    let id = typed
+        .project(
+            stage.node,
+            QueryNodeKind::Select,
+            child,
+            output_row,
+            stage_origin,
+            Some(checked_fields.clone()),
+        )
+        .map_err(query_error)?;
+    checked = CheckedQuery::select(checked, checked_fields, stage_origin)
+        .map_err(|error| Error::unsupported(error.message).at(stage_origin))?;
+    Ok(Some((typed.finish(id), checked)))
+}
+
+fn contains_other_stage(
+    input: CompilerInput<'_>,
+    module: usize,
+    body: &Expr,
+    allowed: RowStage,
+) -> bool {
+    let tc = input.type_check();
+    let mut stack = vec![body];
+    while let Some(expr) = stack.pop() {
+        if matches!(&expr.kind, ExprKind::Name(_) | ExprKind::Proj(_, _)) {
+            if let Some(Resolved::Def((stage_module, stage_def))) = tc.resolution(module, expr.id) {
+                if let ExprKind::Primitive(name) =
+                    &input.module(*stage_module).def(*stage_def).body.kind
+                {
+                    if let Some(prim) = crate::primitive::prim_of(name) {
+                        if let Some(stage) = RowStage::of_prim(prim) {
+                            if stage != allowed {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stack.extend(crate::check::child_exprs(expr));
+    }
+    false
 }
 
 /// Lower a direct join or set operation whose two relational operands are
@@ -2690,6 +2827,36 @@ mod tests {
         assert_eq!(
             window_fields[1].1.kind(),
             crate::checked::ExprKind::WinTemplate
+        );
+    }
+
+    #[test]
+    fn direct_plain_select_bypasses_normalized_elaboration() {
+        let ws = Workspace::from_source(
+            "users : query { id = int, name = string } = table \"s\" \"users\"\n\
+             q = users & select { id = .id, name = .name }\n",
+        );
+        let tc = check::check(&ws);
+        assert!(tc.errors().is_empty(), "{:?}", tc.errors());
+        let def = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|definition| definition.name == "q")
+            .unwrap();
+        crate::normalize::clear_visited();
+        let result = lower(
+            CompilerInput::new(&ws, &tc),
+            ws.root,
+            def,
+            &ws.modules[ws.root].module.defs[def].body,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.0.root_kind(), QueryNodeKind::Select);
+        assert!(
+            crate::normalize::visited_nodes().is_empty(),
+            "simple select unexpectedly entered normalized elaboration"
         );
     }
 

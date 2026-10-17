@@ -231,6 +231,12 @@ directly from typed child queries; join predicates still come from the bridge.
 Direct expression pipelines also assemble each checked stage from the typed
 child and hydrated payloads, falling back to the normalized shape only when a
 wrapper was absorbed from the stage record.
+Helper application now instantiates recorded `where`, `order`, `limit`,
+`offset`, `select`, `update`, and `agg` stages into typed nodes. Predicate,
+sort-key, and projection payloads are copied onto those nodes, and their
+checked stages are constructed directly. The normalized query remains the
+source of instantiated helper payloads and intermediate projection rows;
+helper-expanded checked output still retains normalized call-site origins.
 The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be

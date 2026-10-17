@@ -560,6 +560,7 @@ fn lower_plain_expr_with_row(
                 "rtrim" => ("RTRIM($1)", 1),
                 "length" => ("CAGARA_LENGTH($1)", 1),
                 "coalesce" => ("COALESCE($2, $1)", 2),
+                "ifThenElse" | "caseWhen" => ("CASE WHEN $1 THEN $2 ELSE $3 END", 3),
                 _ => return Ok(None),
             };
             if args.len() != arity {
@@ -4177,7 +4178,7 @@ mod tests {
         let ws = Workspace::from_source(
             "spec = { order = [asc .id] }\n\
              users : query { id = int, name = string } = table \"s\" \"users\"\n\
-             q = users & select { id = .id, name = .name, rn = rowNumber spec }\n",
+             q = users & select { id = .id, name = .name, label = ifThenElse (.id > 0) .name \"unknown\", rn = rowNumber spec }\n",
         );
         let tc = check::check(&ws);
         assert!(tc.errors().is_empty(), "{:?}", tc.errors());
@@ -4203,8 +4204,10 @@ mod tests {
         );
         let node = result.0.node(result.0.root());
         let fields = node.projection_fields().expect("typed select has fields");
-        assert_eq!(fields[2].0, "rn");
-        assert_eq!(fields[2].1.kind(), crate::checked::ExprKind::WinTemplate);
+        assert_eq!(fields[2].0, "label");
+        assert_eq!(fields[2].1.kind(), crate::checked::ExprKind::Template);
+        assert_eq!(fields[3].0, "rn");
+        assert_eq!(fields[3].1.kind(), crate::checked::ExprKind::WinTemplate);
     }
 
     #[test]

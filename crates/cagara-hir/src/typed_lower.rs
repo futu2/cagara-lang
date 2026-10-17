@@ -1369,11 +1369,10 @@ fn lower_combine_pipeline(
         CombineKind::Set(kind) => CheckedQuery::set(kind, checked_left, checked_right, origin)
             .map_err(|error| Error::unsupported(error.message).at(origin))?,
         CombineKind::Join(kind) => {
-            let predicate = plain_join_predicate(input, module, operation).or_else(|| {
-                crate::normalize::elaborate_query_via_terms(input, module, def, body)
-                    .ok()
-                    .and_then(|terms| checked_join_predicate(&terms, terms.origin()))
-            });
+            // A typed join is complete only when its predicate can be built
+            // from checker facts. Let the query-lowering coordinator choose
+            // the transitional adapter for other predicate forms.
+            let predicate = plain_join_predicate(input, module, operation);
             let Some(predicate) = predicate else {
                 return Ok(None);
             };
@@ -1818,13 +1817,15 @@ fn lower_composed_expr(
             let kind = combine_query_kind(combine.kind);
             let output = combine.output.clone().map(Row::new);
             let origin = Origin::new(combine.node.definition_module, operation.span);
-            let checked = crate::normalize::elaborate_query_via_terms(
-                input,
-                module,
-                def,
-                &input.module(module).def(def).body,
-            )?;
-            let join_predicate = checked_join_predicate(&checked, origin);
+            let join_predicate = match combine.kind {
+                CombineKind::Join(_) => {
+                    let Some(predicate) = plain_join_predicate(input, module, operation) else {
+                        return Ok(None);
+                    };
+                    Some(predicate)
+                }
+                CombineKind::Set(_) => None,
+            };
             let id = typed
                 .combine(
                     combine.node,
@@ -1865,13 +1866,15 @@ fn lower_composed_expr(
         let kind = combine_query_kind(combine.kind);
         let output = combine.output.clone().map(Row::new);
         let origin = Origin::new(combine.node.definition_module, operation.span);
-        let checked = crate::normalize::elaborate_query_via_terms(
-            input,
-            module,
-            def,
-            &input.module(module).def(def).body,
-        )?;
-        let join_predicate = checked_join_predicate(&checked, origin);
+        let join_predicate = match combine.kind {
+            CombineKind::Join(_) => {
+                let Some(predicate) = plain_join_predicate(input, module, operation) else {
+                    return Ok(None);
+                };
+                Some(predicate)
+            }
+            CombineKind::Set(_) => None,
+        };
         let id = typed
             .combine(
                 combine.node,

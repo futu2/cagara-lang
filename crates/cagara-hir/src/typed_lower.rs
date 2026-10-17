@@ -485,6 +485,248 @@ fn lower_plain_expr_with_row(
     expr: &Expr,
     row: Option<&RowType>,
 ) -> Result<Option<crate::checked::CheckedExpr>, Error> {
+    if let Some(plain) = lower_plain_expr_basic(input, module, expr, row)? {
+        return Ok(Some(plain));
+    }
+    let mut env = HashMap::new();
+    Ok(
+        match lower_plain_value(input, module, expr, row, &mut env, 0)? {
+            Some(PlainValue::Expr(value)) => Some(value),
+            Some(PlainValue::Function { .. }) | None => None,
+        },
+    )
+}
+
+/// A checker-resolved scalar value.  The direct expression lowering above is
+/// deliberately small; this value layer handles the function values that can
+/// appear in scalar position (aliases, lambdas, and composition).
+#[derive(Clone)]
+enum PlainValue<'a> {
+    Expr(crate::checked::CheckedExpr),
+    Function {
+        params: Vec<String>,
+        body: PlainFunctionBody<'a>,
+        module: usize,
+        env: HashMap<String, PlainValue<'a>>,
+    },
+}
+
+#[derive(Clone)]
+enum PlainFunctionBody<'a> {
+    Expr(&'a Expr),
+    Template {
+        sql: String,
+        kind: crate::normalize::TemplateKind,
+        ty: crate::core::ScalarType,
+    },
+}
+
+fn lower_plain_value<'a>(
+    input: CompilerInput<'a>,
+    module: usize,
+    expr: &'a Expr,
+    row: Option<&RowType>,
+    env: &mut HashMap<String, PlainValue<'a>>,
+    depth: usize,
+) -> Result<Option<PlainValue<'a>>, Error> {
+    if depth > 16 {
+        return Ok(None);
+    }
+    if let Some(value) = lower_plain_expr_basic(input, module, expr, row)? {
+        return Ok(Some(PlainValue::Expr(value)));
+    }
+    let tc = input.type_check();
+    match &expr.kind {
+        ExprKind::Name(name) => {
+            if let Some(value) = env.get(name).cloned() {
+                return Ok(Some(value));
+            }
+            let Some(Resolved::Def((target_module, target_def))) = tc.resolution(module, expr.id)
+            else {
+                return Ok(None);
+            };
+            lower_plain_definition(input, *target_module, *target_def, row, depth + 1)
+        }
+        ExprKind::Proj(_, _) => {
+            let Some(Resolved::Def((target_module, target_def))) = tc.resolution(module, expr.id)
+            else {
+                return Ok(None);
+            };
+            lower_plain_definition(input, *target_module, *target_def, row, depth + 1)
+        }
+        ExprKind::Lambda(parameter, body) => Ok(Some(PlainValue::Function {
+            params: vec![parameter.clone()],
+            body: PlainFunctionBody::Expr(body),
+            module,
+            env: env.clone(),
+        })),
+        ExprKind::App(head, args) => {
+            let Some(mut value) = lower_plain_value(input, module, head, row, env, depth + 1)?
+            else {
+                return Ok(None);
+            };
+            for arg in args.iter() {
+                let Some(arg) = lower_plain_value(input, module, arg, row, env, depth + 1)? else {
+                    return Ok(None);
+                };
+                let Some(applied) = apply_plain_value(input, value, arg, expr, row, depth + 1)?
+                else {
+                    return Ok(None);
+                };
+                value = applied;
+            }
+            Ok(Some(value))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn lower_plain_definition<'a>(
+    input: CompilerInput<'a>,
+    module: usize,
+    def: usize,
+    row: Option<&RowType>,
+    depth: usize,
+) -> Result<Option<PlainValue<'a>>, Error> {
+    if depth > 16 {
+        return Ok(None);
+    }
+    let declaration = input.module(module).def(def);
+    match &declaration.body.kind {
+        ExprKind::Sql(sql) => {
+            let params = template_arity(declaration.ty.as_ref());
+            let ty = input
+                .type_check()
+                .result_scalar(module, def)
+                .unwrap_or(crate::core::ScalarType::Unknown);
+            Ok(Some(PlainValue::Function {
+                params: (0..params).map(|i| format!("$arg{i}")).collect(),
+                body: PlainFunctionBody::Template {
+                    sql: sql.clone(),
+                    kind: crate::normalize::declared_template_kind(declaration),
+                    ty,
+                },
+                module,
+                env: HashMap::new(),
+            }))
+        }
+        ExprKind::Lambda(parameter, body) => Ok(Some(PlainValue::Function {
+            params: vec![parameter.clone()],
+            body: PlainFunctionBody::Expr(body),
+            module,
+            env: HashMap::new(),
+        })),
+        ExprKind::Name(_) | ExprKind::Proj(_, _) => {
+            let Some(Resolved::Def((target_module, target_def))) =
+                input.type_check().resolution(module, declaration.body.id)
+            else {
+                return Ok(None);
+            };
+            lower_plain_definition(input, *target_module, *target_def, row, depth + 1)
+        }
+        _ => {
+            let mut env = HashMap::new();
+            lower_plain_value(input, module, &declaration.body, row, &mut env, depth + 1)
+        }
+    }
+}
+
+fn template_arity(ty: Option<&cagara_syntax::ast::TypeExpr>) -> usize {
+    let mut count = 0;
+    let mut current = ty;
+    while let Some(cagara_syntax::ast::TypeExpr::Fun(_, next)) = current {
+        count += 1;
+        current = Some(next.as_ref());
+    }
+    count
+}
+
+fn apply_plain_value<'a>(
+    input: CompilerInput<'a>,
+    value: PlainValue<'a>,
+    arg: PlainValue<'a>,
+    call: &Expr,
+    row: Option<&RowType>,
+    depth: usize,
+) -> Result<Option<PlainValue<'a>>, Error> {
+    let PlainValue::Function {
+        mut params,
+        body,
+        module,
+        mut env,
+    } = value
+    else {
+        return Ok(None);
+    };
+    let Some(parameter) = params.first().cloned() else {
+        return Ok(None);
+    };
+    params.remove(0);
+    env.insert(parameter, arg);
+    if !params.is_empty() {
+        return Ok(Some(PlainValue::Function {
+            params,
+            body,
+            module,
+            env,
+        }));
+    }
+    match body {
+        PlainFunctionBody::Expr(body) => {
+            lower_plain_value(input, module, body, row, &mut env, depth + 1)
+        }
+        PlainFunctionBody::Template { sql, kind, ty } => {
+            let mut bindings: Vec<_> = env.into_iter().collect();
+            bindings.sort_by_key(|(name, _)| {
+                name.strip_prefix("$arg")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(usize::MAX)
+            });
+            let args = bindings
+                .into_iter()
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            let mut checked = Vec::with_capacity(args.len());
+            for value in args {
+                let PlainValue::Expr(value) = value else {
+                    return Ok(None);
+                };
+                checked.push(value);
+            }
+            let ty = if matches!(&ty, crate::core::ScalarType::Unknown) {
+                input
+                    .type_check()
+                    .typed_node(module, call.id)
+                    .and_then(|node| node.ty())
+                    .unwrap_or(ty)
+            } else {
+                ty
+            };
+            let origin = Origin::new(module, call.span);
+            let checked = match kind {
+                crate::normalize::TemplateKind::Scalar => {
+                    crate::checked::CheckedExpr::template(sql, checked, ty, origin)
+                }
+                crate::normalize::TemplateKind::Agg => {
+                    crate::checked::CheckedExpr::agg_template(sql, checked, ty, origin)
+                }
+                crate::normalize::TemplateKind::Win => return Ok(None),
+            }
+            .map_err(|error| Error::unsupported(error.message).at(origin))?;
+            Ok(Some(PlainValue::Expr(checked)))
+        }
+    }
+}
+
+/// Lower the direct source expression subset. Expressions that need a
+/// checker-resolved function value are handled by [`lower_plain_value`] after
+/// this fast path declines them.
+fn lower_plain_expr_basic(
+    input: CompilerInput<'_>,
+    module: usize,
+    expr: &Expr,
+    row: Option<&RowType>,
+) -> Result<Option<crate::checked::CheckedExpr>, Error> {
     let tc = input.type_check();
     let origin = Origin::new(module, expr.span);
     match &expr.kind {

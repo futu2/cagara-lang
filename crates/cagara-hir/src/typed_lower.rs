@@ -542,6 +542,29 @@ fn lower_plain_expr_with_row(
     expr: &Expr,
     row: Option<&RowType>,
 ) -> Result<Option<crate::checked::CheckedExpr>, Error> {
+    if let ExprKind::App(head, args) = &expr.kind {
+        if matches!(&head.kind, ExprKind::Name(name) if name == "_??_") && args.len() == 2 {
+            let Some(left) = lower_plain_expr_with_row(input, module, &args[0], row)? else {
+                return Ok(None);
+            };
+            let Some(right) = lower_plain_expr_with_row(input, module, &args[1], row)? else {
+                return Ok(None);
+            };
+            let ty = input
+                .type_check()
+                .typed_node(module, expr.id)
+                .and_then(|node| node.ty())
+                .unwrap_or(crate::core::ScalarType::Unknown);
+            return crate::checked::CheckedExpr::template(
+                "COALESCE($1, $2)",
+                vec![left, right],
+                ty,
+                Origin::new(module, expr.span),
+            )
+            .map(Some)
+            .map_err(|error| Error::unsupported(error.message).at(Origin::new(module, expr.span)));
+        }
+    }
     if let Some(plain) = lower_plain_expr_basic(input, module, expr, row)? {
         return Ok(Some(plain));
     }
@@ -553,7 +576,10 @@ fn lower_plain_expr_with_row(
     }
     Ok(match value {
         Some(PlainValue::Expr(value)) => Some(value),
-        Some(PlainValue::Function { .. }) | None => None,
+        Some(PlainValue::Function { .. })
+        | Some(PlainValue::Compose { .. })
+        | Some(PlainValue::Overloads(_))
+        | None => None,
     })
 }
 
@@ -576,6 +602,12 @@ fn application_depth(expr: &Expr) -> usize {
 #[derive(Clone)]
 enum PlainValue<'a> {
     Expr(crate::checked::CheckedExpr),
+    Compose {
+        first: Box<PlainValue<'a>>,
+        second: Box<PlainValue<'a>>,
+        reverse: bool,
+    },
+    Overloads(Vec<PlainValue<'a>>),
     Function {
         params: Vec<String>,
         body: PlainFunctionBody<'a>,
@@ -609,6 +641,7 @@ fn scalar_operator_template(name: &str) -> Option<&'static str> {
         "_!=_" => Some("$1 <> $2"),
         "_&&_" => Some("$1 AND $2"),
         "_||_" => Some("$1 OR $2"),
+        "_??_" => Some("COALESCE($1, $2)"),
         _ => None,
     }
 }
@@ -645,10 +678,31 @@ fn lower_plain_value<'a>(
                     env: HashMap::new(),
                 }));
             }
+            if let Some(Resolved::Overloads {
+                module: overload_module,
+                defs,
+            }) = tc.resolution(module, expr.id)
+            {
+                let mut values = Vec::new();
+                for candidate in defs {
+                    if let Some(value) =
+                        lower_plain_definition(input, *overload_module, *candidate, row, depth + 1)?
+                    {
+                        values.push(value);
+                    }
+                }
+                if !values.is_empty() {
+                    return Ok(Some(PlainValue::Overloads(values)));
+                }
+            }
             let Some((target_module, target_def)) = scalar_definition_target(tc, module, expr.id)
             else {
                 return Ok(None);
             };
+            if scalar_alias_cycle(input, target_module, target_def, &mut HashSet::new()) {
+                return Err(Error::unsupported("definition refers to itself")
+                    .at(Origin::new(module, expr.span)));
+            }
             lower_plain_definition(input, target_module, target_def, row, depth + 1)
         }
         ExprKind::Proj(_, _) => {
@@ -656,6 +710,10 @@ fn lower_plain_value<'a>(
             else {
                 return Ok(None);
             };
+            if scalar_alias_cycle(input, target_module, target_def, &mut HashSet::new()) {
+                return Err(Error::unsupported("definition refers to itself")
+                    .at(Origin::new(module, expr.span)));
+            }
             lower_plain_definition(input, target_module, target_def, row, depth + 1)
         }
         ExprKind::Lambda(parameter, body) => Ok(Some(PlainValue::Function {
@@ -665,6 +723,23 @@ fn lower_plain_value<'a>(
             env: env.clone(),
         })),
         ExprKind::App(head, args) => {
+            if args.len() == 2
+                && matches!(&head.kind, ExprKind::Name(name) if name == "_>>>_" || name == "_<<<_")
+            {
+                let Some(first) = lower_plain_value(input, module, &args[0], row, env, depth + 1)?
+                else {
+                    return Ok(None);
+                };
+                let Some(second) = lower_plain_value(input, module, &args[1], row, env, depth + 1)?
+                else {
+                    return Ok(None);
+                };
+                return Ok(Some(PlainValue::Compose {
+                    first: Box::new(first),
+                    second: Box::new(second),
+                    reverse: matches!(&head.kind, ExprKind::Name(name) if name == "_<<<_"),
+                }));
+            }
             let Some(mut value) = lower_plain_value(input, module, head, row, env, depth + 1)?
             else {
                 return Ok(None);
@@ -707,6 +782,54 @@ fn scalar_definition_target(
         .then_some(target)
 }
 
+fn scalar_alias_cycle(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    seen: &mut HashSet<(usize, usize)>,
+) -> bool {
+    if !seen.insert((module, def)) {
+        return true;
+    }
+    let body = &input.module(module).def(def).body;
+    let (ExprKind::Name(_) | ExprKind::Proj(_, _)) = &body.kind else {
+        return false;
+    };
+    let Some(Resolved::Def((next_module, next_def))) =
+        input.type_check().resolution(module, body.id)
+    else {
+        return false;
+    };
+    scalar_alias_cycle(input, *next_module, *next_def, seen)
+}
+
+fn expr_refs_definition(
+    input: CompilerInput<'_>,
+    module: usize,
+    expr: &Expr,
+    target_module: usize,
+    target_def: usize,
+    seen: &mut HashSet<u32>,
+) -> bool {
+    if !seen.insert(expr.id) {
+        return false;
+    }
+    if matches!(&expr.kind, ExprKind::Name(_) | ExprKind::Proj(_, _))
+        && input
+            .type_check()
+            .resolution(module, expr.id)
+            .is_some_and(|resolved| match resolved {
+                Resolved::Def((m, d)) => *m == target_module && *d == target_def,
+                _ => false,
+            })
+    {
+        return true;
+    }
+    crate::check::child_exprs(expr)
+        .into_iter()
+        .any(|child| expr_refs_definition(input, module, child, target_module, target_def, seen))
+}
+
 fn lower_plain_definition<'a>(
     input: CompilerInput<'a>,
     module: usize,
@@ -736,12 +859,18 @@ fn lower_plain_definition<'a>(
                 env: HashMap::new(),
             }))
         }
-        ExprKind::Lambda(parameter, body) => Ok(Some(PlainValue::Function {
-            params: vec![parameter.clone()],
-            body: PlainFunctionBody::Expr(body),
-            module,
-            env: HashMap::new(),
-        })),
+        ExprKind::Lambda(parameter, body) => {
+            if expr_refs_definition(input, module, body, module, def, &mut HashSet::new()) {
+                return Err(Error::unsupported("definition refers to itself")
+                    .at(Origin::new(module, declaration.body.span)));
+            }
+            Ok(Some(PlainValue::Function {
+                params: vec![parameter.clone()],
+                body: PlainFunctionBody::Expr(body),
+                module,
+                env: HashMap::new(),
+            }))
+        }
         ExprKind::Name(_) | ExprKind::Proj(_, _) => {
             let Some(Resolved::Def((target_module, target_def))) =
                 input.type_check().resolution(module, declaration.body.id)
@@ -751,6 +880,28 @@ fn lower_plain_definition<'a>(
             lower_plain_definition(input, *target_module, *target_def, row, depth + 1)
         }
         _ => {
+            if let ExprKind::App(head, args) = &declaration.body.kind {
+                if args.len() == 2
+                    && matches!(&head.kind, ExprKind::Name(name) if name == "_>>>_" || name == "_<<<_")
+                {
+                    let mut env = HashMap::new();
+                    let Some(first) =
+                        lower_plain_value(input, module, &args[0], row, &mut env, depth + 1)?
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(second) =
+                        lower_plain_value(input, module, &args[1], row, &mut env, depth + 1)?
+                    else {
+                        return Ok(None);
+                    };
+                    return Ok(Some(PlainValue::Compose {
+                        first: Box::new(first),
+                        second: Box::new(second),
+                        reverse: matches!(&head.kind, ExprKind::Name(name) if name == "_<<<_"),
+                    }));
+                }
+            }
             let mut env = HashMap::new();
             lower_plain_value(input, module, &declaration.body, row, &mut env, depth + 1)
         }
@@ -775,6 +926,32 @@ fn apply_plain_value<'a>(
     row: Option<&RowType>,
     depth: usize,
 ) -> Result<Option<PlainValue<'a>>, Error> {
+    if let PlainValue::Compose {
+        first,
+        second,
+        reverse,
+    } = value
+    {
+        let (outer, inner) = if reverse {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        let Some(inner) = apply_plain_value(input, *inner, arg, call, row, depth + 1)? else {
+            return Ok(None);
+        };
+        return apply_plain_value(input, *outer, inner, call, row, depth + 1);
+    }
+    if let PlainValue::Overloads(values) = value {
+        for candidate in values {
+            if let Some(applied) =
+                apply_plain_value(input, candidate, arg.clone(), call, row, depth + 1)?
+            {
+                return Ok(Some(applied));
+            }
+        }
+        return Ok(None);
+    }
     let PlainValue::Function {
         mut params,
         body,
@@ -950,49 +1127,55 @@ fn lower_plain_expr_basic(
             // payload directly for the small operator family represented by
             // the core AST.
             if let ExprKind::Name(operator) = &_head.kind {
-                let sql = match operator.as_str() {
-                    "_+_" => Some("$1 + $2"),
-                    "_-_" => Some("$1 - $2"),
-                    "_*_" => Some("$1 * $2"),
-                    "_/_" => Some("$1 / $2"),
-                    "_%_" => Some("$1 % $2"),
-                    "_>_" => Some("$1 > $2"),
-                    "_<_" => Some("$1 < $2"),
-                    "_>=_" => Some("$1 >= $2"),
-                    "_<=_" => Some("$1 <= $2"),
-                    "_==_" => Some("$1 = $2"),
-                    "_!=_" => Some("$1 <> $2"),
-                    "_&&_" => Some("$1 AND $2"),
-                    "_||_" => Some("$1 OR $2"),
-                    _ => None,
-                };
-                if let Some(sql) = sql {
-                    let mut lowered = Vec::with_capacity(args.len());
-                    for arg in args.iter() {
-                        let Some(arg) = lower_plain_expr_with_row(input, module, arg, row)? else {
-                            return Ok(None);
-                        };
-                        lowered.push(arg);
-                    }
-                    let ty = if operator == "_>_"
-                        || operator == "_<_"
-                        || operator == "_>=_"
-                        || operator == "_<=_"
-                        || operator == "_==_"
-                        || operator == "_!=_"
-                        || operator == "_&&_"
-                        || operator == "_||_"
-                    {
-                        crate::core::ScalarType::Bool
-                    } else {
-                        lowered
-                            .first()
-                            .map(|arg| arg.ty().clone())
-                            .unwrap_or(crate::core::ScalarType::Unknown)
+                if declared_template(input, module, expr).is_some() {
+                    // The checker-selected template below handles this operator.
+                } else {
+                    let sql = match operator.as_str() {
+                        "_+_" => Some("$1 + $2"),
+                        "_-_" => Some("$1 - $2"),
+                        "_*_" => Some("$1 * $2"),
+                        "_/_" => Some("$1 / $2"),
+                        "_%_" => Some("$1 % $2"),
+                        "_>_" => Some("$1 > $2"),
+                        "_<_" => Some("$1 < $2"),
+                        "_>=_" => Some("$1 >= $2"),
+                        "_<=_" => Some("$1 <= $2"),
+                        "_==_" => Some("$1 = $2"),
+                        "_!=_" => Some("$1 <> $2"),
+                        "_&&_" => Some("$1 AND $2"),
+                        "_||_" => Some("$1 OR $2"),
+                        "_??_" => Some("COALESCE($1, $2)"),
+                        _ => None,
                     };
-                    return crate::checked::CheckedExpr::template(sql, lowered, ty, origin)
-                        .map(Some)
-                        .map_err(|error| Error::unsupported(error.message).at(origin));
+                    if let Some(sql) = sql {
+                        let mut lowered = Vec::with_capacity(args.len());
+                        for arg in args.iter() {
+                            let Some(arg) = lower_plain_expr_with_row(input, module, arg, row)?
+                            else {
+                                return Ok(None);
+                            };
+                            lowered.push(arg);
+                        }
+                        let ty = if operator == "_>_"
+                            || operator == "_<_"
+                            || operator == "_>=_"
+                            || operator == "_<=_"
+                            || operator == "_==_"
+                            || operator == "_!=_"
+                            || operator == "_&&_"
+                            || operator == "_||_"
+                        {
+                            crate::core::ScalarType::Bool
+                        } else {
+                            lowered
+                                .first()
+                                .map(|arg| arg.ty().clone())
+                                .unwrap_or(crate::core::ScalarType::Unknown)
+                        };
+                        return crate::checked::CheckedExpr::template(sql, lowered, ty, origin)
+                            .map(Some)
+                            .map_err(|error| Error::unsupported(error.message).at(origin));
+                    }
                 }
             }
             if let Some((sql, kind, arity)) = declared_template(input, module, expr) {
@@ -1103,8 +1286,71 @@ fn declared_template(
     expr: &Expr,
 ) -> Option<(String, crate::normalize::TemplateKind, usize)> {
     let ((target_module, target_def), args) = helper_application(input.type_check(), module, expr)?;
-    let (sql, kind) = template_definition(input, target_module, target_def, 0)?;
+    let use_expr = match &expr.kind {
+        ExprKind::App(head, _) => head.as_ref(),
+        _ => expr,
+    };
+    let (sql, kind) =
+        resolved_template_for_target(input, module, use_expr, target_module, target_def, 0)?;
     Some((sql, kind, args.len()))
+}
+
+fn resolved_template_for_target(
+    input: CompilerInput<'_>,
+    use_module: usize,
+    use_expr: &Expr,
+    module: usize,
+    def: usize,
+    depth: usize,
+) -> Option<(String, crate::normalize::TemplateKind)> {
+    if depth > 32 {
+        return None;
+    }
+    let declaration = input.module(module).def(def);
+    if let ExprKind::Sql(sql) = &declaration.body.kind {
+        return Some((
+            sql.clone(),
+            crate::normalize::declared_template_kind(declaration),
+        ));
+    }
+    let (ExprKind::Name(_) | ExprKind::Proj(_, _)) = &declaration.body.kind else {
+        return None;
+    };
+    match input.type_check().resolution(module, declaration.body.id)? {
+        Resolved::Def((next_module, next_def)) => resolved_template_for_target(
+            input,
+            use_module,
+            use_expr,
+            *next_module,
+            *next_def,
+            depth + 1,
+        ),
+        Resolved::Overloads {
+            module: overload_module,
+            defs,
+        } => {
+            let choice = input
+                .type_check()
+                .typed_node(use_module, use_expr.id)?
+                .choices
+                .iter()
+                .find_map(|(_, choice)| match choice {
+                    crate::check::Choice::Def(_, candidate) if defs.contains(candidate) => {
+                        Some(*candidate)
+                    }
+                    _ => None,
+                })?;
+            resolved_template_for_target(
+                input,
+                use_module,
+                use_expr,
+                *overload_module,
+                choice,
+                depth + 1,
+            )
+        }
+        Resolved::Primitive => None,
+    }
 }
 
 fn template_definition(
@@ -2166,6 +2412,16 @@ fn apply_plain_stage_expr(
     mut checked: CheckedQuery,
     typed: &mut TypedQuery,
 ) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    if matches!(&expr.kind, ExprKind::Name(_) | ExprKind::Proj(_, _)) {
+        let target = query_target(input.type_check(), module, expr).or_else(|| {
+            helper_application(input.type_check(), module, expr).map(|(target, _)| target)
+        });
+        let Some((target_module, target_def)) = target else {
+            return Ok(None);
+        };
+        let body = lambda_tail(&input.module(target_module).def(target_def).body);
+        return apply_plain_stage_expr(input, target_module, def, body, child, checked, typed);
+    }
     let ExprKind::App(head, args) = &expr.kind else {
         return Ok(None);
     };
@@ -2352,6 +2608,51 @@ fn apply_plain_stage_expr(
     Ok(Some((id, checked)))
 }
 
+fn apply_plain_stage_value(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    expr: &Expr,
+    child: NodeId,
+    checked: CheckedQuery,
+    typed: &mut TypedQuery,
+) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    if let ExprKind::App(head, args) = &expr.kind {
+        if args.len() == 2
+            && matches!(&head.kind, ExprKind::Name(name) if name == "_>>>_" || name == "_<<<_")
+        {
+            let order: Box<dyn Iterator<Item = &Expr>> = if matches!(
+                &head.kind,
+                ExprKind::Name(name) if name == "_<<<_"
+            ) {
+                Box::new(args.iter().rev())
+            } else {
+                Box::new(args.iter())
+            };
+            let mut current = child;
+            let mut current_checked = checked;
+            for stage in order {
+                let Some((next, next_checked)) = apply_plain_stage_value(
+                    input,
+                    module,
+                    def,
+                    stage,
+                    current,
+                    current_checked,
+                    typed,
+                )?
+                else {
+                    return Ok(None);
+                };
+                current = next;
+                current_checked = next_checked;
+            }
+            return Ok(Some((current, current_checked)));
+        }
+    }
+    apply_plain_stage_expr(input, module, def, expr, child, checked, typed)
+}
+
 /// Source-build a composed query when all joins and stages have plain
 /// expression payloads. The checked relation travels with each typed node, so
 /// a join and its surrounding stages need no normalized query template.
@@ -2395,7 +2696,7 @@ fn lower_plain_composed_expr(
         return Ok(None);
     };
     if args.len() == 2
-        && matches!(&head.kind, ExprKind::Name(name) if name == "_&|_" || name == "_&~_")
+        && matches!(&head.kind, ExprKind::Name(name) if matches!(name.as_str(), "_&|_" | "_&!_" | "_&^_" | "_&~_"))
     {
         let Some((left, checked_left)) =
             lower_plain_composed_expr(context, input, module, def, &args[0], typed)?
@@ -2407,10 +2708,11 @@ fn lower_plain_composed_expr(
         else {
             return Ok(None);
         };
-        let kind = if matches!(&head.kind, ExprKind::Name(name) if name == "_&|_") {
-            crate::ir::SetKind::Union
-        } else {
-            crate::ir::SetKind::Except
+        let kind = match &head.kind {
+            ExprKind::Name(name) if name == "_&|_" => crate::ir::SetKind::Union,
+            ExprKind::Name(name) if name == "_&!_" => crate::ir::SetKind::UnionAll,
+            ExprKind::Name(name) if name == "_&^_" => crate::ir::SetKind::Intersect,
+            _ => crate::ir::SetKind::Except,
         };
         let origin = Origin::new(module, expr.span);
         let checked = CheckedQuery::set(kind, checked_left, checked_right, origin)
@@ -2438,12 +2740,107 @@ fn lower_plain_composed_expr(
         return lower_shorthand_stage(input, module, def, expr, child, checked, typed);
     }
     if args.len() != 2 || !is_pipe_head(head) {
+        if let Some((combine, operation)) = combine_record_in(input.type_check(), module, expr) {
+            let operands: Vec<_> = query_operand_args(input, module, operation).collect();
+            if operands.len() == 2 {
+                let Some((left, checked_left)) =
+                    lower_plain_composed_expr(context, input, module, def, operands[0], typed)?
+                else {
+                    return Ok(None);
+                };
+                let Some((right, checked_right)) =
+                    lower_plain_composed_expr(context, input, module, def, operands[1], typed)?
+                else {
+                    return Ok(None);
+                };
+                let origin = Origin::new(combine.node.definition_module, operation.span);
+                let kind = combine_query_kind(combine.kind);
+                let output = combine.output.clone().map(Row::new);
+                let (typed_left, typed_right, checked, predicate) = match combine.kind {
+                    CombineKind::Join(join_kind) => {
+                        let ExprKind::App(_, join_args) = &operation.kind else {
+                            return Ok(None);
+                        };
+                        let Some(predicate_expr) = join_args.get(1) else {
+                            return Ok(None);
+                        };
+                        let Some(predicate) = lower_plain_expr(input, module, predicate_expr)?
+                        else {
+                            return Ok(None);
+                        };
+                        let checked = CheckedQuery::join(
+                            join_kind,
+                            checked_left,
+                            checked_right,
+                            predicate.clone(),
+                            origin,
+                        )
+                        .map_err(|error| Error::unsupported(error.message).at(origin))?;
+                        (left, right, checked, Some(predicate))
+                    }
+                    CombineKind::Set(set_kind) => {
+                        let checked =
+                            CheckedQuery::set(set_kind, checked_left, checked_right, origin)
+                                .map_err(|error| Error::unsupported(error.message).at(origin))?;
+                        (left, right, checked, None)
+                    }
+                };
+                let id = typed
+                    .combine(
+                        combine.node,
+                        kind,
+                        typed_left,
+                        typed_right,
+                        output,
+                        origin,
+                        predicate,
+                    )
+                    .map_err(query_error)?;
+                return Ok(Some((id, checked)));
+            }
+        }
         let mut helper_typed = TypedQuery::new();
         if let Some((root, checked)) =
             lower_helper_expr(context, input, module, def, expr, &mut helper_typed)?
         {
             let id = copy_typed_graph(&helper_typed.finish(root), typed)?;
             return Ok(Some((id, checked)));
+        }
+        if let Some(((helper_module, helper_def), helper_args)) =
+            helper_application(input.type_check(), module, expr)
+        {
+            if matches!(
+                input.type_check().scheme_view(helper_module, helper_def),
+                Some(crate::check::SchemeView::Function)
+            ) {
+                for query_index in (0..helper_args.len()).rev() {
+                    let query_arg = &helper_args[query_index];
+                    let Some((child, checked)) =
+                        lower_plain_composed_expr(context, input, module, def, query_arg, typed)?
+                    else {
+                        continue;
+                    };
+                    let mut non_query = helper_args.clone();
+                    non_query.remove(query_index);
+                    if let Some(lowered) = apply_helper(
+                        context,
+                        input,
+                        module,
+                        def,
+                        expr.id,
+                        child,
+                        checked,
+                        helper_module,
+                        helper_def,
+                        query_index,
+                        &non_query,
+                        expr,
+                        typed,
+                    )? {
+                        return Ok(Some(lowered));
+                    }
+                }
+            }
         }
         return Ok(None);
     }
@@ -2463,7 +2860,7 @@ fn lower_plain_composed_expr(
             def,
             &stage_expr,
             child,
-            checked,
+            checked.clone(),
             typed,
         );
     }
@@ -2515,7 +2912,7 @@ fn lower_plain_composed_expr(
         return Ok(Some((id, checked)));
     }
     if let ExprKind::App(comp_head, comp_args) = &rhs.kind {
-        if matches!(&comp_head.kind, ExprKind::Name(name) if name == "_>>>_")
+        if matches!(&comp_head.kind, ExprKind::Name(name) if name == "_>>>_" || name == "_<<<_")
             && comp_args.len() == 2
         {
             let Some((child, mut checked)) =
@@ -2524,8 +2921,14 @@ fn lower_plain_composed_expr(
                 return Ok(None);
             };
             let mut current = child;
-            for stage_expr in comp_args.iter() {
-                let Some((next, next_checked)) = apply_plain_stage_expr(
+            let stages: Box<dyn Iterator<Item = &Expr>> = if matches!(&comp_head.kind, ExprKind::Name(name) if name == "_<<<_")
+            {
+                Box::new(comp_args.iter().rev())
+            } else {
+                Box::new(comp_args.iter())
+            };
+            for stage_expr in stages {
+                let Some((next, next_checked)) = apply_plain_stage_value(
                     input, module, def, stage_expr, current, checked, typed,
                 )?
                 else {
@@ -2572,15 +2975,65 @@ fn lower_plain_composed_expr(
             def,
             expr.id,
             child,
-            checked,
+            checked.clone(),
             helper_module,
             helper_def,
-            0,
+            helper_args.len(),
             &helper_args,
             rhs,
             typed,
         )? {
             return Ok(Some(lowered));
+        }
+        if helper_args.is_empty()
+            && matches!(
+                input.type_check().scheme_view(helper_module, helper_def),
+                Some(crate::check::SchemeView::Function)
+            )
+        {
+            let stage_body = lambda_tail(&input.module(helper_module).def(helper_def).body);
+            if let ExprKind::App(comp_head, comp_args) = &stage_body.kind {
+                if matches!(&comp_head.kind, ExprKind::Name(name) if name == "_>>>_" || name == "_<<<_")
+                    && comp_args.len() == 2
+                {
+                    let mut current = child;
+                    let mut current_checked = checked;
+                    let stages: Box<dyn Iterator<Item = &Expr>> = if matches!(&comp_head.kind, ExprKind::Name(name) if name == "_<<<_")
+                    {
+                        Box::new(comp_args.iter().rev())
+                    } else {
+                        Box::new(comp_args.iter())
+                    };
+                    for stage_expr in stages {
+                        let Some((next, next_checked)) = apply_plain_stage_value(
+                            input,
+                            module,
+                            def,
+                            stage_expr,
+                            current,
+                            current_checked,
+                            typed,
+                        )?
+                        else {
+                            return Ok(None);
+                        };
+                        current = next;
+                        current_checked = next_checked;
+                    }
+                    return Ok(Some((current, current_checked)));
+                }
+            }
+            if let Some(lowered) = apply_plain_stage_expr(
+                input,
+                helper_module,
+                def,
+                stage_body,
+                child,
+                checked,
+                typed,
+            )? {
+                return Ok(Some(lowered));
+            }
         }
     }
     if let Some((stage_module, stage_def)) = query_target(input.type_check(), module, rhs) {
@@ -2596,13 +3049,19 @@ fn lower_plain_composed_expr(
             let stage_body = &input.module(stage_module).def(stage_def).body;
             let stage_body = lambda_tail(stage_body);
             if let ExprKind::App(comp_head, comp_args) = &stage_body.kind {
-                if matches!(&comp_head.kind, ExprKind::Name(name) if name == "_>>>_")
+                if matches!(&comp_head.kind, ExprKind::Name(name) if name == "_>>>_" || name == "_<<<_")
                     && comp_args.len() == 2
                 {
                     let mut current = child;
                     let mut current_checked = checked;
-                    for stage_expr in comp_args.iter() {
-                        let Some((next, next_checked)) = apply_plain_stage_expr(
+                    let stages: Box<dyn Iterator<Item = &Expr>> = if matches!(&comp_head.kind, ExprKind::Name(name) if name == "_<<<_")
+                    {
+                        Box::new(comp_args.iter().rev())
+                    } else {
+                        Box::new(comp_args.iter())
+                    };
+                    for stage_expr in stages {
+                        let Some((next, next_checked)) = apply_plain_stage_value(
                             input,
                             stage_module,
                             def,
@@ -2620,15 +3079,11 @@ fn lower_plain_composed_expr(
                     return Ok(Some((current, current_checked)));
                 }
             }
-            return apply_plain_stage_expr(
-                input,
-                stage_module,
-                def,
-                stage_body,
-                child,
-                checked,
-                typed,
-            );
+            if let Some(lowered) =
+                apply_plain_stage_expr(input, stage_module, def, stage_body, child, checked, typed)?
+            {
+                return Ok(Some(lowered));
+            }
         }
     }
     if let Some((combine, operation)) = combine_record_in(input.type_check(), module, rhs) {
@@ -3918,7 +4373,7 @@ fn lower_helper_expr(
                     checked,
                     helper_module,
                     helper_def,
-                    0,
+                    helper_args.len(),
                     &helper_args,
                     body,
                     typed,
@@ -3959,6 +4414,59 @@ fn apply_helper(
 ) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
     let tc = input.type_check();
     let mut helper_stages: Vec<_> = tc.row_stages(helper_module, helper_def).cloned().collect();
+    let helper_syntax = &input.module(helper_module).def(helper_def).body;
+    let params = lambda_params(helper_syntax);
+    if helper_stages.is_empty() && query_param_index < params.len() {
+        let helper_tail = lambda_tail(helper_syntax);
+        let mut syntax = HashMap::new();
+        index_exprs(helper_tail, &mut syntax);
+        let bound = typed.clone().finish(child);
+        let mut substitutions = HashMap::new();
+        let mut argument_index = 0usize;
+        for (parameter_index, parameter) in params.iter().enumerate() {
+            if parameter_index == query_param_index {
+                for expr in syntax.values() {
+                    if matches!(&expr.kind, ExprKind::Name(name) if name == parameter) {
+                        context
+                            .query_bindings
+                            .insert((helper_module, expr.id), (bound.clone(), checked.clone()));
+                    }
+                }
+                continue;
+            }
+            let Some(argument) = helper_args.get(argument_index) else {
+                continue;
+            };
+            argument_index += 1;
+            let function_argument = tc
+                .use_scheme(use_module, argument.id)
+                .is_some_and(|scheme| matches!(scheme, crate::check::SchemeView::Function));
+            if function_argument {
+                substitutions.insert(parameter.as_str(), argument.clone());
+            } else {
+                substitutions.insert(parameter.as_str(), argument.clone());
+            }
+        }
+        let substituted = substitute_expr(helper_tail, &substitutions);
+        let mut body_typed = TypedQuery::new();
+        let composed = lower_plain_composed_expr(
+            context,
+            input,
+            helper_module,
+            helper_def,
+            &substituted,
+            &mut body_typed,
+        )?;
+        for expr in syntax.values() {
+            if matches!(&expr.kind, ExprKind::Name(name) if name == &params[query_param_index]) {
+                context.query_bindings.remove(&(helper_module, expr.id));
+            }
+        }
+        if let Some((root, body_checked)) = composed {
+            let copied = copy_typed_graph(&body_typed.finish(root), typed)?;
+            return Ok(Some((copied, body_checked)));
+        }
+    }
     if helper_stages.is_empty()
         || helper_stages.iter().any(|stage| {
             !matches!(
@@ -3980,14 +4488,12 @@ fn apply_helper(
     {
         return Ok(None);
     }
-    let helper_syntax = &input.module(helper_module).def(helper_def).body;
     // The checker records stages by source visitation. Nested direct calls
     // write the outer application first even though the inner application runs
     // first, so order this helper's stages by their AST nesting depth.
     helper_stages.sort_by_key(|stage| {
         std::cmp::Reverse(expr_depth_to_id(helper_syntax, stage.site, 0).unwrap_or(0))
     });
-    let params = lambda_params(helper_syntax);
     if params.iter().collect::<HashSet<_>>().len() != params.len() {
         return Ok(None);
     }
@@ -4042,6 +4548,7 @@ fn apply_helper(
         checked.clone(),
         helper_module,
         helper_def,
+        query_param_index,
         helper_args,
         use_expr,
         &helper_stages,
@@ -4070,6 +4577,7 @@ fn apply_plain_helper_pipeline(
     mut checked: CheckedQuery,
     helper_module: usize,
     helper_def: usize,
+    query_param_index: usize,
     helper_args: &[Expr],
     _use_expr: &Expr,
     stages: &[crate::check::RowStageView],
@@ -4083,6 +4591,17 @@ fn apply_plain_helper_pipeline(
     let mut syntax = HashMap::new();
     index_exprs(helper_body, &mut syntax);
     let params = lambda_params(helper_body);
+    let mut substitutions = HashMap::new();
+    let mut argument_index = 0usize;
+    for (parameter_index, parameter) in params.iter().enumerate() {
+        if parameter_index == query_param_index {
+            continue;
+        }
+        if let Some(argument) = helper_args.get(argument_index) {
+            substitutions.insert(parameter.as_str(), argument.clone());
+            argument_index += 1;
+        }
+    }
 
     // Build on a clone so any unsupported expression can cleanly decline
     // without retaining partially appended nodes.
@@ -4091,6 +4610,11 @@ fn apply_plain_helper_pipeline(
     for stage in stages {
         let Some(stage_expr) = find_expr_id(helper_body, stage.site) else {
             return Ok(None);
+        };
+        let stage_expr = if substitutions.is_empty() {
+            stage_expr.clone()
+        } else {
+            substitute_expr(stage_expr, &substitutions)
         };
         let ExprKind::App(_, args) = &stage_expr.kind else {
             return Ok(None);
@@ -4665,6 +5189,17 @@ fn query_target(
     match &expr.kind {
         ExprKind::Name(_) | ExprKind::Proj(_, _) => match tc.resolution(module, expr.id) {
             Some(Resolved::Def(target)) => Some(*target),
+            Some(Resolved::Overloads {
+                module: overload_module,
+                defs,
+            }) => tc.typed_node(module, expr.id).and_then(|node| {
+                node.choices.iter().find_map(|(_, choice)| match choice {
+                    crate::check::Choice::Def(_, def) if defs.contains(def) => {
+                        Some((*overload_module, *def))
+                    }
+                    _ => None,
+                })
+            }),
             _ => None,
         },
         _ => None,

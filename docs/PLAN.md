@@ -250,6 +250,12 @@ nodes and rebuilds the checked relation directly when the supported expression
 subset is covered. Unsupported forms currently report a compiler capability
 error and are tracked as migration gaps.
 
+The typed path also instantiates higher-order helpers with concrete scalar and
+stage arguments, preserves composed and inline stage values, and lowers direct
+infix set spellings (`&|` and `&~`) without re-normalizing their operands.
+Polymorphic scalar operators in helper projections use the checker-resolved
+argument types when constructing their checked payloads.
+
 Plain expression lowering now reads SQL templates and their declared phase from
 resolved definition metadata. Scalar, aggregate, and window templates use the
 selected `sql` body, aliases are followed through their definitions, and

@@ -134,12 +134,11 @@ fn elaborate_def(
     ) {
         return Err(NOT_A_QUERY);
     }
-    // The typed route is authoritative whenever its graph is complete. A
-    // declined shape is sent through one explicit transitional adapter; typed
-    // errors are never hidden by trying a second interpretation.
+    // The typed route is authoritative. A query shape the typed builder cannot
+    // construct is a compiler capability error; it is never reinterpreted by
+    // a second semantic implementation.
     match crate::query_lowering::lower(input, module, def, &d.body)? {
-        crate::query_lowering::LoweredQuery::Typed { checked, .. }
-        | crate::query_lowering::LoweredQuery::Legacy { checked } => Ok(checked),
+        crate::query_lowering::LoweredQuery::Typed { checked, .. } => Ok(checked),
     }
 }
 

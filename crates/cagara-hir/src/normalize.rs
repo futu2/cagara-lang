@@ -1752,6 +1752,7 @@ fn inline_resolved(
 ///
 /// `Err` with `Fault::Compiler` means the term layer could not build the
 /// definition, which is the caller's cue to record the fallback.
+#[cfg(test)]
 pub fn elaborate_query_via_terms(
     input: crate::compile::CompilerInput<'_>,
     module: usize,
@@ -1803,6 +1804,7 @@ pub fn elaborate_query_via_terms(
 /// Counted with an explicit stack rather than recursively: the terms this
 /// rejects are exactly the deep and wide ones, and a walk that recursed over
 /// them would overflow the stack while reporting that the term is too big.
+#[cfg(test)]
 fn check_term_size(t: &Term) -> Result<(), Gap> {
     let mut stack = vec![t];
     let mut nodes = 0usize;

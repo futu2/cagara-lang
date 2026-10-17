@@ -1,10 +1,11 @@
 //! Tree-driven query lowering slices.
 //!
-//! This builder consumes the checker-owned stage records and the typed query
-//! nodes' rows. It handles direct pipelines and recursively composed joins and
-//! set operations over tables or already typed query aliases. Some expression
-//! payloads remain on the normalized bridge, and shapes whose stage bodies
-//! cannot yet be instantiated return `None` for the established term route.
+//! This builder consumes checker-owned stage records, expression facts, and
+//! typed query rows. It handles direct pipelines and recursively composed
+//! joins and set operations over tables or typed query aliases. Shapes it
+//! cannot construct return `None`; the production coordinator turns that into
+//! a compiler capability diagnostic. The normalized term implementation is
+//! used only by agreement tests.
 #![allow(dead_code)] // Keep the slice self-contained while later stages land.
 
 use crate::check::{CombineKind, NodeId, NodeRef, QueryNodeKind, Row, RowStage, TypedQuery};
@@ -122,16 +123,15 @@ fn lower_unhydrated(
             .at(Origin::new(module, body.span)));
     }
 
-    // A standalone join/set can be rebuilt from its typed operands before
-    // the composed pipeline route uses the normalized template.
+    // A standalone join/set can be rebuilt from its typed operands before the
+    // general composed-pipeline route handles surrounding stages.
     if let Some(lowered) = lower_combine_pipeline(context, input, module, def, body)? {
         return Ok(Some(lowered));
     }
 
     // A combine can occur below or above ordinary stages. Build the complete
-    // relational skeleton recursively so a stage never causes the combine
-    // child to be dropped. Expression payloads still come from the normalized
-    // route; this builder only owns node identity and row boundaries.
+    // relational graph recursively so a stage never causes a combine child to
+    // be dropped.
     if contains_combine_tree(input, module, body) || contains_join_operator_tree(body) {
         if let Some(lowered) = lower_composed_pipeline(context, input, module, def, body)? {
             return Ok(Some(lowered));
@@ -164,6 +164,17 @@ fn lower_unhydrated(
     }
     if let Some(lowered) = lower_plain_expression_chain(context, input, module, def, body)? {
         return Ok(Some(lowered));
+    }
+    // Non-direct stage values (named/composed stages and inline lambdas) do
+    // not leave caller-owned row-stage records. Walk their source structure
+    // through the same typed composer before considering helper fallback.
+    if !is_direct_pipeline(input, module, body) {
+        let mut typed = TypedQuery::new();
+        if let Some((root, checked)) =
+            lower_plain_composed_expr(context, input, module, def, body, &mut typed)?
+        {
+            return Ok(Some((typed.finish(root), checked)));
+        }
     }
     // A helper application may itself carry recorded stages at the use site
     // (for example `h (where ...)`). It is not a direct source pipeline, so
@@ -583,6 +594,25 @@ enum PlainFunctionBody<'a> {
     },
 }
 
+fn scalar_operator_template(name: &str) -> Option<&'static str> {
+    match name {
+        "_+_" => Some("$1 + $2"),
+        "_-_" => Some("$1 - $2"),
+        "_*_" => Some("$1 * $2"),
+        "_/_" => Some("$1 / $2"),
+        "_%_" => Some("$1 % $2"),
+        "_>_" => Some("$1 > $2"),
+        "_<_" => Some("$1 < $2"),
+        "_>=_" => Some("$1 >= $2"),
+        "_<=_" => Some("$1 <= $2"),
+        "_==_" => Some("$1 = $2"),
+        "_!=_" => Some("$1 <> $2"),
+        "_&&_" => Some("$1 AND $2"),
+        "_||_" => Some("$1 OR $2"),
+        _ => None,
+    }
+}
+
 fn lower_plain_value<'a>(
     input: CompilerInput<'a>,
     module: usize,
@@ -602,6 +632,18 @@ fn lower_plain_value<'a>(
         ExprKind::Name(name) => {
             if let Some(value) = env.get(name).cloned() {
                 return Ok(Some(value));
+            }
+            if let Some(sql) = scalar_operator_template(name) {
+                return Ok(Some(PlainValue::Function {
+                    params: (0..2).map(|i| format!("$arg{i}")).collect(),
+                    body: PlainFunctionBody::Template {
+                        sql: sql.to_string(),
+                        kind: crate::normalize::TemplateKind::Scalar,
+                        ty: crate::core::ScalarType::Unknown,
+                    },
+                    module,
+                    env: HashMap::new(),
+                }));
             }
             let Some((target_module, target_def)) = scalar_definition_target(tc, module, expr.id)
             else {
@@ -1091,6 +1133,36 @@ fn template_definition(
         return None;
     };
     template_definition(input, *target_module, *target_def, depth + 1)
+}
+
+/// Resolve a bare name to the checker-selected SQL template, including an
+/// overload choice recorded at that use site.
+fn resolved_template_definition(
+    input: CompilerInput<'_>,
+    module: usize,
+    expr: &Expr,
+) -> Option<(usize, usize, String, crate::normalize::TemplateKind)> {
+    let tc = input.type_check();
+    let (target_module, target_def) = match tc.resolution(module, expr.id)? {
+        Resolved::Def((target_module, target_def)) => (*target_module, *target_def),
+        Resolved::Overloads {
+            module: overload_module,
+            defs,
+        } => {
+            let choice = tc.typed_node(module, expr.id)?.choices.iter().find_map(
+                |(_, choice)| match choice {
+                    crate::check::Choice::Def(_, def) if defs.contains(def) => {
+                        Some((*overload_module, *def))
+                    }
+                    _ => None,
+                },
+            )?;
+            choice
+        }
+        Resolved::Primitive => return None,
+    };
+    let (sql, kind) = template_definition(input, target_module, target_def, 0)?;
+    Some((target_module, target_def, sql, kind))
 }
 
 /// Resolve a primitive declaration, following ordinary aliases. Primitive
@@ -2208,6 +2280,8 @@ fn apply_plain_stage_expr(
             }
             output_row = Row::new(columns);
         }
+    } else {
+        output_row = Row::new(checked.row().columns().to_vec());
     }
     let kind = match stage {
         RowStage::Prefix => QueryNodeKind::Prefix,
@@ -2463,6 +2537,18 @@ fn lower_plain_composed_expr(
             return Ok(Some((current, checked)));
         }
     }
+    if let ExprKind::Lambda(parameter, body) = &rhs.kind {
+        let Some((child, checked)) =
+            lower_plain_composed_expr(context, input, module, def, left_expr, typed)?
+        else {
+            return Ok(None);
+        };
+        if let Some(lowered) =
+            lower_inline_stage_body(input, module, def, parameter, body, child, checked, typed)?
+        {
+            return Ok(Some(lowered));
+        }
+    }
     if let Some(stage_expr) = inline_stage_expr(rhs) {
         let Some((child, checked)) =
             lower_plain_composed_expr(context, input, module, def, left_expr, typed)?
@@ -2470,6 +2556,32 @@ fn lower_plain_composed_expr(
             return Ok(None);
         };
         return apply_plain_stage_expr(input, module, def, &stage_expr, child, checked, typed);
+    }
+    if let Some(((helper_module, helper_def), helper_args)) =
+        helper_application(input.type_check(), module, rhs)
+    {
+        let Some((child, checked)) =
+            lower_plain_composed_expr(context, input, module, def, left_expr, typed)?
+        else {
+            return Ok(None);
+        };
+        if let Some(lowered) = apply_helper(
+            context,
+            input,
+            module,
+            def,
+            expr.id,
+            child,
+            checked,
+            helper_module,
+            helper_def,
+            0,
+            &helper_args,
+            rhs,
+            typed,
+        )? {
+            return Ok(Some(lowered));
+        }
     }
     if let Some((stage_module, stage_def)) = query_target(input.type_check(), module, rhs) {
         if matches!(
@@ -2815,7 +2927,7 @@ fn lower_composed_expr(
         let id = typed
             .table(NodeRef::new(module, def, expr.id), origin, columns)
             .map_err(query_error)?;
-        let _ = (schema, table); // table metadata belongs to the term bridge.
+        let _ = (schema, table); // TypedQuery records the checker-owned columns.
         return Ok(Some(id));
     }
 
@@ -2890,8 +3002,7 @@ fn lower_composed_expr(
     }
 
     // A direct call such as `union users vips` has two query arguments. The
-    // same combine record is used; predicates are simply ignored here because
-    // their checked expression remains on the normalized bridge.
+    // same combine record supplies its ordered operands and checked predicate.
     if let Some((combine, operation)) = combine_record_in(input.type_check(), module, expr) {
         let operands: Vec<_> = query_operand_args(input, module, operation).collect();
         if operands.len() != 2 {
@@ -4611,6 +4722,55 @@ fn inline_stage_expr(expr: &Expr) -> Option<Expr> {
     })
 }
 
+/// Evaluate an inline stage lambda against an already lowered query. The
+/// surface form is curried application, so a lambda such as
+/// `x => select {...} (where (...) x)` contains two stage applications whose
+/// query argument is the final argument of each application.
+fn lower_inline_stage_body(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    parameter: &str,
+    body: &Expr,
+    child: NodeId,
+    checked: CheckedQuery,
+    typed: &mut TypedQuery,
+) -> Result<Option<(NodeId, CheckedQuery)>, Error> {
+    if matches!(&body.kind, ExprKind::Name(name) if name == parameter) {
+        return Ok(Some((child, checked)));
+    }
+    let ExprKind::App(head, args) = &body.kind else {
+        return Ok(None);
+    };
+    let Some(query_arg) = args.last() else {
+        return Ok(None);
+    };
+    let Some((query_child, query_checked)) = lower_inline_stage_body(
+        input, module, def, parameter, query_arg, child, checked, typed,
+    )?
+    else {
+        return Ok(None);
+    };
+    let stage = Expr {
+        id: body.id,
+        span: body.span,
+        kind: ExprKind::App(
+            head.clone(),
+            args[..args.len() - 1].to_vec().into_boxed_slice(),
+        ),
+    };
+    let result = apply_plain_stage_expr(
+        input,
+        module,
+        def,
+        &stage,
+        query_child,
+        query_checked,
+        typed,
+    );
+    result
+}
+
 fn lambda_params(expr: &Expr) -> Vec<String> {
     let mut params = Vec::new();
     let mut body = expr;
@@ -5161,9 +5321,6 @@ mod tests {
         .unwrap();
         let checked = match lowered {
             crate::query_lowering::LoweredQuery::Typed { checked, .. } => checked,
-            crate::query_lowering::LoweredQuery::Legacy { .. } => {
-                panic!("supported query unexpectedly used normalized lowering")
-            }
         };
         assert_eq!(checked.row().names(), &["id", "name", "uid", "amount"]);
     }

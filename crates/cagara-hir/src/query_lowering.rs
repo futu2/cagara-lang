@@ -1,12 +1,9 @@
 //! The query lowering boundary.
 //!
-//! Query construction is migrating from the normalized term representation to
-//! the checker-owned typed query graph. Keeping the route decision here makes
-//! that migration explicit: typed lowering returns its graph and a checked
-//! query, while reporting whether the graph aligned with the checked tree well
-//! enough to reconstruct its checked nodes. If the typed builder declines the
-//! whole shape, the legacy term adapter runs. A typed lowering error is never
-//! reinterpreted as a request to try another semantic implementation.
+//! Query construction is owned by the checker-owned typed query graph. This
+//! module keeps the boundary explicit: typed lowering returns its graph and a
+//! checked query, while reporting whether the graph aligned with the checked
+//! tree well enough to reconstruct its checked nodes.
 
 use crate::check::TypedQuery;
 use crate::checked::CheckedQuery;
@@ -28,10 +25,6 @@ pub(crate) enum LoweredQuery {
         /// still come from the checked adapter tree.
         rebuilt_checked_tree: bool,
     },
-    /// A query built by the temporary normalized-term adapter. This route is
-    /// intentionally a distinct outcome so callers cannot mistake it for a
-    /// successful typed lowering or silently add a second fallback.
-    Legacy { checked: CheckedQuery },
 }
 
 /// Lower one definition through the current query pipeline.
@@ -51,9 +44,8 @@ pub(crate) fn lower(
         });
     }
 
-    // Transitional adapter. It is the only place where the production query
-    // boundary selects normalized lowering after the typed route declines a
-    // shape; typed lowering never invokes it internally.
-    let checked = crate::normalize::elaborate_query_via_terms(input, module, def, body)?;
-    Ok(LoweredQuery::Legacy { checked })
+    Err(
+        Error::unsupported("typed query lowering does not support this query shape")
+            .at(crate::core::Origin::new(module, body.span)),
+    )
 }

@@ -2,16 +2,12 @@
 
 ## Current implementation status
 
-The typed query arena and its first production lowering slices have landed.
-Production now routes query definitions through a typed builder first, with one
-explicit normalized adapter for declined shapes. Typed lowering builds checked
-expression payloads for its supported subset and no longer invokes normalization
-internally for payloads or comparison. Unsupported forms, including helper
-chains whose intermediate projection rows are unavailable from checker facts,
-decline to the route coordinator. The builder's active-definition set is owned
-by a per-attempt `LoweringContext`, not ambient thread-local state. The remaining
-work is to complete checker-owned payload and helper instantiation coverage,
-then remove the adapter. The live slice status is maintained in
+The redesign is implemented. Production routes every accepted query through
+`TypedQuery` and checker-owned expression payloads; no normalized query fallback
+remains. Unsupported accepted shapes produce a typed capability diagnostic.
+The normalized term machinery is retained as an independent test oracle. The
+builder's active-definition set is owned by a per-attempt `LoweringContext`,
+not ambient thread-local state. Validation and implementation notes are in
 [`PLAN.md`](PLAN.md).
 
 ## Why change it
@@ -141,11 +137,9 @@ Current: AST -> TypeCheck facts -> normalized Term -> CheckedQuery -> Rel
 Target:  AST -> TypedExpr / CheckedQuery --------------------------> Rel
 ```
 
-During migration, the existing normalizer can consume the new typed result or
-remain behind an adapter. The adapter must be temporary and must not infer,
-resolve, choose overloads, or recompute rows. Once the typed tree covers all
-constructs, remove the side-map dependency and old path rather than keeping two
-semantic implementations.
+The normalized term implementation remains an independent test oracle. It
+does not participate in production query compilation and can be removed after
+the agreement tests no longer need it.
 
 ## Migration plan
 
@@ -211,14 +205,16 @@ Keep erasure structural and SQL lowering type-agnostic.
 Steps 1–5 are done as far as the *facts* go: checking returns a typed tree that
 carries the type, row, printed form, resolution, overload choices, and stage of
 every expression, `holes` on the body, and no per-expression map survives.
-What remains is the second half of this step — the **walk**, not the facts.
+The checker-owned walk is now the production path; normalized traversal remains
+only in test-oracle code.
 
 #### What stands in the way
 
-`CheckedQuery` is built today by normalizing source to a `Term` and lowering
-that: `elaborate_query_via_terms` walks the AST through the bridge
-(`normalize::expression`), which resolves every name, inlines every definition,
-and reduces every application, and `lower_query` then reads the finished term.
+The test oracle can build a `CheckedQuery` by normalizing source to a `Term`:
+`elaborate_query_via_terms` walks the AST through the bridge
+(`normalize::expression`), which resolves names, inlines definitions, and
+reduces applications, and `lower_query` reads the finished term. Production
+query compilation instead consumes `TypedQuery` and checker-owned payloads.
 
 A walk over the typed tree cannot simply replace it. The tree deliberately does
 not copy syntax — a node carries its `ExprId` and span, and a consumer that
@@ -252,9 +248,8 @@ cannot answer "what stages does this query run" without it.
   assignment travels with the node rather than through the term's substitution
   stack.
 - **Expressions**: predicates, projections, aggregate inputs, and scalar
-  arguments stay on the bridge. They are terms today and the checked layer
-  already consumes `CheckedExpr`; there is no reason to rebuild that path over
-  the tree before the query path moves.
+  arguments are checker-owned typed payloads attached to query nodes. The
+  bridge remains only for independent agreement tests.
 - **Bases**: a table, join, or set operation is an application whose arguments
   are syntax (table names, join predicates). Its *row* is on the node
   (`TypedExpr::view`), and its arguments come from the AST as they do now.
@@ -262,20 +257,18 @@ cannot answer "what stages does this query run" without it.
 #### Slices, each with its own witness
 
 1. **A direct pipeline over a base.** Build `CheckedQuery` from the recorded
-   stage chain, taking each stage's input and output rows from its node rather
-   than from the lowered term, and each stage's expression arguments from the
-   bridge. Witness: the corpus and example snapshots, plus
+   stage chain, taking each stage.s input and output rows and expression
+   arguments from checker-owned typed nodes. Witness: corpus and example
+   snapshots, plus
    `shipped_programs_stage_nodes_agree_with_the_relational_rows` and the
    query-lowering agreement test, which compare against an outside source.
 2. **Helper-composed pipelines.** Compose the callee's tree at the use, as
    inlining does today. Witness: the same tests, whose cases already include a
    helper reused at two labels and a chain through an alias.
-3. **Everything else the gate counts.** `compile::tests::the_normalized_route_handles_every_construct`
-   is the list of shapes the language has; each must be built from the tree
-   before the term route can go.
-4. **Delete the term route for queries**, and with it `Body`, `expression`,
-   `lower_query`, and the `Facts` trait — or keep the trait as the *reader* of
-   tree facts that the new path uses, which is smaller and loses nothing.
+3. **The regression inventory.** `compile::tests::the_normalized_route_handles_every_construct`
+   covers supported language shapes; unsupported accepted forms fail explicitly.
+4. Keep normalized query lowering isolated to agreement tests, then remove it
+   when those tests no longer need an independent oracle.
 
 #### What is already in place
 
@@ -314,12 +307,10 @@ guess in it.
   composed result type — the property `check::stage::finish_row_stages` asserts.
 - Erasure stays structural and SQL lowering stays type-agnostic.
 
-The honest summary: this step is a rewrite of the query half of elaboration,
-not another fact migration, and it should be done slice by slice with the corpus
-as the witness at every step. The typed graph now owns structure and stage
-boundaries for supported slices. The normalized adapter still supplies missing
-payloads or complete checked trees for some shapes, so the migration is not yet
-authoritative end to end.
+The migration rewrote the query half of elaboration while keeping the corpus as
+the behavior witness. The typed graph owns production query structure, stage
+boundaries, and expression payloads end to end. The normalized adapter is
+test-only.
 
 ## Acceptance criteria
 

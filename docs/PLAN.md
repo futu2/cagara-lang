@@ -135,8 +135,8 @@ correctness, not as an optimization.
   `use_row`, `def_result_ty`, `def_body`, `def_template`, `resolution`,
   `choice`, `holes_at`) and everything downstream reads facts through it, which
   is why each map could be deleted once its last reader read the tree instead.
-  What remains of the migration is the walk, not the facts: production still
-  walks the AST and asks the tree per node, and
+  What remains of the migration is the legacy adapter itself: it still walks
+  normalized terms and asks the tree per node, and
   `docs/TYPE-SYSTEM-REDESIGN.md` step 4 is about feeding `CheckedQuery` from
   the tree directly. The bridge and the tree have been shown to cover the same
   nodes — `compile::tests::the_bridge_visits_every_node_the_typed_tree_holds_except_projection_bases`
@@ -153,14 +153,9 @@ correctness, not as an optimization.
   prefix first but writes the suffix application outermost.
   Each stage record also carries a **stable identity**
   (`check::NodeRef` — the definition the application was written in, and the
-  application node's `ExprId` in it), which travels from the checker through
-  normalization onto the reduced term and is preserved by saturation, inlining
-  and substitution. The production stage check
-  (`normalize::check_stage_records`) matches the lowering's report to the
-  checker's record by that identity, having previously asked whether one span
-  contained another; the identity is what tells a helper's stage from the
-  caller's when the helper is inlined, since the caller records nothing at the
-  use and the callee's stage names the callee.
+  application node's `ExprId` in it). Typed lowering uses that identity when it
+  constructs a query node; the legacy adapter no longer carries a parallel
+  stage report or compares a second set of rows.
   `check::query::TypedQuery` is the query skeleton as its own arena, where a
   node carries its identity, operation, typed children, and checker-closed
   rows. It is now on the production path for supported slices. The typed graph
@@ -202,13 +197,13 @@ the diffs.
 
 | # | Step | Status |
 |---|---|---|
-| 1 | Stable `NodeRef` on normalized stage info; match by identity | **Done** |
+| 1 | Stable `NodeRef` on typed stage info; match by identity | **Done** |
 | 2 | Internal typed query representation (`TypedQueryNode`) | **Done** |
 | 3 | First typed lowering slice: table, prefix, suffix, omit, mapValue | **Done** |
 | 4 | Run both routes; compare rows, stages, origins, relations, SQL | **Done** |
 | 5 | Typed instantiation: helpers, aliases, imports, overloads, repeats | **Done** |
 | 6 | Remaining constructs: joins/sets → select/update/agg → windows → expressions | **In progress** |
-| 7 | Remove the source walk: `lower_query_recorded`, `check_stage_records`, `Facts` | **In progress: route boundary established** |
+| 7 | Remove the legacy adapter and obsolete compatibility facts | **In progress: stage-report walk removed; adapter remains for declined shapes** |
 
 #### The route boundary
 
@@ -242,7 +237,7 @@ special cases:
    the typed graph;
 3. remove normalized calls from `typed_lower.rs` and keep normalization only as
    the legacy adapter in `query_lowering.rs`;
-4. delete the adapter and the source-walk compatibility checks once the corpus
+4. delete the adapter and the remaining normalized facts once the corpus
    and incremental suite pass through the typed route alone.
 
 #### Step 6 progress: direct expression-bearing stages
@@ -414,20 +409,11 @@ It is **stamped where the stage is recorded, never derived from the term**, whic
 is what makes it survive saturation, inlining and substitution — see the
 known-gaps entry above for the mechanism and the code path.
 
-The production stage check (`normalize::check_stage_records`) now matches the
-lowering's report to the checker's record by that identity and asserts a strict
-one-to-one correspondence in both directions: every record is built exactly once,
-and nothing is built under this definition's identity that was never recorded.
-The span-interval test it replaced asked whether one span *contained* another,
-which is a heuristic that holds on the programs measured and breaks as soon as
-two applications share a span or a definition is inlined at two sites.
-
-Witness: `compile::tests::a_stage_identity_names_the_node_that_applied_it` pins
-the three properties the match rests on — two adjacent stages are two distinct
-identities, a helper's stage keeps the *helper's* identity when the helper is
-inlined, and a caller records nothing for a helper's use — and
-`production_stage_check_handles_repeated_helpers_and_imports` keeps the
-helper/import ownership boundary as regression coverage.
+Typed lowering consumes the checker's stage identity directly when it constructs
+each typed node. The normalized adapter no longer carries a parallel stage
+report or performs a production one-to-one compatibility walk. The checker
+tests continue to pin distinct identities for adjacent stages and imported
+helpers, while route agreement remains a test-only comparison.
 
 ### Step 2, done
 

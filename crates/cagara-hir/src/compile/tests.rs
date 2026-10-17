@@ -120,8 +120,8 @@ fn stage_nodes_agree_with_the_relational_rows() {
 }
 
 #[test]
-fn production_stage_check_handles_repeated_helpers_and_imports() {
-    // Repeated stages exercise the one-record-one-match rule. The helper and
+fn typed_stage_records_handle_repeated_helpers_and_imports() {
+    // Repeated stages exercise the one-node-one-record rule. The helper and
     // imported query exercise the ownership boundary: their stage records live
     // with the definition that applies them, not with the caller that inlines
     // them.
@@ -141,27 +141,24 @@ fn production_stage_check_handles_repeated_helpers_and_imports() {
     let compilation = compile_checked(&ws, &tc);
     assert!(
         compilation.diagnostics.is_empty(),
-        "stage check rejected a valid helper/import program: {:?}",
+        "typed stage records rejected a valid helper/import program: {:?}",
         compilation.diagnostics
     );
 }
 
 /// A stage's identity is the **node that applied it**, and it survives inlining.
 ///
-/// This is the property the stage check now rests on. The check used to compare
-/// spans: it asked whether a record's node span lay inside the lowered stage's
-/// span. That works by accident on the programs measured, and the accidents are
-/// exactly what this test removes:
+/// This is the property typed lowering rests on. A stage identity names the
+/// application node, so helper ownership is preserved when a body is
+/// instantiated into a caller:
 ///
 /// * **A helper's stage keeps the helper's identity.** `helper = q => q & prefix
-///   "h_"` records a stage inside `helper`'s own body. When `helper` is inlined
-///   into `via_helper`, the reduced term still carries that identity, naming
-///   `helper` and the application node inside it — not the caller and not the
-///   caller's span. So the caller's check does not claim the helper's stage, and
-///   the helper's own definition is where it is checked.
-/// * **Two stages in one pipeline are two identities**, even though the second
-///   application's span encloses the first's — the case an interval test cannot
-///   separate by containment alone.
+///   "h_"` records a stage inside `helper`'s own body. When `helper` is
+///   instantiated in `via_helper`, the typed node still names `helper` and the
+///   application node inside it — not the caller. So the caller's graph does
+///   not claim the helper's stage, and the helper's own definition owns it.
+/// * **Two stages in one pipeline are two identities**, even when their source
+///   spans overlap.
 #[test]
 fn a_stage_identity_names_the_node_that_applied_it() {
     let src = "users : query { id = int } = table \"s\" \"users\"\n\
@@ -208,12 +205,11 @@ fn a_stage_identity_names_the_node_that_applied_it() {
     );
 
     // And the compiler accepts the program, which is where the ownership
-    // boundary is actually exercised: the caller's lowering carries the
-    // helper's identity, and the check does not mistake it for the caller's.
+    // boundary is actually exercised by typed lowering.
     let compilation = compile_checked(&ws, &tc);
     assert!(
         compilation.diagnostics.is_empty(),
-        "the stage check rejected a valid helper program: {:?}",
+        "typed lowering rejected a valid helper program: {:?}",
         compilation.diagnostics
     );
 }

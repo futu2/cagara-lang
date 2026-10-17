@@ -285,17 +285,12 @@ the slices would otherwise have had to invent:
 * **Stable node identity.** `check::NodeRef` is `(module, definition, expr_id)`:
   the definition a stage application was written in, and the application node's
   `ExprId` inside it. The checker stamps it on every stage it records
-  (`PendingRowStage::node`), the bridge carries it onto the term the application
-  reduced to (`Term::Primitive::node_ref`), and every reduction — saturation,
-  inlining, substitution — moves it without rewriting it, because it is stamped
-  rather than derived. `check_stage_records` compares the lowering's report to
-  the checker's record **by identity** rather than by asking whether one span
-  contains another. That removes the last heuristic from the boundary: the
-  match is now "is this the same application?", which is a question with an
-  answer, instead of a containment test that worked on the programs measured.
-  A helper's stage keeps the helper's identity when it is inlined into a caller,
-  which is what makes the ownership boundary exact: the caller's check does not
-  claim a stage it did not apply.
+  (`PendingRowStage::node`), and typed lowering carries it directly into the
+  corresponding typed query node. A helper's stage keeps the helper's identity
+  when it is instantiated into a caller, which makes the ownership boundary
+  exact: the caller's check does not claim a stage it did not apply. The legacy
+  normalized adapter no longer carries a second identity report or compatibility
+  walk.
 * **The typed query arena.** `check::query::TypedQuery` holds `TypedQueryNode`s
   built *where the stage is applied*, each carrying its `NodeRef`, its kind
   (`QueryNodeKind`: table, the four row rewrites, the row-preserving stages, and

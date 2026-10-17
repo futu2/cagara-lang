@@ -258,24 +258,6 @@ impl TypeCheck {
             .filter_map(|node| node.stage.as_ref())
     }
 
-    /// The stable identity of the stage this definition recorded at `site`.
-    ///
-    /// `site` is an [`ExprId`](cagara_syntax::ast::ExprId) of an application node
-    /// inside `(module, def)`. The answer names the node the checker recorded
-    /// the application at, so a consumer holding a lowered stage can ask whether
-    /// it is *the same application* rather than whether the two spans overlap.
-    ///
-    /// `None` when the definition records no stage at that node — a helper's
-    /// use, a `table`, a join — which is a fact and not a failure.
-    ///
-    /// Read from the same stage list [`TypeCheck::row_stages`] yields, so the
-    /// two cannot disagree about which applications exist.
-    pub(crate) fn stage_node(&self, module: usize, def: usize, site: u32) -> Option<NodeRef> {
-        self.row_stages(module, def)
-            .find(|s| s.site == site)
-            .map(|s| s.node)
-    }
-
     /// A definition's body as a typed tree, if the checker built one.
     ///
     /// This is the checker's own account of the definition, node by node: the

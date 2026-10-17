@@ -1081,8 +1081,9 @@ impl TypedQuery {
     /// The output row is the input's, which is the whole content of the rule for
     /// these stages, so it is the one thing this constructor *does* derive —
     /// from a typed row that is already closed, not from a query type. Taking it
-    /// from the child is exact rather than a guess: the checker's own record for
-    /// these stages says the same, and `check_stage_records` compares them.
+    /// from the child is exact rather than a guess: the checker's own typed
+    /// stage record says the same, and typed lowering carries that boundary
+    /// into this node.
     pub(crate) fn keep_row(
         &mut self,
         site: NodeRef,

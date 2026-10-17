@@ -318,8 +318,9 @@ fn normalized_bridge_visits_every_typed_node_except_projection_bases() {
 #[test]
 fn direct_typed_pipeline_bypasses_normalized_elaboration() {
     let ws = Workspace::from_source(
-        "users : query { id = int } = table \"public\" \"users\"\n\
-         q = users & prefix \"u_\" & limit 10 & offset 2 & distinct & suffix \"_v2\"\n",
+        "users : query { id = int, name = string } = table \"public\" \"users\"\n\
+         q = users & prefix \"u_\" & limit 10 & offset 2 & distinct\n\
+             & suffix \"_v2\" & omit \"u_name_v2\" & mapValue \"nullable\"\n",
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());

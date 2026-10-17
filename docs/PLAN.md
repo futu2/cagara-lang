@@ -245,6 +245,11 @@ typed arena is now returned directly; the compiler no longer performs a second
 normalized lowering and route comparison for that result. Partial typed shapes
 keep the normalized checked tree as a template or fallback. The agreement
 tests still compare both routes independently.
+Direct pipelines made only from row rewrites and row-preserving stages now
+stay entirely on that typed path even when the stages are interleaved; the
+production regression covers prefix, suffix, omit, mapValue, limit, offset,
+and distinct in one chain and asserts that the definition never enters
+normalized elaboration.
 The recursive slice also
 accepts ordinary stages around a combine, so a filter, projection, row rewrite,
 ordering, or limit can consume a join or set result and a staged query can be

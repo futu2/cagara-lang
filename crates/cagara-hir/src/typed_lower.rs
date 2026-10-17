@@ -240,21 +240,26 @@ fn lower_simple_projection_pipeline(
     };
     let mut checked_fields = Vec::with_capacity(fields.len());
     for (name, value) in fields {
-        let ExprKind::Field(side, column) = &value.kind else {
-            return Ok(None);
-        };
-        let Some(ty) = tc.typed_node(module, value.id).and_then(|node| node.ty()) else {
-            return Ok(None);
-        };
-        checked_fields.push((
-            name.clone(),
-            crate::checked::CheckedExpr::column(
-                *side,
-                column.clone(),
-                ty,
-                Origin::new(module, value.span),
+        let origin = Origin::new(module, value.span);
+        let checked = match &value.kind {
+            ExprKind::Field(side, column) => {
+                let Some(ty) = tc.typed_node(module, value.id).and_then(|node| node.ty()) else {
+                    return Ok(None);
+                };
+                crate::checked::CheckedExpr::column(*side, column.clone(), ty, origin)
+            }
+            ExprKind::Lit(lit) => crate::checked::CheckedExpr::lit(
+                match lit {
+                    Lit::Int(value) => crate::ir::Lit::Int(*value),
+                    Lit::Float(value) => crate::ir::Lit::Float(value.clone()),
+                    Lit::Str(value) => crate::ir::Lit::Str(value.clone()),
+                    Lit::Bool(value) => crate::ir::Lit::Bool(*value),
+                },
+                origin,
             ),
-        ));
+            _ => return Ok(None),
+        };
+        checked_fields.push((name.clone(), checked));
     }
     let stage_origin = Origin::new(module, stage_expr.span);
     let (child, mut checked, mut typed) = if let Some((schema, table, columns)) =

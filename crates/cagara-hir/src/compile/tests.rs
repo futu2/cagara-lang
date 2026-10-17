@@ -353,7 +353,7 @@ fn direct_typed_pipeline_bypasses_normalized_elaboration() {
 fn direct_plain_select_bypasses_normalized_elaboration() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string } = table \"public\" \"users\"\n\
-         q = users & select { id = .id, name = .name }\n",
+         q = users & select { id = .id, name = .name, tag = \"active\" }\n",
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
@@ -385,7 +385,7 @@ fn direct_plain_select_bypasses_normalized_elaboration() {
 fn direct_plain_update_bypasses_normalized_elaboration() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string } = table \"public\" \"users\"\n\
-         q = users & update { name = .name }\n",
+         q = users & update { name = .name, tag = \"active\" }\n",
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());

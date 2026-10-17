@@ -602,7 +602,7 @@ fn mixed_plain_aggregate_pipeline_bypasses_normalized_elaboration() {
 #[test]
 fn plain_join_and_stages_bypass_normalized_elaboration() {
     let ws = Workspace::from_source(
-        "users : query { id = int, name = string, active = bool } = table \"public\" \"users\"\nadmins : query { id = int, name = string, active = bool } = table \"public\" \"admins\"\norders : query { user_id = int, total = int } = table \"public\" \"orders\"\nq = users & where (.active) & innerJoin orders (.<id == .>user_id) & where (.total > 10) & select { name = .name, total = .total } & order [desc .total] & limit 5\nu = users & union admins & where (.active) & select { id = .id, name = .name } & order [asc .id] & limit 8\n",
+        "users : query { id = int, name = string, active = bool } = table \"public\" \"users\"\nadmins : query { id = int, name = string, active = bool } = table \"public\" \"admins\"\norders : query { user_id = int, total = int } = table \"public\" \"orders\"\nq = users & where (.active) & innerJoin orders (.<id == .>user_id) & where (.total > 10) & select { name = .name, total = .total } & order [desc .total] & limit 5\nu = users & union admins & where (.active) & select { id = .id, name = .name } & order [asc .id] & limit 8\na = users & union admins & agg { count = count, total = sum .id } & where (.count > 0)\n",
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
@@ -616,7 +616,11 @@ fn plain_join_and_stages_bypass_normalized_elaboration() {
             && compiled
                 .queries
                 .iter()
-                .any(|query| query.name == "u" && query.result.is_ok()),
+                .any(|query| query.name == "u" && query.result.is_ok())
+            && compiled
+                .queries
+                .iter()
+                .any(|query| query.name == "a" && query.result.is_ok()),
         "the composed typed join/set pipelines failed to compile: {:?}",
         compiled.diagnostics
     );
@@ -625,7 +629,7 @@ fn plain_join_and_stages_bypass_normalized_elaboration() {
         .defs
         .iter()
         .enumerate()
-        .filter(|(_, def)| matches!(def.name.as_str(), "q" | "u"))
+        .filter(|(_, def)| matches!(def.name.as_str(), "q" | "u" | "a"))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     assert!(

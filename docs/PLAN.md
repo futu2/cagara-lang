@@ -272,9 +272,11 @@ comparisons, membership, and boolean operators. The typed join and checked
 join are built from the recorded operand rows and that predicate without
 normalizing the query. More complex join predicates keep using the bridge.
 That source-built path now composes through surrounding plain filters,
-projections, updates, row rewrites, ordering, limits, and offsets. Typed child
-relations and checker-recorded stage rows are threaded together through the
-join tree; each checked stage is constructed as the typed graph is built.
+projections, updates, aggregates, row rewrites, ordering, limits, and offsets,
+including after set operations. Typed child relations and checker-recorded
+stage rows are threaded together through the join or set tree; each checked
+stage is constructed as the typed graph is built. A regression now exercises
+an aggregate and filter over a set result alongside the composed join pipeline.
 Direct pipelines with multiple mixed `where`, `select`, `update`, `agg`,
 `order`, limit, offset, and row-rewrite stages now also stay on the typed path
 when each expression payload fits the plain subset. Plain aggregate expressions

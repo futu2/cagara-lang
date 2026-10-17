@@ -658,9 +658,8 @@ fn primitive_definition(
     primitive_definition(input, *target_module, *target_def, depth + 1)
 }
 
-/// Build the plain window specification subset directly from source. Named
-/// specs are followed through their resolved definition; frames remain on the
-/// normalized bridge until their bounds can be built from checker facts.
+/// Build the plain window specification directly from source, following named
+/// specs and frame aliases through their resolved definitions.
 fn lower_plain_window_spec(
     input: CompilerInput<'_>,
     module: usize,
@@ -687,6 +686,7 @@ fn lower_plain_window_spec(
     };
     let mut partition = Vec::new();
     let mut order = Vec::new();
+    let mut frame = None;
     for (key, value) in fields {
         match key.as_str() {
             crate::rules::winspec::PARTITION => {
@@ -720,15 +720,111 @@ fn lower_plain_window_spec(
                     order.push((value, ascending));
                 }
             }
-            // The frame grammar has source-level constructors whose primitive
-            // identities are not represented in the typed expression tree yet.
-            crate::rules::winspec::FRAME => return Ok(None),
+            crate::rules::winspec::FRAME => {
+                let Some(lowered) = lower_plain_frame(input, module, value, depth + 1)? else {
+                    return Ok(None);
+                };
+                frame = Some(lowered);
+            }
             _ => return Ok(None),
         }
     }
-    crate::checked::window_spec(partition, order, None)
+    crate::checked::window_spec(partition, order, frame)
         .map(Some)
         .map_err(|error| Error::unsupported(error.message).at(Origin::new(module, expr.span)))
+}
+
+fn lower_plain_frame(
+    input: CompilerInput<'_>,
+    module: usize,
+    expr: &Expr,
+    depth: usize,
+) -> Result<Option<crate::ir::Frame>, Error> {
+    if depth > 32 {
+        return Ok(None);
+    }
+    if matches!(expr.kind, ExprKind::Name(_) | ExprKind::Proj(_, _)) {
+        if let Some(Resolved::Def((target_module, target_def))) =
+            input.type_check().resolution(module, expr.id)
+        {
+            let target = &input.module(*target_module).def(*target_def).body;
+            if !matches!(target.kind, ExprKind::Name(_) | ExprKind::Proj(_, _)) {
+                return lower_plain_frame(input, *target_module, target, depth + 1);
+            }
+        }
+        return Ok(None);
+    }
+    let resolved = match &expr.kind {
+        ExprKind::Primitive(primitive) => Some((primitive.clone(), Vec::new())),
+        _ => declared_primitive(input, module, expr),
+    };
+    let Some((primitive, args)) = resolved else {
+        return Ok(None);
+    };
+    if primitive != "__rows" || args.len() != 2 {
+        return Ok(None);
+    }
+    let Some(start) = lower_plain_bound(input, module, &args[0], depth + 1)? else {
+        return Ok(None);
+    };
+    let Some(end) = lower_plain_bound(input, module, &args[1], depth + 1)? else {
+        return Ok(None);
+    };
+    match crate::checked::frame(start, end) {
+        Ok(frame) => Ok(Some(frame)),
+        // Leave invalid or unsupported frame forms to the established route,
+        // which owns the user-facing diagnostic.
+        Err(_) => Ok(None),
+    }
+}
+
+fn lower_plain_bound(
+    input: CompilerInput<'_>,
+    module: usize,
+    expr: &Expr,
+    depth: usize,
+) -> Result<Option<crate::ir::Bound>, Error> {
+    if depth > 32 {
+        return Ok(None);
+    }
+    if matches!(expr.kind, ExprKind::Name(_) | ExprKind::Proj(_, _)) {
+        if let Some(Resolved::Def((target_module, target_def))) =
+            input.type_check().resolution(module, expr.id)
+        {
+            let target = &input.module(*target_module).def(*target_def).body;
+            if !matches!(target.kind, ExprKind::Name(_) | ExprKind::Proj(_, _)) {
+                return lower_plain_bound(input, *target_module, target, depth + 1);
+            }
+        }
+    }
+    let resolved = match &expr.kind {
+        ExprKind::Primitive(primitive) => Some((primitive.clone(), Vec::new())),
+        _ => declared_primitive(input, module, expr),
+    };
+    let Some((primitive, args)) = resolved else {
+        return Ok(None);
+    };
+    let bound = match (primitive.as_str(), args.as_slice()) {
+        ("__unboundedPreceding", []) => crate::ir::Bound::UnboundedPreceding,
+        ("__unboundedFollowing", []) => crate::ir::Bound::UnboundedFollowing,
+        ("__currentRow", []) => crate::ir::Bound::CurrentRow,
+        (
+            "__preceding",
+            [Expr {
+                kind: ExprKind::Lit(Lit::Int(value)),
+                ..
+            }],
+        ) => crate::ir::Bound::Preceding(*value),
+        (
+            "__following",
+            [Expr {
+                kind: ExprKind::Lit(Lit::Int(value)),
+                ..
+            }],
+        ) => crate::ir::Bound::Following(*value),
+        _ => return Ok(None),
+    };
+    Ok(Some(bound))
 }
 
 /// Lower a direct order whose keys fit the source checked-expression subset.

@@ -283,10 +283,11 @@ such as nullable-value fallbacks, as well as bare columns. Direction helpers
 are resolved by primitive identity, including aliases from the editable
 prelude.
 Direct `select` and `update` fields can also build the prelude's window
-functions directly when their named window spec contains plain partition and
-order keys. The checked window template is attached to the typed projection;
-specifications with frames and unsupported window expressions still use the
-normalized payload bridge.
+functions directly when their window spec contains plain partition and order
+keys. Frame constructors and bounds are followed by resolved primitive
+identity, including named frame aliases, and validated by the checked frame
+constructor. The checked window template is attached to the typed projection;
+unsupported window expressions still use the normalized payload bridge.
 The plain expression subset also includes the prelude's typed conditional
 (`ifThenElse` and its `caseWhen` alias), which is emitted as a checked searched
 `CASE` template in direct stage payloads.

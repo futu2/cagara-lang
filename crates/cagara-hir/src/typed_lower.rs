@@ -54,7 +54,7 @@ fn lower_unhydrated(
     if let Some(lowered) = lower_keep_pipeline(input, module, def, body)? {
         return Ok(Some(lowered));
     }
-    if let Some(lowered) = lower_simple_select_pipeline(input, module, def, body)? {
+    if let Some(lowered) = lower_simple_projection_pipeline(input, module, def, body)? {
         return Ok(Some(lowered));
     }
     // The expression-bearing stages use the checked payload bridge for their
@@ -206,7 +206,7 @@ fn lower_unhydrated(
 /// Lower a direct projection whose fields are plain column references. This
 /// small expression slice needs no normalized term: the checker supplies each
 /// field's scalar type and the stage record supplies the closed output row.
-fn lower_simple_select_pipeline(
+fn lower_simple_projection_pipeline(
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
@@ -215,11 +215,11 @@ fn lower_simple_select_pipeline(
     let tc = input.type_check();
     let stages: Vec<_> = tc.row_stages(module, def).cloned().collect();
     if stages.len() != 1
-        || stages[0].kind != RowStage::Select
+        || !matches!(stages[0].kind, RowStage::Select | RowStage::Update)
         || stages[0].node.definition_module != module
         || stages[0].node.definition != def
         || !is_direct_pipeline(input, module, body)
-        || contains_other_stage(input, module, body, RowStage::Select)
+        || contains_other_stage(input, module, body, stages[0].kind)
     {
         return Ok(None);
     }
@@ -293,18 +293,27 @@ fn lower_simple_select_pipeline(
         return Ok(None);
     };
     let output_row = stage.output.clone().map(Row::new);
+    let kind = match stage.kind {
+        RowStage::Select => QueryNodeKind::Select,
+        RowStage::Update => QueryNodeKind::Update,
+        _ => unreachable!(),
+    };
     let id = typed
         .project(
             stage.node,
-            QueryNodeKind::Select,
+            kind,
             child,
             output_row,
             stage_origin,
             Some(checked_fields.clone()),
         )
         .map_err(query_error)?;
-    checked = CheckedQuery::select(checked, checked_fields, stage_origin)
-        .map_err(|error| Error::unsupported(error.message).at(stage_origin))?;
+    checked = match stage.kind {
+        RowStage::Select => CheckedQuery::select(checked, checked_fields, stage_origin),
+        RowStage::Update => CheckedQuery::update(checked, checked_fields, stage_origin),
+        _ => unreachable!(),
+    }
+    .map_err(|error| Error::unsupported(error.message).at(stage_origin))?;
     Ok(Some((typed.finish(id), checked)))
 }
 

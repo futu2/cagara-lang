@@ -255,11 +255,11 @@ stages are appended.
 Expression-bearing stages can now follow that same alias path: the copied
 typed graph supplies the relational child and rows, while the existing
 normalized bridge supplies only predicates, projections, and sort payloads.
-Direct `select` stages whose fields are plain column references now have a
-small source checked-expression path: field types come from the checker, and
-the typed projection and `CheckedQuery` are built without entering normalized
-elaboration. Computed fields and aggregate expressions continue through the
-payload bridge.
+Direct `select` and `update` stages whose fields are plain column references
+now have a small source checked-expression path: field types come from the
+checker, and the typed projection and `CheckedQuery` are built without
+entering normalized elaboration. Computed fields and aggregate expressions
+continue through the payload bridge.
 Window expressions in projection payloads are carried by the typed projection
 node as `WinTemplate`, including when the pipeline starts from a typed query
 alias. They are no longer deferred from this slice.

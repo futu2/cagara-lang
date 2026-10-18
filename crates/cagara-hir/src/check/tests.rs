@@ -903,7 +903,7 @@ fn edits_update_names_checks_and_diagnostics() {
 
 #[test]
 fn unused_definitions_still_report_impossible_overloads() {
-    // Nothing uses `bad`, so it is never evaluated; its `+` cannot be resolved
+    // Nothing uses `bad`, so it is never normalized; its `+` cannot be resolved
     // for any type, and that must be reported anyway.
     let e = err("bad = .age + \"x\"\n", "bad");
     assert!(e.contains("no overload of `+`"), "{e}");
@@ -982,7 +982,7 @@ fn users_of_a_failed_definition_fail_too() {
         "{}",
         err(src, "q2")
     );
-    // So nothing evaluates either.
+    // So nothing is normalized either.
     let ws = Workspace::from_source(&format!("{TABLES}{src}"));
     let tc = check(&ws);
     let out = crate::root_queries_checked(&ws, &tc);
@@ -992,7 +992,7 @@ fn users_of_a_failed_definition_fail_too() {
     }
 }
 
-/// Every root definition the checker accepts must also evaluate and pass the
+/// Every root definition the checker accepts must also normalize and pass the
 /// IR validator: the two share their rules (`crate::rules`), and a program
 /// that only the validator rejects is a checker bug. Returns each checked
 /// definition's type or error, like `types`.

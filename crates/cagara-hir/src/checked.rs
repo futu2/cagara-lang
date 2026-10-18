@@ -771,6 +771,38 @@ impl CheckedExpr {
             CheckedExprNode::Call { .. } => ExprKind::Call,
         }
     }
+
+    /// Number of checked expression nodes owned by this expression.
+    ///
+    /// A call-by-name binding copies its checked tree each time it is forced;
+    /// the normalizer uses this count to charge that expansion to its budget.
+    pub(crate) fn node_count(&self) -> usize {
+        1 + match &self.node {
+            CheckedExprNode::Column { .. }
+            | CheckedExprNode::Lit(_)
+            | CheckedExprNode::Call { .. } => 0,
+            CheckedExprNode::Template { args, .. } | CheckedExprNode::AggTemplate { args, .. } => {
+                args.iter().map(CheckedExpr::node_count).sum()
+            }
+            CheckedExprNode::WinTemplate { args, spec, .. } => {
+                args.iter().map(CheckedExpr::node_count).sum::<usize>()
+                    + spec
+                        .partition
+                        .iter()
+                        .map(CheckedExpr::node_count)
+                        .sum::<usize>()
+                    + spec
+                        .order
+                        .iter()
+                        .map(|(expr, _)| expr.node_count())
+                        .sum::<usize>()
+            }
+            CheckedExprNode::In { value, list, .. } => {
+                value.node_count() + list.iter().map(CheckedExpr::node_count).sum::<usize>()
+            }
+            CheckedExprNode::Group(key) => key.node_count(),
+        }
+    }
     /// A column reference (`.x`, `.<x`, `.>x`). Row phase; the type is the one
     /// the checker gave the column.
     pub fn column(side: Side, name: impl Into<String>, ty: ScalarType, origin: Origin) -> Self {
@@ -927,7 +959,7 @@ impl CheckedExpr {
 
     /// A use of a checked definition, with the instantiation chosen for its
     /// overload holes. This is what makes an overload choice explicit at the
-    /// call site instead of a dynamic lookup during evaluation.
+    /// call site instead of a dynamic lookup during normalization.
     pub fn call(
         name: impl Into<String>,
         def: (usize, usize),

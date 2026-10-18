@@ -1,9 +1,9 @@
 # The typed core and the normalizer
 
-This document states the language's compile-time semantics as the compiler
-implements them: what a program means before any SQL exists. It is the reference
-for the reduction rules, the relational arena's constructors, and the parts of
-SQL semantics that the language deliberately adopts.
+This document states the language's compile-time semantics: what a program
+means before any SQL exists. It is the reference for normalization, the
+relational arena's constructors, and the parts of SQL semantics that the
+language deliberately adopts.
 
 Code references are to `crates/cagara-hir/src/`.
 
@@ -20,7 +20,7 @@ resolve
 typed core          check/typed.rs: TypedBody, TypedExpr
   │  one compile-time normalizer
   ▼
-evaluation          normalize/: β-reduction, aliases, overloads, helpers
+normalization       normalize/: β-reduction, aliases, overloads, helpers
   │  query primitives construct relational nodes at saturation
   ▼
 typed relational arena   normalize/arena.rs: CompiledQuery
@@ -32,49 +32,19 @@ Rel                 ir.rs: Rel, a backend-facing tree with no type metadata
 SQL                 cagara-sql
 ```
 
-## 1a. Migration state
+The production boundary is `compile.rs::compile_definition`: it shares the
+checker gate in `elaborate.rs::prepare_query_definition`, calls
+`normalize::route::lower`, validates the erased relation, and records the
+relation or its classified fault. `typed_lower.rs`, `query_lowering.rs`, and
+`CheckedQuery` remain for compatibility APIs and route tests; they are not the
+production query builder. The independent term implementation is a test-only
+oracle (`term_oracle.rs`).
 
-**The normalizer is not the production route yet.** Production remains the
-source-directed lowering in `typed_lower.rs`, reached through
-`query_lowering::lower` from `elaborate.rs::elaborate_def`; the normalizer in
-`normalize/` is complete enough to run on every corpus program but has not been
-wired into `elaborate.rs`.
-
-The two routes are compared by `crates/cagara-hir/tests/normalize_differential.rs`,
-which runs both over every query definition in `examples/`, the HIR corpus, and
-eleven inline shapes, and compares the erased `Rel`. The current result is
-**47 of 99 definitions agree and 52 do not**; the mismatching definitions are
-recorded in `tests/snapshots/normalize_mismatches.txt`, and the test fails if that
-list grows. The failures are four refusals the normalizer still emits, by count
-over the corpus:
-
-| Refusal | Definitions | What is missing |
-|---|---|---|
-| "a name the checker left unresolved" | 37 | separator/qualified-name resolution for the remaining shapes |
-| "this template takes an expression" | 9 | a template whose argument arrives as a label (the prelude's stage and scalar plumbing) |
-| "a window function's first argument is a window specification" | 3 | building a `WinSpec` from the specification record |
-| "no overload candidate accepts this argument" | 3 | the overload rule where the use site records no single choice |
-
-So of the three routes named in this document, only production and the oracle
-produce results today; the normalizer's module-level pieces are in place — value
-domain and `Site` stack (`normalize/mod.rs`), `value`/`apply` (`normalize/value.rs`),
-templates (`normalize/scalar.rs`), frames (`normalize/frame.rs`), environments
-(`normalize/env.rs`), budgets (`normalize/budget.rs`), the identity rule (`normalize/thunk.rs`),
-the arena with its constructors and erasure (`normalize/arena.rs`) and the
-evaluate-and-erase boundary `route::lower` / `route::query` / `route::evaluate`
-(`normalize/route.rs`) — but the reductions listed in §2 are implemented only as far
-as those four refusals are reached.
-
-What is already pinned independently of the cut-over:
-`tests/snapshots/pipeline_golden.txt` (driven by `tests/pipeline_golden.rs`)
-records, for every example and corpus program, the erased `Rel` with locations,
-each definition's fault class, every diagnostic, and the checked tree's kinds,
-origins and rows. It describes production, and it is the gate the cut-over must
-not move.
-
-Sections §2–§6 state the normalizer's intended semantics, which is what the
-culminating change implements. Where a statement in them is not yet true of the
-running normalizer, the table above is the authority on how far it has got.
+The route differential snapshot records the remaining intentional differences
+between the production normalizer and that legacy/debug route. They are source
+origin conventions for reused leaves and combine nodes, not alternate language
+semantics. The pipeline golden snapshot pins the production relation, fault
+class, diagnostics, checked-tree view, and source locations.
 
 ## 2. The reduction rules
 
@@ -96,7 +66,7 @@ normalize (Record/List)  = the arguments' values, with the record's field names
 normalize (Sql s)        = a template awaiting its arguments
 normalize (App h a…)     = foldl apply (normalize h) (map normalize-argument a…)
 
-apply (Closure, v)          = bind the next parameter; evaluate the body when
+apply (Closure, v)          = bind the next parameter; normalize the body when
                               it was the last one
 apply (Template, v)         = accumulate; build the checked expression when
                               saturated
@@ -121,12 +91,12 @@ own.
 
 **β-reduction with environments** (`normalize/env.rs`). An `Env` is a chain of frames,
 innermost last; a closure captures the environment it was created in. Applying a
-closure binds one more parameter, and the body is evaluated when the last one
+closure binds one more parameter, and the body is normalized when the last one
 arrives. Nothing is ever substituted into syntax, so capture is impossible by
-representation; the oracle has to state the same property textually
+representation; the oracle states the same property textually
 (`term_oracle.rs::substitute` renames binders for exactly this reason).
 
-**Call by name, never memoized.** Each argument is evaluated at the use site it
+**Call by name, never memoized.** Each argument is normalized at the use site it
 was written at (`Normalizer::argument`), so it keeps that site's typed node — its
 type, row, origin and overload choices. Two uses of one definition therefore
 produce two stage chains with two sites, which is what the checker recorded for
@@ -139,22 +109,22 @@ pushes a frame that is not `named`, so a stage record the checker made for a
 lambda body is not mistaken for the enclosing application's. `stage_site` reads
 the stack to stamp a constructed node with the application it belongs to.
 
-**Aliases.** A name evaluates the body of the definition the checker resolved it
+**Aliases.** A name normalizes the body of the definition the checker resolved it
 to (`Normalizer::name` → `Normalizer::definition`). An alias *is* its target, so
 following it is that call rather than a separate `follow_alias` walk.
 
 **Overload selection** (`Normalizer::overloads`). The checker records a `Choice`
 per use site (`TypedExpr::choices`); a resolved choice is the one whose
-definition is evaluated. When the use site itself is still open, every candidate
-is evaluated and the first that applies wins.
+definition is normalized. When the use site itself is still open, every candidate
+is tried and the first that applies wins.
 
 **Helpers.** A helper is an ordinary definition, so applying one is β-reduction:
-its parameters are bound in the environment and its body is evaluated under the
-caller's context. Nothing copies a sub-graph into a caller: every use evaluates
+its parameters are bound in the environment and its body is normalized under the
+caller's context. Nothing copies a sub-graph into a caller: every use normalizes
 the helper again, and all uses construct nodes in the same arena.
 
 **Query primitives construct nodes at saturation.** A definition whose body is
-`primitive "…"` evaluates to a *function value* — a stage accumulating its
+`primitive "…"` normalizes to a *function value* — a stage accumulating its
 arguments, a join or set accumulating its operands, a template accumulating its
 expressions. When the last argument arrives, `apply` calls the arena
 constructor, and that is the only place a relational node is made.
@@ -291,9 +261,9 @@ what a caller reports:
   That is a *program* diagnostic, blamed on the expression.
 
 `normalize/budget.rs` bounds two shapes: `MAX_DEPTH = 200` definitions on one
-evaluation path (which also catches a cycle, reported as "definition refers to
-itself"), and `MAX_WORK = 200_000` evaluated or constructed nodes. The work is
-charged *before* the node is built (`Builder::charge`), so a refused evaluation
+normalization path (which also catches a cycle, reported as "definition refers to
+itself"), and `MAX_WORK = 200_000` visited or constructed nodes. The work is
+charged *before* the node is built (`Builder::charge`), so a refused normalization
 discards its arena whole instead of returning a prefix of one. Exceeding either
 is `Control::Unsupported`: the program is well-typed and the compiler could not
 build it within its limits.

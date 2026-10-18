@@ -215,7 +215,7 @@ impl Workspace {
         ws
     }
 
-    /// Select a loaded module as the root used by analysis and evaluation.
+    /// Select a loaded module as the root used by analysis and normalization.
     pub fn set_root_path(&mut self, path: &Path) -> bool {
         let path = normalize(path);
         let Some(&root) = self.by_path.get(&path) else {

@@ -1,161 +1,100 @@
 # Compiler architecture
 
-Cagara's semantic pipeline is a compiler, not an interpreter:
+Cagara is a compile-time functional language whose result is a typed SQL
+relation. A source program is reduced to a relation; it is never run against
+data by the compiler.
 
 ```text
-source -> syntax/AST -> resolve + bidirectional type checking
-       -> typed core (check/typed.rs: one typed node per expression)
-       -> normalizer (normalize/: beta-reduction, aliases, helpers, overloads)
-       -> typed relational arena (normalize/arena.rs)
-       -> erasure -> Rel
-       -> schema validation -> SQL lowering and dialect rewriting -> SQL
+source
+  -> parse and resolve
+  -> bidirectional type checking
+  -> typed core (check/typed.rs)
+  -> normalize (beta-reduction, aliases, helpers, overloads)
+  -> relational arena (normalize/arena.rs)
+  -> structural erasure to Rel
+  -> schema validation
+  -> SQL lowering and dialect rewriting
+  -> SQL
 ```
 
-The normalizer's rules, the arena's constructors, and the SQL-observable
-semantics (bags, nullability, phases, ordering, `sql` templates) are stated in
-[`CORE.md`](CORE.md).
+`CORE.md` is the semantic reference. It defines the reduction rules, the
+relational constructors, and the SQL-visible choices such as bags, phases,
+nullability, ordering, and templates.
 
-**Production during the transition.** Today production is the source-directed
-lowering in `typed_lower.rs`, called through `query_lowering.rs`; it builds a
-`TypedQuery` graph and a `CheckedQuery` tree and has to keep the two in step
-(`check/query.rs::TypedQuery::carry_checked_payloads`, `rebuild_checked`).
-`normalize/` is the incoming route: every module of it exists — including the
-evaluate-and-erase boundary, `normalize/route.rs::lower` — but `elaborate.rs` does
-not call it yet, so the two are compared rather than one replacing the other.
-`tests/normalize_differential.rs` runs both over every query definition in the
-examples, the HIR corpus and the inline shapes and currently reports 47 of 99
-agreeing; the mismatching definitions are recorded in
-`tests/snapshots/normalize_mismatches.txt` and the test refuses to let the list grow.
-The production route's own output is pinned by
-`tests/snapshots/pipeline_golden.txt` (driven by `tests/pipeline_golden.rs`):
-every example and corpus program's erased `Rel` (locations included),
-fault class, diagnostics with their locations, and the checked tree's kinds,
-origins and rows. `docs/CORE.md` §1a lists the refusals still standing between the two.
+## The compiler kernel
 
-## Semantic layers
+The checker records one typed node for every expression. Each node carries its
+type, its query row when applicable, name resolution, overload choices, source
+origin, and stage metadata. A stage record includes the input and output rows
+from that stage's own signature, so later passes do not reconstruct a stage
+from a composed result type.
 
-```text
-AST            names, source spans, and user syntax
-TypeCheck      inferred schemes, typed expressions, rows, and overload choices
-Typed core     check/typed.rs: TypedBody, TypedExpr — one node per expression,
-               carrying its type, row, resolution, choices and stage record
-Normalization     normalize/: values, closures, environments, and the reduction rules
-Arena          normalize/arena.rs: relational nodes whose constructors are the rules
-Rel            backend-facing relational structure without type metadata
-```
+The normalizer consumes this typed core. Names follow the checker-resolved
+definition, lambdas become closures, and application performs beta-reduction
+through an environment. Primitive definitions become values that accumulate
+arguments. Once saturated, a query primitive calls one relational constructor;
+once saturated, a SQL template builds one checked scalar expression. The
+normalizer produces aliases, closures, labels, scalar expressions, and
+relational nodes, never table data.
 
-The checker records one typed node for every expression. A node carries its
-whole type, its row when it is query-shaped, what its name resolved to, the
-overload choices recorded at that use site, its source span, and — for a stage
-application — the operation and the rows its own signature instance read and
-produced. `TypedBody` indexes those nodes by `ExprId` and by the span the checker
-filed a use under, and keeps stage applications in application order, which is
-not the arena's source order. A `NodeRef` identifies the definition and
-application node where a stage was written, so helper instantiation preserves
-ownership and source identity.
+The relational arena is the only place that constructs a query node. Every
+constructor computes its output row and checks its own rule: predicates and
+keys must use the input row, projections compute their fields, joins qualify
+columns and add nullability, and set operations require equal rows. Erasure
+walks the finished arena and emits `Rel` without inferring or checking again.
 
-The normalizer reduces that core. A name evaluates the definition the checker
-resolved it to, so aliases disappear without a separate walk; a lambda closes
-over an environment, so application is beta-reduction and no argument can be
-captured; a `primitive "…"` body evaluates to a function value that accumulates
-its arguments and constructs its relational node when the last one arrives. One
-`Control` type states the only two ways a reduction stops: a construct the
-normalizer has no rule for (a compiler capability gap) and a construct whose rule
-refused what it was given (a program error). The per-attempt `Normalizer` owns its
-arena, its active-definition path and its budget, so incremental or concurrent
-compilations share no lowering state.
+`Control::Unsupported` represents a compiler capability gap. `Control::Program`
+represents a rule that rejected an invalid program. The compiler keeps that
+classification when it turns the result into diagnostics.
 
-In the arena, a node records its operation, its site, its origin, its children in
-operand order, the row its constructor computed, and exactly one payload shape
-for its kind. Constructors are the single source of relational validity: a
-filter takes a boolean row-phase predicate over the input's columns, a projection
-computes its output row from its fields, a join requires side-qualified columns
-and wraps the nullable side's types, a set operation requires equal rows. No
-constructor recovers a row from a final query type. Row formers live in
-`core.rs::RowType`; phase and side rules live in `rules.rs` and are shared with
-the checker's types, so one rule cannot be stated twice in two ways.
+## Production boundary
 
-`CheckedQuery` and `CheckedExpr` (`checked.rs`) are what production builds today
-and what the arena is designed to subsume: both are immutable trees whose
-constructors are the relational rules, and both erase structurally to `Rel`.
-Erasure (`normalize/arena.rs::CompiledQuery::erase`, `checked::erase`) walks the
-structure and emits `Rel`, stamping each node with its origin; it infers
-nothing. SQL lowering sees only `Rel` and therefore cannot silently become a
-second type checker.
-
-The normalized term module (`term_oracle.rs`) is a **test-only oracle**: its own
-`Term` calculus, its own textual capture-avoiding substituter, and its own query
-lowering by primitive name. It has no production role, and its independence is
-the point — the agreement tests drive it directly for the same programs the
-compiler compiles, so the two routes can disagree.
-
-## Checker and incremental shell
-
-Type checking is bidirectional: `infer` synthesizes a type and `check` pushes an
-expected type down. That lets a lambda parameter receive its type from a known
-function type instead of guessing from its body. The checker owns rows, phases,
-SQL template selection, overload choices, and stage identities; downstream
-passes consume those facts rather than re-deriving them. Facts more than one
-layer reads — `Resolved`, `TemplateKind`, `DefId` — live in
-`check/core_facts.rs`, not in the oracle.
-
-`Workspace` loads files, imports, overlays, and the embedded prelude. Salsa
-memoizes parsing, resolution, and type checking for editor updates. `compile`
-is the shared boundary used by CLI and LSP to turn an immutable compiler input
-into erased relations and diagnostics. Cache ownership and invalidation live
-in `incremental.rs` and `Workspace`; compilation and erasure consume read-only
-inputs. Moved definitions are rebuilt so `Rel::At` spans stay current.
-
-The compilation result is:
+`compile` is the shared boundary used by the CLI, LSP, and incremental shell.
+After checking a root definition, `compile_definition` calls
+`normalize::route::lower`, validates the erased `Rel`, and stores the relation
+and its fault class in `Compilation`:
 
 ```text
-compile : Workspace -> Compilation
-
 Compilation {
   queries: [CompiledQuery],
   diagnostics: [Diag]
 }
 ```
 
-## Invariants and validation
+Each normalization attempt owns its arena, active-definition path, and work
+budget. The workspace owns files, imports, overlays, diagnostics, and Salsa
+cache state. This separation makes a compilation deterministic and lets
+incremental or concurrent requests share read-only checker results without
+sharing lowering state.
 
-- A query node's row is the output of its relational constructor.
-- Every source column reference is checked against the row available there.
-- Phase restrictions are enforced before erasure.
-- Outer-join nullability and set-operation compatibility are represented in
-  output rows.
-- Erasure is structural and leaves no type-checking work to SQL lowering.
-- Every accepted query is produced by one production route; there is no
-  normalized fallback.
-- The oracle agreement tests compare rows, stage order and identity, origins,
-  relation structure, and generated SQL across dialects.
-- The pipeline snapshot pins every example and corpus program's erased `Rel`,
-  fault class, diagnostics, and checked tree, so a change of production route
-  that alters behaviour fails there.
-- Corpus, shipped-example, incremental, and SQL tests reject compiler gaps and
-  preserve source diagnostics across edits.
+`CheckedQuery` and `typed_lower.rs` remain as a compatibility and test surface
+for checked-tree APIs and route comparisons. They are not the production query
+builder. `term_oracle.rs` is an independent, test-only term implementation;
+its purpose is to catch semantic drift while the corpus grows, not to provide a
+second production path.
 
-These checks distinguish a language construct with a lowering rule from a
-compiler capability gap. Adding a construct requires a checker record, an
-normalizer rule that constructs its node, constructor coverage for that node, and
-a regression before it is considered accepted.
+## Invariants
 
-## Relational erasure and SQL
+- Type checking precedes normalization for every accepted definition.
+- A relational node's row is computed by its constructor.
+- Column, phase, nullability, join-side, and set-operation rules are enforced
+  before erasure.
+- Erasure is structural; SQL lowering receives only `Rel`.
+- Origins survive normalization and erasure, so diagnostics and SQL snapshots
+  retain user source locations.
+- A compiler capability gap is reported as a compiler fault and cannot be
+  mistaken for a program error.
+- The pipeline golden snapshot, corpus SQL snapshots, route-differential tests,
+  incremental tests, and dialect tests guard the complete path.
 
-The arena and the checked tree carry what is needed while building a valid
-query: rows, expression phases, types, and origins. Erasure emits `Rel`
-structurally and preserves source origins, including walking through operations
-with no SQL form (`mapValue` changes the checked row and nothing else). The
-schema validator remains a defensive check over `Rel` and can validate
-relations assembled by external callers; it is not a second source of type
-information. SQL lowering and dialect rewriting operate after erasure.
+Adding a language construct therefore requires a checker fact, a normalizer
+reduction, an arena constructor or payload rule, and a regression covering the
+erased relation and its source origins.
 
-## Design boundaries
+## Shell and backend
 
-The pure compiler kernel consumes `CompilerInput` and produces owned results.
-The shell owns file access, diagnostics, Salsa state, overlays, and SQL options.
-No runtime evaluation is performed during compilation: the normalizer evaluates
-*programs into queries*, and the values it produces are aliases, closures, labels
-and relational nodes — never data. Relational construction is the only source of
-validity rules, while the normalized term implementation is isolated as a
-removable, test-only semantic oracle.
+The pure kernel consumes an immutable `CompilerInput` and produces owned
+relations and diagnostics. The shell handles file access, overlays, editor
+state, and SQL options. The SQL backend lowers `Rel` to ANSI SQL and rewrites
+the result for each supported dialect. It does not perform language
+type-checking; those facts are complete before SQL lowering begins.

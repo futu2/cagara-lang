@@ -1,7 +1,7 @@
 //! The production boundary between query lowering and the rest of the
 //! compiler.
 //!
-//! One function: evaluate a definition's body to an erased relation. The
+//! One function: normalize a definition's body to an erased relation. The
 //! intermediate value — the typed arena — exists only while this call runs, so
 //! no consumer can acquire a half-built query, and the compiler's product is
 //! the same `Result<Rel, Error>` it has always been.
@@ -21,7 +21,7 @@ use crate::compile::CompilerInput;
 use crate::core::Error;
 use crate::ir::Rel;
 
-/// Evaluate one definition's body and erase the result.
+/// Normalize one definition's body and erase the result.
 pub(crate) fn lower(
     input: CompilerInput<'_>,
     module: usize,
@@ -31,7 +31,7 @@ pub(crate) fn lower(
     query(input, module, def, body)?.erase()
 }
 
-/// Evaluate one definition's body to the typed arena, for a caller that needs
+/// Normalize one definition's body to the typed arena, for a caller that needs
 /// the relational graph rather than the relation.
 pub(crate) fn query(
     input: CompilerInput<'_>,
@@ -42,7 +42,7 @@ pub(crate) fn query(
     reduce(input, module, def, body).map(Lowered::into_query)
 }
 
-/// Evaluate one definition's body, keeping the refusal's classification.
+/// Normalize one definition's body, keeping the refusal's classification.
 pub(crate) fn reduce(
     input: CompilerInput<'_>,
     module: usize,

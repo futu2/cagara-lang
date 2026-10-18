@@ -118,7 +118,7 @@ impl Prim {
     /// (`removeKey k r` for `omit`, `keyMap m r` for the renames). Registering
     /// that rule once, for the definition, is what lets every use instantiate it
     /// with fresh variables instead of rebuilding it from the callee's result
-    /// type. See `docs/TYPE-SYSTEM-REDESIGN.md`.
+    /// type. See `docs/CORE.md` for the reduction and row rules.
     pub fn owns_row_rule(self) -> bool {
         use Prim::*;
         matches!(self, Omit | Prefix | Suffix | MapValue)

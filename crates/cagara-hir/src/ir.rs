@@ -1,4 +1,4 @@
-//! Relational IR produced by compile-time evaluation and consumed by the SQL
+//! Relational IR produced by compile-time normalization and consumed by the SQL
 //! backend. Expression phases (row / aggregate / window) are structural: an
 //! aggregate or window node may only contain row-phase expressions, which is
 //! what enforces the one-level nesting rule for `agg` and `win`.

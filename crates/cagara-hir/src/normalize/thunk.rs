@@ -13,7 +13,7 @@
 //! # Why an *inverse*
 //!
 //! The prelude writes `plain = (f) => (x) => f x`, and `_&_` is `plain` applied,
-//! so a stage applied through the pipeline operator evaluates `plain` to a
+//! so a stage applied through the pipeline operator normalizes `plain` to a
 //! closure and applies it twice. That reduces by β-reduction alone — no rule
 //! here — and `_&_` is `x => f => f x` applied, which was always within the
 //! language's core.
@@ -29,6 +29,7 @@
 use super::Value;
 
 /// Whether a value denotes the identity function.
+#[allow(dead_code)] // The rule is exercised through Value::is_identity.
 pub(crate) fn is_identity(value: &Value<'_>) -> bool {
     value.is_identity()
 }

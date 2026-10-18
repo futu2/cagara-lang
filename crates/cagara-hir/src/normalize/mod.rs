@@ -31,7 +31,7 @@
 //! normalize  (Sql s)       = a template awaiting its arguments
 //! normalize  (App h a…)    = foldl apply (normalize h) (map normalize a…)
 //!
-//! apply (Closure, v)        = bind the next parameter; evaluate the body when
+//! apply (Closure, v)        = bind the next parameter; normalize the body when
 //!                             it was the last one
 //! apply (Template, v)       = accumulate; build the checked expression when
 //!                             every argument has arrived
@@ -48,9 +48,9 @@
 //!
 //! Two properties of this definition are load-bearing:
 //!
-//! * **Call by name, never memoized.** An argument is evaluated at the use site
+//! * **Call by name, never memoized.** An argument is normalized at the use site
 //!   it was written at, so it keeps that site's typed node — its type, row,
-//!   origin and overload choices. Evaluation is not shared between two uses of
+//!   origin and overload choices. Normalization is not shared between two uses of
 //!   one definition, so a helper used twice produces two stage chains with two
 //!   sites, which is what the checker recorded for each of them.
 //! * **The environment is the substitution.** It is captured per application
@@ -64,7 +64,7 @@
 //!
 //! One [`budget::Budget`] replaces the depth constants five separate passes
 //! carried: a recursion bound (how many definitions down one path) and a work
-//! bound (nodes evaluated and nodes built). Exceeding either is
+//! bound (nodes visited and nodes built). Exceeding either is
 //! [`Control::Unsupported`] — the accepted-program boundary that becomes a
 //! compiler fault, never a crash and never a wrong query.
 
@@ -72,7 +72,7 @@ pub(crate) mod arena;
 pub(crate) mod budget;
 mod env;
 mod frame;
-mod route;
+pub(crate) mod route;
 mod scalar;
 mod thunk;
 mod value;
@@ -125,9 +125,9 @@ impl From<Error> for Control {
     }
 }
 
-/// A body being evaluated: the definition it belongs to and its syntax.
+/// A body being normalized: the definition it belongs to and its syntax.
 ///
-/// Carried as a unit because evaluation crosses module boundaries whenever it
+/// Carried as a unit because normalization crosses module boundaries whenever it
 /// follows a definition — a user query reaches a prelude helper and that
 /// helper's body is recorded under the *prelude's* module index, so the module
 /// is not ambient and cannot be the caller's.
@@ -289,7 +289,7 @@ pub(crate) struct Closure<'a> {
     env: std::sync::Arc<Env<'a>>,
     /// The application this closure is being applied at, once it has one.
     ///
-    /// A lambda body is evaluated *later* — when its last argument arrives —
+    /// A lambda body is normalized *later* — when its last argument arrives —
     /// and the reduction of the body must still attribute what it builds to the
     /// application that supplied the arguments. The checker records a pipeline
     /// application's stage against the definition that wrote `&`, so without
@@ -305,6 +305,9 @@ pub(crate) struct Closure<'a> {
 pub(crate) struct StageFn {
     spec: StageSpec,
     args: Vec<Value<'static>>,
+    /// The application that supplied this stage value, when it crossed a
+    /// definition boundary.
+    site: Option<Site>,
 }
 
 /// The identity and arity of a stage.
@@ -320,10 +323,12 @@ pub(crate) enum CombineFn {
     Join {
         kind: crate::ir::JoinKind,
         args: Vec<Value<'static>>,
+        site: Option<Site>,
     },
     Set {
         kind: crate::ir::SetKind,
         args: Vec<Value<'static>>,
+        site: Option<Site>,
     },
 }
 
@@ -350,7 +355,7 @@ pub(crate) struct TemplateFn {
     origin: Origin,
 }
 
-/// The state of one definition's evaluation.
+/// The state of one definition's normalization.
 ///
 /// Owned per attempt and threaded through the reduction, so two compilations
 /// never share lowering state — the property a thread-local active set made
@@ -363,17 +368,22 @@ pub(crate) struct Normalizer<'i, 'a> {
     /// The arena every node is constructed into.
     pub(crate) builder: arena::Builder,
     pub(crate) budget: budget::Budget,
-    /// The definitions on the current evaluation path.
+    /// The definitions on the current normalization path.
     pub(crate) active: Vec<(usize, usize)>,
-    /// Which definition's body is being evaluated, so a node's site can name
+    /// Which definition's body is being normalized, so a node's site can name
     /// the definition it was written in.
     pub(crate) defining: usize,
-    /// The module the syntax under evaluation was written in.
+    /// The module the syntax under normalization was written in.
     pub(crate) module: usize,
-    /// Where the expression being evaluated is: the origin a construction
-    /// The syntax being evaluated, outermost first: every node of the typed
+    /// Where the expression being normalized is: the origin a construction
+    /// The syntax being normalized, outermost first: every node of the typed
     /// core the reduction is currently inside. See [`Site`].
     pub(crate) sites: Vec<Site>,
+    /// The application site that invoked the definition currently being
+    /// reduced. Definitions such as the prelude's pipeline combinator create
+    /// closures and primitives in their own module, but the checker records
+    /// the resulting stage at the caller's application.
+    pub(crate) definition_site: Option<Site>,
 }
 
 impl<'i, 'a> Normalizer<'i, 'a> {
@@ -386,6 +396,7 @@ impl<'i, 'a> Normalizer<'i, 'a> {
             defining: 0,
             module: 0,
             sites: Vec::new(),
+            definition_site: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -393,13 +404,18 @@ impl<'i, 'a> Normalizer<'i, 'a> {
     /// The checker's typed facts for one node.
     ///
     /// The typed tree is keyed by `ExprId`; a definition that failed has none,
-    /// which cannot happen here because evaluation runs only for definitions
+    /// which cannot happen here because normalization runs only for definitions
     /// the checker accepted.
     pub(crate) fn typed(&self, module: usize, expr: &Expr) -> Option<crate::check::TypedExpr> {
-        self.facts(module, expr)
+        self.facts(module, expr).or_else(|| {
+            let tc = self.input.type_check();
+            tc.typed_node_at(module, expr.span)
+                .or_else(|| tc.typed_node(module, expr.id))
+                .cloned()
+        })
     }
 
-    /// Where evaluation currently is.
+    /// Where normalization currently is.
     pub(crate) fn origin(&self) -> Origin {
         self.sites.last().map_or_else(
             || Origin::new(self.module, Span::default()),
@@ -436,12 +452,12 @@ impl<'i, 'a> Normalizer<'i, 'a> {
         ))
     }
 
-    /// The module the expression being evaluated was written in.
+    /// The module the expression being normalized was written in.
     pub(crate) fn call_module(&self) -> usize {
         self.sites.last().map_or(self.module, |site| site.module)
     }
 
-    /// The `ExprId` of the expression being evaluated.
+    /// The `ExprId` of the expression being normalized.
     pub(crate) fn call_id(&self) -> u32 {
         self.sites.last().map_or(0, |site| site.id)
     }
@@ -517,7 +533,7 @@ impl<'i, 'a> Normalizer<'i, 'a> {
 
     /// The node at a path, in the innermost definition that has one there.
     ///
-    /// The frames are the path from the definition being evaluated to the
+    /// The frames are the path from the definition being normalized to the
     /// syntax, so the innermost frame whose body *contains* this path is the
     /// one that wrote the expression being read. A frame further out holds the
     /// same path — a helper's body is the same syntax whether it is reached
@@ -552,10 +568,10 @@ impl<'i, 'a> Normalizer<'i, 'a> {
             }
             found.get_or_insert_with(|| node.clone());
         }
-        Some(typed.or(found)?)
+        typed.or(found)
     }
     /// The definition a name denotes in the scope of the definition being
-    /// evaluated.
+    /// normalized.
     ///
     /// The checker's resolutions are what the reduction normally reads, and
     /// they are recorded for every name a *use* reaches. A primitive
@@ -580,7 +596,7 @@ impl<'i, 'a> Normalizer<'i, 'a> {
 
     /// The resolution the checker recorded at a name occurrence.
     pub(crate) fn resolution(&self, module: usize, expr: &Expr) -> Option<crate::check::Resolved> {
-        self.facts(module, expr).and_then(|node| node.resolved)
+        self.typed(module, expr).and_then(|node| node.resolved)
     }
 
     /// The checker's scalar type for the expression whose frame is innermost.
@@ -601,6 +617,19 @@ impl<'i, 'a> Normalizer<'i, 'a> {
         expr: &Expr,
     ) -> Option<Vec<(String, crate::core::ScalarType)>> {
         self.typed(module, expr).and_then(|node| node.row())
+    }
+
+    /// The scalar result declared by a template definition's selected scheme.
+    ///
+    /// The `sql` body itself has no useful scalar node type: its result type is
+    /// attached to the definition scheme. Reading that fact is what preserves
+    /// the date/timestamp distinction for overloaded templates.
+    pub(crate) fn result_scalar(
+        &self,
+        module: usize,
+        def: usize,
+    ) -> Option<crate::core::ScalarType> {
+        self.input.type_check().result_scalar(module, def)
     }
 
     /// A definition's declared arity: how many arrows its signature has.
@@ -662,7 +691,7 @@ impl Site {
     }
 }
 
-/// What evaluating one definition produced.
+/// What normalizing one definition produced.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Lowered {
     pub(crate) query: arena::CompiledQuery,
@@ -674,7 +703,7 @@ impl Lowered {
     }
 }
 
-/// Evaluate one definition's body to a query.
+/// Normalize one definition's body to a query.
 ///
 /// A query definition's scheme says its body is a query, so a body that reduces
 /// to anything else is a capability gap: the checker said this is a query and
@@ -691,12 +720,12 @@ pub(crate) fn definition(
     let origin = Origin::new(module, body.span);
     normalizer.budget.enter(origin)?;
     normalizer.active.push((module, def));
-    let value = normalizer.body_value(module, def, body);
+    let value = normalizer.body_value(module, def, body, &Env::default());
     normalizer.active.pop();
     let Value::Query(root) = value? else {
         return Err(Control::unsupported(
             origin,
-            "a query definition evaluated to something that is not a query",
+            "a query definition normalized to something that is not a query",
         ));
     };
     let builder = std::mem::replace(&mut normalizer.builder, arena::Builder::new());
@@ -705,7 +734,7 @@ pub(crate) fn definition(
     })
 }
 
-/// One definition's body, evaluated and erased, for the differential test.
+/// One definition's body, normalized and erased, for the differential test.
 ///
 /// The two routes are compared through this and `legacy_debug_for_tests`; it is
 /// not an interface to build on.

@@ -969,7 +969,7 @@ error (`expected winspec a, found frame`); wrap it:
 ### Windows may not go where a value cannot
 
 Because a window is computed per row, it cannot appear in a place that must be
-evaluated before rows exist. These are rejected, each with a targeted message:
+normalized before rows exist. These are rejected, each with a targeted message:
 
 ```haskell
 bad1 = orders & where ((rowNumber {order = [desc .amount]}) <= 3)

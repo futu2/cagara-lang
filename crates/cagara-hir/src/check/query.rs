@@ -3,13 +3,11 @@
 //!
 //! # Why this exists
 //!
-//! `CheckedQuery` (see [`crate::checked`]) is built today by normalizing a
-//! definition to a [`Term`](crate::term_oracle::Term) and lowering that. The
-//! lowering *recovers* each stage's boundary from the shape of the term it is
-//! handed: it recognizes a saturated stage primitive, reads the rows the stage
-//! read and produced off the surrounding type, and reassembles them. Every step
-//! of that recovery is a place where the answer can be reconstructed slightly
-//! differently from the way it was proved.
+//! The production compiler now uses `normalize::arena` for query construction.
+//! `CheckedQuery` and this typed arena remain as compatibility structures for
+//! checked-tree APIs and route tests. They preserve the checker-owned stage
+//! boundaries so those consumers do not have to recover them from a composed
+//! result type.
 //!
 //! This module is the other representation. A [`TypedQueryNode`] is created
 //! **where the stage is applied**, while the checker still has the operation and
@@ -52,10 +50,9 @@
 //! slices. A kind with no builder yet is a kind nothing constructs, not a kind
 //! with a guess in it.
 //!
-//! Because the consumers arrive slice by slice, part of this module is unused
-//! until they do. The allowance below is scoped to the module and says why,
-//! rather than being applied crate-wide: an unused *builder* here is a slice
-//! that has not landed yet, while an unused item anywhere else still warns.
+//! Because compatibility consumers arrive slice by slice, part of this module
+//! is intentionally unused. The allowance below is scoped to the module and
+//! says why, rather than being applied crate-wide.
 #![allow(dead_code)]
 
 use super::NodeRef;
@@ -1107,6 +1104,7 @@ impl TypedQuery {
     }
 
     /// A row-preserving stage with checked expression payloads.
+    #[allow(clippy::too_many_arguments)] // Compatibility payload adapter.
     pub(crate) fn keep_row_with_payload(
         &mut self,
         site: NodeRef,
@@ -1191,6 +1189,7 @@ impl TypedQuery {
     /// Combine two typed children with a join or set operation. The checker
     /// supplies the output row; this constructor records both child rows in
     /// operand order and refuses an operation of any other arity.
+    #[allow(clippy::too_many_arguments)] // Compatibility payload adapter.
     pub(crate) fn combine(
         &mut self,
         site: NodeRef,

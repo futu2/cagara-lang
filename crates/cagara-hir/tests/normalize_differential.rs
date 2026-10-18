@@ -112,7 +112,6 @@ const PROGRAMS: &[(&str, &str)] = &[
 
 /// What one definition's two routes produced.
 struct Verdict {
-    label: String,
     program: String,
     name: String,
     legacy: Result<cagara_hir::ir::Rel, String>,
@@ -189,7 +188,6 @@ fn compare_workspace(label: &str, ws: &Workspace, verdicts: &mut Vec<Verdict>) {
         let legacy = cagara_hir::legacy_debug_for_tests(input, root, def, &definition.body);
         let normalizer = cagara_hir::normalize_debug_for_tests(input, root, def, &definition.body);
         verdicts.push(Verdict {
-            label: label.to_string(),
             program: format!("{label} def {def}"),
             name: definition.name.clone(),
             legacy,

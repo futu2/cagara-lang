@@ -6,7 +6,20 @@
 //! cannot construct return `None`; the production coordinator turns that into
 //! a compiler capability diagnostic. The normalized term implementation is
 //! used only by agreement tests.
-#![allow(dead_code)] // Keep the slice self-contained while later stages land.
+#![allow(dead_code)]
+// Keep the slice self-contained for compatibility tests.
+// This module is retained as a legacy/debug route while consumers migrate to
+// `normalize::arena`; its shape is deliberately slice-oriented and does not
+// warrant refactoring solely to satisfy lints on the production path.
+#![allow(
+    clippy::if_same_then_else,
+    clippy::let_and_return,
+    clippy::needless_lifetimes,
+    clippy::needless_return,
+    clippy::question_mark,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 
 use crate::check::Resolved;
 use crate::check::{CombineKind, NodeId, NodeRef, QueryNodeKind, Row, RowStage, TypedQuery};
@@ -5326,7 +5339,7 @@ fn inline_stage_expr(expr: &Expr) -> Option<Expr> {
     })
 }
 
-/// Evaluate an inline stage lambda against an already lowered query. The
+/// Normalize an inline stage lambda against an already lowered query. The
 /// surface form is curried application, so a lambda such as
 /// `x => select {...} (where (...) x)` contains two stage applications whose
 /// query argument is the final argument of each application.
@@ -5734,7 +5747,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_plain_select_bypasses_normalized_elaboration() {
+    fn direct_plain_select_stays_on_legacy_compatibility_route() {
         let ws = Workspace::from_source(
             "spec = { order = [asc .id] }\n\
              users : query { id = int, name = string } = table \"s\" \"users\"\n\
@@ -5760,7 +5773,7 @@ mod tests {
         assert_eq!(result.0.root_kind(), QueryNodeKind::Select);
         assert!(
             crate::term_oracle::visited_nodes().is_empty(),
-            "simple select unexpectedly entered normalized elaboration"
+            "simple select unexpectedly entered the legacy lowering route"
         );
         let node = result.0.node(result.0.root());
         let fields = node.projection_fields().expect("typed select has fields");

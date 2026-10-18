@@ -4,7 +4,7 @@
 //! `cagara-fmt` already fuzzes the parser with token soup, which is mostly
 //! rejected. This generates programs that are meant to type-check — real
 //! tables, real stages, real operators — and runs each one through the whole
-//! pipeline: parse, type check, evaluate to the IR, validate its schema, and
+//! pipeline: parse, type check, normalize to the IR, validate its schema, and
 //! lower to SQL. A program that panics (rather than reporting a diagnostic) is
 //! a bug whether or not it happens to be well-typed.
 //!
@@ -388,7 +388,7 @@ fn check_pipeline(src: &str, seed: u64) {
     }
 }
 
-/// Compile the generated query to ANSI SQL, if it type-checks and evaluates.
+/// Compile the generated query to ANSI SQL, if it type-checks and normalizes.
 /// The generator names its definitions `q0`, `q1`, ...; take the first.
 fn compile_one(src: &str) -> Option<String> {
     let ws = Workspace::from_source(&format!("{SCHEMA}{src}"));

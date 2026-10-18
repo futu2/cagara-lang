@@ -647,7 +647,7 @@ fn errors() {
     assert!(error("q = orders & innerJoin users (.user_id == .id)\n", "q").contains("which input"));
     assert!(error("q = users & select {.nope}\n", "q").contains("no column `nope`"));
     assert!(error("q : query { id = int } = q\n", "q").contains("refers to itself"));
-    // A recursive helper is caught during elaboration and named, whether it is
+    // A recursive helper is caught during normalization and named, whether it is
     // a lambda that calls itself or two helpers that call each other. It must
     // never reach the compiler budget as an internal/limit error. The failure
     // is reported at the *use*, since a helper has no query of its own.
@@ -1723,7 +1723,7 @@ fn an_alias_is_a_value_where_a_function_is_expected() {
 }
 
 /// A **computed function value** in application-head position — not a name, but
-/// an expression that evaluates to a function — must apply its arguments like
+/// an expression that normalizes to a function — must apply its arguments like
 /// any other call. The checker types all of these; the elaborator used to
 /// refuse them with "only a named definition can be applied in an expression".
 #[test]

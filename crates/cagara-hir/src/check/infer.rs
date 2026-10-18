@@ -432,7 +432,7 @@ impl<'w> Checker<'w> {
             Some(Binding::Overloads(module, _)) if *module == self.module
         );
         if candidate || matches!(self.resolve(&t), Ty::Con("query", _)) {
-            // A query is evaluated, so its overloads must be resolved:
+            // A query is normalized, so its overloads must be resolved:
             // default leftover literals, then report what is still open.
             self.default_lits();
             self.solve()?;
@@ -458,7 +458,7 @@ impl<'w> Checker<'w> {
                 }
             }
         } else {
-            // A non-query definition is not evaluated, so its overloads may
+            // A non-query definition is not normalized, so its overloads may
             // stay open for its users. One that no candidate can satisfy is an
             // error already, though: without this it stays hidden until
             // something uses the definition (`.a + "x"`). Leftover literals
@@ -1543,7 +1543,7 @@ impl<'w> Checker<'w> {
                 // use instantiates that rule with fresh variables; rebuilding
                 // the rule here, out of the callee's *result* type, is what made
                 // a body with two key stages read the second stage's input as
-                // the composed row. See docs/TYPE-SYSTEM-REDESIGN.md.
+                // the composed row. See docs/CORE.md.
                 // The stage this callee *is*, when its definition owns a row
                 // rule. A helper's scheme says nothing, so its use is not a
                 // stage application: the stages it applies were recorded in its
@@ -2773,7 +2773,7 @@ impl<'w> Checker<'w> {
             // Reduce the public row former after its operands have
             // been tied to the concrete inputs. This keeps later
             // projections from seeing an open `merge` term. The
-            // public type is right-biased; the runtime join retains
+            // public type is right-biased; the SQL join retains
             // its established left-column collision behavior.
             let Ty::Merge(al, ar) = self.resolve(out) else {
                 unreachable!("join output changed while resolving its merge");

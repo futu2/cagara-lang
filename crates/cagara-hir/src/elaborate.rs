@@ -46,6 +46,19 @@ pub(crate) fn elaborated_defs() -> Vec<(usize, usize)> {
     ELABORATED_DEFS.with(|defs| defs.borrow().clone())
 }
 
+/// Record that a root definition reached the lowering boundary. The counter is
+/// used by incremental compilation tests; the production lowering itself lives
+/// in `normalize::route`.
+pub(crate) fn record_definition(module: usize, def: usize) {
+    #[cfg(test)]
+    {
+        ELABORATED_DEFS.with(|defs| defs.borrow_mut().push((module, def)));
+        ELABORATE_RUNS.with(|runs| runs.set(runs.get() + 1));
+    }
+    #[cfg(not(test))]
+    let _ = (module, def);
+}
+
 /// What elaborating one expression produced.
 type R<T> = Result<T, Error>;
 
@@ -103,9 +116,25 @@ fn elaborate_def(
     def: usize,
     d: &ast::Def,
 ) -> R<CheckedQuery> {
-    #[cfg(test)]
-    ELABORATED_DEFS.with(|defs| defs.borrow_mut().push((module, def)));
+    prepare_query_definition(input, module, def, d)?;
+    // This is the compatibility oracle used by the checked-tree snapshot. The
+    // compiler boundary itself calls the normalizer route directly.
+    match crate::query_lowering::lower(input, module, def, &d.body)? {
+        crate::query_lowering::LoweredQuery::Typed { checked, .. } => Ok(checked),
+    }
+}
 
+/// Check the facts needed before reducing a definition, without performing
+/// query lowering. Both the compatibility oracle and the production
+/// normalizer use this same gate so neither route invents a query for a scalar
+/// or a rejected definition.
+pub(crate) fn prepare_query_definition(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    d: &ast::Def,
+) -> R<()> {
+    validate_template_definition(module, d)?;
     let tc = input.type_check();
     // A rejected definition has no trustworthy types. Its checker diagnostic
     // is emitted by the compilation boundary, so it must not be elaborated.
@@ -134,12 +163,7 @@ fn elaborate_def(
     ) {
         return Err(NOT_A_QUERY);
     }
-    // The typed route is authoritative. A query shape the typed builder cannot
-    // construct is a compiler capability error; it is never reinterpreted by
-    // a second semantic implementation.
-    match crate::query_lowering::lower(input, module, def, &d.body)? {
-        crate::query_lowering::LoweredQuery::Typed { checked, .. } => Ok(checked),
-    }
+    Ok(())
 }
 
 /// Elaborate one source definition, for an integration test that needs the
@@ -167,10 +191,8 @@ pub(crate) fn elaborate_definition(
     def: usize,
     definition: &ast::Def,
 ) -> R<CheckedQuery> {
-    #[cfg(test)]
-    ELABORATE_RUNS.with(|runs| runs.set(runs.get() + 1));
-    validate_template_definition(module, definition)
-        .and_then(|()| elaborate_def(input, module, def, definition))
+    record_definition(module, def);
+    elaborate_def(input, module, def, definition)
 }
 
 /// How a `sql` template's result is *declared* to behave, read from its type

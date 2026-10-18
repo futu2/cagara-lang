@@ -9,10 +9,10 @@
 //!
 //! Two costs are counted, because they bound two different shapes:
 //!
-//! * **recursion** — how many definitions down one evaluation path. A chain of
+//! * **recursion** — how many definitions down one normalization path. A chain of
 //!   definitions that merely name each other is linear in this, and a recursive
 //!   definition is unbounded, so this is also where a cycle is caught.
-//! * **work** — nodes evaluated and relational nodes constructed. A definition
+//! * **work** — nodes visited and relational nodes constructed. A definition
 //!   that uses its argument twice doubles the work at every level, so this is
 //!   the bound that catches the exponential shape, and it is charged for every
 //!   node *before* that node is built.
@@ -24,7 +24,7 @@ use crate::core::Origin;
 
 use super::Control;
 
-/// How many definitions may nest on one evaluation path.
+/// How many definitions may nest on one normalization path.
 ///
 /// The old pipeline allowed 200 links of inlining in the term oracle and 16 in
 /// the source-directed lowering; this single number replaces both, and is
@@ -32,13 +32,13 @@ use super::Control;
 /// while still refusing a cycle immediately.
 pub(crate) const MAX_DEPTH: usize = 200;
 
-/// How many nodes one definition's evaluation may visit or construct.
+/// How many nodes one definition's normalization may visit or construct.
 ///
 /// The term oracle refuses a normal form over 200 000 nodes; the same number
 /// here, counted as work, refuses an exponential expansion *during* it.
 pub(crate) const MAX_WORK: usize = 200_000;
 
-/// The budget for one definition's evaluation.
+/// The budget for one definition's normalization.
 #[derive(Debug, Clone)]
 pub(crate) struct Budget {
     depth: usize,
@@ -56,7 +56,8 @@ impl Budget {
         Budget { depth: 0, work: 0 }
     }
 
-    /// How deep the evaluation currently is, for a caller that wants to say so.
+    /// How deep normalization currently is, for a caller that wants to say so.
+    #[allow(dead_code)] // Kept for diagnostics and budget-focused tests.
     pub(crate) fn depth(&self) -> usize {
         self.depth
     }
@@ -81,15 +82,15 @@ impl Budget {
         self.depth = self.depth.saturating_sub(1);
     }
 
-    /// Account for evaluating one node.
+    /// Account for visiting one node.
     pub(crate) fn spend(&mut self, origin: Origin) -> Result<(), Control> {
         self.work += 1;
         if self.work > MAX_WORK {
             return Err(Control::unsupported(
                 origin,
                 format!(
-                    "this definition expands to more than {MAX_WORK} evaluation steps; \
-                     it is too large to evaluate"
+                    "this definition expands to more than {MAX_WORK} normalization steps; \
+                     it is too large to normalize"
                 ),
             ));
         }

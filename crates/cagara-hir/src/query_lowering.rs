@@ -15,7 +15,7 @@ use cagara_syntax::ast::Expr;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LoweredQuery {
     /// A query built from checker-owned typed nodes. The typed graph is kept
-    /// alongside the public checked tree so migration checks can inspect the
+    /// alongside the public checked tree so compatibility tests can inspect the
     /// stage boundaries without rebuilding them from the relation.
     Typed {
         typed: TypedQuery,

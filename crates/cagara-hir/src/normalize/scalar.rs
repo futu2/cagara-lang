@@ -38,6 +38,7 @@ pub(crate) fn primitive<'a>(
         return Ok(Value::Stage(StageFn {
             spec,
             args: Vec::new(),
+            site: ev.definition_site.or_else(|| ev.call_site().copied()),
         }));
     }
     if let Some(value) = frame::primitive_value(prim, origin) {
@@ -47,10 +48,12 @@ pub(crate) fn primitive<'a>(
         crate::primitive::Prim::Join(kind) => Ok(Value::Combine(CombineFn::Join {
             kind,
             args: Vec::new(),
+            site: ev.definition_site.or_else(|| ev.call_site().copied()),
         })),
         crate::primitive::Prim::Set(kind) => Ok(Value::Combine(CombineFn::Set {
             kind,
             args: Vec::new(),
+            site: ev.definition_site.or_else(|| ev.call_site().copied()),
         })),
         // `table "s" "t"`: the only leaf. Its two arguments are labels; the
         // columns are the row the checker closed for the call.
@@ -97,9 +100,16 @@ pub(crate) fn template_value<'a>(
 ) -> Result<Value<'a>, Control> {
     let origin = Origin::new(module, expr.span);
     let kind = ev.declared_template_kind(module, def);
-    let arity = ev.declared_arity(module, def);
-    let ty = ev.ty(module, expr).unwrap_or(ScalarType::Unknown);
-    if arity == 0 {
+    // The window specification is a structural argument consumed by the
+    // normalizer, not one of the SQL template's expression arguments. The
+    // declared type includes it as the first arrow, while `TemplateFn::arity`
+    // counts only the values that become `$n` placeholders.
+    let arity = ev.declared_arity(module, def) - usize::from(kind == TemplateKind::Win);
+    let ty = ev
+        .result_scalar(module, def)
+        .or_else(|| ev.ty(module, expr))
+        .unwrap_or(ScalarType::Unknown);
+    if arity == 0 && kind != TemplateKind::Win {
         // A template with no arguments is already saturated: applying it is not
         // a step, so the value *is* the checked expression.
         return build(sql, kind, None, Vec::new(), origin, ty);
@@ -176,7 +186,10 @@ fn saturated<'a>(ev: &Normalizer<'a, 'a>, template: TemplateFn) -> Result<Value<
         template.kind,
         template.spec,
         template.args,
-        template.origin,
+        // The template body is often a prelude definition. The expression
+        // being reduced, however, belongs to the caller's application, and
+        // diagnostics for that expression must point back to the caller.
+        ev.origin(),
         ty,
     )
 }

@@ -2,7 +2,7 @@
 
 use crate::check::TypeCheck;
 use crate::core::{Error, Fault, Origin};
-use crate::elaborate::{elaborate_definition, is_not_a_query};
+use crate::elaborate::{is_not_a_query, prepare_query_definition, record_definition};
 use crate::ir::Rel;
 use crate::workspace::{Binding, Diag, LoadedModule, Workspace};
 use cagara_syntax::ast::Module;
@@ -14,7 +14,7 @@ use std::path::Path;
 ///
 /// The workspace remains the owner of Salsa storage, overlays, and cache
 /// identity. This view only bundles the cached source graph and its type-check
-/// result for the source-elaboration and erasure boundary.
+/// result for normalization and erasure.
 #[derive(Clone, Copy)]
 pub struct CompilerInput<'a> {
     workspace: &'a Workspace,
@@ -255,8 +255,9 @@ fn compile_definition(
     definition: &cagara_syntax::ast::Def,
     name: &str,
 ) -> Option<(Result<Rel, Diag>, Option<Fault>)> {
-    let elaborated = match elaborate_definition(input, root.index(), index, definition) {
-        Ok(query) => query,
+    record_definition(root.index(), index);
+    match prepare_query_definition(input, root.index(), index, definition) {
+        Ok(()) => {}
         // Not a failure at all: a scalar definition, a stage, … has no query to
         // build. The checker's own diagnostic (if it produced one) is the only
         // thing worth reporting here, because elaboration has no verdict.
@@ -273,24 +274,31 @@ fn compile_definition(
             };
             return Some((Err(diag), Some(fault)));
         }
-    };
-    // Erasure and schema validation run after the checked tree exists. A
-    // failure in either is a *compiler* fault: the checker already accepted the
-    // definition, so the program is well-typed and this phase could not build
-    // it. Reporting that distinction is the whole point of carrying `Fault`.
-    Some(match crate::checked::erase(elaborated) {
-        Ok(rel) => match crate::schema::schema_located(&rel) {
-            Ok(_) => (Ok(rel), None),
-            Err((location, message)) => (
-                Err(input.diagnostic(location.map(|l| Origin::new(l.module, l.span)), message)),
-                Some(Fault::Compiler),
-            ),
+    }
+    // Normalization, erasure, and schema validation follow the query-shape
+    // check. A capability gap here is a *compiler* fault: the checker already
+    // accepted the definition, so this phase could not build it. Reporting that
+    // distinction is the whole point of carrying `Fault`.
+    Some(
+        match crate::normalize::route::lower(input, root.index(), index, &definition.body) {
+            Ok(rel) => match crate::schema::schema_located(&rel) {
+                Ok(_) => (Ok(rel), None),
+                Err((location, message)) => (
+                    Err(input.diagnostic(location.map(|l| Origin::new(l.module, l.span)), message)),
+                    Some(Fault::Compiler),
+                ),
+            },
+            Err(error) => {
+                let fault = error.fault;
+                let diag = match fault {
+                    Fault::Program => input.diagnostic(error.origin, error.message),
+                    Fault::Compiler => internal_error(input, name, &error),
+                    Fault::NotAQuery => unreachable!("the query shape was checked above"),
+                };
+                (Err(diag), Some(fault))
+            }
         },
-        Err(error) => (
-            Err(internal_error(input, name, &error)),
-            Some(Fault::Compiler),
-        ),
-    })
+    )
 }
 
 fn source_hash(source: &str) -> u64 {
@@ -325,10 +333,10 @@ fn definition_keys(module: ModuleSnapshot<'_>) -> Vec<DefinitionKey> {
         .collect()
 }
 
-/// Elaborate root definitions directly into checked queries and erase them.
+/// Compile root definitions using a type check the caller already computed.
 ///
-/// Type checking supplies the facts used by source elaboration. A checked
-/// query is the sole source of a production `Rel`.
+/// The checker supplies the facts consumed by the production normalizer; the
+/// checked-tree elaboration API remains available for compatibility.
 pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Rel, Diag>)> {
     compile_input(CompilerInput::new(ws, tc))
         .queries

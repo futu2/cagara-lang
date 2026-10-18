@@ -1,4 +1,4 @@
-//! The reduction rules: evaluate a typed-core expression to a [`Value`], and
+//! The reduction rules: normalize a typed-core expression to a [`Value`], and
 //! apply a value to an argument.
 //!
 //! [`Normalizer::value`] matches on the *expression*; [`Normalizer::apply`]
@@ -17,14 +17,14 @@ use super::{
 };
 use crate::check::NodeRef;
 use crate::check::Resolved;
-use crate::checked::{CheckedExpr, WinSpecChecked};
+use crate::checked::{CheckedExpr, CheckedExprNode};
 use crate::core::{Origin, ScalarType};
 
 impl<'a> Normalizer<'a, 'a> {
     /// The value of one expression, under one environment.
     ///
     /// Every node pushes its frame, so the stack is exactly the path from the
-    /// definition being evaluated to the expression being reduced — which is
+    /// definition being normalized to the expression being reduced — which is
     /// what [`stage_site`](Self::stage_site) reads to find the application the
     /// checker recorded.
     pub(crate) fn value(
@@ -35,16 +35,26 @@ impl<'a> Normalizer<'a, 'a> {
     ) -> Result<Value<'a>, Control> {
         let origin = Origin::new(module, expr.span);
         self.budget.spend(origin)?;
-        self.sites.push(Site {
-            module,
-            def: self.defining,
-            id: expr.id,
-            span: expr.span,
-            named: true,
-            parent: self.sites.last().map(|site| site.id),
+        let duplicate_frame = self.sites.last().is_some_and(|site| {
+            site.module == module
+                && site.def == self.defining
+                && site.id == expr.id
+                && site.span == expr.span
         });
+        if !duplicate_frame {
+            self.sites.push(Site {
+                module,
+                def: self.defining,
+                id: expr.id,
+                span: expr.span,
+                named: true,
+                parent: self.sites.last().map(|site| site.id),
+            });
+        }
         let result = self.value_at(module, expr, env);
-        self.sites.pop();
+        if !duplicate_frame {
+            self.sites.pop();
+        }
         result
     }
 
@@ -91,9 +101,9 @@ impl<'a> Normalizer<'a, 'a> {
             }
             ExprKind::Case(_) => scalar::case(self, module, expr, env),
             ExprKind::Record(fields) => {
-                // A record reaches evaluation as a projection's fields, a
+                // A record reaches normalization as a projection's fields, a
                 // window specification, or an argument to a label-taking
-                // operation. Its values are evaluated here and its names travel
+                // operation. Its values are normalized here and its names travel
                 // with them.
                 let mut items = Vec::with_capacity(fields.len());
                 let mut names = Vec::with_capacity(fields.len());
@@ -117,7 +127,7 @@ impl<'a> Normalizer<'a, 'a> {
                 })
             }
             // A template reached through a name is a *definition*: its own body
-            // is evaluated by `body_value`, which knows its declared arity and
+            // is normalized by `body_value`, which knows its declared arity and
             // kind. Reaching one here would be a `sql` written inline, which
             // the language does not have.
             ExprKind::Sql(sql) => scalar::template(self, module, expr, sql),
@@ -129,7 +139,7 @@ impl<'a> Normalizer<'a, 'a> {
         }
     }
 
-    /// One expression evaluated as another's argument.
+    /// One expression normalized as another's argument.
     ///
     /// The same reduction as [`value`](Self::value), with the one difference
     /// that matters to identity: the frame is not named, because the
@@ -202,7 +212,11 @@ impl<'a> Normalizer<'a, 'a> {
                 expr: body,
             },
             env: std::sync::Arc::new(env.clone()),
-            site: None,
+            // Keep the application that is supplying this closure. The body
+            // may construct a relational node after the lambda is reduced
+            // away, and that node still belongs to this use site in the
+            // checker's stage index.
+            site: self.definition_site.or_else(|| self.call_site().copied()),
         }))
     }
 
@@ -212,20 +226,31 @@ impl<'a> Normalizer<'a, 'a> {
     /// following it is this call rather than a separate walk.
     fn name(&mut self, module: usize, expr: &'a Expr, env: &Env<'a>) -> Result<Value<'a>, Control> {
         let origin = Origin::new(module, expr.span);
-        let ExprKind::Name(label) = &expr.kind else {
-            return Err(Control::unsupported(
-                origin,
-                "a projection has no local name",
-            ));
+        let label = match &expr.kind {
+            ExprKind::Name(label) | ExprKind::Proj(_, label) => label,
+            _ => {
+                return Err(Control::unsupported(
+                    origin,
+                    "a projection has no local name",
+                ))
+            }
         };
         if let Some(value) = env.lookup(label) {
+            if let Value::Scalar(expr) = value {
+                for _ in 0..expr.node_count() {
+                    self.budget.spend(origin)?;
+                }
+            }
             return Ok(value.clone());
         }
         match self.resolution(module, expr) {
             Some(Resolved::Def((target_module, target_def))) => {
                 self.definition(target_module, target_def, origin)
             }
-            Some(Resolved::Overloads { module, defs }) => self.overloads(module, expr, &defs),
+            Some(Resolved::Overloads {
+                module: target_module,
+                defs,
+            }) => self.overloads(target_module, module, expr, &defs),
             // The checker records a primitive only for a `primitive "…"` body,
             // which is read as a body form rather than as a name.
             Some(Resolved::Primitive) => Err(Control::unsupported(
@@ -234,7 +259,7 @@ impl<'a> Normalizer<'a, 'a> {
             )),
             // A body no use reaches — a primitive definition's own — has no
             // recorded resolution, so the name is looked up in the scope of the
-            // definition being evaluated, which is the scope it was written in.
+            // definition being normalized, which is the scope it was written in.
             // The first definition of that name is enough: narrowing the
             // overloads is a *use* site's job, and there is none here.
             None => match self.scope_definition(module, label) {
@@ -251,23 +276,24 @@ impl<'a> Normalizer<'a, 'a> {
     /// filtered by whichever one applies.
     fn overloads(
         &mut self,
-        module: usize,
+        target_module: usize,
+        use_module: usize,
         expr: &'a Expr,
         defs: &[usize],
     ) -> Result<Value<'a>, Control> {
-        let origin = Origin::new(module, expr.span);
-        if let Some(node) = self.typed(module, expr) {
+        let origin = Origin::new(use_module, expr.span);
+        if let Some(node) = self.typed(use_module, expr) {
             for (_, choice) in &node.choices {
-                if let crate::check::Choice::Def(target_module, target_def) = choice {
-                    if module == *target_module && defs.contains(target_def) {
-                        return self.definition(*target_module, *target_def, origin);
+                if let crate::check::Choice::Def(choice_module, target_def) = choice {
+                    if target_module == *choice_module && defs.contains(target_def) {
+                        return self.definition(*choice_module, *target_def, origin);
                     }
                 }
             }
         }
         let mut values = Vec::with_capacity(defs.len());
         for def in defs {
-            match self.definition(module, *def, origin) {
+            match self.definition(target_module, *def, origin) {
                 Ok(value) => values.push(value),
                 Err(Control::Unsupported { .. }) => continue,
                 Err(error) => return Err(error),
@@ -283,12 +309,12 @@ impl<'a> Normalizer<'a, 'a> {
         }
     }
 
-    /// Evaluate a definition's body.
+    /// Normalize a definition's body.
     ///
     /// The budget charges the path; a definition already on it is a cycle, and
     /// is refused before the budget could only say "too deep".
     ///
-    /// The *site* is restored afterwards: a definition evaluates to a value —
+    /// The *site* is restored afterwards: a definition normalizes to a value —
     /// a primitive's stage, a lambda, an alias's target — and applying that
     /// value is something the calling expression does. Leaving the callee's sites
     /// current would stamp the call in the caller with the callee's
@@ -300,16 +326,22 @@ impl<'a> Normalizer<'a, 'a> {
     ) -> Result<Value<'a>, Control> {
         let key = (module, def);
         if self.active.contains(&key) {
-            return Err(Control::unsupported(
-                use_origin,
-                "definition refers to itself",
+            let name = &self.input.module(module).def(def).name;
+            return Err(Control::Program(
+                crate::core::Error::new(format!(
+                    "`{name}` refers to itself; recursion is not supported"
+                ))
+                .at(use_origin),
             ));
         }
         self.budget.enter(use_origin)?;
         self.active.push(key);
         let previous = std::mem::replace(&mut self.defining, def);
+        let previous_site = self.definition_site;
+        self.definition_site = self.application_site(use_origin);
         let body = &self.input.module(module).def(def).body;
-        let result = self.body_value(module, def, body);
+        let result = self.body_value(module, def, body, &Env::default());
+        self.definition_site = previous_site;
         self.defining = previous;
         self.active.pop();
         self.budget.leave();
@@ -326,6 +358,7 @@ impl<'a> Normalizer<'a, 'a> {
         module: usize,
         def: usize,
         body: &'a Expr,
+        env: &Env<'a>,
     ) -> Result<Value<'a>, Control> {
         self.budget.spend(Origin::new(module, body.span))?;
         self.sites.push(Site {
@@ -341,7 +374,7 @@ impl<'a> Normalizer<'a, 'a> {
             ExprKind::Sql(sql) => scalar::template_value(self, module, body, sql, def),
             // Any other body is an ordinary expression: an alias follows, a
             // lambda is a function value, an application is reduced.
-            _ => self.value(module, body, &Env::default()),
+            _ => self.value(module, body, env),
         };
         self.sites.pop();
         result
@@ -359,7 +392,7 @@ impl<'a> Normalizer<'a, 'a> {
             Value::Direction {
                 ascending,
                 mut args,
-                origin,
+                origin: _,
             } => {
                 let key = self.as_expr(arg, self.call_module(), self.call_expr()?)?;
                 args.clear();
@@ -435,7 +468,7 @@ impl<'a> Normalizer<'a, 'a> {
     /// β-reduction.
     ///
     /// A curried lambda is one closure with every parameter listed, so binding
-    /// the next parameter is the reduction step, and the body is evaluated when
+    /// the next parameter is the reduction step, and the body is normalized when
     /// the last one arrives — exactly as nested lambdas would reduce, one step
     /// at a time.
     fn apply_closure(
@@ -463,9 +496,32 @@ impl<'a> Normalizer<'a, 'a> {
         }
         let module = closure.body.module;
         let previous = std::mem::replace(&mut self.defining, closure.body.def);
-        // The body is evaluated as the definition that wrote the lambda: the
+        let key = (module, closure.body.def);
+        let entered = if !self.active.contains(&key)
+            && definition_reaches(
+                self.input,
+                module,
+                closure.body.def,
+                module,
+                closure.body.def,
+                &mut Vec::new(),
+            ) {
+            self.active.push(key);
+            true
+        } else {
+            false
+        };
+        // The body is normalized as the definition that wrote the lambda: the
         // frames it pushes are that definition's nodes.
-        let result = self.body_value(module, closure.body.def, closure.body.expr);
+        let saved = self.sites.clone();
+        if let Some(site) = closure.site {
+            self.sites.push(site);
+        }
+        let result = self.body_value(module, closure.body.def, closure.body.expr, &env);
+        self.sites = saved;
+        if entered {
+            self.active.pop();
+        }
         self.defining = previous;
         result
     }
@@ -533,17 +589,7 @@ impl<'a> Normalizer<'a, 'a> {
             return Ok(Value::Stage(stage));
         }
         let args = std::mem::take(&mut stage.args);
-        // The stage was written where its application was recorded, so the site
-        // is restored for the construction: a prelude primitive's own value
-        // carries no location the checker could have filed a row stage at.
-        let saved = self.sites.clone();
-        if let Some(site) = self.call_site().copied() {
-            self.sites.clear();
-            self.sites.push(site);
-        }
-        let built = self.build_stage(stage.spec, args);
-        self.sites = saved;
-        built
+        self.build_stage(stage.spec, stage.site, args)
     }
 
     /// Apply an argument to a partially applied join or set operation.
@@ -575,9 +621,10 @@ impl<'a> Normalizer<'a, 'a> {
     fn build_stage(
         &mut self,
         spec: StageSpec,
+        operation_site: Option<Site>,
         args: Vec<Value<'static>>,
     ) -> Result<Value<'a>, Control> {
-        let (origin, site) = self.stage_site(spec.kind);
+        let (origin, site) = self.stage_site(spec.kind, operation_site);
         let (input, arguments) = args
             .split_last()
             .ok_or_else(|| Control::unsupported(origin, "a stage with no arguments"))?;
@@ -649,7 +696,15 @@ impl<'a> Normalizer<'a, 'a> {
                 let Some(count) = arguments.first() else {
                     return self.wrong_argument(origin, "a count");
                 };
-                let count = self.as_count(count, origin)?;
+                let count = self.as_count(
+                    count,
+                    origin,
+                    if spec.kind == QueryNodeKind::Limit {
+                        "limit"
+                    } else {
+                        "offset"
+                    },
+                )?;
                 let kept = if spec.kind == QueryNodeKind::Limit {
                     Kept::Limit(count)
                 } else {
@@ -755,10 +810,16 @@ impl<'a> Normalizer<'a, 'a> {
         combine: CombineFn,
         args: Vec<Value<'static>>,
     ) -> Result<Value<'a>, Control> {
-        let (origin, site) = self.stage_site(match &combine {
-            CombineFn::Join { kind, .. } => QueryNodeKind::Join(*kind),
-            CombineFn::Set { kind, .. } => QueryNodeKind::Set(*kind),
-        });
+        let operation_site = match &combine {
+            CombineFn::Join { site, .. } | CombineFn::Set { site, .. } => *site,
+        };
+        let (origin, site) = self.stage_site(
+            match &combine {
+                CombineFn::Join { kind, .. } => QueryNodeKind::Join(*kind),
+                CombineFn::Set { kind, .. } => QueryNodeKind::Set(*kind),
+            },
+            operation_site,
+        );
         self.builder.charge(origin)?;
         match combine {
             CombineFn::Join { kind, .. } => {
@@ -821,7 +882,43 @@ impl<'a> Normalizer<'a, 'a> {
     /// When there is no record — a stage the checker did not record, which on
     /// an accepted program does not happen — the innermost named frame is the
     /// best available answer for both the origin and the identity.
-    fn stage_site(&self, kind: QueryNodeKind) -> (Origin, NodeRef) {
+    fn stage_site(&self, kind: QueryNodeKind, operation_site: Option<Site>) -> (Origin, NodeRef) {
+        if let Some(site) = operation_site {
+            // The primitive name and its application share a source span in
+            // the syntax walk but receive distinct expression ids. The
+            // checker stamps the application (the parent of the name frame),
+            // so use that id for the stable node identity.
+            let operation_id = site.parent.unwrap_or(site.id);
+            let node = NodeRef::new(site.module, site.def, operation_id);
+            if let Some(stage) = self
+                .input
+                .type_check()
+                .row_stages(site.module, site.def)
+                .find(|stage| stage.node == node && Self::kind_of_stage(stage.kind) == kind)
+            {
+                let span = self
+                    .input
+                    .type_check()
+                    .typed_node(site.module, operation_id)
+                    .map_or(stage.span, |typed| typed.span);
+                return (Origin::new(stage.node.definition_module, span), stage.node);
+            }
+            if matches!(kind, QueryNodeKind::Join(_) | QueryNodeKind::Set(_)) {
+                if let Some(combine) = self
+                    .input
+                    .type_check()
+                    .typed_node(site.module, operation_id)
+                    .and_then(|node| node.combine.as_ref())
+                {
+                    let span = self
+                        .input
+                        .type_check()
+                        .typed_node(site.module, operation_id)
+                        .map_or(site.span, |typed| typed.span);
+                    return (Origin::new(site.module, span), combine.node);
+                }
+            }
+        }
         for site in self.sites.iter().rev().filter(|site| site.named) {
             let found = self
                 .input
@@ -842,6 +939,22 @@ impl<'a> Normalizer<'a, 'a> {
                 (origin, NodeRef::new(origin.module, self.defining, 0))
             }
         }
+    }
+
+    /// The enclosing application at a definition use. The innermost frame is
+    /// normally the name being resolved; the application frame is its parent
+    /// and is the identity recorded by the checker for stages and combines.
+    fn application_site(&self, use_origin: Origin) -> Option<Site> {
+        self.sites
+            .iter()
+            .rev()
+            .find(|site| site.origin() == use_origin)
+            .or_else(|| {
+                self.sites.iter().rev().find(|site| {
+                    site.span.start <= use_origin.span.start && site.span.end >= use_origin.span.end
+                })
+            })
+            .copied()
     }
 
     /// The stage kind a recorded stage denotes.
@@ -933,29 +1046,108 @@ impl<'a> Normalizer<'a, 'a> {
 
     /// A value as a count: an int literal, or a `symbol` parameter bound to
     /// one.
-    pub(crate) fn as_count(&self, value: &Value<'a>, origin: Origin) -> Result<i64, Control> {
-        let Value::Label(label) = value else {
-            return Err(Control::unsupported(
-                origin,
-                "a count must be an int literal",
-            ));
+    pub(crate) fn as_count(
+        &self,
+        value: &Value<'a>,
+        origin: Origin,
+        operation: &str,
+    ) -> Result<i64, Control> {
+        let invalid = |at| {
+            Control::Program(crate::core::Error::new(format!("{operation} expects an int")).at(at))
         };
-        if let Some(int) = label.int {
-            return Ok(int);
+        match value {
+            Value::Label(label) => {
+                if let Some(int) = label.int {
+                    return Ok(int);
+                }
+                label.text.parse().map_err(|_| invalid(origin))
+            }
+            // A literal that occurs in a closed checker application can be
+            // typed as an ordinary scalar rather than a symbol. Counts still
+            // consume the literal value, so accept that representation too.
+            Value::Scalar(expr) => {
+                let (_, _, node, _) = expr.clone().into_parts();
+                match node {
+                    CheckedExprNode::Lit(crate::ir::Lit::Int(value)) => Ok(value),
+                    _ => Err(invalid(expr.origin())),
+                }
+            }
+            _ => Err(invalid(origin)),
         }
-        label.text.parse().map_err(|_| {
-            Control::unsupported(
-                origin,
-                format!(
-                    "a count must be an int literal, and `{}` is not",
-                    label.text
-                ),
-            )
-        })
     }
     pub(crate) fn ty(&self, module: usize, expr: &Expr) -> Option<ScalarType> {
         self.ty_at(Origin::new(module, expr.span))
     }
+}
+
+/// Whether expanding a definition can reach itself through resolved names.
+///
+/// Only genuinely recursive lambda bodies need to stay active while reduced.
+/// A non-recursive combinator such as the prelude's `_&_` may be applied again
+/// by a function argument, and treating that ordinary higher-order expansion
+/// as recursion rejects valid pipelines.
+fn definition_reaches(
+    input: crate::compile::CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    target_module: usize,
+    target_def: usize,
+    seen: &mut Vec<(usize, usize)>,
+) -> bool {
+    if seen.contains(&(module, def)) {
+        return false;
+    }
+    seen.push((module, def));
+    let body = &input.module(module).def(def).body;
+    fn visit(
+        input: crate::compile::CompilerInput<'_>,
+        module: usize,
+        expr: &Expr,
+        target_module: usize,
+        target_def: usize,
+        seen: &mut Vec<(usize, usize)>,
+    ) -> bool {
+        if matches!(expr.kind, ExprKind::Name(_) | ExprKind::Proj(_, _)) {
+            match input.type_check().resolution(module, expr.id) {
+                Some(Resolved::Def((next_module, next_def))) => {
+                    if (*next_module, *next_def) == (target_module, target_def)
+                        || definition_reaches(
+                            input,
+                            *next_module,
+                            *next_def,
+                            target_module,
+                            target_def,
+                            seen,
+                        )
+                    {
+                        return true;
+                    }
+                }
+                Some(Resolved::Overloads {
+                    module: next_module,
+                    defs,
+                }) if defs.iter().any(|next_def| {
+                    (*next_module, *next_def) == (target_module, target_def)
+                        || definition_reaches(
+                            input,
+                            *next_module,
+                            *next_def,
+                            target_module,
+                            target_def,
+                            seen,
+                        )
+                }) =>
+                {
+                    return true
+                }
+                _ => {}
+            }
+        }
+        crate::check::child_exprs(expr)
+            .into_iter()
+            .any(|child| visit(input, module, child, target_module, target_def, seen))
+    }
+    visit(input, module, body, target_module, target_def, seen)
 }
 /// A value moved into an accumulator's argument list.
 ///

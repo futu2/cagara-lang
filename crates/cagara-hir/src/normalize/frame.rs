@@ -10,6 +10,7 @@ use crate::core::Origin;
 use crate::ir::{Bound, Frame};
 
 use super::{Control, Label, Normalizer, Value};
+use crate::checked::CheckedExprNode;
 
 /// The fold an accumulator performs once its last argument arrives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,13 +88,27 @@ pub(crate) fn fold<'a>(
                 .map_err(Control::Program)
         }
         FoldSpec::Offset { following } => {
-            let Some(Value::Label(Label { int: Some(n), .. })) = args.first() else {
-                return Err(Control::unsupported(
-                    origin,
-                    "a frame offset takes an int literal",
-                ));
+            let n = match args.first() {
+                Some(Value::Label(Label { int: Some(n), .. })) => *n,
+                Some(Value::Scalar(expr)) => {
+                    let (_, _, node, _) = expr.clone().into_parts();
+                    match node {
+                        CheckedExprNode::Lit(crate::ir::Lit::Int(n)) => n,
+                        _ => {
+                            return Err(Control::unsupported(
+                                origin,
+                                "a frame offset takes an int literal",
+                            ))
+                        }
+                    }
+                }
+                _ => {
+                    return Err(Control::unsupported(
+                        origin,
+                        "a frame offset takes an int literal",
+                    ))
+                }
             };
-            let n = *n;
             Ok(Value::Bound(if following {
                 Bound::Following(n)
             } else {

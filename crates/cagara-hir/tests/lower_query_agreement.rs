@@ -1,28 +1,7 @@
-//! Every query shape lowers to the checked tree the compiler produces.
-//!
-//! # What this compares, and what it used to
-//!
-//! While the migration was in progress this was a **differential** test:
-//! `source_path` called `root_queries_checked`, which went through the source
-//! walk, and `term_path` normalized and lowered by hand, so a disagreement meant
-//! the new path had dropped or reordered something. That is how the
-//! set-operation operand order was checked — the bug that once reversed
-//! `except`.
-//!
-//! There is no source walk now, so the two sides are no longer independent
-//! implementations: `source_path` still exercises the whole pipeline
-//! (check, elaborate, erase) while `term_path` drives normalization and
-//! lowering directly, and what this pins is that the *direct* route agrees with
-//! the one the compiler takes. That is a weaker claim than it once was, and
-//! saying so here is the point — a test that still claimed to compare two
-//! implementations would be the third time in this refactor that a comment
-//! described a world that had ended.
-//!
-//! What replaces the lost differential evidence is the corpus: the four shipped
-//! examples' snapshots are byte-identical across the switch, so the SQL users
-//! see is unchanged. This file's job is coverage of the *shapes* — every stage,
-//! join, set operation, window and stage-value spelling — and
-//! `the_comparison_can_fail` keeps it honest.
+//! Compare the production normalizer with the independent term oracle across
+//! every relational shape. The test covers stages, joins, set operations,
+//! windows, and stage-value spellings; the SQL corpus tests cover emitted
+//! behavior. `the_comparison_can_fail` ensures the comparison is substantive.
 
 use cagara_hir::check::check;
 use cagara_hir::term_oracle::{lower_query, Body, Facts, Normalizer, WorkspaceFacts};
@@ -35,9 +14,6 @@ vips : query { id = int, name = string, age = int } = table \"s\" \"vips\"
 ";
 
 /// The compiler's query for `name`, as an erased relation.
-///
-/// This is the whole production pipeline, not an independent implementation. See
-/// the module comment for what that means for the comparison.
 fn source_path(src: &str, name: &str) -> String {
     let ws = Workspace::from_source(src);
     let tc = check(&ws);
@@ -51,7 +27,7 @@ fn source_path(src: &str, name: &str) -> String {
     format!("{rel:?}")
 }
 
-/// The same query built by driving normalization and lowering directly.
+/// The same query built through the independent term oracle and lowerer.
 fn term_path(src: &str, name: &str) -> String {
     let ws = Workspace::from_source(src);
     let tc = check(&ws);

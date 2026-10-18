@@ -13,7 +13,7 @@
 //! *applications*, but the three stages are three separate operations, each
 //! consuming the previous one's output. As a graph the chain is the children
 //! (`inputs`), and a consumer reads the query by following them without
-//! reconstructing anything. A query definition used twice is evaluated once per
+//! reconstructing anything. A query definition used twice is normalized once per
 //! use — the checker recorded two sites — and both uses name nodes in the same
 //! arena, so nothing has to copy a sub-graph into its caller.
 //!
@@ -37,9 +37,9 @@
 //!
 //! # Payment for a node
 //!
-//! A builder that runs out of evaluation budget between two nodes would leave
+//! A builder that runs out of normalization budget between two nodes would leave
 //! an arena that is half a query. [`Builder::charge`] is how the normalizer pays
-//! for a node *before* it builds it, so a refused evaluation throws the arena
+//! for a node *before* it builds it, so a refused normalization throws the arena
 //! away whole instead of returning a prefix of one.
 
 use crate::check::NodeRef;
@@ -89,6 +89,7 @@ pub(crate) enum QueryNodeKind {
     Set(SetKind),
 }
 
+#[allow(dead_code)] // Introspection kept for debug and compatibility tests.
 impl QueryNodeKind {
     /// How many relational children the operation takes.
     pub(crate) fn arity(self) -> usize {
@@ -129,6 +130,7 @@ pub(crate) enum Payload {
     None,
 }
 
+#[allow(dead_code)] // Introspection kept for debug and compatibility tests.
 impl Payload {
     /// The prefix/suffix direction, for a consumer that needs it.
     pub(crate) fn is_prefix(&self) -> Option<bool> {
@@ -155,7 +157,7 @@ pub(crate) struct RelNode {
 /// The `budget` field is the normalizer's, threaded here so one object owns both
 /// halves of "construct a node": the cost of doing it and the node. There is no
 /// way to make a [`CompiledQuery`] except [`Builder::finish`], which takes the
-/// root the definition evaluated to, so a finished query has at least one node
+/// root the definition normalized to, so a finished query has at least one node
 /// and a real root.
 #[derive(Debug)]
 pub(crate) struct Builder {
@@ -181,6 +183,7 @@ impl Builder {
     }
 
     /// Build under `budget`; every node construction is charged to it.
+    #[allow(dead_code)] // Direct arena tests can opt into a shared budget.
     pub(crate) fn with_budget(mut self, budget: crate::normalize::budget::Budget) -> Self {
         self.budget = Some(budget);
         self
@@ -202,6 +205,7 @@ impl Builder {
     }
 
     /// The row a node produces.
+    #[allow(dead_code)] // Used by debug consumers of the arena.
     pub(crate) fn row(&self, id: NodeId) -> &RowType {
         &self.node(id).row
     }
@@ -556,7 +560,7 @@ pub(crate) enum Projection {
     Agg,
 }
 
-/// A finished query: the arena and the node the definition evaluated to.
+/// A finished query: the arena and the node the definition normalized to.
 #[allow(dead_code)] // Read by the erase boundary, which lands with the route cut.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompiledQuery {
@@ -565,12 +569,14 @@ pub(crate) struct CompiledQuery {
 }
 
 /// A read-only view of one node.
+#[allow(dead_code)] // Read by debug consumers of the arena.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct QueryNode<'a> {
     id: NodeId,
     node: &'a RelNode,
 }
 
+#[allow(dead_code)] // Read by debug consumers of the arena.
 impl<'a> QueryNode<'a> {
     pub(crate) fn id(&self) -> NodeId {
         self.id
@@ -598,6 +604,7 @@ impl<'a> QueryNode<'a> {
     }
 }
 
+#[allow(dead_code)] // Read by debug consumers of the arena.
 impl CompiledQuery {
     /// The node the definition's body produced.
     pub(crate) fn root(&self) -> NodeId {

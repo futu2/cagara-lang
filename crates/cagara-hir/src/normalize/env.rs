@@ -14,7 +14,7 @@ use super::Value;
 /// A frame chain rather than a map: a lookup walks from the innermost binder
 /// outwards, which is the scoping rule itself, and binding a parameter copies
 /// only the chain of pointers below it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Env<'a> {
     frames: Option<std::sync::Arc<Frame<'a>>>,
 }
@@ -25,12 +25,6 @@ struct Frame<'a> {
     name: String,
     value: Value<'a>,
     outer: Option<std::sync::Arc<Frame<'a>>>,
-}
-
-impl<'a> Default for Env<'a> {
-    fn default() -> Self {
-        Env { frames: None }
-    }
 }
 
 impl<'a> Env<'a> {

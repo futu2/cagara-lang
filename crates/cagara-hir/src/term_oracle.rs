@@ -1925,7 +1925,7 @@ fn frame_offset(t: &Term) -> Result<i64, Gap> {
             ..
         } => Ok(*i),
         // A frame offset is a *literal* by the language's rules, so a computed
-        // one is refused rather than evaluated — matching the source path, which
+        // one is refused rather than normalized — matching the source path, which
         // reads the literal too.
         other => Err(Gap::new(
             other_origin(other),

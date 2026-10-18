@@ -215,7 +215,7 @@ fn a_stage_identity_names_the_node_that_applied_it() {
 }
 
 #[test]
-fn direct_typed_pipeline_bypasses_normalized_elaboration() {
+fn direct_typed_pipeline_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string } = table \"public\" \"users\"\n\
          renamed = users & prefix \"u_\"\n\
@@ -244,12 +244,12 @@ fn direct_typed_pipeline_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "direct typed pipeline unexpectedly walked normalized terms"
+        "direct typed pipeline unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn direct_plain_select_bypasses_normalized_elaboration() {
+fn direct_plain_select_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string } = table \"public\" \"users\"\n\
          frameRows : bound -> bound -> frame = rows\n\
@@ -281,12 +281,12 @@ fn direct_plain_select_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain direct select unexpectedly walked normalized terms"
+        "plain direct select unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn callable_scalar_projection_bypasses_normalized_elaboration() {
+fn callable_scalar_projection_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string } = table \"public\" \"users\"\n\
          up = upper\n\
@@ -315,12 +315,12 @@ fn callable_scalar_projection_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "callable scalar projection unexpectedly walked normalized terms"
+        "callable scalar projection unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn direct_plain_update_bypasses_normalized_elaboration() {
+fn direct_plain_update_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string } = table \"public\" \"users\"\n\
          q = users & update { name = .name, tag = \"active\" }\n",
@@ -347,12 +347,12 @@ fn direct_plain_update_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain direct update unexpectedly walked normalized terms"
+        "plain direct update unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn direct_plain_order_bypasses_normalized_elaboration() {
+fn direct_plain_order_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = maybe string } = table \"public\" \"users\"\nq = users & order [desc (coalesce \"\" .name)]\n",
     );
@@ -378,12 +378,12 @@ fn direct_plain_order_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain direct order unexpectedly walked normalized terms"
+        "plain direct order unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn direct_plain_where_bypasses_normalized_elaboration() {
+fn direct_plain_where_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, age = int, name = string } = table \"public\" \"users\"\nq = users & where (in [18, 21] .age && .name != \"guest\")\n",
     );
@@ -409,12 +409,12 @@ fn direct_plain_where_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain direct where unexpectedly walked normalized terms"
+        "plain direct where unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn plain_expression_helper_bypasses_normalized_elaboration() {
+fn plain_expression_helper_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, age = int, name = string, nickname = maybe string } = table \"public\" \"users\"\npipeline = q => q & where (.age > 18) & order [desc .name] & limit 50 & offset 5 & distinct\nfiltered = q => q & where (.age > 18)\nsorted = q => q & order [desc (coalesce \"\" .nickname)]\nprojected = q => q & select { id = .id, name = upper .name }\ngrouped = q => q & agg { age = group .age, n = count }\nq = users & pipeline & filtered & sorted & projected\na = users & grouped\n",
     );
@@ -440,7 +440,7 @@ fn plain_expression_helper_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain expression helper unexpectedly walked normalized terms"
+        "plain expression helper unexpectedly called the term oracle"
     );
     let a = ws.modules[ws.root]
         .module
@@ -452,12 +452,12 @@ fn plain_expression_helper_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == a),
-        "plain aggregate helper unexpectedly walked normalized terms"
+        "plain aggregate helper unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn closed_window_projection_helper_bypasses_normalized_elaboration() {
+fn closed_window_projection_helper_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int } = table \"public\" \"users\"\n\
          frameRows : bound -> bound -> frame = rows\n\
@@ -488,7 +488,7 @@ fn closed_window_projection_helper_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "closed window projection helper unexpectedly walked normalized terms"
+        "closed window projection helper unexpectedly called the term oracle"
     );
     let numbered = ws.modules[ws.root]
         .module
@@ -500,12 +500,12 @@ fn closed_window_projection_helper_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == numbered),
-        "closed window helper definition unexpectedly walked normalized terms"
+        "closed window helper definition unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn plain_join_predicate_bypasses_normalized_elaboration() {
+fn plain_join_predicate_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string } = table \"public\" \"users\"\norders : query { user_id = int, total = int } = table \"public\" \"orders\"\nq = users & innerJoin orders (.<id == .>user_id)\n",
     );
@@ -531,12 +531,12 @@ fn plain_join_predicate_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain join predicate unexpectedly walked normalized terms"
+        "plain join predicate unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn mixed_plain_expression_pipeline_bypasses_normalized_elaboration() {
+fn mixed_plain_expression_pipeline_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, score = int, active = bool } = table \"public\" \"users\"\nq = users & where (.active && .score >= 1) & select { id = .id, score = .score + 1 } & update { total = .score * 2 } & order [desc .total] & limit 10\n",
     );
@@ -562,12 +562,12 @@ fn mixed_plain_expression_pipeline_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "mixed plain expression pipeline unexpectedly walked normalized terms"
+        "mixed plain expression pipeline unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn mixed_plain_aggregate_pipeline_bypasses_normalized_elaboration() {
+fn mixed_plain_aggregate_pipeline_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "orders : query { user_id = int, amount = int, active = bool } = table \"public\" \"orders\"\nq = orders & where (.active) & agg { user_id = group .user_id, total = coalesce 0 (sum .amount), n = count } & where (.n > 1) & order [desc .total] & limit 10\n",
     );
@@ -593,12 +593,12 @@ fn mixed_plain_aggregate_pipeline_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain aggregate pipeline unexpectedly walked normalized terms"
+        "plain aggregate pipeline unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn plain_join_and_stages_bypass_normalized_elaboration() {
+fn plain_join_and_stages_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string, active = bool } = table \"public\" \"users\"\nadmins : query { id = int, name = string, active = bool } = table \"public\" \"admins\"\norders : query { user_id = int, total = int } = table \"public\" \"orders\"\nq = users & where (.active) & innerJoin orders (.<id == .>user_id) & where (.total > 10) & select { name = .name, total = .total } & order [desc .total] & limit 5\nu = users & union admins & where (.active) & select { id = .id, name = .name } & order [asc .id] & limit 8\na = users & union admins & agg { count = count, total = sum .id } & where (.count > 0)\n",
     );
@@ -634,12 +634,12 @@ fn plain_join_and_stages_bypass_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && q.contains(def)),
-        "plain composed join pipeline unexpectedly walked normalized terms"
+        "plain composed join pipeline unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn multi_stage_helper_operand_bypasses_normalized_elaboration() {
+fn multi_stage_helper_operand_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string } = table \"public\" \"users\"\n\
          admins : query { id = int, x = int } = table \"public\" \"admins\"\n\
@@ -668,12 +668,12 @@ fn multi_stage_helper_operand_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "multi-stage helper combine operand unexpectedly walked normalized terms"
+        "multi-stage helper combine operand unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn higher_order_stage_helper_bypasses_normalized_elaboration() {
+fn higher_order_stage_helper_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string } = table \"public\" \"users\"\n\
          h = p => users & select { id = .id } & p\n\
@@ -701,12 +701,12 @@ fn higher_order_stage_helper_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
-        "higher-order stage helper unexpectedly walked normalized terms"
+        "higher-order stage helper unexpectedly called the term oracle"
     );
 }
 
 #[test]
-fn active_totals_shorthand_pipeline_bypasses_normalized_elaboration() {
+fn active_totals_shorthand_pipeline_uses_production_normalizer() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string, active = bool } = table \"public\" \"users\"\n\
          orders : query { user_id = int, amount = float, status = string, created_at = date } = table \"public\" \"orders\"\n\
@@ -745,7 +745,7 @@ fn active_totals_shorthand_pipeline_bypasses_normalized_elaboration() {
         !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, visited, _)| *module == ws.root && *visited == def),
-        "active_totals unexpectedly walked normalized terms"
+        "active_totals unexpectedly called the term oracle"
     );
 }
 
@@ -1105,7 +1105,7 @@ fn dependency_walk_handles_long_chains_and_cycles_without_recursing() {
 }
 
 #[test]
-fn typed_lowering_rejects_a_recursive_query_alias_without_recursing() {
+fn production_normalizer_rejects_a_recursive_query_alias_without_recursing() {
     for source in [
         "q : query { id = int } = q\n",
         "a : query { id = int } = b\n\
@@ -1117,7 +1117,7 @@ fn typed_lowering_rejects_a_recursive_query_alias_without_recursing() {
         assert!(compilation
             .queries
             .iter()
-            .all(|query| query.fault == Some(Fault::Compiler)));
+            .all(|query| query.fault == Some(Fault::Program)));
         assert!(compilation
             .diagnostics
             .iter()

@@ -1409,6 +1409,17 @@ fn order_survives_a_derived_table() {
 }
 
 #[test]
+fn hidden_order_alias_does_not_collide_with_a_user_column() {
+    let q = "weird : query { __k1 = int, id = int, sort = int } = table \"public\" \"weird\"\n\
+             q = weird & order [desc .sort] & select { __k1 = .__k1, rn = rowNumber { order = [asc .id] } } & where (.rn > 0)\n";
+    assert_sql(
+        &sql(q, "q"),
+        "SELECT __k1, rn FROM (SELECT __k1, ROW_NUMBER() OVER (ORDER BY id NULLS LAST) AS rn, sort AS __k2 \
+         FROM public.weird) AS t2 WHERE (rn > 0) ORDER BY __k2 DESC NULLS LAST",
+    );
+}
+
+#[test]
 fn template_placeholders_must_stand_alone() {
     let bad = [
         (

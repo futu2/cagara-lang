@@ -104,7 +104,7 @@ impl Lowerer {
             let name = match st.items.iter().find(|(_, e)| *e == k.expr) {
                 Some((n, _)) => n.clone(),
                 None => {
-                    let n = self.hidden();
+                    let n = self.hidden(&st);
                     st.items.push((n.clone(), k.expr.clone()));
                     n
                 }
@@ -130,10 +130,18 @@ impl Lowerer {
         out
     }
 
-    /// Name of a hidden pass-through column (users cannot write `__` names).
-    fn hidden(&mut self) -> String {
-        self.next += 1;
-        format!("__k{}", self.next)
+    /// Name of a hidden pass-through column that cannot collide with a stage's
+    /// visible output columns. User schemas may contain names beginning with
+    /// `__`, so the generated name must be checked rather than relying on that
+    /// prefix being reserved.
+    fn hidden(&mut self, st: &Stage) -> String {
+        loop {
+            self.next += 1;
+            let name = format!("__k{}", self.next);
+            if !st.items.iter().any(|(n, _)| n == &name) {
+                return name;
+            }
+        }
     }
 
     /// Turn a stage into a join input. A projection / filter over a plain

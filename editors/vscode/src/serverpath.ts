@@ -88,6 +88,22 @@ export function vscodeTarget(platform: string, arch: string): string | undefined
 }
 
 /**
+ * Rust target used by the release build for a VS Code target. The release
+ * workflow uses musl for Linux so those binaries run without a glibc version
+ * dependency; the other targets map directly to their platform triples.
+ */
+export function rustTargetFor(target: string): string | undefined {
+  return {
+    "linux-x64": "x86_64-unknown-linux-musl",
+    "linux-arm64": "aarch64-unknown-linux-musl",
+    "darwin-x64": "x86_64-apple-darwin",
+    "darwin-arm64": "aarch64-apple-darwin",
+    "win32-x64": "x86_64-pc-windows-msvc",
+    "win32-arm64": "aarch64-pc-windows-msvc",
+  }[target];
+}
+
+/**
  * The server to run: the configured path, else the bundled one, else a
  * `target/` build in the workspace or above it, else the executable name for
  * `PATH` to resolve.

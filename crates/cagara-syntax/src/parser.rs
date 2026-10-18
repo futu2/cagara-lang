@@ -1345,6 +1345,16 @@ mod tests {
             assert_eq!(defs(&p), ["x", "y", "z"], "{src:?}");
             assert_eq!(p.syntax().text().to_string(), src);
         }
+        for src in [
+            "x = \"abc\ry = 1\r",
+            "x = \"abc\\\ny = 1\n",
+            "x = \"abc\\\ry = 1\r",
+        ] {
+            let p = parse(src);
+            assert_eq!(messages(&p).len(), 1, "{src:?}: {:?}", p.errors);
+            assert_eq!(defs(&p), ["x", "y"], "{src:?}");
+            assert_eq!(p.syntax().text().to_string(), src, "{src:?}");
+        }
         // Escaped quotes still work.
         assert!(parse("x = \"a\\\"b\"\n").errors.is_empty());
     }

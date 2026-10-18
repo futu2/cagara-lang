@@ -8,7 +8,13 @@ import { join } from "path";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { resolveServer, selfAndAncestors, vscodeTarget, type ServerSearch } from "../serverpath";
+import {
+  resolveServer,
+  rustTargetFor,
+  selfAndAncestors,
+  vscodeTarget,
+  type ServerSearch,
+} from "../serverpath";
 
 /** A real `target/` tree under a throwaway root, so `existsSync` is exercised. */
 function tree(files: string[]): { root: string; dispose: () => void } {
@@ -119,4 +125,14 @@ test("vscodeTarget has no answer for architectures no release builds", () => {
   assert.equal(vscodeTarget("linux", "ia32"), undefined);
   assert.equal(vscodeTarget("linux", "arm"), undefined);
   assert.equal(vscodeTarget("freebsd", "x64"), undefined);
+});
+
+test("release VS Code targets map to the Rust targets used by packaging", () => {
+  assert.equal(rustTargetFor("linux-x64"), "x86_64-unknown-linux-musl");
+  assert.equal(rustTargetFor("linux-arm64"), "aarch64-unknown-linux-musl");
+  assert.equal(rustTargetFor("darwin-x64"), "x86_64-apple-darwin");
+  assert.equal(rustTargetFor("darwin-arm64"), "aarch64-apple-darwin");
+  assert.equal(rustTargetFor("win32-x64"), "x86_64-pc-windows-msvc");
+  assert.equal(rustTargetFor("win32-arm64"), "aarch64-pc-windows-msvc");
+  assert.equal(rustTargetFor("linux-armhf"), undefined);
 });

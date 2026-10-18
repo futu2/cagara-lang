@@ -66,8 +66,9 @@ fn starts_line(input: &str, offset: usize) -> bool {
 /// The rule is the one the token's old pattern encoded, applied iteratively: a
 /// literal opens with `"`, ends at the next unescaped `"`, and a `\` escapes the
 /// character after it — including a `"`, which is why the scan cannot simply
-/// look for the next quote. A raw `\n` ends the line and therefore the literal,
-/// which is what keeps an unclosed quote from swallowing the rest of the file.
+/// look for the next quote. A raw `\n` or `\r` ends the line and therefore the
+/// literal, which is what keeps an unclosed quote from swallowing the rest of
+/// the file.
 ///
 /// Bytes are matched rather than characters, which is safe here because every
 /// byte tested is ASCII and no UTF-8 continuation byte can equal one.
@@ -76,11 +77,13 @@ fn scan_string(input: &str, start: usize) -> (Token, usize) {
     let mut i = start + 1;
     while i < bytes.len() {
         match bytes[i] {
-            b'\n' => break,
+            b'\n' | b'\r' => break,
             b'\\' => {
-                // A trailing backslash escapes nothing; the literal is unclosed.
-                if i + 1 >= bytes.len() {
-                    break;
+                // A trailing backslash, or one immediately before a line
+                // break, escapes nothing in this literal. Keep the backslash
+                // in the token and leave the line break for the trivia lexer.
+                if i + 1 >= bytes.len() || matches!(bytes[i + 1], b'\n' | b'\r') {
+                    return (Token::UnterminatedString, i + 1);
                 }
                 i += 2;
             }
@@ -207,6 +210,31 @@ mod tests {
                 .find(|l| l.kind == Token::Comment)
                 .expect("a comment");
             assert_eq!(comment.text, "# c", "{src:?}");
+        }
+    }
+
+    #[test]
+    fn unterminated_strings_stop_at_all_line_breaks_and_keep_backslashes() {
+        for src in [
+            "\"abc\ry = 1\r",
+            "\"abc\ny = 1\n",
+            "\"abc\\\ry = 1\r",
+            "\"abc\\\ny = 1\n",
+        ] {
+            let toks = lex(src);
+            assert_eq!(toks[0].kind, Token::UnterminatedString, "{src:?}");
+            assert_eq!(
+                toks[0].text,
+                &src[..src.find(['\r', '\n']).unwrap()],
+                "{src:?}"
+            );
+            assert_eq!(
+                toks.iter().filter(|l| l.kind == Token::Ident).count(),
+                1,
+                "{src:?}"
+            );
+            let rebuilt: String = toks.iter().map(|l| l.text).collect();
+            assert_eq!(rebuilt, src, "{src:?}");
         }
     }
 

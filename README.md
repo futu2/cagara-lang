@@ -23,7 +23,7 @@ main = orders
   & order [desc .revenue]
 ```
 
-`cagara report.cagara` compiles `main` — the file's entry point — to:
+`cagara your-file.cagara` compiles `main` — the file's entry point — to:
 
 ```sql
 SELECT user_id, revenue, n
@@ -34,6 +34,10 @@ FROM (SELECT user_id, SUM(amount) AS revenue, COUNT(*) AS n
 WHERE (n >= 5)
 ORDER BY revenue DESC NULLS LAST;
 ```
+
+The repository's [`examples/report.cagara`](examples/report.cagara) is a
+library of named queries, so inspect one of its queries with, for example,
+`cagara examples/report.cagara --only revenue`.
 
 ## Features
 

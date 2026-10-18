@@ -21,8 +21,9 @@ const repoRoot = resolve(extensionDir, "..", "..");
 // The same function the extension uses, so the directory staged here is the
 // one the extension looks in. Requires `npm run compile` to have run.
 let vscodeTarget;
+let rustTargetFor;
 try {
-  ({ vscodeTarget } = require(join(extensionDir, "out", "serverpath.js")));
+  ({ vscodeTarget, rustTargetFor } = require(join(extensionDir, "out", "serverpath.js")));
 } catch {
   console.error(
     `cagara: cannot load ${join(extensionDir, "out", "serverpath.js")}.\n` +
@@ -103,7 +104,13 @@ const exe = target.startsWith("win32") || process.env.CAGARA_STAGE_EXE === "caga
   ? "cagara.exe"
   : "cagara";
 const profile = process.env.CAGARA_STAGE_PROFILE ?? "release";
-const source = join(repoRoot, "target", profile, exe);
+const hostTarget = vscodeTarget(process.platform, process.arch);
+const rustTarget = process.env.CAGARA_STAGE_RUST_TARGET?.trim() || rustTargetFor(target);
+const source = target === hostTarget && !process.env.CAGARA_STAGE_RUST_TARGET
+  ? join(repoRoot, "target", profile, exe)
+  : rustTarget
+    ? join(repoRoot, "target", rustTarget, profile, exe)
+    : join(repoRoot, "target", profile, exe);
 
 // Set by `npm run package`. F5 wants a staged server even from a build that is
 // a few seconds behind the sources -- you are iterating. A VSIX is different:

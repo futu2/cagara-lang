@@ -183,50 +183,50 @@ jobs:
             vsix="cagara-vscode-${GITHUB_REF_NAME}.vsix"
           fi
           python3 - "$TARGET" "$vsix" <<'PY'
+          import os
           import sys, zipfile
+          import hashlib
+          import pathlib
 
           target, vsix = sys.argv[1], sys.argv[2]
           with zipfile.ZipFile(vsix) as archive:
               names = archive.namelist()
-          bundled = [n for n in names if n.startswith("extension/bin/")]
+              bundled = [n for n in names if n.startswith("extension/bin/")]
 
-          if not target:
-              if bundled:
-                  sys.exit(f"{vsix}: expected no bundled server, found {bundled}")
-              print(f"{vsix}: no bundled server, as intended")
-          else:
-              exe = "cagara.exe" if target.startswith("win32") else "cagara"
-              entry = f"extension/bin/{target}/{exe}"
-              if entry not in names:
-                  sys.exit(f"{vsix}: missing {entry} (found {bundled})")
-              info = archive.getinfo(entry)
-              mode = (info.external_attr >> 16) & 0o777
-              if not mode & 0o111:
-                  sys.exit(f"{vsix}: {entry} is not executable (mode {mode:o})")
-              # The server inside the VSIX must be the binary this job just
-              # downloaded, byte for byte. A bundled server outranks
-              # `cagara.path`, a workspace build and PATH, so shipping an
-              # older one makes every user run that compiler with nothing on
-              # their machine able to override it -- and the symptom is bogus
-              # diagnostics, not anything that says "stale". Presence alone
-              # would not catch a stale copy, so compare the bytes.
-              import hashlib
-              import pathlib
-
-              # The job's default working directory is editors/vscode.
-              staged = pathlib.Path(f"bin/{target}/{exe}")
-              if not staged.is_file():
-                  sys.exit(f"{vsix}: staged {staged} is not a file")
-              digest = lambda b: hashlib.sha256(b).hexdigest()
-              packed = digest(archive.read(entry))
-              on_disk = digest(staged.read_bytes())
-              if packed != on_disk:
-                  sys.exit(
-                      f"{vsix}: {entry} is not the binary that was built\n"
-                      f"  in vsix: {packed}\n"
-                      f"  staged:  {on_disk}"
-                  )
-              print(f"{vsix}: {entry} mode {mode:o}, {info.file_size} bytes, matches the build")
+              if not target:
+                  if bundled:
+                      sys.exit(f"{vsix}: expected no bundled server, found {bundled}")
+                  print(f"{vsix}: no bundled server, as intended")
+              else:
+                  exe = "cagara.exe" if target.startswith("win32") else "cagara"
+                  entry = f"extension/bin/{target}/{exe}"
+                  if entry not in names:
+                      sys.exit(f"{vsix}: missing {entry} (found {bundled})")
+                  info = archive.getinfo(entry)
+                  mode = (info.external_attr >> 16) & 0o777
+                  if not mode & 0o111:
+                      sys.exit(f"{vsix}: {entry} is not executable (mode {mode:o})")
+                  # The server inside the VSIX must be the binary this job just
+                  # downloaded, byte for byte. A bundled server outranks
+                  # `cagara.path`, a workspace build and PATH, so shipping an
+                  # older one makes every user run that compiler with nothing on
+                  # their machine able to override it -- and the symptom is bogus
+                  # diagnostics, not anything that says "stale". Presence alone
+                  # would not catch a stale copy, so compare the bytes.
+                  workspace = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+                  staged = workspace / "editors/vscode/bin" / target / exe
+                  if not staged.is_file():
+                      sys.exit(f"{vsix}: staged {staged} is not a file")
+                  digest = lambda b: hashlib.sha256(b).hexdigest()
+                  packed = digest(archive.read(entry))
+                  on_disk = digest(staged.read_bytes())
+                  if packed != on_disk:
+                      sys.exit(
+                          f"{vsix}: {entry} is not the binary that was built\n"
+                          f"  in vsix: {packed}\n"
+                          f"  staged:  {on_disk}"
+                      )
+                  print(f"{vsix}: {entry} mode {mode:o}, {info.file_size} bytes, matches the build")
           PY
       - uses: actions/upload-artifact@v4
         with:

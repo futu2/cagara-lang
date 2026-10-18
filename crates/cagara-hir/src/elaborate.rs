@@ -142,6 +142,24 @@ fn elaborate_def(
     }
 }
 
+/// Elaborate one source definition, for an integration test that needs the
+/// checked tree alongside what `compile` reports.
+///
+/// Only the snapshot test reads this: `compile` returns erased relations,
+/// which is the compiler's public product, but a consolidation of the lowering
+/// has to be held to the *checked* tree as well — its node kinds, origins and
+/// rows — or a change that preserves the SQL while moving a stage's origin
+/// would pass unnoticed.
+#[doc(hidden)]
+pub fn elaborate_definition_for_tests(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    definition: &ast::Def,
+) -> R<CheckedQuery> {
+    elaborate_definition(input, module, def, definition)
+}
+
 /// Elaborate one source definition for the compilation boundary.
 pub(crate) fn elaborate_definition(
     input: CompilerInput<'_>,
@@ -166,7 +184,7 @@ pub(crate) fn elaborate_definition(
 /// have been two silently different answers. The cases and the reader both live
 /// in [`crate::normalize`] now, and this name is kept because it is what the
 /// query path's call sites read as.
-pub(crate) use crate::normalize::TemplateKind as DeclaredKind;
+pub(crate) use crate::check::TemplateKind as DeclaredKind;
 
 fn template_arity_from_type(t: &ast::TypeExpr, kind: DeclaredKind) -> usize {
     let mut n: usize = 0;
@@ -253,9 +271,9 @@ fn check_placeholders(sql: &str, expr_args: usize) -> R<()> {
 /// The declared result kind of a `sql` template definition.
 ///
 /// Thin, because the rule lives in one place now: this is the query path's name
-/// for [`crate::normalize::declared_template_kind`], which the term layer also
+/// for [`crate::check::declared_template_kind`], which the term layer also
 /// reads. Two readers of one rule would be the duplication the migration exists
 /// to remove.
 fn declared_kind(d: &ast::Def) -> DeclaredKind {
-    crate::normalize::declared_template_kind(d)
+    crate::check::declared_template_kind(d)
 }

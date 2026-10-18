@@ -47,6 +47,7 @@
 //! The implementation is split by concern; see each module for its part:
 //! [`ty`], [`reduce`], [`unify`], [`overload`], [`infer`], [`print`].
 
+mod core_facts;
 mod facts;
 mod infer;
 mod overload;
@@ -109,12 +110,13 @@ pub(crate) use crate::core::ScalarType;
 pub(crate) use crate::db::ModuleInput;
 pub(crate) use crate::ir::{JoinKind, Phase};
 pub(crate) use crate::lower::parse_module;
-pub(crate) use crate::normalize::Resolved;
 pub(crate) use crate::primitive::Prim;
 pub(crate) use crate::resolve::{module_own, module_scope};
 pub(crate) use crate::rules::{self};
 pub(crate) use crate::workspace::{Binding, Diag, Workspace};
 pub(crate) use cagara_syntax::ast::{self, ExprKind, Side, Span, TypeExpr};
+pub(crate) use core_facts::declared_template_kind;
+pub use core_facts::{DefId, Resolved, TemplateKind};
 pub(crate) use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq)]

@@ -4,7 +4,7 @@
 //! # Why this exists
 //!
 //! `CheckedQuery` (see [`crate::checked`]) is built today by normalizing a
-//! definition to a [`Term`](crate::normalize::Term) and lowering that. The
+//! definition to a [`Term`](crate::term_oracle::Term) and lowering that. The
 //! lowering *recovers* each stage's boundary from the shape of the term it is
 //! handed: it recognizes a saturated stage primitive, reads the rows the stage
 //! read and produced off the surrounding type, and reassembles them. Every step

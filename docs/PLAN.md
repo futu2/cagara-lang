@@ -1,32 +1,37 @@
 # Architecture and status
 
 Cagara is a typed query language that compiles queries to SQL. The
-prelude is written in Cagara; Rust supplies name resolution, type checking,
-normalization, relational IR, language server, and SQL backend.
+prelude is written in Cagara; Rust supplies name resolution, type checking, the
+normalizer, the relational arena and IR, the language server, and the SQL
+backend.
 
 ## Pipeline
 
 ```text
-source -> syntax/AST -> checker-owned typed facts
-       -> typed query lowering -> CheckedQuery -> erasure -> Rel
+source -> syntax/AST -> resolve + type checking -> typed core
+       -> normalizer (normalize/: beta-reduction, aliases, helpers, overloads)
+       -> typed relational arena -> erasure -> Rel
        -> schema validation -> SQL lowering -> dialect rewrite -> SQL
 ```
 
-`TypedQuery` and checker-owned typed expressions are the sole production query
-path. The normalized term lowering remains available as a test oracle for route
-agreement and normalization properties; it is never used to compile a query.
-An accepted shape that the typed builder cannot construct produces a compiler
-capability error until typed support is added.
+Production today is the older shape of the same pipeline: the source-directed
+lowering in `typed_lower.rs` builds a `TypedQuery` graph and a `CheckedQuery`
+tree, reconciled through `carry_checked_payloads` and `rebuild_checked`, and
+the normalizer in `normalize/` is the module that replaces both with one reduction and
+one arena. The normalizer in `term_oracle.rs` is a test-only oracle for route
+agreement; it never compiles a query. An accepted shape the production route
+cannot construct produces a compiler capability error until a rule is added.
+See [`CORE.md`](CORE.md) for the normalizer's rules and the arena's
+constructors, and "Consolidating the normalizer" below for what is left.
 
-The intended simplification of this pipeline is described in
-[`ARCHITECTURE.md`](ARCHITECTURE.md). It separates the pure compiler kernel
-from the incremental workspace shell and makes typed relational construction
-the single source of validity rules.
+The target shape, and how the kernel is separated from the incremental workspace
+shell, are described in [`ARCHITECTURE.md`](ARCHITECTURE.md). In both shapes typed
+relational construction is the single source of validity rules.
 
 | Crate | Role |
 |---|---|
 | `cagara-syntax` | Lexer, lossless parser, AST, formatter |
-| `cagara-hir` | Modules, name resolution, HM rows, checked relational tree, validation |
+| `cagara-hir` | Modules, name resolution, HM rows, the normalizer, the relational arena, validation |
 | `cagara-sql` | SQL lowering, templates, dialect-specific intrinsics |
 | `cagara-lsp` | Diagnostics, hover, definitions, references, symbols, completion |
 | `cagara-cli` | `cagara` executable and CLI integration |
@@ -114,11 +119,13 @@ correctness, not as an optimization.
   budgets to keep compiler and language-server stacks bounded. Common filter
   pipelines are lowered iteratively and have no separate ten-stage limit.
   Inlining is bounded by depth (200 links) and a definition's normal form by
-  size (200 000 nodes), but the size budget is checked on the **finished** term:
-  a chain of definitions that each use their argument twice still pays for the
-  expansion before being refused. Bounding the expansion itself means charging
-  the budget inside the reduction, where `substitute` does the copying, which
-  needs a failure channel through `Term::apply`.
+  size (200 000 nodes), but in the **oracle** the size budget is checked on the
+  finished term: a chain of definitions that each use their argument twice
+  still pays for the expansion before being refused. Bounding it there means
+  charging inside the reduction, where `substitute` does the copying, which
+  needs a failure channel through `Term::apply`. The production normalizer
+  already charges as it goes (`normalize/budget.rs`: depth 200, work 200 000, the
+  work spent before a node is built), so this gap is the oracle's alone.
 - Some join combinations require extra derived tables because parenthesized
   joins are not yet represented directly.
 - `--optimize` is opt-in; it runs sqlglot optimization after Cagara lowering.
@@ -131,12 +138,11 @@ correctness, not as an optimization.
   and the definition-keyed stage list are all gone; the tree carries the type,
   row, choices, resolution, printed form, and stage of every expression, plus
   `holes` on the body.
-  The normalized `Facts` trait remains for the scalar normalizer and the
-  test-only query oracle. Production query lowering reads checker-owned typed
+  The normalized `Facts` trait remains for the test-only oracle, which reads
+  checker-owned typed nodes through it. Production query lowering reads those
   nodes directly; no compatibility walk or side maps remain for that path.
-  Normalized bridge coverage is retained only as a test oracle. It has no
-  production query-elaboration role; the corpus and SQL agreement suites guard
-  that every accepted shape has typed lowering.
+  The oracle has no production query-elaboration role; the corpus and SQL
+  agreement suites guard that every accepted shape has a production rule.
   Stage metadata is on the nodes now: `TypedExpr::stage` holds the operation a
   node applied and the rows its signature instance read and produced, and
   `TypedBody::by_stage` keeps the application order, which is not the arena's
@@ -151,12 +157,13 @@ correctness, not as an optimization.
   stage report or compares a second set of rows.
   `check::query::TypedQuery` is the query skeleton as its own arena, where a
   node carries its identity, operation, typed children, checker-closed rows,
-  and checked payloads. It is the sole production query path. The
-  `rebuilt_checked_tree` status records whether the typed graph exactly
-  reconstructs every checked node, while typed lowering still supplies any
-  checked metadata that has no corresponding query node. `check::query` tests
-  pin that every node fact is available from the checker where a stage is
-  applied.
+  and checked payloads. It is the current production query path. Because the
+  checked layer is still a separate tree, `TypedQuery::rebuild_checked`
+  records whether the typed graph reconstructs every checked node exactly, and
+  `carry_checked_payloads` copies expression payloads across. That duplication
+  is the scaffolding the normalizer removes: see "Consolidating the normalizer".
+  `check::query` tests pin that every node fact is available from the checker
+  where a stage is applied.
   Two properties of `use_types` are worth keeping in mind because they are not
   obvious from the tree: it was keyed by the span the checker *filed* a use
   under, which is the node's own span in every program measured but is carried
@@ -180,356 +187,151 @@ correctness, not as an optimization.
   survive unresolved is not proven either way, so the count stays a fact of its
   own until someone proves that path closed.
 
-## Query elaboration migration: plan and status
+## Query elaboration migration: completion record
 
-The end state is the one in [`TYPE-SYSTEM-REDESIGN.md`](TYPE-SYSTEM-REDESIGN.md):
-`CheckedQuery` built from the checker's typed query skeleton rather than from a
-normalized term, with no source walk and no `Facts` in the query path. The
-sections above describe the code as it is; this one states the ordered plan and
-how far it has got, so the next session does not have to reconstruct either from
-the diffs.
+The migration replaced a normalizing elaborator with a typed one. It is
+finished: production builds every accepted query from checker-owned facts, the
+normalizer is a test-only oracle, and the record below says what each old
+function did, what replaced it, and what is left.
 
-| # | Step | Status |
+Everything in this chapter describes a state that **held** at the end of the
+migration. The next section, "Consolidating the normalizer", says what is
+happening now.
+
+### What the migration removed
+
+| Old function (`typed_lower.rs` unless noted) | What it did | Replaced by |
 |---|---|---|
-| 1 | Stable `NodeRef` on typed stage info; match by identity | **Done** |
-| 2 | Internal typed query representation (`TypedQueryNode`) | **Done** |
-| 3 | First typed lowering slice: table, prefix, suffix, omit, mapValue | **Done** |
-| 4 | Run both routes; compare rows, stages, origins, relations, SQL | **Done** |
-| 5 | Typed instantiation: helpers, aliases, imports, overloads, repeats | **Done** |
-| 6 | Typed construction for query stages, joins/sets, helpers, windows, and expression payloads | **Done** |
-| 7 | Remove the legacy adapter and obsolete compatibility facts | **Done; normalized lowering is test-only** |
+| `lower` / `lower_impl` / `lower_unhydrated` | The entry point: a chain of `if let Some(lowered) = lower_…_pipeline(...)` attempts, each declining by returning `None` | `normalize::definition` (one reduction) |
+| `lower_plain_value` / `apply_plain_value` | A second partial functional normalizer: `PlainValue::{Expr, Compose, Overloads, Function}`, one-argument environments, `PlainFunctionBody::{Expr, Template}` | `normalize/value.rs` (`Value`, `apply_closure`, `apply_stage`) |
+| `lower_plain_definition` / `scalar_definition_target` / `scalar_alias_cycle` | Alias following, depth 16, with cycle detection by following `Resolved::Def` chains | `normalize/value.rs` (`Normalizer::definition`, `Normalizer::overloads`) + `normalize/budget.rs` |
+| `apply_helper`, `apply_plain_helper_pipeline` | Helper instantiation: parameter substitution through `LoweringContext.query_bindings` and `stage_bindings`, transactional retries (`lower_plain_composed_expr`) | `Normalizer::apply_closure` (a helper is a closure like any other) |
+| `lower_plain_composed_expr`, `lower_composed_expr`, `lower_combine_pipeline`, `lower_composed_pipeline`, `apply_plain_stage_expr`, `lower_shorthand_stage`, `lower_inline_stage_body`, `lower_keep_pipeline`, `lower_simple_{projection,where,order}_pipeline`, `lower_plain_expression_chain` | Shape-dispatching entry points, each walked the syntax in its own order and declined by returning `None` | One reduced name: `normalize/value.rs` (`Normalizer::build_stage`, `build_combine`) |
+| `copy_typed_graph`, `copy_typed_chain`, `LoweringContext.query_bindings` | Copying a whole sub-graph into a caller's arena | Not needed: all uses share one arena (`normalize/arena.rs`) |
+| `index_exprs`, `find_expr_id`, `expr_depth_to_id`, `find_base`, `contains_*` (`distinct`, `combine`, `unmigrated_stage`, `other_stage` …) | Syntax searches used to decide which slice applies | Not needed: no slices |
+| `substitute_expr`, `lambda_params`, `lambda_tail` | Substitution of helper arguments into helper syntax | The environment (`normalize/env.rs`) |
+| `scalar_operator_template`, `declared_template`, `template_definition`, `resolved_template_for_target`, `declared_primitive`, `primitive_definition` | Resolved prelude names and SQL templates through definitions and overload choices | `normalize/scalar.rs`, reading `Resolved` and the checker's `Choice` |
+| `lower_plain_window_spec`, `lower_plain_frame`, `lower_plain_bound` | Window specification and frame construction from source | `normalize/scalar.rs` (the spec is a record as usual) + `normalize/frame.rs` |
+| `rows_match`, `unordered_rows_match`, `checked_kind_matches`, `query_error`, `QueryErr` | Cross-checks between the two trees, and a third error type | The arena's constructors (`normalize/arena.rs`) and `normalize::Control` |
+| `carry_checked_payloads`, `require_checked_payloads`, `rebuild_checked`, `checked_node_kind` (`check/query.rs`) | Copying payloads from the checked tree to the typed one and rebuilding one from the other | `TypedQuery` and `CheckedQuery` merged into one arena (`normalize/arena.rs`) |
 
-#### The route boundary
+Together with `check/query.rs` (1 581 lines) that is the bulk of the query
+pipeline; `normalize/` replaces it with one reducer and one arena (`normalize/arena.rs`
+is under a thousand lines, erasure included).
 
-`crates/cagara-hir/src/query_lowering.rs` is the production coordinator for
-query lowering. It returns a typed graph and checked query, with a
-`rebuilt_checked_tree` flag for diagnostics and migration assertions. There is
-no legacy outcome and no production adapter fallback. Table metadata and
-literal arguments are carried by the typed lowering itself.
-`typed_lower.rs` owns a per-attempt
-`LoweringContext` for alias expansion and cycle detection; no lowering state is
-stored in thread-local storage. This matters for incremental and concurrent
-requests: each compilation has its own dependency walk, and a recursive alias
-is diagnosed by the typed lowering context at its source location.
+### What is kept, and why
 
-The context owns query expansion, bindings, and cycle detection. Builders must
-use it when expanding a query definition; they must not call the public typed
-entry point recursively, because that would create a fresh graph walk and lose
-cycle ownership. Every accepted query now has a typed source for its relational
-structure and supported expression payloads; unsupported shapes stop at the
-typed capability error instead of entering a second query implementation.
+`term_oracle.rs` survives as a **test-only oracle**. It carries its own `Term`
+representation, its own textual capture-avoiding `substitute`, and its own query
+lowering by primitive name (`lower_query_primitive`). It is not a shared
+implementation of anything: the agreement tests drive it directly for the same
+programs the compiler compiles, and the test is worth running only while the
+two can disagree. The oracle's gates are
+`cagara-hir/tests/lower_query_agreement.rs` (shapes and rows) and
+`cagara-sql/tests/typed_route_agreement.rs` (generated SQL in six dialects).
 
-The migration boundary is complete. The typed route now covers the accepted
-query corpus, and the normalized route is retained only for independent
-agreement tests:
+The corpus snapshots (`cagara-hir/tests/corpus/snapshots/`, driven by
+`cagara-sql/tests/corpus.rs`) still pin the emitted SQL byte-for-byte.
 
-1. Keep checker-owned typed payloads and stage identities authoritative at every
-   helper, join, set, window, and scalar use.
-2. Keep normalized lowering isolated to test-only agreement and normalization
-   properties.
-3. Preserve the workspace, corpus, incremental, and SQL suites as migration
-   gates for future language changes.
+### What the migration left behind
 
-#### Step 6 progress: direct expression-bearing stages
+The end state was *one typed tree*. The migration produced **two**: a
+`TypedQuery` arena in `check/query.rs` and a `CheckedQuery` tree in
+`checked.rs`, with `carry_checked_payloads` and `rebuild_checked` keeping them
+in step at the boundary. That duplication was scaffolding, and removing it is
+the work described next.
 
-The typed lowering now builds typed query nodes for direct table pipelines that
-include `where`, `select`, `update`, `agg`, or `order`, and allows those stages
-to mix with the already supported row rewrites and row-preserving stages. The
-checker records their stage identity and input/output boundaries at application
-time. `where` and `order` take their rows from the typed child; projections and
-aggregates carry the checker's recorded output row. A direct typed `where` node
-now also carries its checked predicate, and direct typed `order` nodes carry
-their checked sort keys in source order. Direct `select`, `update`, and `agg`
-nodes now also retain
-their checked output field expressions, including window expressions in
-projections. Typed lowering carries checked expression payloads on the typed
-nodes and rebuilds the checked relation directly when the supported expression
-subset is covered. Unsupported forms currently report a compiler capability
-error and are tracked as migration gaps.
+## Consolidating the normalizer: the state now
 
-The typed path also instantiates higher-order helpers with concrete scalar and
-stage arguments, preserves composed and inline stage values, and lowers direct
-infix set spellings (`&|` and `&~`) without re-normalizing their operands.
-Polymorphic scalar operators in helper projections use the checker-resolved
-argument types when constructing their checked payloads.
+The end state aimed for is:
 
-Plain expression lowering now reads SQL templates and their declared phase from
-resolved definition metadata. Scalar, aggregate, and window templates use the
-selected `sql` body, aliases are followed through their definitions, and
-grouping and membership use resolved primitive identities. The typed path no
-longer maintains a Rust table of prelude names or SQL spellings, so changing or
-extending `prelude.cagara` does not require a Rust change. A focused test covers
-both a user-defined template and an alias to it.
+```text
+source -> resolve + type-check -> typed core
+       -> one compile-time normalizer (beta-reduction, aliases, composition,
+          helpers, overloads)
+       -> one typed relational arena
+       -> erasure -> Rel -> SQL
+```
 
-Plain sort keys follow resolved `__asc` and `__desc` primitive identities, so
-aliases for direction helpers work in direct orders and window specifications
-without Rust recognizing their source names. Window-spec field lookup uses the
-shared checker rule constants as well.
+A pure functional language does not compile by matching the surface spelling of
+its values, and the current lowering does exactly that: a series of
+`lower_*_pipeline` entry points, each recognizing one family of query shape,
+plus `lower_plain_value` / `apply_plain_value` — a second, partial normalizer that
+grew beside them to handle the function values the shapes could not express. The
+normalizer makes the reduction explicit and canonical, and the primitives
+construct relational nodes at saturation.
 
-`TypedQuery` now has ordered multi-input edges for joins and set operations, and
-records each child's checked output row. Typed lowering constructs those nodes
-recursively, including both child subtrees, and carries checked join predicates
-on typed join nodes when they fit the source-built expression subset. Set
-operations and supported joins build their checked relation directly from
-typed child queries. Direct expression pipelines build checked stages and
-payloads from checker facts; unsupported expression shapes currently report a typed capability error.
-Helper application now instantiates recorded `where`, `order`, `limit`,
-`offset`, `select`, `update`, and `agg` stages into typed nodes. Predicate,
-sort-key, projection, and window payloads are built from checker facts at the
-helper use site, and their checked stages are constructed directly. Unsupported
-helper payloads currently report a typed capability error.
-Projection and aggregate helpers can also mix those stages with prefix,
-suffix, omit, and map-value rewrites. Their instantiated checked rows provide
-the intermediate boundaries needed to connect rewrites around projections.
-At the production boundary, a checked relation rebuilt successfully from the
-typed arena is now returned directly; typed lowering no longer invokes a
-second normalized lowering for comparison or payload hydration. Unsupported
-typed shapes currently report a typed capability error. The agreement tests
-compare typed lowering with the normalized route independently.
-Direct pipelines made only from row rewrites and row-preserving stages now
-stay entirely on that typed path even when the stages are interleaved; the
-production regression covers prefix, suffix, omit, mapValue, limit, offset,
-and distinct in one chain over an already typed query alias, and asserts that
-the definition never enters normalized elaboration. The alias's original
-typed stage chain and identities are copied into the consumer before its new
-stages are appended.
-Expression-bearing stages can now follow that same alias path: the copied
-typed graph supplies the relational child, rows, and supported expression
-payloads. Unsupported helper expressions report a typed capability error.
-Direct `where` stages whose predicates use plain fields, literals, comparisons,
-membership lists, and boolean operators now build their checked expressions
-from checker types and also bypass normalized elaboration.
-Direct `select` and `update` stages whose fields use the plain expression
-subset now have a source checked-expression path: expression types come from
-the checker, and the typed projection and `CheckedQuery` are built without
-entering normalized elaboration. Aggregate, window, and other unsupported
-expressions report a typed capability error.
-Direct `order` stages whose keys fit the plain checked-expression subset use the
-same typed path, retaining checked sort keys without entering normalized
-elaboration. This includes computed keys built from resolved SQL templates,
-such as nullable-value fallbacks, as well as bare columns. Direction helpers
-are resolved by primitive identity, including aliases from the editable
-prelude.
-Direct `select` and `update` fields can also build the prelude's window
-functions directly when their window spec contains plain partition and order
-keys. Frame constructors and bounds are followed by resolved primitive
-identity, including named frame aliases, and validated by the checked frame
-constructor. The checked window template is attached to the typed projection;
-unsupported window expressions report a typed capability error.
-The plain expression subset also includes the prelude's typed conditional
-(`ifThenElse` and its `caseWhen` alias), which is emitted as a checked searched
-`CASE` template in direct stage payloads.
-It now covers common string matching and slicing operations, null checks,
-`toString`, explicit scalar/date casts, and the current date/time expressions;
-the checker supplies each selected expression's result type while the typed
-lowerer supplies its declared SQL template.
-Date arithmetic, truncation, date-part extraction, date differences, and
-decimal conversion templates also select their date/timestamp variant from the
-checker-typed operand rows.
-Nullable value helpers (`just`, `isNull`, `isNotNull`, `isTrue`, `nullIf`,
-`_??_`, and `eqMaybe`) now use the same direct checked-template path.
-Direct joins whose predicates fit the plain expression subset now construct
-their checked predicate from checker-typed side-qualified fields, literals,
-comparisons, membership, and boolean operators. The typed join and checked
-join are built from the recorded operand rows and that predicate without
-normalizing the query. More complex join predicates keep using the bridge.
-That source-built path now composes through surrounding plain filters,
-projections, updates, aggregates, row rewrites, ordering, limits, and offsets,
-including after set operations. Typed child relations and checker-recorded
-stage rows are threaded together through the join or set tree; each checked
-stage is constructed as the typed graph is built. A regression now exercises
-an aggregate and filter over a set result alongside the composed join pipeline.
-Direct pipelines with multiple mixed `where`, `select`, `update`, `agg`,
-`order`, limit, offset, and row-rewrite stages now also stay on the typed path
-when each expression payload fits the plain subset. Plain aggregate expressions
-include grouping keys, count, sum, average, min/max, and count-of expressions.
-Each stage reads the row recorded by the checker, so expressions after
-projections, updates, and aggregation resolve against their actual intermediate
-schema. Unsupported payloads leave the whole attempted chain for the explicit
-typed capability error at `query_lowering.rs`.
-The prelude's pipeline shorthands (`&?`, `&=`, `&+`, `&*`, `&.`, and `&-`) now
-instantiate their lambda bodies directly from the caller's checker facts as
-well. Operator-form joins such as `<?` are consumed by the same recursive typed
-composer, including when they are nested beneath those shorthands.
-Helpers with chains of `where`, `order`, `select`, and `update` stages now use
-that plain expression builder at each recorded stage identity. The caller's
-typed row is threaded through every stage, supplying field types and each
-projection boundary, so a reusable helper can mix those stages with `prefix`,
-`suffix`, `omit`, `mapValue`, `limit`, `offset`, and `distinct` while staying
-outside normalized elaboration. The plain path is transactional: if one stage
-uses an unsupported expression, the partially built typed arena is discarded
-before the route coordinator handles the definition.
-Helper order stages accept computed keys from the same resolved template
-subset as direct orders; a regression covers a nullable column fallback inside
-a reusable sorting helper.
-Single-stage aggregate helpers with plain grouping and aggregate expressions
-also instantiate directly in the caller's typed arena; their checked aggregate
-payload and output row are built without a normalized walk.
-Window expressions in projection payloads are carried by the typed projection
-node as `WinTemplate`, including when the pipeline starts from a typed query
-alias. They are no longer deferred from this slice.
-Projection helpers carry the same window payload through their instantiated
-typed projection node, preserving the helper's stage identity and checked
-output row. Plain window templates and specs are now built at the helper
-definition through resolved template, direction, and frame metadata; the helper
-does not need normalized expression payloads for these cases, including when
-its input row is instantiated at a polymorphic call site.
-The recursive slice also
-accepts ordinary stages around a combine, so a filter, projection, row rewrite,
-ordering, or limit can consume a join or set result and a staged query can be
-used as either combine operand. Window expressions are retained in typed
-projection payloads throughout the recursive typed path.
+| Step | What | Status |
+|---|---|---|
+| 1 | Move shared facts (`Resolved`, `TemplateKind`, `DefId`) out of `term_oracle.rs` into `check/core_facts.rs` | **Done** |
+| 2 | The normalizer: values, environments, reduction rules (`normalize/mod.rs`, `normalize/value.rs`, `normalize/env.rs`, `normalize/scalar.rs`, `normalize/frame.rs`) | **In progress** |
+| 3 | The relational arena with its constructors and structural erasure (`normalize/arena.rs`); budgets (`normalize/budget.rs`); the evaluate-and-erase boundary (`normalize/route.rs`) | **Done as a module** |
+| 4 | Differential gate between the two routes (`tests/normalize_differential.rs`, `tests/snapshots/normalize_mismatches.txt`) | **In place: 47 of 99 query definitions agree** |
+| 5 | Pipeline snapshot gate: every example and corpus program's erased `Rel`, fault class, diagnostics and checked tree (`tests/pipeline_golden.rs`) | **Done** |
+| 6 | Cut production over: `elaborate.rs` calls `normalize::route`; delete `typed_lower.rs`, `check/query.rs`, and the `TypedQuery`/`CheckedQuery` duplication; fold `CheckedQuery` onto the arena | **Remaining** |
+| 7 | Keep the oracle test-only and retire it once the corpus is broad enough | **Remaining** |
 
-The checker records join and set applications on the typed expression node,
-including piped forms where the primitive is partially applied first. Each
-record has a stable application identity, operation kind, both operand rows in
-operand order, and the output row. Typed lowering consumes these records for
-joins and sets over tables or typed query aliases, constructs both child
-subtrees recursively, and checks the resulting output row against the checked
-route. Ordinary stages can surround a combine and can occur inside either
-operand; graph copying preserves unary stages when a typed alias is
-instantiated. Row-rewrite helpers are instantiated inside combine operands as
-well, with their definition identities preserved. Helpers whose stage
-bodies preserve their row (`where`, `order`, `limit`, `offset`, or `distinct`)
-are now instantiated inside combine operands too. A helper with one `select`,
-`update`, or `agg`, surrounded by any number of those row-preserving stages,
-can use the closed row on its call expression as the projection boundary. The
-projection and aggregate payloads use checker types and resolved SQL template
-metadata, including callable scalar expressions. Helpers with multiple
-projection or aggregate stages thread each instantiated intermediate row through
-the typed arena as well, including when the helper is used as a join or set
-operand. Unsupported payloads and unresolved witnesses produce a typed
-capability error; the normalized route is used only by agreement tests.
+**Where it stands.** Production is unchanged: `elaborate.rs::elaborate_def`
+calls `query_lowering::lower`, which calls `typed_lower::lower_with_status`, and
+the resulting `TypedQuery` graph is reconciled with the `CheckedQuery` tree
+through `carry_checked_payloads` and `rebuild_checked`, with a
+`rebuilt_checked_tree` flag recording whether the reconciliation was exact.
 
-### Step 1, done
+The normalizer is not yet the production route. Every module of it exists, and
+`tests/normalize_differential.rs` runs it beside the lowering it replaces over every
+query definition in `examples/`, the HIR corpus and eleven inline shapes. Of the
+99 definitions it compares, **47 agree and 52 do not**; the mismatching
+definitions are recorded in `tests/snapshots/normalize_mismatches.txt` and the test
+fails if that list grows. The 52 are four refusals the normalizer still emits:
 
-`check::NodeRef` is `(definition_module, definition, expr_id)`: the definition a
-stage application was written in, and the application node's `ExprId` inside it.
-It is **stamped where the stage is recorded, never derived from the term**, which
-is what makes it survive saturation, inlining and substitution — see the
-known-gaps entry above for the mechanism and the code path.
+| Refusal | Definitions |
+|---|---|
+| "a name the checker left unresolved" | 37 |
+| "this template takes an expression" | 9 |
+| "a window function's first argument is a window specification" | 3 |
+| "no overload candidate accepts this argument" | 3 |
 
-Typed lowering consumes the checker's stage identity directly when it constructs
-each typed node. The normalized adapter no longer carries a parallel stage
-report or performs a production one-to-one compatibility walk. The checker
-tests continue to pin distinct identities for adjacent stages and imported
-helpers, while route agreement remains a test-only comparison.
+`docs/CORE.md` §1a carries the same table with what is missing behind each
+refusal. The cut-over happens when that list is empty, and the constraint on it
+is absolute: `tests/snapshots/pipeline_golden.txt` must stay byte identical and
+the corpus snapshots and six-dialect agreement tests must keep passing.
 
-### Step 2, done
+`docs/CORE.md` states the normalizer's rules and the arena's constructors;
+`docs/ARCHITECTURE.md` states the target shape and the transition.
 
-`check::query::TypedQuery` is the query skeleton as its own arena. A
-`TypedQueryNode` carries its `NodeRef`, its `QueryNodeKind`, a link to its
-**typed child** by `NodeId`, and the rows it read and produced as the checker
-closed them. `QueryNodeKind` covers table, the four row rewrites, the
-row-preserving stages, and the projections — every relational operation the
-checked layer's `QueryKind` names.
+## Remaining recommended steps
 
-Two invariants are enforced by the constructors rather than documented:
-a rewrite refuses an input whose output row is not the row the stage read, and a
-kind cannot be built through the constructor for a group it does not belong to.
-Nothing in the type consults a final query type to work out a row.
+### 1. Separate relational optimization from SQL emission
 
-Its constructors are deliberately partial in the same way the slices are: an
-operation whose builder has not landed is a kind nothing constructs, not a kind
-with a guess in it. The module carries a scoped `#![allow(dead_code)]` for that
-reason, documented at the use site.
+Today `cagara-sql/src/lower.rs` decides two kinds of thing in one pass: which
+`Rel` node becomes which SQL clause, and whether a stage *fuses* into the one
+below it (`Stage::needs_barrier`, `wrap`, `derived`). The second is a relational
+optimization — a question about the relation, not about SQL text — and it is
+the reason a lowering rule sometimes has to read two levels of the tree.
 
-### Step 3, completed milestone
+The target is: `Rel -> Rel` rewrites (fuse stages, choose CTEs, hoist
+predicates) as one pass over the arena, then a lowering pass whose every rule is
+local to a node. The `HAVING` fold below is a case of the same problem, and the
+"Deliberately absent" section states what it needs: a stage's phase as a
+property of the node, not a fact recovered by matching the relation underneath.
 
-The first builder is implemented for **direct, closed table pipelines** built
-from `prefix`, `suffix`, `omit`, and `mapValue`: it builds a `TypedQuery` chain
-from the checker's stage records, uses the recorded stage rows and witnesses,
-and constructs the corresponding `CheckedQuery`. `mapValue` has a checked node
-whose row records nullable/list wrapping while erasure passes through it, since
-the wrapper is type-level and emits no SQL. This was the first production typed
-slice; later slices extended the same invariants to expression-bearing stages,
-helpers, joins, sets, and windows. No query shape is routed to normalized
-lowering in production.
+### 2. Restore the aggregate-filter `HAVING` fold
 
-The comparison checks output rows, stage count/order/identity/kind, stage origins
-and input/output rows, and the erased relation after ignoring `Rel::At` wrappers
-(which carry route-specific source spans). A SQL backend integration test now
-rebuilds every successful shipped/corpus query through the normalized route and
-compares ANSI, PostgreSQL, SQLite, DuckDB, MySQL, and T-SQL output. This closes
-the step 4 gate.
+A filter after `agg` currently wraps a derived table. Folding it into `HAVING`
+is desirable, but it must be done through an explicit phase annotation on
+relational nodes — "this predicate may run inside the aggregate's own clause" —
+rather than by re-introducing a lowering rule that inspects the child. See
+*Deliberately absent → Aggregate filters and `HAVING`* for the history and the
+corpus snapshot that pins the current shape.
 
-### Step 5, completed milestone
+### 3. Retire the oracle once the corpus is broad enough
 
-Typed lowering now follows query aliases to the definition that owns their
-typed stage chain, preserves the original `NodeRef` identities, and checks
-aliases against the normalized route. It also instantiates a closed helper
-lambda at a use site: the helper's `prefix`, `suffix`, `omit`, and `mapValue`
-stages are copied into the caller's typed arena over the caller's child.
-Left-associated helper pipelines compose repeatedly, and imported helpers
-retain the imported definition module in each stage identity. Focused tests
-cover a signed helper, an alias followed by a helper, and an imported helper.
-
-A single rewrite with an open helper row and a closed witness can use the
-caller's recorded result row as its instantiated output. This covers a
-row-polymorphic helper such as `q => q & prefix "h_"`, including repeated uses
-of the same helper in one pipeline; its input is checked against the typed
-child row and its result is still compared with the normalized route.
-
-A single open row rewrite can also take its witness from a literal argument at
-the helper call, as in `affix => q => q & prefix affix` or
-`wrapper => q => q & mapValue wrapper`. The helper parameter is matched to the
-stage witness, and the literal has already been checked at the call site.
-
-Helpers with multiple supported row rewrites now instantiate each stage in
-order from the typed child's current row. This supplies per-stage boundaries
-when the helper's own rows are open, while checking any closed helper rows
-against the instantiated rows. Each witness can be a closed helper literal or a
-string literal passed to the corresponding helper parameter.
-
-Overloaded query helpers use the checker's `Choice::Def` at the helper use
-site, so the typed route instantiates the selected definition and retains its
-stage identity. A test selects two overloads by their input rows and compares
-both typed results with the normalized route.
-
-The slice reports a typed capability error for helpers with witnesses that
-cannot be tied to a supplied literal, unsupported relational stages, or helper
-uses whose choice remains an open `Choice::Hole`. Repeated direct stages and
-expression-bearing helper bodies are covered by the later typed builders.
-
-### Step 6, completed milestone
-
-Direct pipelines made only of integer literal `limit` and `offset` stages, or
-the argument free `distinct` stage, now build typed row preserving nodes. The
-builder derives each stage boundary from the typed child row and uses the
-checked constructors for the count and the unchanged output row. The
-normalized route remains only the test oracle, including its location
-independent relation comparison. `where`, `select`, `update`, `agg`, `order`,
-joins, sets, helpers, and windows now use checker-owned payloads in production;
-unsupported expression forms report a typed capability error.
-
-Slice 1 is a **builder** that walks a definition's stage records and populates
-the arena, then a `CheckedQuery` constructed from the tree. The feasibility claim
-behind it is already pinned:
-`check::query::tests::the_checker_supplies_every_fact_a_typed_query_node_needs`
-asserts, off the checker's own records, that a stage's identity is a `NodeRef`,
-that both of its rows are closed, and that its **input query is a typed child in
-the same definition's tree** whose recorded row equals the stage's input row —
-which is the link the builder follows and `TypedQuery::rewrite` validates.
-
-Two implementation details remain useful:
-
-- **Expression arguments are checker-owned payloads.** A `where` predicate,
-  projection field, or join `on` expression is built from typed facts and
-  attached to its `TypedQuery` node. The normalized builder remains available
-  only to agreement tests.
-- **`TypeCheck::stage_node` is a linear scan** over a definition's stage list,
-  which the bridge calls once per application. That is fine at the current call
-  rate and a builder walking a whole chain should index the list instead of
-  scanning it per node.
-
-### Agreement oracle
-
-The normalized term route is an independent test oracle. The comparison is over
-output rows, stage order,
-each stage's input/output rows, origins, checked relation structure, and
-generated SQL — the last of which the corpus snapshot
-(`cagara-hir/tests/corpus/snapshots/`, driven by `cagara-sql/tests/corpus.rs`)
-already pins byte-for-byte, and which is why a change that silently alters
+The oracle earns its keep while two independent implementations exist. A
+candidate end state is the oracle replaced by a broader differential *test*
+corpus: more programs, more SQL, judged against execution on SQLite and DuckDB
+(the engines the shipped examples already run on in CI). That would let
+`term_oracle.rs` go entirely. Until then it stays test-only, and the tests that
+compare the routes are the reason it exists.
 emitted SQL fails there rather than passing a structural comparison.
 
 ## Roadmap

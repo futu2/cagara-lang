@@ -25,7 +25,7 @@
 //! `the_comparison_can_fail` keeps it honest.
 
 use cagara_hir::check::check;
-use cagara_hir::normalize::{lower_query, Body, Facts, Normalizer, WorkspaceFacts};
+use cagara_hir::term_oracle::{lower_query, Body, Facts, Normalizer, WorkspaceFacts};
 use cagara_hir::{root_queries_checked, Workspace};
 
 const TABLES: &str = "\
@@ -72,7 +72,7 @@ fn term_path(src: &str, name: &str) -> String {
     let mut cx = Normalizer::new(Box::new(resolved));
     let term = cx
         .in_module(ws.root, |cx| {
-            cagara_hir::normalize::expression(&facts, cx, &body)
+            cagara_hir::term_oracle::expression(&facts, cx, &body)
         })
         .unwrap_or_else(|g| panic!("`{name}` did not normalize: {}", g.message));
     let query =
@@ -437,7 +437,7 @@ fn the_lowering_covers_the_relational_vocabulary() {
         inspected += 1;
         let term = cx
             .in_module(ws.root, |cx| {
-                cagara_hir::normalize::expression(&facts, cx, &body)
+                cagara_hir::term_oracle::expression(&facts, cx, &body)
             })
             .unwrap_or_else(|g| panic!("{prim} did not normalize: {}", g.message));
         if let Err(g) = lower_query(&term) {

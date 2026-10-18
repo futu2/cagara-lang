@@ -70,9 +70,14 @@ pub struct TypedExpr {
     /// operation was read and the signature instantiated.
     pub stage: Option<RowStageView>,
     pub combine: Option<CombineView>,
-    /// Sub-expressions, as indices into the body's arena, in the order
-    /// [`child_exprs`] states.
-    children: Vec<usize>,
+    /// Sub-expressions, as arena indices, in [`crate::check::child_exprs`]
+    /// order.
+    ///
+    /// Public so a reader that identifies an expression by its *path* — from
+    /// the root down, one `ExprId` at a time — can walk it. Ids repeat: a
+    /// stage node and the callee it applies share one, and only the parent
+    /// says which is meant.
+    pub children: Vec<usize>,
 }
 
 impl TypedExpr {
@@ -91,6 +96,19 @@ impl TypedExpr {
     pub fn row(&self) -> Option<Vec<(String, crate::core::ScalarType)>> {
         match self.view.as_ref()? {
             SchemeView::Query { fields } => fields.clone(),
+            _ => None,
+        }
+    }
+
+    /// The phase this expression sits in, when it is an expression at all.
+    ///
+    /// A scalar is a constant; an `expr` sits in the phase named by its first
+    /// argument. `Open` may be either — an unsolved `expr` or a constant the
+    /// checker could not classify — so it has no phase, and a caller that
+    /// needs one must find another node for the same expression.
+    pub fn scalar_phase(&self) -> Option<crate::ir::Phase> {
+        match self.view.as_ref()? {
+            SchemeView::Scalar(_) => Some(crate::ir::Phase::Const),
             _ => None,
         }
     }

@@ -801,6 +801,19 @@ impl CheckedExpr {
         }
     }
 
+    /// A literal written inside an expression of phase `phase`.
+    ///
+    /// A constant takes the phase of the expression it is part of — that is
+    /// what [`rules::mix`] says about `const` — and the checker decides which
+    /// expression that is when it types the literal. A caller that builds the
+    /// literal before the expression has to say the same thing here.
+    pub fn const_at(lit: Lit, phase: Phase, origin: Origin) -> Self {
+        CheckedExpr {
+            phase,
+            ..Self::lit(lit, origin)
+        }
+    }
+
     /// A scalar SQL template: its phase is the [`rules::mix`] of its
     /// arguments', so a template over row arguments is row phase and one over
     /// aggregate arguments is an aggregate.
@@ -901,6 +914,15 @@ impl CheckedExpr {
             },
             origin,
         })
+    }
+
+    /// Every column this expression reads, in reading order.
+    ///
+    /// The join constructor appends them (a join predicate's names are
+    /// side-qualified) and the column-reference rule tests them against the
+    /// input row, so both readers ask the node rather than walking it again.
+    pub(crate) fn columns(&self, out: &mut Vec<(Side, String)>) {
+        self.node.collect_columns(out);
     }
 
     /// A use of a checked definition, with the instantiation chosen for its
@@ -1072,7 +1094,7 @@ fn mix_of(args: &[CheckedExpr], origin: Origin) -> Result<Phase, Error> {
 }
 
 /// The existing placement rule, pointed at the offending expression.
-fn place(place: Place, e: &CheckedExpr, origin: Origin) -> Result<(), Error> {
+pub(crate) fn place(place: Place, e: &CheckedExpr, origin: Origin) -> Result<(), Error> {
     rules::place(place, e.phase)
         .map_err(|m| Error::new(m).at(e.origin))
         .map_err(|err| err.at(origin))
@@ -1095,7 +1117,12 @@ fn row_args(what: &str, args: &[CheckedExpr], origin: Origin) -> Result<(), Erro
 /// Every plain column reference must be a column of `input`; a side-qualified
 /// one is a join-predicate form and is rejected outside a join
 /// (`rules::JOIN_ONLY`, the same message `schema::refs` gives).
-fn refs_columns(e: &CheckedExpr, input: &RowType, ctx: &str, origin: Origin) -> Result<(), Error> {
+pub(crate) fn refs_columns(
+    e: &CheckedExpr,
+    input: &RowType,
+    ctx: &str,
+    origin: Origin,
+) -> Result<(), Error> {
     for (side, n) in e.node.columns() {
         match side {
             Side::Single if !input.has(&n) => {
@@ -1118,7 +1145,7 @@ fn refs_columns(e: &CheckedExpr, input: &RowType, ctx: &str, origin: Origin) -> 
 /// `at` is `Place::Select` for `select`/`update` and `Place::Agg` for `agg`;
 /// the message for a rejected field is the one the checker's `stage_phase`
 /// produces, so a user sees one explanation.
-fn project_row(
+pub(crate) fn project_row(
     stage: &str,
     input: &RowType,
     fields: &[(String, CheckedExpr)],
@@ -1149,7 +1176,7 @@ fn project_row(
 }
 
 /// `update`'s fields are placed like `select`'s: row phase, over the input.
-fn update_place() -> Place {
+pub(crate) fn update_place() -> Place {
     Place::Select
 }
 

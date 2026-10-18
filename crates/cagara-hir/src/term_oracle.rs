@@ -1,41 +1,11 @@
-//! Normalization: reduce a resolved term to a form that no longer depends on
-//! how it was *spelled*.
+//! Normalization: a term calculus kept as a **test-only oracle**.
 //!
-//! # What this replaced
+//! # What this module is
 //!
-//! Elaboration used to double as the normalization step, and it did so by
-//! re-walking **source**: applying a function built an environment and walked
-//! the callee's body again, from the AST. That one decision was the root of a
-//! family of workarounds, each of which existed only because there was no
-//! separate normalization pass:
-//!
-//! * a bare alias has no body to re-walk, so `follow_alias` walked the chain by
-//!   hand;
-//! * a composed function value has no body either, so
-//!   `apply_to_computed_head` had to be added for `(trim >>> upper) .name`;
-//! * a callee was classified by its *syntax shape* (`elaborate_callable`),
-//!   because there was no normalized function value to inspect;
-//! * a polymorphic definition was re-elaborated once per hole assignment,
-//!   because substitution baked the choice in at expansion time.
-//!
-//! **All four are gone.** This list is kept as the record of what the
-//! normalization pass paid for, not as a description of the code: the source
-//! path for scalar expressions went first, and the query path followed it, so
-//! `follow_alias`, `elaborate_callable`, `apply_to_computed_head` and the
-//! parallel window, frame and order helpers they had grown no longer exist.
-//! `elaborate.rs` is 270 lines where it was 2329, and nothing in this file
-//! classifies a callee, follows an alias, or re-walks a body.
-//!
-//! The exception that outlived all of it is the **window specification**. A
-//! window's `sql` and arguments arrive as a term like any other, but its
-//! `partition`/`order`/`frame` record is handed to [`lower_winspec`] rather than
-//! walked inline — a hook, not a second reading, and the reason the query
-//! lowering had to be given one. It is named here because it is the last place
-//! where a term's *structure* is dispatched on rather than its rule applied.
-//!
-//! # What normalization is
-//!
-//! A term is reduced to a **normal form** in which:
+//! A reducer over a small calculus of its own ([`Term`]): local binders,
+//! columns, literals, templates, lambdas, applications, cases, records, lists,
+//! and the relational primitives by name. A term is reduced to a normal form in
+//! which
 //!
 //! * every name is resolved to what it denotes — there are no aliases;
 //! * every application is *saturated* or is a first-class function value —
@@ -44,36 +14,58 @@
 //!   and normalizing it is just beta reduction;
 //! * `id`-like definitions with no operational content are erased.
 //!
-//! Two spellings of one program — `p = trim >>> upper` applied as `p .name`,
-//! the same written inline as `(trim >>> upper) .name`, and a lambda
-//! `(f => upper f) .name` — normalize to the *same term*. That property used to
-//! be assertable only by comparing generated SQL (`cagara-sql`'s
-//! spelling-equivalence tests); under normalization it holds by construction, at
-//! the term level, before any SQL exists. Those tests remain, as the end-to-end
-//! statement of the same thing.
+//! Two spellings of one program — `p = trim >>> upper` applied as `p .name`, the
+//! same written inline as `(trim >>> upper) .name`, and a lambda
+//! `(f => upper f) .name` — normalize to the *same term*. That property is the
+//! reason the calculus was built: it is true by construction at the term level,
+//! before any SQL exists.
 //!
-//! # Scope
+//! # It is not the compiler
 //!
-//! This module **is** the production path for a scalar expression: every one is
-//! normalized to a term and lowered through the checked constructors, and a form
-//! with no rule is a compiler gap rather than a second implementation of the
-//! language. The gate for that is [`crate::compile`]'s
-//! `the_normalized_route_handles_every_construct`, which counts the gaps over
-//! every program shape the suite exercises and asserts the count is zero.
+//! This module has **no production role**. Production is the checker-owned typed
+//! path: [`crate::elaborate`] hands a definition to the query lowering
+//! (`crate::query_lowering`), which builds the relational structure from the
+//! typed tree, and the normalizer in [`crate::normalize`] is the route that replaces
+//! that lowering. Nothing in `elaborate`, in the checker, or in the normalizer
+//! calls this module; a form with no rule here is a gap *in the oracle*, not a
+//! compiler capability error.
 //!
-//! It covers expressions **and** relational construction. The comment here used
-//! to say the query half was still elaborated by walking source, with
-//! `follow_alias` and `elaborate_callable` needed for it; both are gone, and
-//! [`crate::elaborate`]'s only job now is to decide whether a definition is a
-//! query and hand it to this module. The gate's zero is therefore a statement
-//! about the whole language rather than about one layer of it.
+//! It is kept because it is **independent**, and independence is the whole
+//! value. The oracle has its own representation ([`Term`], which carries no
+//! `ast::Expr` and no binding name), its own substitution (`substitute`, textual
+//! and capture-avoiding, renaming binders where the production environment
+//! simply never captures), and its own query lowering by primitive name
+//! ([`lower_query_primitive`]). The agreement tests (`cagara-hir/tests/
+//! lower_query_agreement.rs`, `cagara-sql/tests/typed_route_agreement.rs`, and
+//! the in-crate comparisons) drive it directly for the same programs the
+//! compiler compiles, so the two implementations can disagree; a shared
+//! implementation could not.
+//!
+//! # How it is reached
+//!
+//! [`elaborate_query_via_terms`] is the entry point the tests use: it normalizes
+//! a definition's body with [`InputFacts`] reading the checker's typed tree, and
+//! lowers the resulting term to a `CheckedQuery`. [`Normalizer`], [`Facts`],
+//! [`Body`] and [`WorkspaceFacts`] exist to be driven that way.
+//!
+//! # The history this calculus records
+//!
+//! Elaboration once doubled as the normalization step, and did so by re-walking
+//! **source**: applying a function built an environment and walked the callee's
+//! body again, from the AST. That one decision was the root of a family of
+//! workarounds — `follow_alias` for a bare alias, `apply_to_computed_head` for a
+//! composed function value, `elaborate_callable` for a callee classified by its
+//! syntax shape, and re-elaboration per hole assignment — because there was no
+//! separate value to inspect. The calculus replaced all four by making
+//! reduction a property of the term rather than of the spelling. The production
+//! route now reaches the same end by evaluating the typed core
+//! ([`crate::normalize`]), which is why this module could be retired to the tests.
 //!
 //! # Why the normal form is data, not syntax
 //!
-//! [`Term`] carries no `ast::Expr` and no `String` binding name. An application
-//! is a constructor over *arguments*, not a body to substitute into. That is
-//! the difference that matters: a re-walk can observe the spelling of a
-//! program, and this cannot.
+//! An application in a [`Term`] is a constructor over *arguments*, not a body to
+//! substitute into. That is the difference that matters: a re-walk can observe
+//! the spelling of a program, and this cannot.
 
 use crate::check::Choice;
 use crate::core::Origin;
@@ -104,32 +96,13 @@ pub(crate) fn visited_nodes() -> Vec<(usize, usize, u32)> {
 pub(crate) fn clear_visited() {
     VISITED.with(|v| v.borrow_mut().clear());
 }
-
-/// A definition's identity: module index and source-order position.
-pub type DefId = (usize, usize);
-
-/// Which checked constructor a `sql` template lowers to.
+/// The facts the reducer is handed, and the enum the query path branches on.
 ///
-/// Read from the template's **declared** signature, not from its resolved
-/// scheme: `upper : expr r string -> expr r string` is a scalar template,
-/// `sum : expr r a -> agg (expr r a)` an aggregate, `rowNumber : winspec r a ->
-/// win (expr r a)` a window function. The declared form is the only place that
-/// distinction survives, because once a template is applied its scheme says
-/// what it *returned*, not which node built it.
-///
-/// One enum with one reader ([`declared_template_kind`]) on purpose. Elaboration
-/// carries the same three cases and is the reason both exist — it built the
-/// checked node from a `kind` read off the same signature, from the same three
-/// strings, at the same time this layer did. Two enums and two readers of one
-/// rule is the duplication this migration set out to remove, and a `head` string
-/// added to one and not the other would have been a silently different answer
-/// rather than a compile error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TemplateKind {
-    Scalar,
-    Agg,
-    Win,
-}
+/// Defined by the checker that records them (`check::core_facts`) and
+/// re-exported here under the names this module's readers already use, so the
+/// oracle reads the same definitions instead of a copy.
+pub(crate) use crate::check::declared_template_kind;
+pub use crate::check::{DefId, Resolved, TemplateKind};
 
 /// A fully normalized term.
 ///
@@ -821,51 +794,6 @@ fn rewrite_local(term: Term, name: &str, replace: &dyn Fn(Term) -> Term, avoid: 
     }
 }
 
-/// What a name was resolved to, before its body is normalized.
-///
-/// This is the input side: a caller that has already asked the checker what a
-/// name means hands the answer here, and normalization turns it into a
-/// [`Term`]. Keeping it separate is what makes aliases disappear without a
-/// `follow_alias` walk — an alias *is* its target, so the second lookup simply
-/// does not happen.
-///
-/// Mirrors [`crate::workspace::Binding`] rather than reusing it, for two
-/// reasons: `Binding` is the *resolver's* vocabulary and includes cases (a
-/// module, a name bound to nothing) that cannot denote a term, and a consumer
-/// should not gain a new variant every time the resolver does.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Resolved {
-    /// The checker resolved the name to this definition.
-    Def(DefId),
-    /// The name is defined more than once with signatures, and the checker
-    /// picked one candidate **per use**. The candidates travel with the
-    /// resolution because which one applies is a fact about *this* occurrence —
-    /// recorded in `TypeCheck`'s choices — not a property of the name.
-    Overloads { module: usize, defs: Vec<usize> },
-    /// The checker resolved the name to a primitive.
-    Primitive,
-}
-
-impl Resolved {
-    /// The resolution a module-scope binding denotes, or `None` when the
-    /// binding cannot denote a term at all.
-    ///
-    /// `None` for [`crate::workspace::Binding::Module`]: a module is not a
-    /// value, and a bare reference to one is already a checker error, so there
-    /// is nothing to report here.
-    pub fn of_binding(binding: &crate::workspace::Binding) -> Option<Self> {
-        match binding {
-            crate::workspace::Binding::Def(m, d) => Some(Resolved::Def((*m, *d))),
-            crate::workspace::Binding::Overloads(m, defs) => Some(Resolved::Overloads {
-                module: *m,
-                defs: defs.clone(),
-            }),
-            crate::workspace::Binding::Module(_) => None,
-        }
-    }
-}
-
-/// The operation normalization performs on one occurrence.
 ///
 /// A caller supplies one of these per unresolved name. Returning `None` means
 /// "this occurrence is a local", which is the only case where the term keeps a
@@ -2290,36 +2218,6 @@ fn describe_expr_kind(k: &cagara_syntax::ast::ExprKind) -> &'static str {
         K::Case(_) => "a case",
         K::Primitive(_) => "a primitive",
         K::Error => "an error node",
-    }
-}
-
-/// The phase kind a definition's **declared signature** gives it.
-///
-/// The single reader of this rule. Elaboration used to carry the same three-case
-/// match over the same three strings, with its own copy of the enum, justified
-/// by an analogy to `lit_of` — but the two are not alike. `lit_of` translates
-/// between two `Lit` enums that *should* stay independent, so writing it out
-/// makes a new AST variant a compile error there. This reads three `head`
-/// strings out of a type expression and answers a question both layers ask; a
-/// fourth kind added to one side and not the other would have been two silently
-/// different answers, not a compile error.
-///
-/// Read from the type expression rather than the resolved scheme because only
-/// the declared form distinguishes `expr r a` from `agg (expr r a)`; after
-/// resolution both are just the result type.
-pub(crate) fn declared_template_kind(d: &cagara_syntax::ast::Def) -> TemplateKind {
-    use cagara_syntax::ast::TypeExpr;
-    let Some(mut t) = d.ty.as_ref() else {
-        return TemplateKind::Scalar;
-    };
-    // Strip the argument arrows to reach the result.
-    while let TypeExpr::Fun(_, r) = t {
-        t = r;
-    }
-    match t {
-        TypeExpr::App { head, .. } if head == "agg" => TemplateKind::Agg,
-        TypeExpr::App { head, .. } if head == "win" => TemplateKind::Win,
-        _ => TemplateKind::Scalar,
     }
 }
 

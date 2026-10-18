@@ -8,11 +8,11 @@
 //! used only by agreement tests.
 #![allow(dead_code)] // Keep the slice self-contained while later stages land.
 
+use crate::check::Resolved;
 use crate::check::{CombineKind, NodeId, NodeRef, QueryNodeKind, Row, RowStage, TypedQuery};
 use crate::checked::CheckedQuery;
 use crate::compile::CompilerInput;
 use crate::core::{Error, Origin, RowType};
-use crate::normalize::Resolved;
 use cagara_syntax::ast::{Expr, ExprKind, Lit};
 use std::collections::{HashMap, HashSet};
 
@@ -66,6 +66,20 @@ impl LoweringContext {
         self.active.remove(&key);
         result
     }
+}
+
+#[doc(hidden)]
+pub fn legacy_debug_for_tests(
+    input: CompilerInput<'_>,
+    module: usize,
+    def: usize,
+    body: &Expr,
+) -> Result<crate::ir::Rel, String> {
+    let built = lower(input, module, def, body).map_err(|error| error.message)?;
+    let Some((_typed, checked)) = built else {
+        return Err("the typed lowering declined this shape".to_string());
+    };
+    crate::checked::erase(checked).map_err(|error| error.message)
 }
 
 /// Build the typed query and its checked counterpart when this slice applies.
@@ -621,7 +635,7 @@ enum PlainFunctionBody<'a> {
     Expr(&'a Expr),
     Template {
         sql: String,
-        kind: crate::normalize::TemplateKind,
+        kind: crate::check::TemplateKind,
         ty: crate::core::ScalarType,
     },
 }
@@ -671,7 +685,7 @@ fn lower_plain_value<'a>(
                     params: (0..2).map(|i| format!("$arg{i}")).collect(),
                     body: PlainFunctionBody::Template {
                         sql: sql.to_string(),
-                        kind: crate::normalize::TemplateKind::Scalar,
+                        kind: crate::check::TemplateKind::Scalar,
                         ty: crate::core::ScalarType::Unknown,
                     },
                     module,
@@ -900,7 +914,7 @@ fn lower_plain_definition<'a>(
                 params: (0..params).map(|i| format!("$arg{i}")).collect(),
                 body: PlainFunctionBody::Template {
                     sql: sql.clone(),
-                    kind: crate::normalize::declared_template_kind(declaration),
+                    kind: crate::check::declared_template_kind(declaration),
                     ty,
                 },
                 module,
@@ -1058,13 +1072,13 @@ fn apply_plain_value<'a>(
             };
             let origin = Origin::new(module, call.span);
             let checked = match kind {
-                crate::normalize::TemplateKind::Scalar => {
+                crate::check::TemplateKind::Scalar => {
                     crate::checked::CheckedExpr::template(sql, checked, ty, origin)
                 }
-                crate::normalize::TemplateKind::Agg => {
+                crate::check::TemplateKind::Agg => {
                     crate::checked::CheckedExpr::agg_template(sql, checked, ty, origin)
                 }
-                crate::normalize::TemplateKind::Win => return Ok(None),
+                crate::check::TemplateKind::Win => return Ok(None),
             }
             .map_err(|error| Error::unsupported(error.message).at(origin))?;
             Ok(Some(PlainValue::Expr(checked)))
@@ -1159,13 +1173,13 @@ fn lower_plain_expr_basic(
                 return Ok(None);
             };
             match kind {
-                crate::normalize::TemplateKind::Scalar => {
+                crate::check::TemplateKind::Scalar => {
                     crate::checked::CheckedExpr::template(sql, Vec::new(), ty, origin)
                 }
-                crate::normalize::TemplateKind::Agg => {
+                crate::check::TemplateKind::Agg => {
                     crate::checked::CheckedExpr::agg_template(sql, Vec::new(), ty, origin)
                 }
-                crate::normalize::TemplateKind::Win => return Ok(None),
+                crate::check::TemplateKind::Win => return Ok(None),
             }
             .map(Some)
             .map_err(|error| Error::unsupported(error.message).at(origin))
@@ -1233,7 +1247,7 @@ fn lower_plain_expr_basic(
                 if args.len() != arity {
                     return Ok(None);
                 }
-                if kind == crate::normalize::TemplateKind::Win {
+                if kind == crate::check::TemplateKind::Win {
                     let Some((spec_expr, values)) = args.split_first() else {
                         return Ok(None);
                     };
@@ -1273,13 +1287,13 @@ fn lower_plain_expr_basic(
                     return Ok(None);
                 };
                 return match kind {
-                    crate::normalize::TemplateKind::Scalar => {
+                    crate::check::TemplateKind::Scalar => {
                         crate::checked::CheckedExpr::template(sql, checked_args, ty, origin)
                     }
-                    crate::normalize::TemplateKind::Agg => {
+                    crate::check::TemplateKind::Agg => {
                         crate::checked::CheckedExpr::agg_template(sql, checked_args, ty, origin)
                     }
-                    crate::normalize::TemplateKind::Win => unreachable!(),
+                    crate::check::TemplateKind::Win => unreachable!(),
                 }
                 .map(Some)
                 .map_err(|error| Error::unsupported(error.message).at(origin));
@@ -1335,7 +1349,7 @@ fn declared_template(
     input: CompilerInput<'_>,
     module: usize,
     expr: &Expr,
-) -> Option<(String, crate::normalize::TemplateKind, usize)> {
+) -> Option<(String, crate::check::TemplateKind, usize)> {
     let ((target_module, target_def), args) = helper_application(input.type_check(), module, expr)?;
     let use_expr = match &expr.kind {
         ExprKind::App(head, _) => head.as_ref(),
@@ -1353,7 +1367,7 @@ fn resolved_template_for_target(
     module: usize,
     def: usize,
     depth: usize,
-) -> Option<(String, crate::normalize::TemplateKind)> {
+) -> Option<(String, crate::check::TemplateKind)> {
     if depth > 32 {
         return None;
     }
@@ -1361,7 +1375,7 @@ fn resolved_template_for_target(
     if let ExprKind::Sql(sql) = &declaration.body.kind {
         return Some((
             sql.clone(),
-            crate::normalize::declared_template_kind(declaration),
+            crate::check::declared_template_kind(declaration),
         ));
     }
     let (ExprKind::Name(_) | ExprKind::Proj(_, _)) = &declaration.body.kind else {
@@ -1409,7 +1423,7 @@ fn template_definition(
     module: usize,
     def: usize,
     depth: usize,
-) -> Option<(String, crate::normalize::TemplateKind)> {
+) -> Option<(String, crate::check::TemplateKind)> {
     if depth > 32 {
         return None;
     }
@@ -1417,7 +1431,7 @@ fn template_definition(
     if let ExprKind::Sql(sql) = &declaration.body.kind {
         return Some((
             sql.clone(),
-            crate::normalize::declared_template_kind(declaration),
+            crate::check::declared_template_kind(declaration),
         ));
     }
     let target = match &declaration.body.kind {
@@ -1438,7 +1452,7 @@ fn resolved_template_definition(
     input: CompilerInput<'_>,
     module: usize,
     expr: &Expr,
-) -> Option<(usize, usize, String, crate::normalize::TemplateKind)> {
+) -> Option<(usize, usize, String, crate::check::TemplateKind)> {
     let tc = input.type_check();
     let (target_module, target_def) = match tc.resolution(module, expr.id)? {
         Resolved::Def((target_module, target_def)) => (*target_module, *target_def),
@@ -5666,7 +5680,7 @@ mod tests {
         let (typed, checked) = lower(input, ws.root, def, body)
             .expect("typed lowering")
             .expect("supported direct pipeline");
-        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body)
+        let terms = crate::term_oracle::elaborate_query_via_terms(input, ws.root, def, body)
             .expect("term lowering");
         compare_with_terms(input, &typed, &checked, &terms).expect("typed route agrees");
         (typed, checked)
@@ -5734,7 +5748,7 @@ mod tests {
             .iter()
             .position(|definition| definition.name == "q")
             .unwrap();
-        crate::normalize::clear_visited();
+        crate::term_oracle::clear_visited();
         let result = lower(
             CompilerInput::new(&ws, &tc),
             ws.root,
@@ -5745,7 +5759,7 @@ mod tests {
         .unwrap();
         assert_eq!(result.0.root_kind(), QueryNodeKind::Select);
         assert!(
-            crate::normalize::visited_nodes().is_empty(),
+            crate::term_oracle::visited_nodes().is_empty(),
             "simple select unexpectedly entered normalized elaboration"
         );
         let node = result.0.node(result.0.root());
@@ -5888,7 +5902,7 @@ mod tests {
             let body = &ws.modules[ws.root].module.defs[def].body;
             let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
             let terms =
-                crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+                crate::term_oracle::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
             compare_with_terms(input, &typed, &checked, &terms).unwrap();
         }
 
@@ -5950,7 +5964,8 @@ mod tests {
         let body = &ws.modules[ws.root].module.defs[def].body;
         let input = CompilerInput::new(&ws, &tc);
         let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
-        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        let terms =
+            crate::term_oracle::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
         compare_with_terms(input, &typed, &checked, &terms).unwrap();
         let chain = typed.chain();
         assert_eq!(chain.len(), 3);
@@ -5978,7 +5993,8 @@ mod tests {
         let body = &ws.modules[ws.root].module.defs[def].body;
         let input = CompilerInput::new(&ws, &tc);
         let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
-        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        let terms =
+            crate::term_oracle::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
         compare_with_terms(input, &typed, &checked, &terms).unwrap();
         assert_eq!(typed.root_kind(), QueryNodeKind::Distinct);
         assert_eq!(checked.kind(), crate::checked::QueryKind::Distinct);
@@ -6111,7 +6127,7 @@ mod tests {
         let input = CompilerInput::new(&ws, &tc);
         let body = &ws.modules[ws.root].module.defs[q].body;
         let (typed, checked) = lower(input, ws.root, q, body).unwrap().unwrap();
-        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, q, body).unwrap();
+        let terms = crate::term_oracle::elaborate_query_via_terms(input, ws.root, q, body).unwrap();
         compare_with_terms(input, &typed, &checked, &terms).unwrap();
         assert_eq!(
             typed
@@ -6160,7 +6176,8 @@ mod tests {
         let input = CompilerInput::new(&ws, &tc);
         let body = &ws.modules[ws.root].module.defs[def].body;
         let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
-        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        let terms =
+            crate::term_oracle::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
         compare_with_terms(input, &typed, &checked, &terms).unwrap();
         assert!(typed
             .nodes()
@@ -6189,7 +6206,8 @@ mod tests {
         let input = CompilerInput::new(&ws, &tc);
         let body = &ws.modules[ws.root].module.defs[def].body;
         let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
-        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        let terms =
+            crate::term_oracle::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
         compare_with_terms(input, &typed, &checked, &terms).unwrap();
         assert_eq!(
             typed
@@ -6230,7 +6248,8 @@ mod tests {
         let input = CompilerInput::new(&ws, &tc);
         let body = &ws.modules[ws.root].module.defs[def].body;
         let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
-        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        let terms =
+            crate::term_oracle::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
         compare_with_terms(input, &typed, &checked, &terms).unwrap();
         let kinds: Vec<_> = typed
             .chain()
@@ -6276,7 +6295,8 @@ mod tests {
         let input = CompilerInput::new(&ws, &tc);
         let body = &ws.modules[ws.root].module.defs[def].body;
         let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
-        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        let terms =
+            crate::term_oracle::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
         compare_with_terms(input, &typed, &checked, &terms).unwrap();
         let chain: Vec<_> = typed.chain().into_iter().map(|id| typed.node(id)).collect();
         assert_eq!(
@@ -6316,7 +6336,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let terms = crate::normalize::elaborate_query_via_terms(
+        let terms = crate::term_oracle::elaborate_query_via_terms(
             input,
             ws.root,
             def,
@@ -6355,7 +6375,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let terms = crate::normalize::elaborate_query_via_terms(
+        let terms = crate::term_oracle::elaborate_query_via_terms(
             input,
             ws.root,
             def,
@@ -6390,7 +6410,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let terms = crate::normalize::elaborate_query_via_terms(
+        let terms = crate::term_oracle::elaborate_query_via_terms(
             input,
             ws.root,
             def,
@@ -6424,7 +6444,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let terms = crate::normalize::elaborate_query_via_terms(
+        let terms = crate::term_oracle::elaborate_query_via_terms(
             input,
             ws.root,
             def,
@@ -6459,7 +6479,8 @@ mod tests {
         let body = &ws.modules[ws.root].module.defs[def].body;
         let input = CompilerInput::new(&ws, &tc);
         let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
-        let terms = crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+        let terms =
+            crate::term_oracle::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
         compare_with_terms(input, &typed, &checked, &terms).unwrap();
         assert_eq!(checked.row().names(), &["h_id_v2"]);
         let chain = typed.chain();
@@ -6508,7 +6529,7 @@ mod tests {
             let body = &ws.modules[ws.root].module.defs[def].body;
             let (typed, checked) = lower(input, ws.root, def, body).unwrap().unwrap();
             let terms =
-                crate::normalize::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
+                crate::term_oracle::elaborate_query_via_terms(input, ws.root, def, body).unwrap();
             compare_with_terms(input, &typed, &checked, &terms).unwrap();
             assert_eq!(checked.row().names(), &[expected]);
             let stage = typed

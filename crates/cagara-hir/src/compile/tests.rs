@@ -224,7 +224,7 @@ fn direct_typed_pipeline_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -241,7 +241,7 @@ fn direct_typed_pipeline_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "direct typed pipeline unexpectedly walked normalized terms"
@@ -261,7 +261,7 @@ fn direct_plain_select_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -278,7 +278,7 @@ fn direct_plain_select_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "plain direct select unexpectedly walked normalized terms"
@@ -295,7 +295,7 @@ fn callable_scalar_projection_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -312,7 +312,7 @@ fn callable_scalar_projection_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "callable scalar projection unexpectedly walked normalized terms"
@@ -327,7 +327,7 @@ fn direct_plain_update_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -344,7 +344,7 @@ fn direct_plain_update_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "plain direct update unexpectedly walked normalized terms"
@@ -358,7 +358,7 @@ fn direct_plain_order_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -375,7 +375,7 @@ fn direct_plain_order_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "plain direct order unexpectedly walked normalized terms"
@@ -389,7 +389,7 @@ fn direct_plain_where_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -406,7 +406,7 @@ fn direct_plain_where_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "plain direct where unexpectedly walked normalized terms"
@@ -420,7 +420,7 @@ fn plain_expression_helper_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -437,7 +437,7 @@ fn plain_expression_helper_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "plain expression helper unexpectedly walked normalized terms"
@@ -449,7 +449,7 @@ fn plain_expression_helper_bypasses_normalized_elaboration() {
         .position(|def| def.name == "a")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == a),
         "plain aggregate helper unexpectedly walked normalized terms"
@@ -468,7 +468,7 @@ fn closed_window_projection_helper_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -485,7 +485,7 @@ fn closed_window_projection_helper_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "closed window projection helper unexpectedly walked normalized terms"
@@ -497,7 +497,7 @@ fn closed_window_projection_helper_bypasses_normalized_elaboration() {
         .position(|def| def.name == "numbered")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == numbered),
         "closed window helper definition unexpectedly walked normalized terms"
@@ -511,7 +511,7 @@ fn plain_join_predicate_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -528,7 +528,7 @@ fn plain_join_predicate_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "plain join predicate unexpectedly walked normalized terms"
@@ -542,7 +542,7 @@ fn mixed_plain_expression_pipeline_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -559,7 +559,7 @@ fn mixed_plain_expression_pipeline_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "mixed plain expression pipeline unexpectedly walked normalized terms"
@@ -573,7 +573,7 @@ fn mixed_plain_aggregate_pipeline_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -590,7 +590,7 @@ fn mixed_plain_aggregate_pipeline_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "plain aggregate pipeline unexpectedly walked normalized terms"
@@ -604,7 +604,7 @@ fn plain_join_and_stages_bypass_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -631,7 +631,7 @@ fn plain_join_and_stages_bypass_normalized_elaboration() {
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && q.contains(def)),
         "plain composed join pipeline unexpectedly walked normalized terms"
@@ -648,7 +648,7 @@ fn multi_stage_helper_operand_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -665,7 +665,7 @@ fn multi_stage_helper_operand_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "multi-stage helper combine operand unexpectedly walked normalized terms"
@@ -681,7 +681,7 @@ fn higher_order_stage_helper_bypasses_normalized_elaboration() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -698,7 +698,7 @@ fn higher_order_stage_helper_bypasses_normalized_elaboration() {
         .position(|def| def.name == "q")
         .unwrap();
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, def, _)| *module == ws.root && *def == q),
         "higher-order stage helper unexpectedly walked normalized terms"
@@ -731,7 +731,7 @@ fn active_totals_shorthand_pipeline_bypasses_normalized_elaboration() {
         matches!(lowered, crate::query_lowering::LoweredQuery::Typed { .. }),
         "active_totals lowered through legacy route: {lowered:?}"
     );
-    crate::normalize::clear_visited();
+    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -742,7 +742,7 @@ fn active_totals_shorthand_pipeline_bypasses_normalized_elaboration() {
         compiled.diagnostics
     );
     assert!(
-        !crate::normalize::visited_nodes()
+        !crate::term_oracle::visited_nodes()
             .iter()
             .any(|(module, visited, _)| *module == ws.root && *visited == def),
         "active_totals unexpectedly walked normalized terms"
@@ -1900,7 +1900,7 @@ fn every_corpus_program_compiles_without_a_fallback() {
 /// Every use site's recorded overload choices are contiguous from zero, and no
 /// site mixes a resolved choice with an open one.
 ///
-/// `normalize::InputFacts::holes_at` keeps a site's resolved choices, drops the
+/// `term_oracle::InputFacts::holes_at` keeps a site's resolved choices, drops the
 /// open ones, and hands them to a normalizer that reads them **positionally**:
 /// `Normalizer::hole(k)` is `assignment.get(k)`, documented as
 /// `holes[k] = (callee_module, chosen_def)`. Dropping an entry shifts every later
@@ -2078,7 +2078,7 @@ fn every_use_site_carries_one_hole() {
 #[test]
 fn both_facts_adapters_resolve_the_same_assignment() {
     use crate::compile::CompilerInput;
-    use crate::normalize::{Facts, InputFacts, WorkspaceFacts};
+    use crate::term_oracle::{Facts, InputFacts, WorkspaceFacts};
     use cagara_syntax::ast::ExprKind;
 
     let ws = Workspace::from_source(

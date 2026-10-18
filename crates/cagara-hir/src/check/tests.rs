@@ -2580,19 +2580,19 @@ fn the_checker_records_what_each_name_resolved_to() {
     let defs = &ws.modules[ws.root].module.defs;
     for id in &ids {
         match tc.resolution(ws.root, *id).expect("listed but absent") {
-            crate::normalize::Resolved::Def((m, d)) => {
+            crate::check::Resolved::Def((m, d)) => {
                 assert!(
                     *d < ws.modules[*m].module.defs.len(),
                     "resolution points at a definition that does not exist"
                 );
             }
-            crate::normalize::Resolved::Overloads { module, defs: ds } => {
+            crate::check::Resolved::Overloads { module, defs: ds } => {
                 assert!(!ds.is_empty(), "an overload resolution with no candidates");
                 for d in ds {
                     assert!(*d < ws.modules[*module].module.defs.len());
                 }
             }
-            crate::normalize::Resolved::Primitive => {}
+            crate::check::Resolved::Primitive => {}
         }
     }
     // `upper` is reached through the alias `up`, and the resolution must name
@@ -2602,7 +2602,7 @@ fn the_checker_records_what_each_name_resolved_to() {
     assert!(
         ids.iter().any(|id| matches!(
             tc.resolution(ws.root, *id),
-            Some(crate::normalize::Resolved::Def((_, d))) if *d == up
+            Some(crate::check::Resolved::Def((_, d))) if *d == up
         )),
         "the alias `up` was not recorded as the resolution of its own use"
     );
@@ -2679,7 +2679,7 @@ fn resolution_covers_the_shapes_that_produced_the_alias_bugs() {
         let found = tc.resolved_ids(ws.root).iter().any(|id| {
             matches!(
                 tc.resolution(ws.root, *id),
-                Some(crate::normalize::Resolved::Def((m, d)))
+                Some(crate::check::Resolved::Def((m, d)))
                     if (*m, *d) == (want_module, want_def)
             )
         });

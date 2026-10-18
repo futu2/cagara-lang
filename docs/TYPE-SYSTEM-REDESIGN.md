@@ -2,13 +2,15 @@
 
 ## Current implementation status
 
-The redesign is implemented. Production routes every accepted query through
-`TypedQuery` and checker-owned expression payloads; no normalized query fallback
-remains. Unsupported accepted shapes produce a typed capability diagnostic.
-The normalized term machinery is retained as an independent test oracle. The
-builder's active-definition set is owned by a per-attempt `LoweringContext`,
-not ambient thread-local state. Validation and implementation notes are in
-[`PLAN.md`](PLAN.md).
+The redesign described here is implemented, and the pipeline has moved on from
+it. Production routes every accepted query through `TypedQuery` and
+checker-owned expression payloads, with no normalized query fallback; that work
+is recorded as the completed migration in [`PLAN.md`](PLAN.md). What replaces
+it next is the normalizer in `crates/cagara-hir/src/normalize/`, whose rules and arena
+are stated in [`CORE.md`](CORE.md); [`PLAN.md`](PLAN.md), "Consolidating the
+normalizer", says where that stands. The normalized term machinery is a test-only
+oracle in both shapes. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the current
+layers.
 
 ## Why change it
 

@@ -5,7 +5,7 @@
 //! corpus must emit the same SQL through the production route and through an
 //! independently normalized term route.
 
-use cagara_hir::normalize::{expression, lower_query, Body, Facts, Normalizer, WorkspaceFacts};
+use cagara_hir::term_oracle::{expression, lower_query, Body, Facts, Normalizer, WorkspaceFacts};
 use cagara_hir::{check, erase, root_queries_checked, Workspace};
 use cagara_sql::{compile, Dialect, Options};
 use std::path::{Path, PathBuf};

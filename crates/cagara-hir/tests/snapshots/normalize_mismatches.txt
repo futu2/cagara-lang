@@ -1,0 +1,156 @@
+crates/cagara-hir/tests/corpus/aggregates.cagara def 1 :: `total`
+  legacy: At(Loc { module: 1, span: Span { start: 531, end: 548 } }, Agg(At(Loc { module: 1, span: Span { start: 531, end: 548 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount", "status"]) }), [("n", Agg("COUNT(*)", []))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/aggregates.cagara def 2 :: `per_user`
+  legacy: At(Loc { module: 1, span: Span { start: 609, end: 725 } }, Agg(At(Loc { module: 1, span: Span { start: 609, end: 725 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount", "status"]) }), [("u", Group(Col(Single, "user_id"))), ("n", Agg("COUNT(*)", [])), ("total", Agg("SUM($1)", [Col(Single, "amount")])), ("biggest", Agg("MAX($1)", [Col(Single, "amount")])), ("smal…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/aggregates.cagara def 3 :: `by_status`
+  legacy: At(Loc { module: 1, span: Span { start: 884, end: 891 } }, Limit(At(Loc { module: 1, span: Span { start: 866, end: 881 } }, Order(At(Loc { module: 1, span: Span { start: 827, end: 863 } }, Agg(At(Loc { module: 1, span: Span { start: 457, end: 480 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount", "status"]) }), [("s", Group(Col(Single, "status"))), ("n", Agg("…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/joins.cagara def 2 :: `inner_named`
+  legacy: At(Loc { module: 1, span: Span { start: 669, end: 705 } }, Join { kind: Inner, left: At(Loc { module: 1, span: Span { start: 538, end: 560 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 622, end: 645 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), on: Tpl("$1 = $2", [Col(Le…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/joins.cagara def 3 :: `inner_op`
+  legacy: At(Loc { module: 1, span: Span { start: 725, end: 753 } }, Join { kind: Inner, left: At(Loc { module: 1, span: Span { start: 538, end: 560 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 622, end: 645 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), on: Tpl("$1 = $2", [Col(Le…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/joins.cagara def 4 :: `left`
+  legacy: At(Loc { module: 1, span: Span { start: 770, end: 805 } }, Join { kind: Left, left: At(Loc { module: 1, span: Span { start: 538, end: 560 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 622, end: 645 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), on: Tpl("$1 = $2", [Col(Lef…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/joins.cagara def 5 :: `right`
+  legacy: At(Loc { module: 1, span: Span { start: 822, end: 858 } }, Join { kind: Right, left: At(Loc { module: 1, span: Span { start: 538, end: 560 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 622, end: 645 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), on: Tpl("$1 = $2", [Col(Le…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/joins.cagara def 6 :: `full`
+  legacy: At(Loc { module: 1, span: Span { start: 874, end: 909 } }, Join { kind: Full, left: At(Loc { module: 1, span: Span { start: 538, end: 560 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 622, end: 645 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), on: Tpl("$1 = $2", [Col(Lef…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/joins.cagara def 7 :: `semi`
+  legacy: At(Loc { module: 1, span: Span { start: 925, end: 960 } }, Join { kind: Semi, left: At(Loc { module: 1, span: Span { start: 538, end: 560 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 622, end: 645 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), on: Tpl("$1 = $2", [Col(Lef…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/joins.cagara def 8 :: `anti`
+  legacy: At(Loc { module: 1, span: Span { start: 976, end: 1011 } }, Join { kind: Anti, left: At(Loc { module: 1, span: Span { start: 538, end: 560 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 622, end: 645 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), on: Tpl("$1 = $2", [Col(Le…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/joins.cagara def 9 :: `joined_then_filtered`
+  legacy: At(Loc { module: 1, span: Span { start: 1135, end: 1157 } }, Where(At(Loc { module: 1, span: Span { start: 1096, end: 1132 } }, Join { kind: Inner, left: At(Loc { module: 1, span: Span { start: 538, end: 560 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 622, end: 645 } }, Table { schema: "public", name: "orders", colu…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/qual.cagara def 4 :: `via_local`
+  legacy: At(Loc { module: 1, span: Span { start: 973, end: 1017 } }, Select(At(Loc { module: 1, span: Span { start: 973, end: 1017 } }, Table { schema: "s", name: "t", columns: Some(["id", "name"]) }), [("s", Tpl("UPPER($1)", [Col(Single, "name")])), ("i", Tpl("$1 + $2", [Col(Single, "id"), Lit(Int(1))]))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 1, span: Span { start: 852, end: 864 } }, what: "this argument is not an expression: it is a name" }
+crates/cagara-hir/tests/corpus/rows.cagara def 1 :: `updated`
+  legacy: At(Loc { module: 1, span: Span { start: 792, end: 813 } }, Where(At(Loc { module: 1, span: Span { start: 757, end: 789 } }, Update(At(Loc { module: 1, span: Span { start: 635, end: 657 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) }), [("doubled", Tpl("$1 + $2", [Col(Single, "age"), Col(Single, "age")]))])), Tpl("$1 > $2", [Col(Single, "doubled"), Lit…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/rows.cagara def 2 :: `trimmed`
+  legacy: At(Loc { module: 1, span: Span { start: 903, end: 916 } }, Omit(At(Loc { module: 1, span: Span { start: 635, end: 657 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) }), "active"))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/rows.cagara def 3 :: `prefixed`
+  legacy: At(Loc { module: 1, span: Span { start: 999, end: 1010 } }, Prefix(At(Loc { module: 1, span: Span { start: 635, end: 657 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) }), "u_"))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/rows.cagara def 4 :: `suffixed`
+  legacy: At(Loc { module: 1, span: Span { start: 1030, end: 1043 } }, Suffix(At(Loc { module: 1, span: Span { start: 635, end: 657 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) }), "_col"))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/rows.cagara def 5 :: `both`
+  legacy: At(Loc { module: 1, span: Span { start: 1073, end: 1084 } }, Suffix(At(Loc { module: 1, span: Span { start: 1059, end: 1070 } }, Prefix(At(Loc { module: 1, span: Span { start: 635, end: 657 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) }), "p_")), "_s"))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/rows.cagara def 6 :: `ages`
+  legacy: At(Loc { module: 1, span: Span { start: 1175, end: 1183 } }, Distinct(At(Loc { module: 1, span: Span { start: 1157, end: 1172 } }, Select(At(Loc { module: 1, span: Span { start: 635, end: 657 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) }), [("age", Col(Single, "age"))]))))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/rows.cagara def 7 :: `renamed`
+  legacy: At(Loc { module: 1, span: Span { start: 1331, end: 1351 } }, Order(At(Loc { module: 1, span: Span { start: 1304, end: 1328 } }, Select(At(Loc { module: 1, span: Span { start: 635, end: 657 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) }), [("user_id", Col(Single, "id"))])), [(Col(Single, "user_id"), true)]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/setops.cagara def 2 :: `union_named`
+  legacy: At(Loc { module: 1, span: Span { start: 889, end: 901 } }, Set { kind: Union, left: At(Loc { module: 1, span: Span { start: 842, end: 865 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 774, end: 796 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }) })
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/setops.cagara def 3 :: `union_op`
+  legacy: At(Loc { module: 1, span: Span { start: 913, end: 928 } }, Set { kind: Union, left: At(Loc { module: 1, span: Span { start: 774, end: 796 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 842, end: 865 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name"]) }) })
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 9071, end: 9080 } }, what: "a set operation takes two queries" }
+crates/cagara-hir/tests/corpus/setops.cagara def 5 :: `union_all`
+  legacy: At(Loc { module: 1, span: Span { start: 984, end: 999 } }, Set { kind: UnionAll, left: At(Loc { module: 1, span: Span { start: 842, end: 865 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 774, end: 796 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }) })
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/setops.cagara def 7 :: `except_named`
+  legacy: At(Loc { module: 1, span: Span { start: 1131, end: 1144 } }, Set { kind: Except, left: At(Loc { module: 1, span: Span { start: 842, end: 865 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 774, end: 796 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }) })
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/setops.cagara def 8 :: `except_op`
+  legacy: At(Loc { module: 1, span: Span { start: 1157, end: 1172 } }, Set { kind: Except, left: At(Loc { module: 1, span: Span { start: 774, end: 796 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 842, end: 865 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name"]) }) })
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 9255, end: 9265 } }, what: "a set operation takes two queries" }
+crates/cagara-hir/tests/corpus/stages.cagara def 10 :: `takes_count_applied`
+  legacy: At(Loc { module: 1, span: Span { start: 1206, end: 1215 } }, Limit(At(Loc { module: 1, span: Span { start: 659, end: 681 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), 3))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/stages.cagara def 2 :: `inline_pipeline`
+  legacy: At(Loc { module: 1, span: Span { start: 815, end: 831 } }, Select(At(Loc { module: 1, span: Span { start: 795, end: 812 } }, Where(At(Loc { module: 1, span: Span { start: 659, end: 681 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), Tpl("$1 > $2", [Col(Single, "age"), Lit(Int(18))]))), [("name", Col(Single, "name"))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/stages.cagara def 3 :: `named_applied`
+  legacy: At(Loc { module: 1, span: Span { start: 879, end: 895 } }, Select(At(Loc { module: 1, span: Span { start: 857, end: 874 } }, Where(At(Loc { module: 1, span: Span { start: 659, end: 681 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), Tpl("$1 > $2", [Col(Single, "age"), Lit(Int(18))]))), [("name", Col(Single, "name"))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/stages.cagara def 5 :: `composed_applied`
+  legacy: At(Loc { module: 1, span: Span { start: 931, end: 947 } }, Select(At(Loc { module: 1, span: Span { start: 909, end: 926 } }, Where(At(Loc { module: 1, span: Span { start: 659, end: 681 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), Tpl("$1 > $2", [Col(Single, "age"), Lit(Int(18))]))), [("name", Col(Single, "name"))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/stages.cagara def 6 :: `inline_lambda`
+  legacy: At(Loc { module: 1, span: Span { start: 1015, end: 1053 } }, Select(At(Loc { module: 1, span: Span { start: 1033, end: 1052 } }, Where(At(Loc { module: 1, span: Span { start: 659, end: 681 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), Tpl("$1 > $2", [Col(Single, "age"), Lit(Int(18))]))), [("name", Col(Single, "name"))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/stages.cagara def 8 :: `with_arg_applied`
+  legacy: At(Loc { module: 1, span: Span { start: 1135, end: 1149 } }, Select(At(Loc { module: 1, span: Span { start: 659, end: 681 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), [("id", Col(Single, "id"))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/windows.cagara def 1 :: `numbered`
+  legacy: At(Loc { module: 1, span: Span { start: 523, end: 567 } }, Select(At(Loc { module: 1, span: Span { start: 523, end: 567 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), [("r", Win("ROW_NUMBER()", [], WinSpec { partition: [], order: [(Col(Single, "id"), true)], frame: None }))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/windows.cagara def 2 :: `per_user`
+  legacy: At(Loc { module: 1, span: Span { start: 641, end: 696 } }, Select(At(Loc { module: 1, span: Span { start: 641, end: 696 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), [("s", Win("SUM($1)", [Col(Single, "amount")], WinSpec { partition: [Col(Single, "user_id")], order: [], frame: None }))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/windows.cagara def 3 :: `running`
+  legacy: At(Loc { module: 1, span: Span { start: 770, end: 868 } }, Select(At(Loc { module: 1, span: Span { start: 770, end: 868 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), [("s", Win("SUM($1)", [Col(Single, "amount")], WinSpec { partition: [Col(Single, "user_id")], order: [(Col(Single, "id"), true)], frame: Some(Frame { start: UnboundedPreceding, end: Curr…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+crates/cagara-hir/tests/corpus/windows.cagara def 4 :: `over_agg`
+  legacy: At(Loc { module: 1, span: Span { start: 1211, end: 1263 } }, Select(At(Loc { module: 1, span: Span { start: 1171, end: 1208 } }, Agg(At(Loc { module: 1, span: Span { start: 447, end: 470 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), [("k", Group(Col(Single, "user_id"))), ("n", Agg("COUNT(*)", []))])), [("k", Col(Single, "k")), ("r", Win("ROW_NUMBER()…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+examples/report.cagara def 2 :: `adults`
+  legacy: At(Loc { module: 1, span: Span { start: 448, end: 456 } }, Limit(At(Loc { module: 1, span: Span { start: 425, end: 443 } }, Order(At(Loc { module: 1, span: Span { start: 359, end: 420 } }, Select(At(Loc { module: 1, span: Span { start: 325, end: 354 } }, Where(At(Loc { module: 1, span: Span { start: 158, end: 180 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "ac…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+examples/report.cagara def 3 :: `revenue`
+  legacy: At(Loc { module: 1, span: Span { start: 885, end: 921 } }, Order(At(Loc { module: 1, span: Span { start: 865, end: 880 } }, Where(At(Loc { module: 1, span: Span { start: 794, end: 860 } }, Agg(At(Loc { module: 1, span: Span { start: 764, end: 789 } }, Where(At(Loc { module: 1, span: Span { start: 281, end: 304 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount",…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+examples/report.cagara def 5 :: `latest`
+  legacy: At(Loc { module: 1, span: Span { start: 1121, end: 1137 } }, Where(At(Loc { module: 1, span: Span { start: 1056, end: 1116 } }, Select(At(Loc { module: 1, span: Span { start: 281, end: 304 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount", "status", "created_at"]) }), [("id", Col(Single, "id")), ("user_id", Col(Single, "user_id")), ("rn", Win("ROW_NUMBER()", […
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+examples/report.cagara def 6 :: `running`
+  legacy: At(Loc { module: 1, span: Span { start: 1160, end: 1296 } }, Select(At(Loc { module: 1, span: Span { start: 1160, end: 1296 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount", "status", "created_at"]) }), [("id", Col(Single, "id")), ("total", Win("SUM($1)", [Col(Single, "amount")], WinSpec { partition: [Col(Single, "user_id")], order: [(Col(Single, "created_at"…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+examples/report.cagara def 7 :: `order_names`
+  legacy: At(Loc { module: 1, span: Span { start: 1557, end: 1620 } }, Select(At(Loc { module: 1, span: Span { start: 1517, end: 1552 } }, Join { kind: Inner, left: At(Loc { module: 1, span: Span { start: 1468, end: 1512 } }, Select(At(Loc { module: 1, span: Span { start: 281, end: 304 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount", "status", "created_at"]) }), [("us…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+examples/report.cagara def 8 :: `user_totals`
+  legacy: At(Loc { module: 1, span: Span { start: 1826, end: 1978 } }, Agg(At(Loc { module: 1, span: Span { start: 1786, end: 1821 } }, Join { kind: Left, left: At(Loc { module: 1, span: Span { start: 158, end: 180 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) }), right: At(Loc { module: 1, span: Span { start: 281, end: 304 } }, Table { schema: "public", name: …
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+examples/report.cagara def 9 :: `active_totals`
+  legacy: At(Loc { module: 1, span: Span { start: 2218, end: 2437 } }, Limit(At(Loc { module: 1, span: Span { start: 2218, end: 2429 } }, Order(At(Loc { module: 1, span: Span { start: 2218, end: 2410 } }, Agg(At(Loc { module: 1, span: Span { start: 2241, end: 2323 } }, Join { kind: Left, left: At(Loc { module: 1, span: Span { start: 2218, end: 2236 } }, Where(At(Loc { module: 1, span: Span { start: 158, end…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 8327, end: 8332 } }, what: "`Where` takes a query as its input, and this is a name" }
+inline: a case def 3 :: `q`
+  legacy: At(Loc { module: 1, span: Span { start: 255, end: 307 } }, Select(At(Loc { module: 1, span: Span { start: 255, end: 307 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), [("x", Tpl("CASE WHEN $1 THEN $2 ELSE $3 END", [Tpl("$1 > $2", [Col(Single, "age"), Lit(Int(1))]), Lit(Str("a")), Lit(Str("b"))]))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+inline: a composed stage def 4 :: `q`
+  legacy: At(Loc { module: 1, span: Span { start: 268, end: 282 } }, Select(At(Loc { module: 1, span: Span { start: 247, end: 263 } }, Where(At(Loc { module: 1, span: Span { start: 55, end: 77 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), Tpl("$1 > $2", [Col(Single, "age"), Lit(Int(1))]))), [("id", Col(Single, "id"))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+inline: a filter def 3 :: `q`
+  legacy: At(Loc { module: 1, span: Span { start: 255, end: 271 } }, Where(At(Loc { module: 1, span: Span { start: 255, end: 271 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), Tpl("$1 > $2", [Col(Single, "age"), Lit(Int(1))])))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+inline: a join def 3 :: `q`
+  legacy: At(Loc { module: 1, span: Span { start: 255, end: 291 } }, Join { kind: Inner, left: At(Loc { module: 1, span: Span { start: 55, end: 77 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), right: At(Loc { module: 1, span: Span { start: 139, end: 162 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), on: Tpl("$1 = $2", [C…
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+inline: a named stage def 4 :: `q`
+  legacy: At(Loc { module: 1, span: Span { start: 247, end: 261 } }, Select(At(Loc { module: 1, span: Span { start: 55, end: 77 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), [("id", Col(Single, "id"))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+inline: a pipeline def 3 :: `q`
+  legacy: At(Loc { module: 1, span: Span { start: 309, end: 316 } }, Limit(At(Loc { module: 1, span: Span { start: 291, end: 306 } }, Order(At(Loc { module: 1, span: Span { start: 274, end: 288 } }, Select(At(Loc { module: 1, span: Span { start: 255, end: 271 } }, Where(At(Loc { module: 1, span: Span { start: 55, end: 77 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), …
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+inline: a projection def 3 :: `q`
+  legacy: At(Loc { module: 1, span: Span { start: 255, end: 271 } }, Select(At(Loc { module: 1, span: Span { start: 255, end: 271 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), [("name", Col(Single, "name"))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+inline: a set operation def 3 :: `q`
+  legacy: At(Loc { module: 1, span: Span { start: 255, end: 267 } }, Set { kind: Union, left: At(Loc { module: 1, span: Span { start: 219, end: 242 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name", "age"]) }), right: At(Loc { module: 1, span: Span { start: 55, end: 77 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }) })
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+inline: a window def 3 :: `q`
+  legacy: At(Loc { module: 1, span: Span { start: 255, end: 299 } }, Select(At(Loc { module: 1, span: Span { start: 255, end: 299 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), [("r", Win("ROW_NUMBER()", [], WinSpec { partition: [], order: [(Col(Single, "id"), true)], frame: None }))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+inline: an aggregate def 3 :: `q`
+  legacy: At(Loc { module: 1, span: Span { start: 255, end: 288 } }, Agg(At(Loc { module: 1, span: Span { start: 255, end: 288 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), [("a", Group(Col(Single, "age"))), ("n", Agg("COUNT(*)", []))]))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }
+inline: an inline lambda stage def 3 :: `q`
+  legacy: At(Loc { module: 1, span: Span { start: 261, end: 279 } }, Where(At(Loc { module: 1, span: Span { start: 55, end: 77 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) }), Tpl("$1 > $2", [Col(Single, "age"), Lit(Int(1))])))
+  normalizer:   ERR Unsupported { origin: Origin { module: 0, span: Span { start: 2086, end: 2089 } }, what: "`f` was applied before it was given a value" }

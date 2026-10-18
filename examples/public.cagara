@@ -5,3 +5,6 @@ import "schema.cagara" as s
 # Drop `password_hash` by selecting the columns that are published, and give
 # `name` its public label.
 public_users = s.users & select { .id, display_name = .name }
+
+# Publish this view when the module is run directly.
+main = public_users

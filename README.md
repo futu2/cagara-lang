@@ -35,9 +35,9 @@ WHERE (n >= 5)
 ORDER BY revenue DESC NULLS LAST;
 ```
 
-The repository's [`examples/report.cagara`](examples/report.cagara) is a
-library of named queries, so inspect one of its queries with, for example,
-`cagara examples/report.cagara --only revenue`.
+The repository's [`examples/report.cagara`](examples/report.cagara) uses its
+aggregate report as `main`; inspect one of its other named queries with, for
+example, `cagara examples/report.cagara --only adults`.
 
 ## Features
 

@@ -62,3 +62,6 @@ active_totals = users
   &* { id = group .id, name = group .name, total = sum (coalesce 0.0 .amount) ?? 0.0 }
   &. [desc .total]
   &- 20
+
+# The aggregate report is the default command-line entry point.
+main = revenue

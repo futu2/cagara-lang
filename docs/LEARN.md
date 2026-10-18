@@ -47,6 +47,9 @@ adults = users
   & select { id = .id, name = .name }
   & order [asc .name]
   & limit 10
+
+# `main` is the definition printed by `cagara file.cagara`.
+main = adults
 ```
 
 Three ideas carry most of the language:
@@ -60,6 +63,11 @@ Three ideas carry most of the language:
 
 There is no `SELECT` keyword, no `FROM`, and no statement structure. Those come
 out the other end as SQL.
+
+The definition named `main` is the file's entry point. The other definitions
+are helpers that build values for it; use `--only NAME` when you want to
+inspect one of them directly. A file without `main` is still checked, but it
+prints no SQL because it is a library.
 
 ### Column references start with a dot
 

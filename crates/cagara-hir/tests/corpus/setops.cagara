@@ -2,8 +2,8 @@
 #
 # The examples had no set operation at all, which is why a reversed `except`
 # reached users: none of the golden files exercised the piped form, so swapping
-# the operands was invisible to the entire suite (see
-# `docs/implementation/FIXED-piped-set-operand-order.md`).
+# the operands was invisible to the entire suite. The paired forms below keep
+# that behavior covered.
 #
 # The two spellings deliberately put the piped query on **opposite sides** —
 # `users & union admins` passes `[admins, users]`, while `users &| admins`

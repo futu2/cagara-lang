@@ -213,7 +213,8 @@ jobs:
               import hashlib
               import pathlib
 
-              staged = pathlib.Path(f"editors/vscode/bin/{target}/{exe}")
+              # The job's default working directory is editors/vscode.
+              staged = pathlib.Path(f"bin/{target}/{exe}")
               if not staged.is_file():
                   sys.exit(f"{vsix}: staged {staged} is not a file")
               digest = lambda b: hashlib.sha256(b).hexdigest()

@@ -40,7 +40,7 @@ checksum = "36f64beae40a84da1b4b26ff2761a5b895c12adc41dc25aaee1c4f2bbfe97a6e"
 
 [[package]]
 name = "cagara-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cagara-fmt",
  "cagara-hir",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "cagara-fmt"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cagara-syntax",
  "rowan",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "cagara-hir"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cagara-syntax",
  "salsa",
@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "cagara-lsp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cagara-fmt",
  "cagara-hir",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "cagara-sql"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cagara-hir",
  "sqlglot-rust",
@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "cagara-syntax"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "logos",
  "rowan",

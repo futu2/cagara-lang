@@ -32,6 +32,25 @@ try {
   process.exit(1);
 }
 
+// A `require` that succeeds proves only that the file parses; it says nothing
+// about the exports being the current ones. Compiling `serverpath.ts` and not
+// staging it is how `--target` came to fail with a bare "rustTargetFor is not
+// a function" from a line further down: the old `out/` loaded fine and simply
+// did not have the new export. Name the stale output here instead.
+if (typeof vscodeTarget !== "function" || typeof rustTargetFor !== "function") {
+  const missing = [
+    typeof vscodeTarget === "function" ? undefined : "vscodeTarget",
+    typeof rustTargetFor === "function" ? undefined : "rustTargetFor",
+  ].filter(Boolean);
+  console.error(
+    `cagara: ${join(extensionDir, "out", "serverpath.js")} is out of date:\n` +
+      `  missing export${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}\n` +
+      `Its source has changed since it was last compiled. Run \`npm run compile\`\n` +
+      `in ${extensionDir} and try again.`,
+  );
+  process.exit(1);
+}
+
 /**
  * The most recently modified file the server is built from, or undefined.
  * Used only to warn about a build that predates the sources.
@@ -105,12 +124,42 @@ const exe = target.startsWith("win32") || process.env.CAGARA_STAGE_EXE === "caga
   : "cagara";
 const profile = process.env.CAGARA_STAGE_PROFILE ?? "release";
 const hostTarget = vscodeTarget(process.platform, process.arch);
+const hostExe = process.platform === "win32" ? "cagara.exe" : "cagara";
+// A plain `cargo build` writes to target/<profile>/, whatever toolchain it used,
+// so a musl-built host binary is still there. Packaging for this machine can
+// therefore use the plain path; packaging for another one has to name the
+// triple, which is what a release build for that platform produced.
+const native = join(repoRoot, "target", profile, hostExe);
 const rustTarget = process.env.CAGARA_STAGE_RUST_TARGET?.trim() || rustTargetFor(target);
-const source = target === hostTarget && !process.env.CAGARA_STAGE_RUST_TARGET
-  ? join(repoRoot, "target", profile, exe)
-  : rustTarget
-    ? join(repoRoot, "target", rustTarget, profile, exe)
-    : join(repoRoot, "target", profile, exe);
+const triple = rustTarget ? join(repoRoot, "target", rustTarget, profile, exe) : undefined;
+
+// Which build to stage, in order of preference:
+//
+//   1. the target-triple build, when one exists -- this is what a release
+//      build for a specific platform produces, and the only correct answer
+//      when the target is not this machine's;
+//   2. otherwise, this machine's build, but only when the target is this
+//      machine's, because that binary runs here;
+//   3. otherwise the triple path, so the error below names the file a
+//      `cargo build --target <triple>` would create.
+//
+// Case 2 is not a fallback to be ashamed of -- `rustTargetFor` maps linux-x64
+// to the musl triple, while a plain `cargo build --release` writes to
+// target/release/, so requiring the triple would make the common local case
+// fail. It is only wrong when the point of the build is to ship elsewhere.
+let source;
+let shadowedTarget = false;
+const forcedRust = process.env.CAGARA_STAGE_RUST_TARGET?.trim();
+if (triple && existsSync(triple)) {
+  source = triple;
+} else if (target === hostTarget && existsSync(native)) {
+  source = native;
+  // Naming an explicit rust target means the caller expects that toolchain's
+  // output; staging a different binary instead should not pass silently.
+  shadowedTarget = Boolean(forcedRust);
+} else {
+  source = triple ?? native;
+}
 
 // Set by `npm run package`. F5 wants a staged server even from a build that is
 // a few seconds behind the sources -- you are iterating. A VSIX is different:
@@ -121,12 +170,23 @@ const source = target === hostTarget && !process.env.CAGARA_STAGE_RUST_TARGET
 const strict = process.env.CAGARA_STAGE_STRICT === "1";
 
 if (!existsSync(source)) {
+  // Name the command that actually writes to the missing path. A plain
+  // `cargo build --release` fills target/release/, so telling someone to run it
+  // when the path it wanted was target/<triple>/release/ sends them in circles.
+  const tripleBuild = rustTarget && source !== native
+    ? `  cargo build ${profile === "release" ? "--release " : ""}--target ${rustTarget}`
+    : `  cargo build${profile === "release" ? " --release" : ""}`;
   console.error(
     `cagara: no ${profile} build at ${source}.\n` +
+      (rustTarget
+        ? `The ${target} target is built by the ${rustTarget} toolchain.\n`
+        : "") +
       (strict
-        ? `Refusing to package a VSIX with no compiler in it. Build one first:\n` +
-          `  cargo build --release`
-        : `Run \`cargo build --release\` in ${repoRoot}, then launch again.`),
+        ? `Refusing to package a VSIX with no compiler in it. Build one first, in\n` +
+          `${repoRoot}:\n` +
+          `${tripleBuild.replace(/`/g, "")}\n` +
+          `(the Rust target has to be added first: rustup target add ${rustTarget ?? "<triple>"})`
+        : `Run \`${tripleBuild.trim()}\` in ${repoRoot}, then launch again.`),
   );
   process.exit(1);
 }
@@ -150,6 +210,14 @@ if (stale && strict) {
 const destDir = join(extensionDir, "bin", target);
 const dest = join(destDir, exe);
 mkdirSync(destDir, { recursive: true });
+if (shadowedTarget) {
+  console.warn(
+    `cagara: warning: CAGARA_STAGE_RUST_TARGET asked for ${rustTarget}, but no build\n` +
+      `exists there; staging this machine's ${profile} build instead. If the VSIX is\n` +
+      `meant to run elsewhere, build it first:\n` +
+      `  cargo build${profile === "release" ? " --release" : ""} --target ${rustTarget}`,
+  );
+}
 // Copied rather than symlinked or pointed at in place: the extension treats a
 // bundled server as self-contained, which is what a release VSIX ships.
 copyFileSync(source, dest);

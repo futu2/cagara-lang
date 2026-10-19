@@ -28,12 +28,35 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const extensionDir = resolve(here, "..");
 
+// `npm` on Windows is a `.cmd` file, which `spawnSync` refuses to run unless a
+// shell is involved. Everything else this script spawns is a plain executable
+// and is run directly.
+const npm = "npm";
+
 const args = process.argv.slice(2);
 const targetFlag = args.findIndex((a) => a === "--target" || a.startsWith("--target="));
 const target = targetFlag === -1 ? undefined : args[targetFlag].split("=")[1] ?? args[targetFlag + 1];
 
 if (target) {
   console.log(`cagara: packaging for ${target}; staging the compiler first`);
+
+  // Compile before staging. `stage-server.mjs` imports `vscodeTarget` and
+  // `rustTargetFor` from the compiled `out/serverpath.js`, so it reads
+  // whatever that directory happens to contain. `vsce` does run
+  // `vscode:prepublish` -> `tsc`, but only after staging, and that ordering
+  // is what made `--target` fail with a bare "rustTargetFor is not a
+  // function": the source had the new export and `out/` did not. Run the same
+  // compile script here so staging always sees current output.
+  const compiled = spawnSync(npm, ["run", "compile"], {
+    cwd: extensionDir,
+    stdio: "inherit",
+    shell: process.platform === "win32",
+  });
+  if (compiled.status !== 0) {
+    console.error("cagara: not packaging; the extension did not compile");
+    process.exit(compiled.status ?? 1);
+  }
+
   const staged = spawnSync(process.execPath, [join(here, "stage-server.mjs")], {
     cwd: extensionDir,
     stdio: "inherit",

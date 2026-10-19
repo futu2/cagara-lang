@@ -9,9 +9,14 @@ this page tracks the remaining boundaries and language work.
 - `typed_lower.rs`, `query_lowering.rs`, and `CheckedQuery` remain for existing
   checked-tree consumers and route tests. Retire them after those consumers
   move to the relational arena API.
-- The route-differential snapshot records intentional source-origin differences
-  for reused leaves and combine nodes. They do not change the relation or SQL.
-  Keep the comparison until the SQL corpus covers those cases independently.
+- The route-differential test compares relations with node origins projected
+  away, and now records **no** mismatches: the two routes agree on every query
+  in the corpus and the inline shapes. The origin difference is a deliberate
+  choice — the slice-ordered lowering stamps a reused leaf with its *use* site,
+  the normalizer with its *declaration* — and neither reaches the SQL. The
+  normalizer is therefore equivalent to the route it replaces, so retiring
+  `typed_lower` no longer has to close a semantic gap first; what keeps it
+  alive is only its remaining consumers.
 - Some joins need derived tables because parenthesized joins are not yet a
   first-class `Rel` shape.
 - A filter after an aggregate currently becomes an outer `WHERE` over a derived
@@ -21,7 +26,9 @@ this page tracks the remaining boundaries and language work.
 ## Next steps
 
 1. Move public checked-tree consumers to the arena API, then remove the legacy
-   adapters and route tests that only protect those adapters.
+   adapters and route tests that only protect those adapters. The differential
+   test has no disagreements left to guard, so it can go with them — its
+   agreement is recorded here and in the corpus snapshots.
 2. Separate relational rewrites from SQL emission. A `Rel -> Rel` pass can fuse
    stages or choose derived tables while keeping dialect rules in the backend.
 3. Add execution-backed examples against SQLite and DuckDB, then reassess

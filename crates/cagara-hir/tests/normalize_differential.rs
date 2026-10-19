@@ -27,8 +27,20 @@
 //! Only relations are compared, not the checked trees behind them. The two
 //! routes build different intermediate structures by construction — that is the
 //! whole point of the consolidation — and what has to agree is the product.
+//!
+//! Nor are node origins compared. Every node carries the span of the source it
+//! came from, and the two routes legitimately disagree about that for reused
+//! leaves: the slice-ordered lowering stamps an inlined alias's nodes with the
+//! *use* site, the normalizer with the *declaration*. Both are defensible, and
+//! neither changes the relation or the SQL — which is why the recorded list
+//! below stayed at a constant size for shapes that had nothing wrong with them.
+//! Comparing origins made the list unfalsifiable: a genuine structural
+//! regression and a span nobody cares about looked identical. So origins are
+//! projected away before the comparison, and what is left is the relation
+//! itself. A recorded mismatch is now a *real* disagreement.
 
 use cagara_hir::check::SchemeView;
+use cagara_hir::ir::Rel;
 use cagara_hir::{check, CompilerInput, Workspace};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -121,7 +133,10 @@ struct Verdict {
 impl Verdict {
     fn agrees(&self) -> bool {
         match (&self.legacy, &self.normalizer) {
-            (Ok(legacy), Ok(normalizer)) => legacy == normalizer,
+            // Origin-agnostic, so the comparison is about the relation the
+            // user gets and not about which span a reused node was stamped
+            // with. See "What is not compared" above.
+            (Ok(legacy), Ok(normalizer)) => strip_origins(legacy) == strip_origins(normalizer),
             _ => false,
         }
     }
@@ -133,6 +148,10 @@ impl Verdict {
 
     /// The detail behind a mismatch: what each route produced, truncated so the
     /// report stays readable and beginning at the first place they differ.
+    ///
+    /// Printed with origins removed, because origins are what the comparison
+    /// ignores: showing them would put a wall of differing spans in front of
+    /// whatever actually differs.
     fn detail(&self) -> String {
         format!(
             "  legacy: {}\n  normalizer:   {}",
@@ -142,10 +161,57 @@ impl Verdict {
     }
 }
 
+/// The relation with every [`Rel::At`] origin wrapper removed, at every depth.
+///
+/// `Rel`'s `PartialEq` is structural and includes each `At`'s [`Loc`]. The two
+/// routes legitimately disagree about which span a reused leaf carries — the
+/// use site or the declaration — and that is invisible in the SQL, so the
+/// comparison runs on this projection instead. Rebuilding the tree (rather
+/// than printing and editing the debug text) keeps the comparison exact: if a
+/// field is added to `Rel`, this function stops compiling and has to say what
+/// the new field means for agreement.
+///
+/// [`Expr`] carries no origins, so it is cloned through unchanged.
+fn strip_origins(rel: &Rel) -> Rel {
+    match rel {
+        Rel::At(_, inner) => strip_origins(inner),
+        Rel::Table { .. } => rel.clone(),
+        Rel::Where(input, pred) => Rel::Where(Box::new(strip_origins(input)), pred.clone()),
+        Rel::Select(input, fields) => Rel::Select(Box::new(strip_origins(input)), fields.clone()),
+        Rel::Update(input, fields) => Rel::Update(Box::new(strip_origins(input)), fields.clone()),
+        Rel::Omit(input, key) => Rel::Omit(Box::new(strip_origins(input)), key.clone()),
+        Rel::Prefix(input, affix) => Rel::Prefix(Box::new(strip_origins(input)), affix.clone()),
+        Rel::Suffix(input, affix) => Rel::Suffix(Box::new(strip_origins(input)), affix.clone()),
+        Rel::Agg(input, aggs) => Rel::Agg(Box::new(strip_origins(input)), aggs.clone()),
+        Rel::Order(input, keys) => Rel::Order(Box::new(strip_origins(input)), keys.clone()),
+        Rel::Limit(input, n) => Rel::Limit(Box::new(strip_origins(input)), *n),
+        Rel::Offset(input, n) => Rel::Offset(Box::new(strip_origins(input)), *n),
+        Rel::Distinct(input) => Rel::Distinct(Box::new(strip_origins(input))),
+        Rel::Join {
+            kind,
+            left,
+            right,
+            on,
+        } => Rel::Join {
+            kind: *kind,
+            left: Box::new(strip_origins(left)),
+            right: Box::new(strip_origins(right)),
+            on: on.clone(),
+        },
+        Rel::Set { kind, left, right } => Rel::Set {
+            kind: *kind,
+            left: Box::new(strip_origins(left)),
+            right: Box::new(strip_origins(right)),
+        },
+    }
+}
+
 fn describe(result: &Result<cagara_hir::ir::Rel, String>) -> String {
     match result {
         Ok(rel) => {
-            let text = format!("{rel:?}");
+            // Origins stripped: they are what the comparison ignores, so
+            // printing them would bury the difference that remains.
+            let text = format!("{:?}", strip_origins(rel));
             if text.len() <= 400 {
                 text
             } else {

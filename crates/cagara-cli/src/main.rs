@@ -1,4 +1,4 @@
-//! `cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]`
+//! `cagara <file.cagara|-> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]`
 //! `cagara fmt [--check] <files...|->`
 //! `cagara lsp`
 //!
@@ -10,13 +10,25 @@ use cagara_hir::{check, compile_checked, Workspace};
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+/// The version this binary was built from, which is the workspace version.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The name `--version` reports for the binary.
+const NAME: &str = "cagara";
+
 const USAGE: &str =
-    "usage: cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
+    "usage: cagara <file.cagara|-> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
        cagara fmt [--check] <files...>   format files in place (`-` for stdin to stdout)
-       cagara lsp    run the language server over stdio";
+       cagara lsp    run the language server over stdio
+       cagara --version";
+
+/// The path a source read from stdin is reported as, so a diagnostic still
+/// names a file. A real file of that name is not consulted: `open_source`
+/// takes the text directly.
+const STDIN_PATH: &str = "<stdin>";
 
 /// The definition a file is compiled for, unless `--only` names another.
 ///
@@ -38,7 +50,14 @@ fn main() -> ExitCode {
 }
 
 fn main_inner() -> std::io::Result<ExitCode> {
-    let mut rest = std::env::args_os().skip(1);
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    // `--version` is answered before the subcommand dispatch, so it works
+    // whatever else was passed: `cagara fmt --version` is still a version
+    // question. It is the only information flag, so `-V` means it too.
+    if args.iter().any(|a| is_version_flag(a)) {
+        return out(&format!("{NAME} {VERSION}")).map(|()| ExitCode::SUCCESS);
+    }
+    let mut rest = args.into_iter();
     let first = rest.next();
     if first.as_deref() == Some(OsStr::new("fmt")) {
         return fmt(rest);
@@ -60,6 +79,11 @@ fn main_inner() -> std::io::Result<ExitCode> {
         };
     }
     compile(first.into_iter().chain(rest))
+}
+
+/// Whether `a` asks for the version (`--version` / `-V`).
+fn is_version_flag(a: &OsStr) -> bool {
+    a == OsStr::new("--version") || a == OsStr::new("-V")
 }
 
 /// `cagara FILE` options, parsed and validated.
@@ -131,6 +155,14 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Parsed {
     let Some(file) = file else {
         return Parsed::Usage("missing input file".into());
     };
+    // `-` is stdin, spelled as a path the rest of the shell understands: a
+    // pipeline (`git show x:q.cagara | cagara -`) and an editor filter both
+    // need it, and so does `fmt`, which already documents it.
+    let file = if file == Path::new("-") {
+        PathBuf::from(STDIN_PATH)
+    } else {
+        file
+    };
     let Some(dialect) = cagara_sql::dialect(&dialect_name) else {
         return Parsed::Usage(format!("unknown dialect `{dialect_name}`"));
     };
@@ -154,7 +186,13 @@ fn compile(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
         Parsed::Usage(message) => return Ok(usage(&message)),
     };
 
-    let ws = Workspace::open(&opts.file);
+    let ws = match open_source(&opts.file) {
+        Ok(ws) => ws,
+        Err(e) => {
+            eprintln!("{STDIN_PATH}: {e}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
     if !ws.diags.is_empty() {
         for d in &ws.diags {
             eprintln!("{d}");
@@ -176,6 +214,20 @@ fn compile(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
     } else {
         report_sql(&ws, &tc, &opts, failed)
     }
+}
+
+/// Open `path` as a workspace, reading stdin when it is [`STDIN_PATH`].
+///
+/// `Workspace::open` reads from disk, so stdin is read here and handed to
+/// `open_with` — which keeps imports resolving relative to the current
+/// directory, exactly as `from_source` does.
+fn open_source(path: &Path) -> std::io::Result<Workspace> {
+    if path != Path::new(STDIN_PATH) {
+        return Ok(Workspace::open(path));
+    }
+    let mut text = String::new();
+    std::io::stdin().read_to_string(&mut text)?;
+    Ok(Workspace::open_with(path, text))
 }
 
 /// `--types`: the inferred type of every selected root definition.
@@ -237,6 +289,13 @@ fn report_sql(
     // each distinct one once, in the order it first appears.
     let mut seen: HashSet<String> = HashSet::new();
     let compiled = compile_checked(ws, tc);
+    // Diagnostics are rendered against the path the user named, not the
+    // canonical one the workspace loaded under: a run from the file's own
+    // directory would otherwise print the whole absolute path back at someone
+    // who typed `cagara q.cagara`.
+    let shown = opts.file.display().to_string();
+    let load_path = ws.modules[ws.root].path.display().to_string();
+    let display = |d: &cagara_hir::workspace::Diag| rebase_path(d, &load_path, &shown);
     // Every root definition that failed is reported, whether or not it is the
     // one being printed. A file is checked as a whole even when one definition
     // is the answer: a broken helper is a broken program, and reporting only
@@ -245,9 +304,9 @@ fn report_sql(
     for query in &compiled.queries {
         if let Err(d) = &query.result {
             let e = if query.name == wanted {
-                d.to_string()
+                display(d)
             } else {
-                format!("{}: error in `{}`: {d}", opts.file.display(), query.name)
+                format!("{}: error in `{}`: {}", shown, query.name, display(d))
             };
             failed = true;
             if seen.insert(e.clone()) {
@@ -272,7 +331,7 @@ fn report_sql(
                 optimize: opts.optimize,
             },
         )
-        .map_err(|m| format!("{}: error in `{name}`: {m}", opts.file.display()))
+        .map_err(|m| format!("{shown}: error in `{name}`: {m}"))
         {
             Ok(sql) => {
                 // One statement per run: `main`, or the one `--only` named.
@@ -395,6 +454,22 @@ fn fmt(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
 fn usage(msg: &str) -> ExitCode {
     eprintln!("error: {msg}\n{USAGE}");
     ExitCode::from(2)
+}
+
+/// A diagnostic rendered against the path the user typed.
+///
+/// The workspace canonicalizes paths when it loads them, so a diagnostic
+/// carries the absolute one. Replacing the loaded prefix with the name as
+/// typed keeps the rest of the rendering (`:line:col`, excerpt) untouched.
+fn rebase_path(d: &cagara_hir::workspace::Diag, loaded: &str, shown: &str) -> String {
+    let rendered = d.to_string();
+    if loaded == shown || loaded.is_empty() {
+        return rendered;
+    }
+    match rendered.strip_prefix(loaded) {
+        Some(rest) => format!("{shown}{rest}"),
+        None => rendered,
+    }
 }
 
 fn display(s: &OsStr) -> String {

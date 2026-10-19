@@ -73,8 +73,10 @@ cargo build --release    # -> target/release/cagara
 
 ```sh
 cagara file.cagara [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
+cagara -              # read the source from stdin
 cagara fmt [--check] <files...>
 cagara lsp
+cagara --version
 ```
 
 ## Learn more

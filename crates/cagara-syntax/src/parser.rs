@@ -111,7 +111,11 @@ impl<'a> Parser<'a> {
     }
 
     fn peek_lex(&self, n: usize) -> Option<Lexeme<'a>> {
-        self.toks[self.pos..]
+        // `min` rather than a plain index: `pos` can sit one past the last
+        // token, and "no more tokens" should be an empty slice, not a panic.
+        self.toks
+            .get(self.pos.min(self.toks.len())..)
+            .unwrap_or_default()
             .iter()
             .filter(|l| !l.kind.is_trivia())
             .nth(n)
@@ -780,6 +784,10 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
+    // Test code may assert with `unwrap`, `expect`, and indexing: a panic
+    // here is a failing test, not a broken compiler.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
     use super::*;
 
     /// Compact s-expression of node kinds (tokens omitted except names).

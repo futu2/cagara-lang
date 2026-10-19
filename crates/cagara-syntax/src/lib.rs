@@ -1,3 +1,17 @@
+//! Lossless syntax tree and parser for Cagara.
+//!
+//! Every byte a user types is either lexed into a token or kept as trivia, so
+//! a file always has a tree to work on — including one that failed to parse.
+//! That makes this crate's input untrusted in the ordinary sense: it is
+//! whatever is on disk or in an editor buffer, and it must not be able to
+//! panic. The lints below are how the crate keeps that promise: an `unwrap`
+//! or a slice index here is a bug report from the future, not a shortcut.
+//!
+//! Each remaining `#[allow]` is paired with the invariant that licenses it;
+//! where the invariant was a guess rather than a proof, the code was
+//! rewritten instead.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
 pub mod ast;
 pub mod lexer;
 pub mod ops;

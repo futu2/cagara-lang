@@ -71,6 +71,11 @@ pub struct Diag {
 
 impl fmt::Display for Diag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `line == 0` means "no position": the path is known but there is no
+        // line to point at (a file that does not exist, say).
+        if self.line == 0 {
+            return write!(f, "{}: error: {}", self.path, self.message);
+        }
         write!(
             f,
             "{}:{}:{}: error: {}",
@@ -157,10 +162,14 @@ impl Workspace {
             Ok(text) => Self::open_with(&p, text),
             Err(e) => {
                 let mut ws = Self::empty();
+                // The file could not be read, so there is no line to point
+                // at: `line: 0` is "no position", and the message is the whole
+                // diagnostic. `1:1` would draw an empty caret under a line
+                // that was never loaded.
                 ws.import_diags.push(Diag {
                     path: p.display().to_string(),
-                    line: 1,
-                    col: 1,
+                    line: 0,
+                    col: 0,
                     message: format!("cannot read file: {e}"),
                     source: String::new(),
                     width: 0,

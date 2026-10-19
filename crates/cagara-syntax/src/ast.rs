@@ -490,6 +490,10 @@ impl Lower<'_> {
 
 #[cfg(test)]
 mod tests {
+    // Test code may assert with `unwrap`, `expect`, and indexing: a panic
+    // here is a failing test, not a broken compiler.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
     use super::*;
 
     #[test]

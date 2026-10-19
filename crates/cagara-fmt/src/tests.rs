@@ -1,3 +1,7 @@
+// Test code may assert with `unwrap`, `expect`, and indexing: a panic here
+// is a failing test, not a broken formatter.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
 use super::*;
 
 fn fmt(src: &str) -> String {

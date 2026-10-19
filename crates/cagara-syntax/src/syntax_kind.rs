@@ -131,10 +131,13 @@ macro_rules! kind_table {
         }
 
         impl From<Token> for SyntaxKind {
-            /// The two enums are generated from one list, so a token's kind is
-            /// its position among the tokens.
+            /// The two enums are generated from one list, and `ALL` is that
+            /// list in discriminant order, so a token's own discriminant is
+            /// its index into `ALL`. Compile-time assertions below prove the
+            /// ordering that licenses the lookup; the fallback is unreachable
+            /// code that keeps the function total anyway.
             fn from(tok: Token) -> Self {
-                ALL[tok as usize]
+                ALL.get(tok as usize).copied().unwrap_or(SyntaxKind::Error)
             }
         }
 
@@ -340,7 +343,23 @@ kind_table! {
 
 #[cfg(test)]
 mod tests {
+    // Test code may assert with `unwrap`, `expect`, and indexing: a panic
+    // here is a failing test, not a broken compiler.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
     use super::*;
+
+    /// `From<Token>` indexes `ALL` by the token's discriminant, which is only
+    /// sound if `ALL` is exactly `SyntaxKind`'s tokens in the same order. This
+    /// checks that premise by construction instead of trusting the macro
+    /// layout: every kind `ALL` names must round-trip through its own index,
+    /// and a token's kind must report at its own discriminant.
+    #[test]
+    fn every_kind_is_at_its_own_index() {
+        for (i, kind) in ALL.iter().enumerate() {
+            assert_eq!(u16::from(*kind) as usize, i, "kind at {i} is {kind:?}");
+        }
+    }
 
     /// The raw numbers rowan stores in a tree are a format: an editor may have
     /// saved one, and `kind_from_raw` reads them back. Reordering a row would

@@ -12,6 +12,12 @@
 //! As a final guard the output is re-parsed; if its tree differs from the
 //! input's (ignoring whitespace and comment placement) formatting fails
 //! rather than change the program.
+//!
+//! The formatter runs on whatever is in the buffer, including a half-typed
+//! file with no valid parse, so like the parser it must not panic: a bail is
+//! handled, a panic loses the user's formatting (and, in an editor, looks
+//! like the formatter silently doing nothing).
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 mod doc;
 
@@ -85,12 +91,15 @@ fn verify_shape(input: &SyntaxNode, text: &str) -> Result<(), FmtError> {
     if before == after && before_comments == after_comments {
         return Ok(());
     }
-    let at = before.iter().zip(&after).position(|(a, b)| a != b);
+    // The pair comes out of the zip, so no index has to be trusted against
+    // either slice's length.
+    let at = before
+        .iter()
+        .zip(&after)
+        .enumerate()
+        .find(|(_, (a, b))| a != b);
     let difference = match at {
-        Some(i) => format!(
-            "first difference at token {i}: `{}` became `{}`",
-            before[i], after[i]
-        ),
+        Some((i, (a, b))) => format!("first difference at token {i}: `{a}` became `{b}`"),
         None => format!(
             "token count changed from {} to {}",
             before.len(),
@@ -362,9 +371,15 @@ impl Fmt<'_> {
             .collect();
         let mut parts = Vec::new();
         for (i, (item, first)) in items.iter().enumerate() {
+            // `starts` is derived from `items` in the same pass, so the two
+            // have the same length; taking the pair from one lookup keeps
+            // that from being something the loop has to remember.
+            let Some(&start) = starts.get(i) else {
+                continue;
+            };
             parts.push(Doc::HardLine);
             parts.push(self.leading(first, true));
-            self.skip_leading.set(Some(starts[i]));
+            self.skip_leading.set(Some(start));
             let next = starts.get(i + 1).copied().unwrap_or(usize::MAX);
             let dirty = item.kind() == K::ErrorNode
                 || item
@@ -373,7 +388,7 @@ impl Fmt<'_> {
                 || self
                     .errors
                     .iter()
-                    .any(|e| e.offset > starts[i] && e.offset <= next);
+                    .any(|e| e.offset > start && e.offset <= next);
             let d = if dirty { Err(Bail) } else { self.item(item) };
             parts.push(d.unwrap_or_else(|Bail| self.verbatim(item)));
         }
@@ -559,7 +574,10 @@ impl Fmt<'_> {
             token(els.get(open_at), K::LBrace)?,
             token(els.get(close_at), K::RBrace)?,
         );
-        let arms = &els[open_at + 1..close_at];
+        // `open_at < close_at` is in scope, so the range is in bounds and
+        // cannot be reversed; `unwrap_or_default` states that rather than
+        // relying on the reader to re-derive it.
+        let arms = els.get(open_at + 1..close_at).unwrap_or_default();
         // `case {}` has no arm to break after; the checker rejects it, but the
         // formatter must still lay it out rather than bail, so a file being
         // typed keeps formatting.
@@ -650,7 +668,9 @@ impl Fmt<'_> {
             return Err(Bail);
         };
         let (open, close) = (token(Some(first), open)?, token(Some(last), close)?);
-        let middle = &els[1..els.len() - 1];
+        // `els` is non-empty (both ends were just taken), so `len() - 1` is
+        // the last index and the range is in bounds; `get` says so.
+        let middle = els.get(1..els.len().saturating_sub(1)).unwrap_or_default();
         if middle.is_empty() && !has_inner_comment(n) {
             return Ok(concat(vec![self.tok(&open), self.tok(&close)]));
         }
@@ -745,11 +765,16 @@ impl Fmt<'_> {
         let (_, op, _, bp) = bin_parts(n)?;
         let (mut operands, mut ops) = (Vec::new(), Vec::new());
         flatten(n, bp, &mut operands, &mut ops)?;
+        // `flatten` always leaves at least the node's own operand, so this is
+        // the whole chain; the split says what each half is.
+        let Some((first, rest)) = operands.split_first() else {
+            return Err(Bail);
+        };
         let mut tail = Vec::new();
-        for (op, e) in ops.iter().zip(&operands[1..]) {
+        for (op, e) in ops.iter().zip(rest) {
             tail.extend([Doc::Line, self.tok(op), text(" "), self.expr(e, false)?]);
         }
-        let d = concat(vec![self.expr(&operands[0], false)?, indent(concat(tail))]);
+        let d = concat(vec![self.expr(first, false)?, indent(concat(tail))]);
         let force = has_inner_comment(n) || (top && is_pipe(&op) && ops.len() >= 2);
         Ok(if force { broken_group(d) } else { group(d) })
     }
@@ -788,11 +813,17 @@ impl Fmt<'_> {
                     cur = node(Some(b))?;
                 }
                 operands.push(cur);
+                // `operands` is the chain's left operand followed by each
+                // right one, so `split_first` is the pairing `arrows` was
+                // built for.
+                let Some((first, rest)) = operands.split_first() else {
+                    return Err(Bail);
+                };
                 let mut tail = Vec::new();
-                for (arrow, t) in arrows.iter().zip(&operands[1..]) {
+                for (arrow, t) in arrows.iter().zip(rest) {
                     tail.extend([Doc::Line, self.tok(arrow), text(" "), self.ty(t)?]);
                 }
-                let d = concat(vec![self.ty(&operands[0])?, indent(concat(tail))]);
+                let d = concat(vec![self.ty(first)?, indent(concat(tail))]);
                 Ok(if has_inner_comment(n) {
                     broken_group(d)
                 } else {

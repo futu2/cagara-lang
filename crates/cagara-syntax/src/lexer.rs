@@ -57,8 +57,15 @@ pub fn lex(input: &str) -> Vec<Lexeme<'_>> {
 }
 
 /// Whether the byte at `offset` begins a line.
+///
+/// An offset past the end counts as not starting a line, so a caller does not
+/// have to pre-check it.
 fn starts_line(input: &str, offset: usize) -> bool {
-    offset == 0 || matches!(input.as_bytes()[offset - 1], b'\n' | b'\r')
+    offset == 0
+        || input
+            .as_bytes()
+            .get(offset.wrapping_sub(1))
+            .is_none_or(|b| matches!(b, b'\n' | b'\r'))
 }
 
 /// Scan one string literal, returning its kind and the offset just past it.
@@ -75,14 +82,17 @@ fn starts_line(input: &str, offset: usize) -> bool {
 fn scan_string(input: &str, start: usize) -> (Token, usize) {
     let bytes = input.as_bytes();
     let mut i = start + 1;
-    while i < bytes.len() {
-        match bytes[i] {
+    while let Some(&byte) = bytes.get(i) {
+        match byte {
             b'\n' | b'\r' => break,
             b'\\' => {
                 // A trailing backslash, or one immediately before a line
                 // break, escapes nothing in this literal. Keep the backslash
                 // in the token and leave the line break for the trivia lexer.
-                if i + 1 >= bytes.len() || matches!(bytes[i + 1], b'\n' | b'\r') {
+                if bytes
+                    .get(i + 1)
+                    .is_none_or(|&next| matches!(next, b'\n' | b'\r'))
+                {
                     return (Token::UnterminatedString, i + 1);
                 }
                 i += 2;
@@ -96,6 +106,10 @@ fn scan_string(input: &str, start: usize) -> (Token, usize) {
 
 #[cfg(test)]
 mod tests {
+    // Test code may assert with `unwrap`, `expect`, and indexing: a panic
+    // here is a failing test, not a broken compiler.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
     use super::*;
 
     fn kinds(s: &str) -> Vec<Token> {

@@ -480,3 +480,104 @@ fn fmt_without_files_is_a_usage_error() {
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     assert!(stderr(&out).contains("needs files"), "{}", stderr(&out));
 }
+
+/// `--version` and `-V` print the version and nothing else, from any
+/// subcommand position, since it is the only information flag there is.
+#[test]
+fn version_is_printed_for_both_spellings() {
+    let expected = format!("cagara {}\n", env!("CARGO_PKG_VERSION"));
+    for args in [vec!["--version"], vec!["-V"], vec!["fmt", "--version"]] {
+        let out = cagara(args.iter().copied());
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(stdout(&out), expected, "for {args:?}");
+        assert!(stderr(&out).is_empty(), "{}", stderr(&out));
+    }
+}
+
+/// `cagara -` compiles stdin, so a query can come from a pipe.
+#[test]
+fn compile_reads_stdin() {
+    let src = "t : query { a = int } = table \"s\" \"t\"\nmain = t & select { x = .a }\n";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cagara"))
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn cagara -");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(src.as_bytes())
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("SELECT"), "{}", stdout(&out));
+}
+
+/// An error in stdin text names `<stdin>`, not a path that does not exist.
+#[test]
+fn stdin_errors_are_reported_against_stdin() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cagara"))
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn cagara -");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(b"main = nope\n")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait");
+    assert!(!out.status.success(), "a failed compile must exit non-zero");
+    let err = stderr(&out);
+    assert!(err.contains("<stdin>:"), "{err}");
+    assert!(!err.contains("No such file"), "{err}");
+}
+
+/// A missing file is one line, without a `1:1` pointing at a line that does
+/// not exist.
+#[test]
+fn a_missing_file_has_no_position() {
+    let dir = TempDir::new("missing");
+    let missing = dir.0.path().join("absent.cagara");
+    let out = run(&missing);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("cannot read file"), "{err}");
+    assert!(!err.contains(":1:1"), "a missing file has no line: {err}");
+}
+
+/// Diagnostics name the file the way the user typed it, not the canonical
+/// absolute path the workspace loaded it as.
+#[test]
+fn diagnostics_use_the_path_as_typed() {
+    let dir = TempDir::new("rebase");
+    let f = dir.write(
+        "rel.cagara",
+        "t : query { a = int } = table \"s\" \"t\"\nmain = t & where (.nope > 1)\n",
+    );
+    // Run from the temp directory and name the file relatively.
+    let out = Command::new(env!("CARGO_BIN_EXE_cagara"))
+        .arg("rel.cagara")
+        .current_dir(dir.0.path())
+        .output()
+        .expect("run cagara");
+    let err = stderr(&out);
+    assert!(err.contains("rel.cagara:"), "{err}");
+    let abs = f.canonicalize().expect("canonical");
+    assert!(
+        !err.contains(&abs.display().to_string()),
+        "the absolute path leaked into a diagnostic: {err}"
+    );
+}

@@ -89,7 +89,7 @@ pub(crate) enum QueryNodeKind {
     Set(SetKind),
 }
 
-#[allow(dead_code)] // Introspection kept for debug and compatibility tests.
+#[allow(dead_code)] // Introspection retained for arena-focused tests.
 impl QueryNodeKind {
     /// How many relational children the operation takes.
     pub(crate) fn arity(self) -> usize {
@@ -130,7 +130,7 @@ pub(crate) enum Payload {
     None,
 }
 
-#[allow(dead_code)] // Introspection kept for debug and compatibility tests.
+#[allow(dead_code)] // Introspection retained for arena-focused tests.
 impl Payload {
     /// The prefix/suffix direction, for a consumer that needs it.
     pub(crate) fn is_prefix(&self) -> Option<bool> {

@@ -55,10 +55,7 @@
 //!   sites, which is what the checker recorded for each of them.
 //! * **The environment is the substitution.** It is captured per application
 //!   rather than substituted into syntax, so an argument can never be captured
-//!   by a binder it was passed under. The term oracle keeps its own textual,
-//!   capture-avoiding substituter on purpose: two independent reductions are
-//!   what let the oracle disagree with production, and disagreement is the
-//!   property the agreement tests exist to check.
+//!   by a binder it was passed under.
 //!
 //! # Budgets
 //!
@@ -238,8 +235,8 @@ impl<'a> Value<'a> {
     /// *applied*, but a composition written `>>> id` never applies it — the
     /// composition itself is a value — so the reduction has to recognise it
     /// as a value that composes to nothing, which is exactly what the identity
-    /// function is. The term oracle erases the same definition by reducing its
-    /// body, so both routes agree.
+    /// function is. The normalizer erases the same definition by reducing its
+    /// body.
     pub(crate) fn is_identity(&self) -> bool {
         let Value::Closure(closure) = self else {
             return false;
@@ -732,22 +729,6 @@ pub(crate) fn definition(
     Ok(Lowered {
         query: builder.finish(root),
     })
-}
-
-/// One definition's body, normalized and erased, for the differential test.
-///
-/// The two routes are compared through this and `legacy_debug_for_tests`; it is
-/// not an interface to build on.
-#[doc(hidden)]
-pub fn normalize_debug_for_tests(
-    input: CompilerInput<'_>,
-    module: usize,
-    def: usize,
-    body: &Expr,
-) -> Result<crate::ir::Rel, String> {
-    definition(input, module, def, body)
-        .map_err(|control| format!("{control:?}"))
-        .and_then(|lowered| lowered.into_query().erase().map_err(|error| error.message))
 }
 
 /// The typed node at `path` in `tree`, when the body has one there.

@@ -12,9 +12,8 @@ type NodeSchema = Result<Vec<String>, (Option<Loc>, String)>;
 /// The one wording for "this table's columns are not known", shared by the
 /// checked constructor, source elaboration, and this validator.
 ///
-/// Three copies of the sentence used to exist and had to be kept in step by
-/// hand; `CheckedQuery::table` documents that a user should see one
-/// explanation, not two.
+/// Shared by source elaboration and this validator so a user sees one
+/// consistent explanation.
 pub fn unknown_table_columns(schema: &str, name: &str) -> String {
     format!(
         "the columns of table `{schema}.{name}` are unknown; give its definition a closed type, \

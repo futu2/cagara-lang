@@ -35,16 +35,10 @@ SQL                 cagara-sql
 The production boundary is `compile.rs::compile_definition`: it shares the
 checker gate in `elaborate.rs::prepare_query_definition`, calls
 `normalize::route::lower`, validates the erased relation, and records the
-relation or its classified fault. `typed_lower.rs`, `query_lowering.rs`, and
-`CheckedQuery` remain for compatibility APIs and route tests; they are not the
-production query builder. The independent term implementation is a test-only
-oracle (`term_oracle.rs`).
+relation or its classified fault.
 
-The route differential snapshot records the remaining intentional differences
-between the production normalizer and that legacy/debug route. They are source
-origin conventions for reused leaves and combine nodes, not alternate language
-semantics. The pipeline golden snapshot pins the production relation, fault
-class, diagnostics, checked-tree view, and source locations.
+The pipeline golden snapshot pins the production relation, fault class,
+diagnostics, and source locations.
 
 ## 2. The reduction rules
 
@@ -93,8 +87,7 @@ own.
 innermost last; a closure captures the environment it was created in. Applying a
 closure binds one more parameter, and the body is normalized when the last one
 arrives. Nothing is ever substituted into syntax, so capture is impossible by
-representation; the oracle states the same property textually
-(`term_oracle.rs::substitute` renames binders for exactly this reason).
+representation.
 
 **Call by name, never memoized.** Each argument is normalized at the use site it
 was written at (`Normalizer::argument`), so it keeps that site's typed node — its
@@ -267,12 +260,3 @@ charged *before* the node is built (`Builder::charge`), so a refused normalizati
 discards its arena whole instead of returning a prefix of one. Exceeding either
 is `Control::Unsupported`: the program is well-typed and the compiler could not
 build it within its limits.
-
-## 7. What the normalizer is not
-
-`term_oracle.rs` is a **test-only oracle**, never a production route. It carries
-its own `Term`, its own textual capture-avoiding substituter, and its own query
-lowering by primitive name (`normalize::lower_query_primitive`). Its value is
-independence: the agreement tests drive it directly for the same programs the
-compiler compiles, so the two routes can disagree. Do not extend it for
-features; extend `normalize/` and keep the oracle as the check.

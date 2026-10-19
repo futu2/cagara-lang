@@ -6,12 +6,10 @@
 //! is a fact *about* normalization. Name resolution records `Resolved`, the
 //! checker records `TemplateKind` from a definition's declared signature, and
 //! both are read by name resolution, inference, elaboration, the checked layer,
-//! and the term oracle alike.
+//! and the production normalizer alike.
 //!
-//! Keeping them in the oracle's module made the production path import the
-//! test-only calculus for two enums. They live here now, next to the checker
-//! that produces them; [`crate::normalize`] re-exports them so the oracle and
-//! its tests read the same definitions rather than a copy.
+//! They live here next to the checker that produces them; [`crate::normalize`]
+//! re-exports them so later phases read the same definitions rather than copies.
 
 use cagara_syntax::ast;
 
@@ -45,9 +43,9 @@ pub enum TemplateKind {
 /// What a name was resolved to.
 ///
 /// This is the input side of normalization: a caller that has already asked the
-/// checker what a name means hands the answer to the reducer, and the reducer
-/// turns it into a [`Term`](crate::term_oracle::Term). Keeping it separate is
-/// what makes aliases disappear without a `follow_alias` walk — an alias *is*
+/// checker what a name means hands the answer to the normalizer, which reduces
+/// the definition. Keeping it separate is what makes aliases disappear without
+/// a `follow_alias` walk — an alias *is*
 /// its target, so the second lookup simply does not happen.
 ///
 /// Mirrors [`crate::workspace::Binding`] rather than reusing it, for two

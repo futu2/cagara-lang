@@ -2,27 +2,22 @@
 //!
 //! # Why this exists
 //!
-//! The consolidation that replaces the slice-ordered typed lowering with one
-//! normalizer and one relational arena must not change what a program means,
-//! where a failure is blamed, or who is at fault. The checkable part of that
-//! claim is the compiler's *output*: for every program in the repository, the
-//! erased relation of each query, the fault classification of each definition,
-//! and every diagnostic with its location.
+//! The compiler's production normalizer and relational arena must keep the
+//! observable pipeline stable. For every program in the repository, this pins
+//! the erased relation of each query, the fault classification of each
+//! definition, and every diagnostic with its location.
 //!
 //! This file records exactly that and compares it against a checked-in
-//! snapshot. It deliberately names no internal type: it cannot be "updated to
-//! the new model" by accident, because it does not know the model. A step of
-//! the consolidation that changes a single byte fails here, and the diff says
-//! which program and which definition moved.
+//! snapshot. It deliberately names no lowering implementation, so a refactor
+//! cannot update the test without changing the compiler's output.
 //!
 //! # What is deliberately not compared
 //!
 //! Nothing is stripped. The `Rel` rendering keeps its locations and origins,
-//! because a consolidation that reassigned a stage's origin would still print
-//! the same SQL while blaming the wrong line, and the compiler's diagnostics
-//! are part of its behavior.
+//! because changing a stage's origin would still print the same SQL while
+//! blaming the wrong line, and diagnostics are part of the behavior.
 
-use cagara_hir::{check, compile_input, erase, CheckedQuery, CompilerInput, Workspace};
+use cagara_hir::{check, compile_input, CompilerInput, Workspace};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -156,8 +151,7 @@ const TABLES: &str = "users : query { id = int, name = string, age = int, active
 /// One program's whole pipeline output, rendered.
 fn render_program(label: &str, ws: &Workspace) -> String {
     let tc = check(ws);
-    let input = CompilerInput::new(ws, &tc);
-    let compiled = compile_input(input);
+    let compiled = compile_input(CompilerInput::new(ws, &tc));
     let mut out = String::new();
     let root = ws.root;
     let _ = writeln!(
@@ -195,48 +189,6 @@ fn render_program(label: &str, ws: &Workspace) -> String {
             }
         }
     }
-    // The checked layer's view of every root definition, for the definitions
-    // `compile` reports no verdict for (a scalar helper has none) and for the
-    // origin/kind of each node along the way.
-    for (def, definition) in ws.modules[root].module.defs.iter().enumerate() {
-        if !matches!(
-            tc.scheme_view(root, def),
-            Some(cagara_hir::check::SchemeView::Query { .. })
-        ) {
-            continue;
-        }
-        let _ = write!(out, "checked {} def {def}: ", definition.name);
-        match cagara_hir::elaborate_definition_for_tests(input, root, def, definition) {
-            Ok(checked) => {
-                let _ = writeln!(out, "{}", describe(&checked));
-            }
-            Err(error) => {
-                let _ = writeln!(out, "ERR {error:?}");
-            }
-        }
-    }
-    out
-}
-
-/// A checked query's shape with its origins, without the type information the
-/// erasure already carries.
-fn describe(query: &CheckedQuery) -> String {
-    let mut out = String::new();
-    let _ = write!(
-        out,
-        "{:?} origin {:?} row [{}]",
-        query.kind(),
-        query.origin(),
-        query
-            .row()
-            .columns()
-            .iter()
-            .map(|(name, ty)| format!("{name}: {ty}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    let erased: Result<_, _> = erase(query.clone());
-    let _ = write!(out, " erase {erased:?}");
     out
 }
 

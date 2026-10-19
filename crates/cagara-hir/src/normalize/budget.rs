@@ -26,16 +26,14 @@ use super::Control;
 
 /// How many definitions may nest on one normalization path.
 ///
-/// The old pipeline allowed 200 links of inlining in the term oracle and 16 in
-/// the source-directed lowering; this single number replaces both, and is
-/// generous enough for the deepest helper chains the corpus and examples use
-/// while still refusing a cycle immediately.
+/// This limit is generous enough for the deepest helper chains the corpus and
+/// examples use while still refusing a cycle immediately.
 pub(crate) const MAX_DEPTH: usize = 200;
 
 /// How many nodes one definition's normalization may visit or construct.
 ///
-/// The term oracle refuses a normal form over 200 000 nodes; the same number
-/// here, counted as work, refuses an exponential expansion *during* it.
+/// This limit, counted as work, refuses an exponential expansion *during*
+/// normalization.
 pub(crate) const MAX_WORK: usize = 200_000;
 
 /// The budget for one definition's normalization.

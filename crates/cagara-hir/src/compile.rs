@@ -260,7 +260,7 @@ fn compile_definition(
         Ok(()) => {}
         // Not a failure at all: a scalar definition, a stage, … has no query to
         // build. The checker's own diagnostic (if it produced one) is the only
-        // thing worth reporting here, because elaboration has no verdict.
+        // thing worth reporting here, because normalization has no verdict.
         Err(error) if is_not_a_query(&error) => {
             let diag = tc.error_for(root.index(), index).cloned()?;
             return Some((Err(diag), Some(Fault::Program)));
@@ -307,7 +307,7 @@ fn source_hash(source: &str) -> u64 {
     hasher.finish()
 }
 
-/// Build source-based identities before elaboration drops non-query
+/// Build source-based identities before normalization drops non-query
 /// definitions from the result. Occurrences are counted by name, so editing a
 /// definition's body does not renumber a later overload with the same name.
 fn definition_keys(module: ModuleSnapshot<'_>) -> Vec<DefinitionKey> {
@@ -335,8 +335,7 @@ fn definition_keys(module: ModuleSnapshot<'_>) -> Vec<DefinitionKey> {
 
 /// Compile root definitions using a type check the caller already computed.
 ///
-/// The checker supplies the facts consumed by the production normalizer; the
-/// checked-tree elaboration API remains available for compatibility.
+/// The checker supplies the facts consumed by the production normalizer.
 pub fn root_queries_checked(ws: &Workspace, tc: &TypeCheck) -> Vec<(String, Result<Rel, Diag>)> {
     compile_input(CompilerInput::new(ws, tc))
         .queries

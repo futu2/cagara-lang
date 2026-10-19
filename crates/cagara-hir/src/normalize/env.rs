@@ -3,9 +3,8 @@
 //! Environments are the normalizer's substitution. A closure captures the
 //! environment it was created in; applying it binds one more parameter; a local
 //! name is a lookup. Nothing is ever substituted into syntax, so no argument can
-//! be captured by a binder it was passed under — the property the term oracle
-//! has to state textually ([`crate::normalize`]'s `substitute` renames binders
-//! for exactly this reason) is here a property of the representation.
+//! be captured by a binder it was passed under; that follows from the
+//! representation rather than requiring syntax substitution.
 
 use super::Value;
 

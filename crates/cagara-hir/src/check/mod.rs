@@ -52,7 +52,6 @@ mod facts;
 mod infer;
 mod overload;
 mod print;
-mod query;
 mod reduce;
 mod row;
 mod stage;
@@ -72,15 +71,6 @@ pub(crate) use stage::*;
 pub(crate) use ty::*;
 
 pub(crate) use facts::{child_exprs, definition_facts, DefinitionFacts};
-/// The typed query: the relational skeleton a definition's stages build, with
-/// each node owning the rows its operation read and produced.
-///
-/// Re-exported now so the module's own tests and the slices that consume it name
-/// these types from one place, the way every other sibling module's items are
-/// reached. Nothing outside `check` reads them yet, which is what the allowance
-/// records.
-#[allow(unused_imports)]
-pub(crate) use query::{NodeId, QueryErr, QueryNodeKind, Row, TypedQuery};
 /// The stable identity of one checked node, for matching a lowered stage to the
 /// record the checker made of it.
 ///

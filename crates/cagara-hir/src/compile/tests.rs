@@ -224,7 +224,6 @@ fn direct_typed_pipeline_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -233,18 +232,6 @@ fn direct_typed_pipeline_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "the typed pipeline failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "direct typed pipeline unexpectedly called the term oracle"
     );
 }
 
@@ -261,7 +248,6 @@ fn direct_plain_select_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -270,18 +256,6 @@ fn direct_plain_select_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "the typed projection failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain direct select unexpectedly called the term oracle"
     );
 }
 
@@ -295,7 +269,6 @@ fn callable_scalar_projection_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -304,18 +277,6 @@ fn callable_scalar_projection_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "callable scalar projection failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "callable scalar projection unexpectedly called the term oracle"
     );
 }
 
@@ -327,7 +288,6 @@ fn direct_plain_update_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -336,18 +296,6 @@ fn direct_plain_update_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "the typed update failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain direct update unexpectedly called the term oracle"
     );
 }
 
@@ -358,7 +306,6 @@ fn direct_plain_order_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -367,18 +314,6 @@ fn direct_plain_order_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "the typed order failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain direct order unexpectedly called the term oracle"
     );
 }
 
@@ -389,7 +324,6 @@ fn direct_plain_where_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -398,18 +332,6 @@ fn direct_plain_where_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "the typed where failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain direct where unexpectedly called the term oracle"
     );
 }
 
@@ -420,7 +342,6 @@ fn plain_expression_helper_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -429,30 +350,6 @@ fn plain_expression_helper_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "the typed helper projection failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain expression helper unexpectedly called the term oracle"
-    );
-    let a = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "a")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == a),
-        "plain aggregate helper unexpectedly called the term oracle"
     );
 }
 
@@ -468,7 +365,6 @@ fn closed_window_projection_helper_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -477,30 +373,6 @@ fn closed_window_projection_helper_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "the closed typed window helper failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "closed window projection helper unexpectedly called the term oracle"
-    );
-    let numbered = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "numbered")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == numbered),
-        "closed window helper definition unexpectedly called the term oracle"
     );
 }
 
@@ -511,7 +383,6 @@ fn plain_join_predicate_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -520,18 +391,6 @@ fn plain_join_predicate_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "the typed join failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain join predicate unexpectedly called the term oracle"
     );
 }
 
@@ -542,7 +401,6 @@ fn mixed_plain_expression_pipeline_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -551,18 +409,6 @@ fn mixed_plain_expression_pipeline_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "the mixed typed pipeline failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "mixed plain expression pipeline unexpectedly called the term oracle"
     );
 }
 
@@ -573,7 +419,6 @@ fn mixed_plain_aggregate_pipeline_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -582,18 +427,6 @@ fn mixed_plain_aggregate_pipeline_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "the typed aggregate pipeline failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "plain aggregate pipeline unexpectedly called the term oracle"
     );
 }
 
@@ -604,7 +437,6 @@ fn plain_join_and_stages_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -622,20 +454,6 @@ fn plain_join_and_stages_uses_production_normalizer() {
         "the composed typed join/set pipelines failed to compile: {:?}",
         compiled.diagnostics
     );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .enumerate()
-        .filter(|(_, def)| matches!(def.name.as_str(), "q" | "u" | "a"))
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && q.contains(def)),
-        "plain composed join pipeline unexpectedly called the term oracle"
-    );
 }
 
 #[test]
@@ -648,7 +466,6 @@ fn multi_stage_helper_operand_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -657,18 +474,6 @@ fn multi_stage_helper_operand_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "multi-stage helper combine operand failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "multi-stage helper combine operand unexpectedly called the term oracle"
     );
 }
 
@@ -681,7 +486,6 @@ fn higher_order_stage_helper_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -690,18 +494,6 @@ fn higher_order_stage_helper_uses_production_normalizer() {
             .any(|query| query.name == "q" && query.result.is_ok()),
         "higher-order stage helper failed to compile: {:?}",
         compiled.diagnostics
-    );
-    let q = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|def| def.name == "q")
-        .unwrap();
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, def, _)| *module == ws.root && *def == q),
-        "higher-order stage helper unexpectedly called the term oracle"
     );
 }
 
@@ -714,24 +506,6 @@ fn active_totals_shorthand_pipeline_uses_production_normalizer() {
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    let def = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|definition| definition.name == "active_totals")
-        .unwrap();
-    let lowered = crate::query_lowering::lower(
-        CompilerInput::new(&ws, &tc),
-        ws.root,
-        def,
-        &ws.modules[ws.root].module.defs[def].body,
-    )
-    .unwrap();
-    assert!(
-        matches!(lowered, crate::query_lowering::LoweredQuery::Typed { .. }),
-        "active_totals lowered through legacy route: {lowered:?}"
-    );
-    crate::term_oracle::clear_visited();
     let compiled = compile_checked(&ws, &tc);
     assert!(
         compiled
@@ -740,12 +514,6 @@ fn active_totals_shorthand_pipeline_uses_production_normalizer() {
             .any(|query| query.name == "active_totals" && query.result.is_ok()),
         "active_totals failed to compile: {:?}",
         compiled.diagnostics
-    );
-    assert!(
-        !crate::term_oracle::visited_nodes()
-            .iter()
-            .any(|(module, visited, _)| *module == ws.root && *visited == def),
-        "active_totals unexpectedly called the term oracle"
     );
 }
 
@@ -1895,228 +1663,6 @@ fn every_corpus_program_compiles_without_a_fallback() {
         checked += 1;
     }
     assert!(checked > 0, "no corpus files were found");
-}
-
-/// Every use site's recorded overload choices are contiguous from zero, and no
-/// site mixes a resolved choice with an open one.
-///
-/// `term_oracle::InputFacts::holes_at` keeps a site's resolved choices, drops the
-/// open ones, and hands them to a normalizer that reads them **positionally**:
-/// `Normalizer::hole(k)` is `assignment.get(k)`, documented as
-/// `holes[k] = (callee_module, chosen_def)`. Dropping an entry shifts every later
-/// position, so that read means what it says only under the two conditions this
-/// asserts.
-///
-/// Both were measured rather than assumed, because the shapes have different
-/// correct answers. A site of *open* holes is answered by the enclosing
-/// assignment on the stack, and the source path that used to do this read it as
-/// `cx.holes.get(h)` — translating the callee's hole number `h` into the
-/// caller's — while a dropped entry simply falls through to whatever sits at
-/// that index. The two agree only while the numbers line up, which is the
-/// contiguity this pins.
-///
-/// Measured over the widest corpus available — the prelude, which uses almost
-/// every construct, plus every shipped example — and it holds: no site mixes,
-/// and none is sparse. So this is not a bug report; it is the invariant the
-/// adapter silently relies on, stated where a change to it would fail loudly
-/// rather than appear as a wrong overload candidate.
-#[test]
-fn every_use_site_records_contiguous_choices() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    // The prelude always loads, and it is the hardest of the two corpora.
-    let mut workspaces = vec![("the prelude".to_string(), Workspace::from_source("q = 1\n"))];
-    for entry in [
-        "examples/report.cagara",
-        "examples/public.cagara",
-        "examples/schema.cagara",
-        "examples/errors.cagara",
-    ] {
-        if let Ok(text) = std::fs::read_to_string(root.join(entry)) {
-            workspaces.push((entry.to_string(), Workspace::from_source(&text)));
-        }
-    }
-
-    let mut sites = 0usize;
-    for (label, ws) in &workspaces {
-        let tc = crate::check::check(ws);
-        for m in 0..ws.modules.len() {
-            for d in 0..ws.modules[m].module.defs.len() {
-                let mut by_site: std::collections::BTreeMap<
-                    u32,
-                    Vec<(usize, crate::check::Choice)>,
-                > = std::collections::BTreeMap::new();
-                for (site, hole, choice) in tc.choices_of(m, d) {
-                    by_site.entry(site).or_default().push((hole, choice));
-                }
-                for (site, entries) in by_site {
-                    sites += 1;
-                    let mut holes: Vec<usize> = entries.iter().map(|(h, _)| *h).collect();
-                    holes.sort_unstable();
-                    assert_eq!(
-                        holes,
-                        (0..entries.len()).collect::<Vec<_>>(),
-                        "{label}: definition {d} of module {m} records holes \
-                         {holes:?} at site {site}; a gap makes `holes_at`'s \
-                         positional read address the wrong hole"
-                    );
-                    let open = entries
-                        .iter()
-                        .any(|(_, c)| matches!(c, crate::check::Choice::Hole(_)));
-                    let resolved = entries
-                        .iter()
-                        .any(|(_, c)| matches!(c, crate::check::Choice::Def(..)));
-                    assert!(
-                        !(open && resolved),
-                        "{label}: definition {d} of module {m} records both a \
-                         resolved and an open choice at site {site}: {entries:?} \
-                         — dropping the open one shifts every later hole, so the \
-                         assignment `holes_at` returns no longer matches its \
-                         documented indexing"
-                    );
-                }
-            }
-        }
-    }
-    assert!(
-        sites > 0,
-        "no use site with a recorded choice was found; the scan is not looking \
-         where it thinks it is"
-    );
-}
-
-/// Every use site carries **one** overload hole, so `Facts::choice` never has to
-/// choose between entries.
-///
-/// `choice_at` returns `None` when a site has several entries, deliberately:
-/// without the hole index there is no way to tell which one the caller meant, so
-/// reporting the use as unresolved keeps a coin-flip from being recorded as a
-/// decision. This measures whether that branch is reachable — it is not, in any
-/// program available here, because the checker keys choices by `(ExprId, hole)`
-/// and each overloaded *application* is its own `ExprId`.
-///
-/// The assertion is therefore the *documentation* of a defensive branch: if a
-/// program is ever found where one site really does carry two holes, this fails
-/// and names it, and the fix is to thread the hole index through the trait
-/// rather than to loosen the check.
-///
-/// The corpus is the same one the contiguity test uses, plus the shapes that
-/// were expected to produce several holes and did not: nested sums, a definition
-/// applied to two overloaded arguments, and a record of two sums.
-#[test]
-fn every_use_site_carries_one_hole() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut workspaces = vec![("the prelude".to_string(), Workspace::from_source("q = 1\n"))];
-    for entry in [
-        "examples/report.cagara",
-        "examples/public.cagara",
-        "examples/schema.cagara",
-        "examples/errors.cagara",
-    ] {
-        if let Ok(text) = std::fs::read_to_string(root.join(entry)) {
-            workspaces.push((entry.to_string(), Workspace::from_source(&text)));
-        }
-    }
-    for (label, src) in [
-        ("nested sums", "q = 1 + 2 + 3 + 4\n"),
-        (
-            "a definition applied to two overloaded arguments",
-            "f : expr r int -> expr r int -> expr r int = a => b => a + b\nq = f (1 + 2) (3 + 4)\n",
-        ),
-        ("a record of two sums", "q = { a = 1 + 2, b = 3 + 4 }\n"),
-        (
-            "two overloaded columns compared",
-            "q = (1 + 2) == (3 + 4)\n",
-        ),
-    ] {
-        workspaces.push((label.to_string(), Workspace::from_source(src)));
-    }
-
-    let mut sites = 0usize;
-    for (label, ws) in &workspaces {
-        let tc = crate::check::check(ws);
-        for m in 0..ws.modules.len() {
-            for d in 0..ws.modules[m].module.defs.len() {
-                let mut by_site: std::collections::BTreeMap<u32, Vec<usize>> =
-                    std::collections::BTreeMap::new();
-                for (site, hole, _) in tc.choices_of(m, d) {
-                    by_site.entry(site).or_default().push(hole);
-                }
-                for (site, holes) in by_site {
-                    sites += 1;
-                    assert_eq!(
-                        holes.len(),
-                        1,
-                        "{label}: definition {d} of module {m} records {holes:?} at \
-                         site {site}. `Facts::choice` returns `None` for such a \
-                         site, so this use resolves as an unknown overload; thread \
-                         the hole index through `Facts::choice` rather than \
-                         loosening that check"
-                    );
-                }
-            }
-        }
-    }
-    assert!(
-        sites > 0,
-        "no use site with a recorded choice was found; the scan is not looking \
-         where it thinks it is"
-    );
-}
-
-/// Both `Facts` adapters answer the hole-assignment question identically.
-///
-/// The workspace adapter (used by tests) did not override `holes_at`, so it fell
-/// back to the trait's default — no assignment, every hole open — while the
-/// compiler's adapter read the checker's choices. The walk then differed between
-/// the two on `h .age`: production found the assignment, tests did not and let
-/// the fall-through stand in for it. Both happened to produce the same term here,
-/// which is exactly why nothing caught it.
-///
-/// This asserts the two agree rather than that either is "right", so it fails if
-/// either one drifts. It is the cheap half of merging the adapters; the other
-/// half is that they now share `resolved_assignment`.
-#[test]
-fn both_facts_adapters_resolve_the_same_assignment() {
-    use crate::compile::CompilerInput;
-    use crate::term_oracle::{Facts, InputFacts, WorkspaceFacts};
-    use cagara_syntax::ast::ExprKind;
-
-    let ws = Workspace::from_source(
-        "users : query { id = int, name = string, age = int, active = bool } = \
-         table \"public\" \"users\"\n\
-         h = e => users & select { x = e + 1, id = .id }\n\
-         ok = h .age\n",
-    );
-    let tc = crate::check::check(&ws);
-    assert!(tc.errors().is_empty(), "{:?}", tc.errors());
-    let ok = ws.modules[ws.root]
-        .module
-        .defs
-        .iter()
-        .position(|d| d.name == "ok")
-        .expect("`ok`");
-    let ExprKind::App(head, _) = &ws.modules[ws.root].module.defs[ok].body.kind else {
-        panic!("`ok`'s body should be an application");
-    };
-    let site = head.id;
-
-    let workspace_facts = WorkspaceFacts::new(&ws, &tc);
-    let input = CompilerInput::new(&ws, &tc);
-    let input_facts = InputFacts::new(input);
-
-    // The assignment is not empty — otherwise "both agree" would hold trivially
-    // on a pair of empty vectors, which is the shape of the bug being guarded.
-    let from_workspace = workspace_facts.holes_at((ws.root, ok), site);
-    assert!(
-        !from_workspace.is_empty(),
-        "`ok` resolved `h`'s open overload, so its assignment must not be empty"
-    );
-    assert_eq!(
-        from_workspace,
-        input_facts.holes_at((ws.root, ok), site),
-        "the test adapter and the compiler adapter disagree about the \
-         assignment at site {site}"
-    );
 }
 
 /// A polymorphic helper applied at a projection resolves its open overload.

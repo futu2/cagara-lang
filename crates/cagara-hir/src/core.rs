@@ -203,8 +203,8 @@ impl RowType {
     /// A row with a repeated name is not a valid output row: `select` and
     /// `agg` list their fields, and two fields with one name would produce a
     /// query whose row cannot address both. The checker rejects it through the
-    /// record's field rule, and [`CheckedQuery::select`](crate::checked) rejects
-    /// it again so a hand-built row cannot slip through.
+    /// record's field rule, and schema validation rejects it in an untyped
+    /// relational tree.
     pub fn duplicate(&self) -> Option<&str> {
         let mut seen = HashSet::with_capacity(self.columns.len());
         self.columns
@@ -217,10 +217,8 @@ impl RowType {
     /// `omit "k"`: the row without column `k`.
     ///
     /// This is the row *former*, so a key the row does not have is a no-op:
-    /// the rule that rejects a missing key lives in the constructor that
-    /// consumes this, [`CheckedQuery::omit`](crate::checked::CheckedQuery::omit),
-    /// and in `schema::omit_columns` for an untyped tree. Making this total is
-    /// what lets those two be the single place the rule is stated; do not read
+    /// the rule that rejects a missing key lives in `schema::omit_columns`.
+    /// Making this total is what lets the validator own that rule; do not read
     /// totality here as permission to omit an absent key.
     pub fn omit(&self, key: &str) -> RowType {
         RowType::new(
@@ -426,11 +424,8 @@ impl Diagnostic {
 
 /// A value a constructor has already validated.
 ///
-/// The checked layer's invariant is "constructors check, consumers do not" —
-/// so a `CheckedQuery` that exists has a row that matches its expression, and
-/// the only way to make one is through a constructor. This wrapper marks the
-/// arguments a constructor has checked, which is what keeps a consumer from
-/// having to re-check them.
+/// This wrapper lets a consumer distinguish validated input from unchecked
+/// input without repeating the validation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Verified<T>(T);
 

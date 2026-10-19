@@ -1,31 +1,9 @@
-//! Source elaboration: build the checked tree directly from source.
+//! Shared checks at the boundary between type checking and normalization.
 //!
-//! Type checking supplies the facts used to construct `CheckedQuery` directly
-//! from source. The result is erased only at the SQL boundary.
-//!
-//! # What it reads, and what it does not compute
-//!
-//! It does **not** re-derive types. Everything it needs is recorded by the
-//! checker and read through `TypeCheck`:
-//!
-//! * `use_ty(module, ExprId)` — the scalar type of one expression;
-//! * `scheme_view` / `scheme_fields` — the row shape of a definition;
-//! * `choices_of` — which overload candidate a use resolved to;
-//! * `rules::is_pipe_name` and the prelude's stage declarations — which
-//!   operator is a pipeline stage.
-//!
-//! Re-deriving any of those would create a second source of truth for types.
-//!
-//! # Scope
-//!
-//! Expressions are elaborated for the *scalar* cases a `CheckedExpr` can hold:
-//! columns, literals, SQL templates, `in`, and `group`. An expression whose
-//! type the checker did not record as a scalar — a query, a function, a nested
-//! stage — is reported as an error rather than given an invented type, because
-//! a `CheckedExpr` carrying a made-up `ScalarType` is exactly the kind of
-//! plausible-but-wrong value this layer must not produce.
+//! The production compiler consumes the checker's facts directly in the
+//! normalizer. This module only keeps the boundary rules that must run before
+//! normalization: template placeholder validation and query-shape checks.
 
-use crate::checked::CheckedQuery;
 use crate::compile::CompilerInput;
 use crate::core::{Error, Origin};
 use cagara_syntax::ast::{self, ExprKind};
@@ -46,9 +24,7 @@ pub(crate) fn elaborated_defs() -> Vec<(usize, usize)> {
     ELABORATED_DEFS.with(|defs| defs.borrow().clone())
 }
 
-/// Record that a root definition reached the lowering boundary. The counter is
-/// used by incremental compilation tests; the production lowering itself lives
-/// in `normalize::route`.
+/// Record that a root definition reached the normalization boundary.
 pub(crate) fn record_definition(module: usize, def: usize) {
     #[cfg(test)]
     {
@@ -59,20 +35,8 @@ pub(crate) fn record_definition(module: usize, def: usize) {
     let _ = (module, def);
 }
 
-/// What elaborating one expression produced.
-type R<T> = Result<T, Error>;
+type Result<T> = std::result::Result<T, Error>;
 
-/// The marker a definition that is not a query fails with.
-///
-/// A sentinel rather than a real error: "this definition has no query to
-/// elaborate" is a *finding*, not a failure, but `elaborate_module` returns one
-/// `Result` per definition and a sentinel is the smallest way to add the third
-/// outcome without changing that shape for every caller.
-///
-/// It is recognised by [`is_not_a_query`] rather than by comparing messages,
-/// and its text is deliberately something no real diagnostic would say, so a
-/// mistake shows up as strange output rather than as a silently swallowed
-/// program error.
 pub(crate) const NOT_A_QUERY: Error = Error {
     message: String::new(),
     origin: None,
@@ -80,83 +44,22 @@ pub(crate) const NOT_A_QUERY: Error = Error {
     fault: crate::core::Fault::NotAQuery,
 };
 
-/// Whether an elaboration result means "this definition is not a query".
-pub(crate) fn is_not_a_query(e: &Error) -> bool {
-    e.fault == crate::core::Fault::NotAQuery
+pub(crate) fn is_not_a_query(error: &Error) -> bool {
+    error.fault == crate::core::Fault::NotAQuery
 }
 
-/// Elaborate the root module's definitions from source.
-///
-/// Returns one entry per definition, in source order, with the same
-/// one result per root definition, in source order.
-pub fn elaborate_module(input: CompilerInput<'_>, module: usize) -> Vec<(String, R<CheckedQuery>)> {
-    let mut out = Vec::new();
-    for (i, d) in input.module(module).source().defs.iter().enumerate() {
-        let result = elaborate_definition(input, module, i, d);
-        out.push((d.name.clone(), result));
-    }
-    out
-}
-
-fn validate_template_definition(module: usize, d: &ast::Def) -> R<()> {
-    let ExprKind::Sql(sql) = &d.body.kind else {
-        return Ok(());
-    };
-    let Some(ty) = d.ty.as_ref() else {
-        return Ok(());
-    };
-    let arity = template_arity_from_type(ty, declared_kind(d));
-    check_placeholders(sql, arity).map_err(|e| e.at(Origin::new(module, d.body.span)))
-}
-
-/// Elaborate one definition's body to a checked query.
-fn elaborate_def(
-    input: CompilerInput<'_>,
-    module: usize,
-    def: usize,
-    d: &ast::Def,
-) -> R<CheckedQuery> {
-    prepare_query_definition(input, module, def, d)?;
-    // This is the compatibility oracle used by the checked-tree snapshot. The
-    // compiler boundary itself calls the normalizer route directly.
-    match crate::query_lowering::lower(input, module, def, &d.body)? {
-        crate::query_lowering::LoweredQuery::Typed { checked, .. } => Ok(checked),
-    }
-}
-
-/// Check the facts needed before reducing a definition, without performing
-/// query lowering. Both the compatibility oracle and the production
-/// normalizer use this same gate so neither route invents a query for a scalar
-/// or a rejected definition.
+/// Check the facts needed before reducing one definition.
 pub(crate) fn prepare_query_definition(
     input: CompilerInput<'_>,
     module: usize,
     def: usize,
-    d: &ast::Def,
-) -> R<()> {
-    validate_template_definition(module, d)?;
+    definition: &ast::Def,
+) -> Result<()> {
+    validate_template_definition(module, definition)?;
     let tc = input.type_check();
-    // A rejected definition has no trustworthy types. Its checker diagnostic
-    // is emitted by the compilation boundary, so it must not be elaborated.
-    if tc.error_for(module, def).is_some() {
+    if tc.error_for(module, def).is_some() || tc.holes(module, def) > 0 {
         return Err(NOT_A_QUERY);
     }
-    // A definition that leaves open overloads is meaningful only at its uses:
-    // it has no body of its own, so there is nothing here to elaborate. This is
-    // the same situation as "not a query": it has no query body to elaborate.
-    if tc.holes(module, def) > 0 {
-        return Err(NOT_A_QUERY);
-    }
-    // A definition that is **not a query** has nothing to elaborate here, and
-    // that is not a failure. `bad : expr r int -> expr r int = sql "$0"` is a
-    // function; building a `CheckedQuery` from it fails with "expected a query",
-    // which is true and useless. A caller must be able to tell "not a query"
-    // from "a query I could not build", because the production boundary reports
-    // the second as a compiler gap and must stay silent about the first.
-    //
-    // Structural, on the scheme, rather than by catching error text:
-    // `SchemeView::Query` is `query r`, and `Function`/`Scalar`/`Row` are
-    // everything else.
     if !matches!(
         tc.scheme_view(module, def),
         Some(crate::check::SchemeView::Query { .. })
@@ -166,136 +69,104 @@ pub(crate) fn prepare_query_definition(
     Ok(())
 }
 
-/// Elaborate one source definition, for an integration test that needs the
-/// checked tree alongside what `compile` reports.
-///
-/// Only the snapshot test reads this: `compile` returns erased relations,
-/// which is the compiler's public product, but a consolidation of the lowering
-/// has to be held to the *checked* tree as well — its node kinds, origins and
-/// rows — or a change that preserves the SQL while moving a stage's origin
-/// would pass unnoticed.
-#[doc(hidden)]
-pub fn elaborate_definition_for_tests(
-    input: CompilerInput<'_>,
-    module: usize,
-    def: usize,
-    definition: &ast::Def,
-) -> R<CheckedQuery> {
-    elaborate_definition(input, module, def, definition)
+fn validate_template_definition(module: usize, definition: &ast::Def) -> Result<()> {
+    let ExprKind::Sql(sql) = &definition.body.kind else {
+        return Ok(());
+    };
+    let Some(ty) = definition.ty.as_ref() else {
+        return Ok(());
+    };
+    let arity = template_arity_from_type(ty, declared_kind(definition));
+    check_placeholders(sql, arity)
+        .map_err(|error| error.at(Origin::new(module, definition.body.span)))
 }
 
-/// Elaborate one source definition for the compilation boundary.
-pub(crate) fn elaborate_definition(
-    input: CompilerInput<'_>,
-    module: usize,
-    def: usize,
-    definition: &ast::Def,
-) -> R<CheckedQuery> {
-    record_definition(module, def);
-    elaborate_def(input, module, def, definition)
-}
-
-/// How a `sql` template's result is *declared* to behave, read from its type
-/// expression.
-///
-/// Deliberately not the resolved scheme — see the comment at the use site.
-///
-/// An alias rather than a second enum. Elaboration and normalization each had
-/// their own three-case copy of this and their own reader of it, which is one
-/// rule in two places: a declared head added to one side and not the other would
-/// have been two silently different answers. The cases and the reader both live
-/// in [`crate::normalize`] now, and this name is kept because it is what the
-/// query path's call sites read as.
 pub(crate) use crate::check::TemplateKind as DeclaredKind;
 
-fn template_arity_from_type(t: &ast::TypeExpr, kind: DeclaredKind) -> usize {
-    let mut n: usize = 0;
-    let mut ty = t;
-    while let ast::TypeExpr::Fun(_, r) = ty {
-        n += 1;
-        ty = r;
+fn template_arity_from_type(ty: &ast::TypeExpr, kind: DeclaredKind) -> usize {
+    let mut arity: usize = 0;
+    let mut current = ty;
+    while let ast::TypeExpr::Fun(_, result) = current {
+        arity += 1;
+        current = result;
     }
     if kind == DeclaredKind::Win {
-        n.saturating_sub(1)
+        arity.saturating_sub(1)
     } else {
-        n
+        arity
     }
 }
 
-fn check_placeholders(sql: &str, expr_args: usize) -> R<()> {
+fn check_placeholders(sql: &str, expression_args: usize) -> Result<()> {
     let bytes = sql.as_bytes();
-    let mut seen = vec![false; expr_args + 1];
-    let mut i = 0;
+    let mut seen = vec![false; expression_args + 1];
+    let mut index = 0;
     let mut highest = 0;
     let mut in_string = false;
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            if in_string && bytes.get(i + 1) == Some(&b'\'') {
-                i += 2;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            if in_string && bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
             } else {
                 in_string = !in_string;
-                i += 1;
+                index += 1;
             }
             continue;
         }
-        if bytes[i] != b'$' {
-            i += 1;
+        if bytes[index] != b'$' {
+            index += 1;
             continue;
         }
-        let start = i;
-        let mut end = i + 1;
+        let start = index;
+        let mut end = index + 1;
         while end < bytes.len() && bytes[end].is_ascii_digit() {
             end += 1;
         }
-        if end == i + 1 {
+        if end == index + 1 {
             return Err(Error::new(format!(
                 "SQL template `{sql}`: a `$` at byte {start} is not a placeholder"
             )));
         }
-        let n = sql[i + 1..end]
+        let number = sql[index + 1..end]
             .parse::<usize>()
             .map_err(|_| Error::new("SQL template placeholder is too large"))?;
         let glued = |byte: u8| byte == b'_' || byte.is_ascii_alphanumeric() || byte == b'$';
-        if in_string || bytes.get(end).copied().is_some_and(glued) || (i > 0 && glued(bytes[i - 1]))
+        if in_string
+            || bytes.get(end).copied().is_some_and(glued)
+            || (index > 0 && glued(bytes[index - 1]))
         {
             return Err(Error::new(format!(
                 "SQL template `{sql}`: `{}` must stand alone (not inside a name or string)",
-                &sql[i..end]
+                &sql[index..end]
             )));
         }
-        if n == 0 {
+        if number == 0 {
             return Err(Error::new(format!(
-                "SQL template `{sql}`: placeholders are 1-based, so `${n}` is not an argument"
+                "SQL template `{sql}`: placeholders are 1-based, so `${number}` is not an argument"
             )));
         }
-        if n > expr_args {
+        if number > expression_args {
             return Err(Error::new(format!(
-                "template uses placeholders up to ${n} but its signature has {expr_args} expression argument(s)"
+                "template uses placeholders up to ${number} but its signature has {expression_args} expression argument(s)"
             )));
         }
-        seen[n] = true;
-        highest = highest.max(n);
-        i = end;
+        seen[number] = true;
+        highest = highest.max(number);
+        index = end;
     }
-    if let Some(missing) = (1..=highest).find(|&n| !seen[n]) {
+    if let Some(missing) = (1..=highest).find(|&number| !seen[number]) {
         return Err(Error::new(format!(
             "SQL template `{sql}` is missing placeholder `${missing}`"
         )));
     }
-    if highest < expr_args {
-        return Err(Error::new(format!(
-            "template uses placeholders up to ${highest} but its signature has {expr_args} expression argument(s)"
-        )));
+    if highest < expression_args {
+        return Err(Error::new(
+            format!("template uses placeholders up to ${highest} but its signature has {expression_args} expression argument(s)"),
+        ));
     }
     Ok(())
 }
 
-/// The declared result kind of a `sql` template definition.
-///
-/// Thin, because the rule lives in one place now: this is the query path's name
-/// for [`crate::check::declared_template_kind`], which the term layer also
-/// reads. Two readers of one rule would be the duplication the migration exists
-/// to remove.
-fn declared_kind(d: &ast::Def) -> DeclaredKind {
-    crate::check::declared_template_kind(d)
+fn declared_kind(definition: &ast::Def) -> DeclaredKind {
+    crate::check::declared_template_kind(definition)
 }

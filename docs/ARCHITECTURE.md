@@ -67,12 +67,6 @@ cache state. This separation makes a compilation deterministic and lets
 incremental or concurrent requests share read-only checker results without
 sharing lowering state.
 
-`CheckedQuery` and `typed_lower.rs` remain as a compatibility and test surface
-for checked-tree APIs and route comparisons. They are not the production query
-builder. `term_oracle.rs` is an independent, test-only term implementation;
-its purpose is to catch semantic drift while the corpus grows, not to provide a
-second production path.
-
 ## Invariants
 
 - Type checking precedes normalization for every accepted definition.
@@ -84,8 +78,8 @@ second production path.
   retain user source locations.
 - A compiler capability gap is reported as a compiler fault and cannot be
   mistaken for a program error.
-- The pipeline golden snapshot, corpus SQL snapshots, route-differential tests,
-  incremental tests, and dialect tests guard the complete path.
+- The pipeline golden snapshot, corpus SQL snapshots, incremental tests, and
+  dialect tests guard the complete path.
 
 Adding a language construct therefore requires a checker fact, a normalizer
 reduction, an arena constructor or payload rule, and a regression covering the

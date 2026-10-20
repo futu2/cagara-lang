@@ -187,7 +187,14 @@ so `expr r a` does not accept `expr r (maybe a)`. Where nullability arises:
   `RowType::map_value_nullable`;
 - `sum`, `avg`, `min`, `max`, `lag`, `lead` and the `*Over` windows return
   `maybe`, because SQL returns `NULL` for an empty or all-null input;
-  `count`/`countOf`/`countDistinct` return non-null `int`.
+  `count`/`countOf`/`countDistinct` return non-null `int`. The `*Filter`
+  aggregate helpers keep the same result type as their unfiltered forms.
+
+Filtered aggregates are not an IR construct: `sumFilter p x`, for example, is
+the ordinary prelude template `SUM(CASE WHEN p THEN x END)`. Omitting `ELSE`
+is what preserves SQL `FILTER`'s empty-group behaviour (`NULL` for the value
+aggregates, `0` for the counts), and the `CASE` spelling needs no
+dialect-specific lowering.
 
 Nullable values are not silently coerced. The prelude provides the operators:
 `coalesce d x` (`sql "COALESCE($2, $1)"`) and infix `x ?? d`, `just`,

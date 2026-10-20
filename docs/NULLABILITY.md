@@ -8,9 +8,14 @@ function signature means a non-null type, so `expr r a` does not accept
 |---|---|
 | A column declared `maybe int` | Reads as a nullable expression |
 | The possibly absent side of a left, right, or full join | Its output columns become `maybe` |
-| `sum`, `avg`, `min`, `max` | Return `maybe`, including for empty/all-null input |
+| `sum`, `avg`, `min`, `max` and their `*Filter` forms | Return `maybe`, including for empty/all-null input |
 | `lag`, `lead`, `sumOver`, `avgOver` | Return `maybe` |
-| `count`, `countOf`, `countDistinct`, `countOver` | Return non-null `int` |
+| `count`, `countOf`, `countDistinct`, `countOver`; `countFilter`, `countOfFilter`, `countDistinctFilter` | Return non-null `int` |
+
+The filtered aggregate helpers take a non-null `bool` predicate over the
+aggregate's input rows. Their result type is the same as the unfiltered
+aggregate, so `sumFilter`/`avgFilter`/`minFilter`/`maxFilter` are `maybe` and
+`countFilter`/`countOfFilter`/`countDistinctFilter` are non-null `int`.
 
 Use these helpers to handle nullable values:
 
@@ -33,13 +38,15 @@ total = coalesce 0.0 (sum (coalesce 0.0 .amount))
 ```
 
 `countOf` follows the same non-null argument rule, even though SQL `COUNT(x)`
-ignores nulls. To count matched rows on a nullable join side, sum a conditional
-indicator instead:
+ignores nulls. To count matched rows on a nullable join side, use `countFilter`
+with a test on the null-extended side:
 
 ```haskell
-matches = coalesce 0 (sum (ifThenElse (isNotNull .right_id) 1 0))
+matches = countFilter (isNotNull .right_id)
 ```
 
-This counts true matches while excluding the synthetic row created for an
-unmatched left-side row. These explicit rules make null handling visible in
-the query; see the report example for a complete left-join aggregation.
+The synthetic row created for an unmatched left-side row fails that predicate,
+and the count remains non-null. The equivalent without a filtered aggregate is
+an indicator sum: `coalesce 0 (sum (ifThenElse (isNotNull .right_id) 1 0))`.
+These explicit rules make null handling visible in the query; see the report
+example for a complete left-join aggregation.

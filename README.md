@@ -42,6 +42,7 @@ example, `cagara examples/report.cagara --only adults`.
 ## Features
 
 - Pipelines with `&`: `where`, `select`, `agg`, `order`, `limit`, joins, window functions.
+- Filtered aggregates: `sumFilter p .amount`, `countFilter p` and friends compile to portable `CASE` equivalents of SQL's `FILTER (WHERE ...)`.
 - Hindley–Milner type inference with extensible records, so column types flow through the pipeline.
 - Explicit nulls: the right side of a left join and aggregates like `sum` are `maybe`.
 - Multi-way conditionals: `case { cond => value; ...; true => default }`, which compiles to one searched `CASE`.

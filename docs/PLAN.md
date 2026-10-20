@@ -13,6 +13,9 @@ this page tracks the remaining boundaries and language work.
   first-class `Rel` shape.
 - A filter after an aggregate currently becomes an outer `WHERE` over a derived
   table. Add explicit phase metadata before considering a `HAVING` rewrite.
+- Filtered aggregates are prelude templates over `CASE`, not a relational node.
+  They cover every built-in aggregate without a dialect-specific `FILTER`
+  lowering; a first-class `FILTER` would need an IR field and a backend rule.
 - SQL optimization remains opt-in and runs after Cagara lowering.
 
 ## Next steps
@@ -25,10 +28,11 @@ this page tracks the remaining boundaries and language work.
 
 ## Deferred language work
 
-Catalog declarations, typed bind parameters, filtered aggregates, `qualify`,
-grouping sets, lateral or correlated subqueries, and richer window frames remain
-future work. Each feature should extend the typed core, normalizer, relational
-arena, and SQL backend together.
+Catalog declarations, typed bind parameters, first-class aggregate `FILTER`
+emission (the prelude's `*Filter` helpers already cover the built-in aggregates
+portably), `qualify`, grouping sets, lateral or correlated subqueries, and
+richer window frames remain future work. The remaining features should extend
+the typed core, normalizer, relational arena, and SQL backend together.
 
 See [`CORE.md`](CORE.md) for semantics and [`ROW-TYPES.md`](ROW-TYPES.md) for
 row algebra.

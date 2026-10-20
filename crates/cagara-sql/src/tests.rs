@@ -639,6 +639,52 @@ fn constant_global_agg_has_one_row() {
 }
 
 #[test]
+fn filtered_aggregates_lower_to_portable_case() {
+    let src = r#"q = orders & agg {
+  u = group .user_id,
+  paid = sumFilter (.status == "paid") .amount,
+  mean = avgFilter (.status == "paid") .amount,
+  n = countFilter (.status == "paid"),
+  n_of = countOfFilter (.status == "paid") .id,
+  n_distinct = countDistinctFilter (.status == "paid") .id,
+  lo = minFilter (.status == "paid") .amount,
+  hi = maxFilter (.status == "paid") .amount
+}
+"#;
+    let s = sql(src, "q");
+    for want in [
+        "SUM(CASE WHEN (status = 'paid') THEN amount END) AS paid",
+        "AVG(CASE WHEN (status = 'paid') THEN amount END) AS mean",
+        "COUNT(CASE WHEN (status = 'paid') THEN 1 END) AS n",
+        "COUNT(CASE WHEN (status = 'paid') THEN id END) AS n_of",
+        "COUNT(DISTINCT CASE WHEN (status = 'paid') THEN id END) AS n_distinct",
+        "MIN(CASE WHEN (status = 'paid') THEN amount END) AS lo",
+        "MAX(CASE WHEN (status = 'paid') THEN amount END) AS hi",
+    ] {
+        assert!(s.contains(want), "missing `{want}` in {s}");
+    }
+    assert!(!s.contains("FILTER"), "{s}");
+    // The rewrite is chosen in the prelude, not per dialect, so a target that
+    // has no `FILTER` clause gets the same portable SQL.
+    let m = dialect(src, "q", "mysql").expect("mysql");
+    assert!(m.contains("CASE WHEN"), "{m}");
+    assert!(!m.contains("FILTER"), "{m}");
+}
+
+#[test]
+fn a_filtered_aggregate_is_a_value() {
+    let direct = sql(
+        "q = orders & agg { u = group .user_id, paid = sumFilter (.status == \"paid\") .amount }\n",
+        "q",
+    );
+    let partial = sql(
+        "paid = sumFilter (.status == \"paid\")\nq = orders & agg { u = group .user_id, paid = paid .amount }\n",
+        "q",
+    );
+    assert_eq!(partial, direct);
+}
+
+#[test]
 fn errors() {
     assert!(error("q = users & agg { t = sum (sum .age) }\n", "q").contains("cannot nest"));
     assert!(error("q = users & agg { n = count, name = .name }\n", "q").contains("not grouped"));
@@ -665,6 +711,17 @@ fn errors() {
         "q"
     )
     .contains("ungrouped"));
+    assert!(error("q = orders & agg { p = sumFilter .status .amount }\n", "q").contains("bool"));
+    assert!(error(
+        "q = orders & agg { p = sumFilter (count > 0) .amount }\n",
+        "q"
+    )
+    .contains("cannot nest"));
+    assert!(error(
+        "q = orders & select { p = sumFilter (.status == \"paid\") .amount }\n",
+        "q"
+    )
+    .contains("belong in `agg`"));
     let w = error(
         "q = users & where (rowNumber { order = [.id] } <= 3)\n",
         "q",

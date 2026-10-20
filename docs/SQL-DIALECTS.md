@@ -18,6 +18,10 @@ SQLite/DuckDB differential test checks query results for the cases in
 The live-engine suite is required in CI and can be skipped locally when the
 shells are unavailable.
 
+Filtered aggregates do not depend on the dialect: `sumFilter` and the other
+`*Filter` helpers are prelude templates over `CASE`, not a `FILTER` clause, so
+they need no per-dialect rewrite.
+
 When targeting another engine, inspect the generated SQL and run representative
 queries against that engine, especially if they use dates, string functions,
 integer division, null ordering, or T-SQL-specific boolean handling. Add a

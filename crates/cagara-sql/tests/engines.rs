@@ -89,6 +89,12 @@ const CASES: &[(&str, &[&str])] = &[
         "ljagg = users & leftJoin orders (.<id == .>user_id) & agg { id = group .id, total = coalesce 0.0 (sum (coalesce 0.0 .amount)), n = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0)) } & order [asc .id]",
         &["1|10.0|2", "2|0.0|0", "3|1.0|1"],
     ),
+    // `countFilter` replaces the indicator sum: the synthetic unmatched row
+    // fails the predicate, so the count is 0 rather than NULL.
+    (
+        "ljcount = users & leftJoin orders (.<id == .>user_id) & agg { id = group .id, n = countFilter (isNotNull .user_id) } & order [asc .id]",
+        &["1|2", "2|0", "3|1"],
+    ),
     // A constant group key groups everything, and nothing from nothing.
     (
         "cg = nums & select { c = 2, x = .id } & agg { c = group .c, n = count }",
@@ -241,6 +247,31 @@ const CASES: &[(&str, &[&str])] = &[
     (
         "case_agg = nums & agg { n = count, k = case { count > 3 => coalesce 0 (sum .a); true => 0 } }",
         &["4|-1"],
+    ),
+    // Filtered aggregates: the predicate filters each aggregate's input, so
+    // the `neg` group has no matching rows. Its value aggregates are NULL
+    // while its counts are 0, exactly as `FILTER (WHERE p)` behaves.
+    (
+        "fagg = nums & select { k = ifThenElse (.a > 0) \"pos\" \"neg\", a = .a } & agg {
+           k = group .k,
+           total = sumFilter (.a > 0) .a,
+           mean = avgFilter (.a > 0) .a,
+           n = countFilter (.a > 0),
+           n_of = countOfFilter (.a > 0) .a,
+           n_distinct = countDistinctFilter (.a > 0) .a,
+           lo = minFilter (.a > 0) .a,
+           hi = maxFilter (.a > 0) .a
+         } & order [asc .k]",
+        &[
+            "neg|NULL|NULL|0|0|0|NULL|NULL",
+            "pos|14|7.0|2|2|1|7|7",
+        ],
+    ),
+    // On an empty input a global filtered aggregate still has one row:
+    // `countFilter` is 0 and `sumFilter` is NULL.
+    (
+        "fagg_empty = empty & agg { n = countFilter true, total = sumFilter true .id }",
+        &["0|NULL"],
     ),
 ];
 

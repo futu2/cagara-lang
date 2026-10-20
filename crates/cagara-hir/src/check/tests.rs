@@ -154,6 +154,38 @@ fn aggregate_types_print_wrapped() {
 }
 
 #[test]
+fn filtered_aggregates_keep_their_aggregate_types() {
+    let row = r#"q = orders & agg {
+  s = sumFilter (.status == "paid") .amount,
+  a = avgFilter (.status == "paid") .amount,
+  n = countFilter (.status == "paid"),
+  c = countOfFilter (.status == "paid") .id,
+  d = countDistinctFilter (.status == "paid") .id,
+  lo = minFilter (.status == "paid") .amount,
+  hi = maxFilter (.status == "paid") .amount
+}
+"#;
+    assert_eq!(
+        ty(row, "q"),
+        "query { s = maybe float, a = maybe float, n = int, c = int, d = int, lo = maybe float, hi = maybe float }"
+    );
+    // The predicate is a non-null row-phase bool...
+    assert!(err("q = orders & agg { s = sumFilter .status .amount }\n", "q").contains("bool"));
+    // ...and an aggregate argument, so it cannot contain another aggregate.
+    assert!(err(
+        "q = orders & agg { s = sumFilter (count > 0) .amount }\n",
+        "q"
+    )
+    .contains("cannot nest"));
+    // A filtered aggregate is still an aggregate, so it belongs in `agg`.
+    assert!(err(
+        "q = orders & select { s = sumFilter (.status == \"paid\") .amount }\n",
+        "q"
+    )
+    .contains("belong in `agg`"));
+}
+
+#[test]
 fn query_output_rows() {
     assert_eq!(
         ty("q = users & where .active & select { id = .id, label = upper .name, next = .age + 1 }\n", "q"),

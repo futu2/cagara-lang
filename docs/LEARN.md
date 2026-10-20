@@ -671,8 +671,8 @@ SELECT n FROM (SELECT COUNT(*) AS n FROM public.orders) AS t1 WHERE (n > 5);
 ```
 
 Folding that filter into a `HAVING` on the aggregate is a query-shape
-optimization this compiler does not currently perform. See *Aggregate filters
-and `HAVING`* in [`PLAN.md`](PLAN.md) for why it is absent.
+optimization this compiler does not currently perform. See the aggregate-filter
+note under *Current boundaries* in [`PLAN.md`](PLAN.md) for why it is absent.
 
 A `limit` is also a boundary, and so is an `order` or `limit` sitting between
 the `agg` and the `where`: SQL cannot filter on a limited result in the same
@@ -756,7 +756,53 @@ error: field `s` is an aggregate; aggregates belong in `agg`, not `select`
 
 `sum`, `avg`, `min`, and `max` return `maybe` because SQL produces `NULL` for an
 all-`NULL` or empty input. `count`, `countOf`, and `countDistinct` return a
-non-null `int`. See the next section.
+non-null `int`. The filtered forms follow the same rule: `sumFilter`,
+`avgFilter`, `minFilter`, and `maxFilter` are `maybe`, while `countFilter`,
+`countOfFilter`, and `countDistinctFilter` are non-null `int`. See the next
+section.
+
+### Filtered aggregates
+
+A predicate on an aggregate's **input rows** is written with the `*Filter`
+functions. They are the portable spelling of SQL's
+`SUM(x) FILTER (WHERE p)`: the filter changes which rows reach each aggregate,
+not which groups are kept.
+
+```haskell
+sales = orders & agg {
+  user_id = group .user_id,
+  paid = sumFilter (.status == "paid") .amount,
+  refunded = sumFilter (.status == "refunded") .amount,
+  n_paid = countFilter (.status == "paid")
+}
+```
+
+```sql
+SELECT user_id,
+       SUM(CASE WHEN (status = 'paid') THEN amount END) AS paid,
+       SUM(CASE WHEN (status = 'refunded') THEN amount END) AS refunded,
+       COUNT(CASE WHEN (status = 'paid') THEN 1 END) AS n_paid
+FROM public.orders
+GROUP BY user_id;
+```
+
+The predicate is a non-null `bool` over the input row and cannot contain an
+aggregate or window. It is evaluated before grouping, so it may name a column
+that is not a group key (`status` above). The `CASE` has no `ELSE`: a group with
+no matching rows is `NULL` for `sumFilter`, `avgFilter`, `minFilter`, and
+`maxFilter`, and `0` for the count forms — the same results `FILTER` gives. Do
+not add `ELSE 0` yourself; for `avg` it changes the denominator, and for the
+other value aggregates it changes an empty group from `NULL` to `0`.
+
+When **every** aggregate in the stage shares one predicate, filter before
+`agg` instead:
+
+```haskell
+paid = orders & where (.status == "paid") & agg { user_id = group .user_id, total = sum .amount }
+```
+
+That filters the rows once. The `*Filter` forms exist for the case where
+different aggregates in one stage need different predicates.
 
 ---
 
@@ -773,9 +819,9 @@ Where nullability comes from:
 |---|---|
 | A column declared `maybe int` | reads as nullable |
 | The possibly-absent side of a left, right, or full join | its columns become `maybe` |
-| `sum`, `avg`, `min`, `max` | `maybe` |
+| `sum`, `avg`, `min`, `max` and their `*Filter` forms | `maybe` |
 | `lag`, `lead`, `sumOver`, `avgOver` | `maybe` |
-| `count`, `countOf`, `countDistinct`, `countOver` | non-null `int` |
+| `count`, `countOf`, `countDistinct`, `countOver`; `countFilter`, `countOfFilter`, `countDistinctFilter` | non-null `int` |
 | `isNull`, `isNotNull`, `isTrue` | non-null `bool` |
 
 Handling nulls explicitly:
@@ -813,9 +859,17 @@ t = u & leftJoin o (.<id == .>user_id) & select {.id, amt = coalesce 0.0 .amount
 ```
 
 `countOf` follows the same non-null rule even though SQL's `COUNT(x)` skips
-nulls. To count *matched* rows across a left join, sum an indicator over the
-null-extended side instead — this also excludes the synthetic row SQL creates
-for an unmatched row:
+nulls. To count *matched* rows across a left join, use `countFilter` on the
+null-extended side: the synthetic row for an unmatched row fails the predicate,
+and the count stays non-null.
+
+```haskell
+matches = users
+  & leftJoin orders (.<id == .>user_id)
+  & agg { id = group .id, n = countFilter (isNotNull .user_id) }
+```
+
+The same count without a filtered aggregate sums an indicator:
 
 ```haskell
 matches = users

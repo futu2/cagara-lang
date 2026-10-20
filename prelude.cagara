@@ -246,6 +246,31 @@ avg : expr r float -> agg (expr r (maybe float)) = sql "AVG($1)"
 min : expr r a -> agg (expr r (maybe a)) = sql "MIN($1)"
 max : expr r a -> agg (expr r (maybe a)) = sql "MAX($1)"
 
+# Filtered aggregates apply a predicate to the aggregate's *input* rows, the
+# portable spelling of SQL's `agg(x) FILTER (WHERE p)`. The predicate is a
+# non-null row-phase `bool` and cannot contain an aggregate or window. The
+# `CASE` omits `ELSE`, so a group with no matching row is NULL for the value
+# aggregates and 0 for the counts, exactly as `FILTER` gives. When every
+# aggregate in a stage shares one predicate, prefer `where` before `agg`: it
+# filters the rows once instead of once per aggregate.
+#
+# The count forms use `COUNT(...)`, not `SUM(1)`: `SUM` is NULL when nothing
+# matches, while `COUNT(*) FILTER` is 0.
+sumFilter : expr r bool -> expr r int -> agg (expr r (maybe int)) =
+  sql "SUM(CASE WHEN $1 THEN $2 END)"
+sumFilter : expr r bool -> expr r float -> agg (expr r (maybe float)) =
+  sql "SUM(CASE WHEN $1 THEN $2 END)"
+avgFilter : expr r bool -> expr r int -> agg (expr r (maybe float)) =
+  sql "AVG(CASE WHEN $1 THEN $2 END)"
+avgFilter : expr r bool -> expr r float -> agg (expr r (maybe float)) =
+  sql "AVG(CASE WHEN $1 THEN $2 END)"
+minFilter : expr r bool -> expr r a -> agg (expr r (maybe a)) = sql "MIN(CASE WHEN $1 THEN $2 END)"
+maxFilter : expr r bool -> expr r a -> agg (expr r (maybe a)) = sql "MAX(CASE WHEN $1 THEN $2 END)"
+countFilter : expr r bool -> agg (expr r int) = sql "COUNT(CASE WHEN $1 THEN 1 END)"
+countOfFilter : expr r bool -> expr r a -> agg (expr r int) = sql "COUNT(CASE WHEN $1 THEN $2 END)"
+countDistinctFilter : expr r bool -> expr r a -> agg (expr r int) =
+  sql "COUNT(DISTINCT CASE WHEN $1 THEN $2 END)"
+
 # ── window functions (depth 1) ────────────────────────────────────────────
 # spec = { partition = [..], order = [asc .x, desc .y], frame = .. }
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add filtered aggregate helpers to the prelude (`sumFilter`, `avgFilter`,
+  `minFilter`, `maxFilter`, `countFilter`, `countOfFilter`,
+  `countDistinctFilter`). They are the portable `CASE` equivalents of SQL
+  `FILTER (WHERE ...)` and keep the unfiltered aggregate's result type.
 - Reject self- and mutually recursive definitions during type checking, even
   without an annotation. Previously an unannotated cycle could check as a
   fresh type variable and produce no SQL.

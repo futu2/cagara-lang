@@ -3,8 +3,8 @@
 //! meaning (e.g. filtering after windows or LIMIT). A filter over an aggregate
 //! is one of the wrapping cases: it becomes an ordinary `WHERE` outside a
 //! derived table rather than a `HAVING` on the aggregate. See `docs/PLAN.md`,
-//! "Aggregate filters and `HAVING`", for why that fold is deliberately absent
-//! and what reinstating it would take.
+//! "Current boundaries", for why that fold is deliberately absent and what
+//! reinstating it would take.
 
 use crate::stage::{and_all, col, ident_style, lower_expr, qualify, Fuse, Stage};
 use cagara_hir::ir::{Expr as IrExpr, JoinKind, Rel, SetKind, Side};

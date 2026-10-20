@@ -567,6 +567,11 @@ Rules:
 - Aggregates belong only in `agg`; `select { x = sum .amount }` fails.
 - A later `agg` may aggregate the previous `agg`'s output; that is a separate stage, not nesting.
 - `sum`, `avg`, `min`, `max` return `maybe`. `count`, `countOf`, `countDistinct` return `int`.
+- Filtered aggregates apply a predicate to one aggregate's input rows:
+  `paid = sumFilter (.status == "paid") .amount`, `n = countFilter (.status == "paid")`.
+  The predicate is a non-null row-phase `bool` with no aggregate or window. The
+  helpers compile to `CASE`, not SQL `FILTER`, so every dialect accepts them.
+  When every aggregate shares one predicate, use `where` before `agg` instead.
 - A filter after `agg` is an outer `WHERE` over a derived table; there is no `HAVING` keyword.
 - A window may read an aggregate's output in a later `select`; a window field in `agg` is rejected.
 
@@ -581,6 +586,25 @@ main = orders & agg {
     n = count
   }
 ```
+
+Different aggregates over different row subsets in one pass:
+
+```cagara
+orders : query { id = int, user_id = int, amount = float, status = string } =
+  table "public" "orders"
+
+main = orders & agg {
+    user_id = group .user_id,
+    paid = sumFilter (.status == "paid") .amount,
+    refunded = sumFilter (.status == "refunded") .amount,
+    n_paid = countFilter (.status == "paid")
+  }
+```
+
+`sumFilter`/`avgFilter`/`minFilter`/`maxFilter` return `maybe`, like their
+unfiltered forms; the count forms return non-null `int`. A group with no
+matching row is `NULL` for the value aggregates and `0` for the counts, the same
+as SQL `FILTER`.
 
 ### 5.5 `order`, `limit`, `offset`, `distinct`
 
@@ -781,9 +805,9 @@ Where `maybe` comes from:
 |---|---|
 | column declared `maybe` | `maybe` |
 | nullable side of left/right/full join | that side's columns `maybe` |
-| `sum`, `avg`, `min`, `max` | `maybe` (empty/all-null input) |
+| `sum`, `avg`, `min`, `max` and their `*Filter` forms | `maybe` (empty/all-null input) |
 | `lag`, `lead`, `sumOver`, `avgOver` | `maybe` |
-| `count`, `countOf`, `countDistinct`, `countOver` | non-null `int` |
+| `count`, `countOf`, `countDistinct`, `countOver`; `countFilter`, `countOfFilter`, `countDistinctFilter` | non-null `int` |
 | `isNull`, `isNotNull`, `isTrue` | non-null `bool` |
 | `try*` casts | `maybe` |
 
@@ -1016,10 +1040,24 @@ sum            : expr r int -> agg (expr r (maybe int))
 sum            : expr r float -> agg (expr r (maybe float))
 avg            : expr r int|float -> agg (expr r (maybe float))
 min max        : expr r a -> agg (expr r (maybe a))
+
+countFilter          : expr r bool -> agg (expr r int)
+countOfFilter        : expr r bool -> expr r a -> agg (expr r int)
+countDistinctFilter  : expr r bool -> expr r a -> agg (expr r int)
+
+sumFilter      : expr r bool -> expr r int -> agg (expr r (maybe int))
+sumFilter      : expr r bool -> expr r float -> agg (expr r (maybe float))
+avgFilter      : expr r bool -> expr r int|float -> agg (expr r (maybe float))
+minFilter maxFilter : expr r bool -> expr r a -> agg (expr r (maybe a))
 ```
 
 `count` is a value, not a call: write `n = count`, not `count ()`. `sum`/`avg`/`min`/`max` return
 `maybe`; `coalesce 0 (sum .x)` makes a number. `countOf`/`countDistinct` require non-null input.
+
+The `*Filter` forms take a non-null row-phase `bool` predicate first and apply it to that
+aggregate's input rows, so `sumFilter p .x` means `SUM(x) FILTER (WHERE p)` (compiled to the
+portable `SUM(CASE WHEN p THEN x END)`). They return the same type as the unfiltered form. When every
+aggregate in the stage shares one predicate, use `where` before `agg` instead.
 
 ### 7.7 Windows (only in `select`/`update` fields)
 
@@ -1173,6 +1211,12 @@ Use this to map a request, not to write SQL.
 | `SUM(x)` | `sum .x` (result `maybe`) |
 | `AVG(x)` | `avg .x` (result `maybe float`) |
 | `MIN(x)` / `MAX(x)` | `min .x` / `max .x` (result `maybe`) |
+| `SUM(x) FILTER (WHERE p)` | `sumFilter p .x` |
+| `AVG(x) FILTER (WHERE p)` | `avgFilter p .x` |
+| `MIN(x)` / `MAX(x) FILTER (WHERE p)` | `minFilter p .x` / `maxFilter p .x` |
+| `COUNT(*) FILTER (WHERE p)` | `countFilter p` |
+| `COUNT(x) FILTER (WHERE p)` | `countOfFilter p .x` |
+| `COUNT(DISTINCT x) FILTER (WHERE p)` | `countDistinctFilter p .x` |
 | `COALESCE(x, 0)` | `coalesce 0 .x` or `.x ?? 0` |
 | `CASE WHEN c THEN a ELSE b END` | `ifThenElse c a b` |
 | `CASE WHEN ... WHEN ... ELSE ... END` | `case { c1 => v1; c2 => v2; true => v3 }` |
@@ -1202,8 +1246,9 @@ If a request needs one of these, say so or write a `sql` template; do not guess 
   comparisons, `isNull`, `like`, `semiJoin`, `antiJoin`.
 - **Subqueries:** no `FROM (SELECT ...)`, no correlated subqueries, no `LATERAL`. Compose named query
   definitions instead; a join input may be a query.
-- **Aggregation:** `HAVING` (use `where` after `agg`), `FILTER (WHERE ...)` (use `ifThenElse` inside
-  the aggregate), `GROUPING SETS`, `DISTINCT ON`, `QUALIFY`.
+- **Aggregation:** `HAVING` (use `where` after `agg`), `GROUPING SETS`, `DISTINCT ON`, `QUALIFY`.
+  SQL's `FILTER (WHERE ...)` clause is not syntax; use the `*Filter` helpers
+  (`sumFilter`, `countFilter`, ...) or spell `CASE` in a custom aggregate template.
 - **Functions not in §7:** math (`abs`, `round`, `floor`, `ceil`, `sqrt`, `power`, `random`), more
   aggregates (`median`, `stddev`, `string_agg`, `array_agg`, `bool_and`), more windows
   (`first_value`, `last_value`, `ntile`, `percent_rank`, `cume_dist`), `split`, `regexp_*`.
@@ -1432,7 +1477,8 @@ Run this in order before returning a file.
 4. **Columns:** every `.x` is a column of the row at that point; no bare column names.
 5. **Row changes:** `select` (replace) vs `update` (merge) vs `omit` (drop) chosen deliberately.
 6. **Aggregation:** aggregates only in `agg`; every non-`group` field is an aggregate or constant;
-   no nested aggregates; `sum`/`avg`/`min`/`max` wrapped in `coalesce` when a non-null is needed.
+   no nested aggregates; `sum`/`avg`/`min`/`max` and their `*Filter` forms wrapped in `coalesce`
+   when a non-null is needed; filtered aggregates use the helpers, not `ifThenElse` with `ELSE 0`.
 7. **Windows:** only in `select`/`update` fields; filter/sort on the named column in a later stage.
 8. **Nulls:** predicates and operators see non-null values; every `maybe` is handled.
 9. **Joins:** predicate uses `.<` and `.>`; both columns exist on the correct sides; output

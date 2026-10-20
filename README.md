@@ -83,6 +83,8 @@ cagara --version
 
 - [A language guide](docs/LEARN.md), [nullability reference](docs/NULLABILITY.md),
   and [row type reference](docs/ROW-TYPES.md)
+- [`CAGARA.md`](CAGARA.md): a single self-contained reference written for code-generating agents;
+  paste it into an agent's context before asking for Cagara code
 - [`examples/`](examples): filtering, aggregation, windows, joins, modules, error messages
 - [`docs/PLAN.md`](docs/PLAN.md): architecture and current gaps
 - Editor support: [VS Code](editors/vscode) · [Neovim](editors/nvim)

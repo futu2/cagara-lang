@@ -22,6 +22,23 @@ Filtered aggregates do not depend on the dialect: `sumFilter` and the other
 `*Filter` helpers are prelude templates over `CASE`, not a `FILTER` clause, so
 they need no per-dialect rewrite.
 
+Two constructs are deliberately refused rather than emitted in a dialect that
+cannot mean them:
+
+- `fullJoin` is an error for the MySQL family, which has no
+  `FULL [OUTER] JOIN`. Rewriting it would require deciding which predicate
+  null-extends which side; the portable workaround is
+  `leftJoin`/`rightJoin` plus `unionAll`.
+- An empty `inList []` lowers to a constant `FALSE` (or `TRUE` when negated),
+  because SQL has no empty `IN ()`. The target never sees an empty list.
+
+`toInt`, `toFloat`, `tryInt`, and `tryFloat` cast to the language's widths
+rather than the engine's default `INT`/`FLOAT`: the integer target is `BIGINT`
+and the float target is a 64-bit double in the target's spelling
+(`DOUBLE PRECISION`, `DOUBLE`, `FLOAT`, or `FLOAT64`). `toInt` of a float also
+truncates toward zero in every dialect, rather than inheriting PostgreSQL or
+MySQL rounding from a plain cast.
+
 When targeting another engine, inspect the generated SQL and run representative
 queries against that engine, especially if they use dates, string functions,
 integer division, null ordering, or T-SQL-specific boolean handling. Add a

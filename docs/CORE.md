@@ -75,6 +75,11 @@ apply (Table|Label, v)      = a table leaf, or a symbol argument
 apply (Overloads cs, v)     = the first candidate that applies
 ```
 
+A local `let name = value in body` is parsed as `(name => body) value`, so it is
+an ordinary closure application: it beta-reduces here and never reaches SQL.
+Local bindings are therefore monomorphic, unlike generalized top-level
+definitions.
+
 **A literal is a label until an operation says otherwise**
 (`normalize/value.rs`, `value_at`). A string in a `symbol` position names an affix or
 a removed column, an int in a count position is a count, and either in an
@@ -185,10 +190,11 @@ so `expr r a` does not accept `expr r (maybe a)`. Where nullability arises:
 - a column declared `maybe`; the nullable side of a left/right/full join, whose
   types the checker writes as `mapValue (AsNullable) s` and the arena as
   `RowType::map_value_nullable`;
-- `sum`, `avg`, `min`, `max`, `lag`, `lead` and the `*Over` windows return
-  `maybe`, because SQL returns `NULL` for an empty or all-null input;
-  `count`/`countOf`/`countDistinct` return non-null `int`. The `*Filter`
-  aggregate helpers keep the same result type as their unfiltered forms.
+- `sum`, `avg`, `min`, `max`, `sumMaybe`, `avgMaybe`, `minMaybe`, `maxMaybe`,
+  `lag`, `lead` and the `*Over` windows return `maybe`, because SQL returns
+  `NULL` for an empty or all-null input; `count`/`countOf`/`countDistinct` and
+  their `*Maybe` count forms return non-null `int`. The `*Filter` aggregate
+  helpers keep the same result type as their unfiltered forms.
 
 Filtered aggregates are not an IR construct: `sumFilter p x`, for example, is
 the ordinary prelude template `SUM(CASE WHEN p THEN x END)`. Omitting `ELSE`
@@ -201,8 +207,10 @@ Nullable values are not silently coerced. The prelude provides the operators:
 `nullIf`, `isNull`/`isNotNull`, `isTrue` (treats a nullable `NULL` as false), `whereTrue` (a filter whose
 predicate is `isTrue`), `eqMaybe` (two `NULL`s count as equal). These are
 ordinary templates, so their null behaviour is the SQL they name. A plain
-comparison or aggregate input requires non-null operands, so the query states
-where a `NULL` is allowed to flow.
+comparison requires non-null operands, and the ordinary aggregate signatures do
+too; the prelude's explicit `*Maybe` aggregates opt a nullable input into SQL's
+null-skipping behaviour, so the query still states where a `NULL` is allowed to
+flow.
 
 **Phases.** `ir::Phase` is `Const | Row | Agg | Win`. `rules::mix` combines two
 phases (`Agg` with anything but `Const`/`Agg` is a clash; `Win` combines with

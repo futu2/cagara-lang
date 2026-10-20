@@ -5,7 +5,7 @@ if exists("b:current_syntax")
 endif
 
 syn keyword cagaraImport   import as
-syn keyword cagaraKeyword  sql case
+syn keyword cagaraKeyword  sql case let
 syn keyword cagaraBoolean  true false
 syn keyword cagaraType     query expr agg win maybe list int float string bool date timestamp sortkey winspec bound frame
 

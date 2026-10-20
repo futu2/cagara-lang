@@ -57,6 +57,16 @@ pub fn rewrite(stmt: Statement, to: Dialect) -> Result<Statement, String> {
     Ok(Statement::Select(sel))
 }
 
+/// Whether the target engine has a `FULL [OUTER] JOIN` spelling.
+///
+/// MySQL has only `LEFT`/`RIGHT` joins; emitting `FULL JOIN` there produces
+/// SQL the engine rejects. The Cagara query stays expressible as a union of the
+/// two outer joins, but rewriting it here would have to know which predicate
+/// null-extends which side, so the backend refuses it instead.
+pub(crate) fn supports_full_join(d: Dialect) -> bool {
+    fam(d) != Fam::Mysql
+}
+
 fn tsql(d: Dialect) -> bool {
     fam(d) == Fam::Tsql
 }

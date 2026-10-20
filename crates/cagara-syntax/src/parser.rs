@@ -41,6 +41,7 @@ pub fn parse_with(input: &str, ops: &Ops) -> Parse {
         depth: 0,
         bailed: false,
         arm_depth: None,
+        stop_at_in: false,
         ops,
     };
     p.file();
@@ -69,6 +70,13 @@ struct Parser<'a> {
     /// exception is about the arm's own level: a lambda nested inside the
     /// condition — in parentheses, in an argument — is a lambda like any other.
     arm_depth: Option<usize>,
+    /// While parsing a `let` binding's value, an identifier spelled `in` ends
+    /// the value instead of being applied as an argument. `in` stays an
+    /// ordinary identifier otherwise (the prelude defines it as an alias of
+    /// `inList`), so this is a parse-context flag rather than a token kind.
+    /// Delimited sub-expressions temporarily clear it, so `(in)` and
+    /// `{ in = ... }` still use the name.
+    stop_at_in: bool,
     ops: &'a Ops,
 }
 
@@ -159,6 +167,7 @@ impl<'a> Parser<'a> {
                         | Token::PrimitiveKw
                         | Token::ImportKw
                         | Token::AsKw
+                        | Token::LetKw
                 )
             )
     }
@@ -193,12 +202,55 @@ impl<'a> Parser<'a> {
         true
     }
 
-    /// Layout rule: an identifier or `import` in column 0 starts a new item.
+    /// Layout rule: a top-level `name [':' type] '='` in column 0 starts a
+    /// new item.
+    ///
+    /// A column-0 identifier that is not a definition header is a continuation
+    /// the author forgot to indent. Treating it as part of the current item lets
+    /// the parser recover and report that specifically; [`Parser::def`] does
+    /// the reporting, because this method is asked on every type/field/atom
+    /// boundary and must stay quiet.
     fn at_boundary(&self) -> bool {
         match self.peek_lex(0) {
             None => true,
-            Some(l) => l.line_start && matches!(l.kind, Token::Ident | Token::ImportKw),
+            Some(l) if l.line_start => match l.kind {
+                Token::ImportKw => true,
+                Token::Ident => self.looks_like_definition(),
+                _ => false,
+            },
+            Some(_) => false,
         }
+    }
+
+    /// Whether the identifier at the cursor looks like a definition header:
+    /// `name = ...` or `name : type = ...`.
+    ///
+    /// The annotation is enough to recognise the header; the parser reports a
+    /// missing `=` or type itself. Requiring the whole header here would make
+    /// a half-typed definition swallow the following one, and scanning a long
+    /// type on every boundary would be quadratic.
+    fn looks_like_definition(&self) -> bool {
+        matches!(
+            self.peek_lex(1).map(|l| l.kind),
+            Some(Token::Eq | Token::Colon)
+        )
+    }
+
+    /// The contextual `in` that ends a `let` binding's value.
+    fn at_in(&self) -> bool {
+        self.peek_lex(0)
+            .is_some_and(|l| l.kind == Token::Ident && l.text == "in")
+    }
+
+    /// Run a delimited sub-expression with the let-`in` terminator disabled.
+    /// `(in)`, `{ in = ... }`, `[in]`, and `case { ... in ... }` then use the
+    /// ordinary name while an `in` outside the delimiters still ends a `let`.
+    fn without_in_stop<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = self.stop_at_in;
+        self.stop_at_in = false;
+        let out = f(self);
+        self.stop_at_in = outer;
+        out
     }
 
     fn bump(&mut self) {
@@ -269,6 +321,36 @@ impl<'a> Parser<'a> {
         self.bailed = true;
     }
 
+    /// Report the first continuation line that starts in column 0.
+    ///
+    /// The parser accepts such a line as part of the current definition (the
+    /// lookahead in [`Parser::at_boundary`] only ends an item at a real
+    /// definition header), so the mistake is recoverable. It is still a layout
+    /// error: only the first token of an item may sit in column 0.
+    fn report_layout_continuation(&mut self, from: usize) {
+        if self.bailed {
+            return;
+        }
+        let end = self.pos.min(self.toks.len());
+        let Some(toks) = self.toks.get(from.min(end)..end) else {
+            return;
+        };
+        for l in toks {
+            if l.kind.is_trivia() {
+                continue;
+            }
+            if l.line_start && matches!(l.kind, Token::Ident | Token::ImportKw | Token::LetKw) {
+                self.errors.push(ParseError {
+                    offset: l.offset,
+                    message: "a line starting with an identifier in column 0 begins a new \
+                              definition; indent it to continue the previous definition"
+                        .into(),
+                });
+                break;
+            }
+        }
+    }
+
     // ── items ────────────────────────────────────────────────
 
     fn file(&mut self) {
@@ -277,8 +359,14 @@ impl<'a> Parser<'a> {
         loop {
             match self.peek() {
                 None => break,
+                // A top-level `;` is an optional item terminator; a stray one
+                // between items is harmless.
+                Some(Token::Semicolon) => self.bump(),
                 Some(Token::ImportKw) => self.import(),
-                Some(Token::Ident) => self.def(),
+                Some(Token::Ident) if self.looks_like_definition() => self.def(),
+                Some(Token::Ident) => {
+                    self.recover("expected a definition (`name = ...`) or `import` at column 0")
+                }
                 Some(_) => self.recover("expected a definition or import"),
             }
         }
@@ -298,6 +386,9 @@ impl<'a> Parser<'a> {
                 self.error("expected module alias");
             }
         }
+        if self.at(Token::Semicolon) {
+            self.bump();
+        }
         self.finish();
     }
 
@@ -312,10 +403,17 @@ impl<'a> Parser<'a> {
             self.finish();
         }
         if self.expect(Token::Eq, "`=`") {
+            let body_start = self.pos;
             self.expr();
+            if !self.at(Token::Semicolon) && !self.at_boundary() {
+                self.recover("unexpected tokens after definition");
+            }
+            self.report_layout_continuation(body_start);
         }
-        if !self.at_boundary() {
-            self.recover("unexpected tokens after definition");
+        // An optional terminator. The formatter does not print it; it exists
+        // so generated code can close an item without relying on indentation.
+        if self.at(Token::Semicolon) {
+            self.bump();
         }
         self.bailed = false;
         self.finish();
@@ -534,7 +632,37 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `let name = value in body`.
+    ///
+    /// `in` is a contextual identifier: only the value position stops at it.
+    /// The AST lowering desugars the form to `(name => body) value`, so the
+    /// checker, normalizer, and SQL backend need no new expression case.
+    fn let_expr(&mut self) {
+        self.start(K::LetExpr);
+        self.bump(); // let
+        if self.at_inner(Token::Ident) {
+            self.bump();
+        } else {
+            self.error("expected a name after `let`");
+        }
+        self.expect(Token::Eq, "`=` after a let binding's name");
+        let outer = self.stop_at_in;
+        self.stop_at_in = true;
+        self.expr();
+        self.stop_at_in = outer;
+        if self.at_in() {
+            self.bump();
+        } else {
+            self.error("expected `in` after the let binding's value");
+        }
+        self.expr();
+        self.finish();
+    }
+
     fn atom_start(&self) -> bool {
+        if self.stop_at_in && self.at_in() {
+            return false;
+        }
         !self.at_boundary()
             && !self.at_lambda_operand()
             && matches!(
@@ -554,6 +682,7 @@ impl<'a> Parser<'a> {
                         | Token::SqlKw
                         | Token::CaseKw
                         | Token::PrimitiveKw
+                        | Token::LetKw
                 )
             )
     }
@@ -596,6 +725,12 @@ impl<'a> Parser<'a> {
     }
 
     fn atom(&mut self) {
+        if self.stop_at_in && self.at_in() {
+            self.error("expected the let binding's value before `in`");
+            self.start(K::ErrorNode);
+            self.finish();
+            return;
+        }
         if self.at_boundary() {
             self.error("expected an expression");
             self.start(K::ErrorNode);
@@ -603,6 +738,7 @@ impl<'a> Parser<'a> {
             return;
         }
         match self.peek() {
+            Some(Token::LetKw) => self.let_expr(),
             Some(Token::Ident) => {
                 let cp = self.checkpoint();
                 let proj = self.adjacent_field();
@@ -664,7 +800,7 @@ impl<'a> Parser<'a> {
             Some(Token::LParen) => {
                 self.start(K::ParenExpr);
                 self.bump();
-                self.expr();
+                self.without_in_stop(|p| p.expr());
                 self.expect(Token::RParen, "`)`");
                 self.finish();
             }
@@ -692,6 +828,8 @@ impl<'a> Parser<'a> {
 
     fn record(&mut self) {
         self.start(K::RecordExpr);
+        let outer = self.stop_at_in;
+        self.stop_at_in = false;
         self.bump(); // {
                      // A field is `name = expr`, or the shorthand `.name` for
                      // `name = .name`, so `select {.id, .name}` chooses columns
@@ -713,11 +851,14 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(Token::RBrace, "`}`");
+        self.stop_at_in = outer;
         self.finish();
     }
 
     fn list(&mut self) {
         self.start(K::ListExpr);
+        let outer = self.stop_at_in;
+        self.stop_at_in = false;
         self.bump(); // [
         while !self.at(Token::RBracket) && !self.at_boundary() {
             self.expr();
@@ -728,6 +869,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(Token::RBracket, "`]`");
+        self.stop_at_in = outer;
         self.finish();
     }
 
@@ -742,8 +884,11 @@ impl<'a> Parser<'a> {
     /// `expr => expr`.
     fn case_expr(&mut self) {
         self.start(K::CaseExpr);
+        let outer = self.stop_at_in;
+        self.stop_at_in = false;
         self.bump(); // case
         if !self.expect(Token::LBrace, "`{` after `case`") {
+            self.stop_at_in = outer;
             self.finish();
             return;
         }
@@ -760,6 +905,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(Token::RBrace, "`}` closing `case`");
+        self.stop_at_in = outer;
         self.finish();
     }
 
@@ -838,6 +984,23 @@ mod tests {
     }
 
     #[test]
+    fn let_is_an_expression() {
+        assert_eq!(
+            body("x = let y = 1 in y + 2"),
+            "(LetExpr y (Literal 1) in (BinExpr (NameRef y) (Literal 2)))"
+        );
+        assert_eq!(
+            body("x = let f = y => y + 1 in f .a"),
+            "(LetExpr f (Lambda y (BinExpr (NameRef y) (Literal 1))) in (App (NameRef f) (FieldExpr .a)))"
+        );
+        // `in` remains an ordinary name outside the binding's value.
+        assert_eq!(
+            body("x = in [1, 2] .a"),
+            "(App (NameRef in) (ListExpr (Literal 1) (Literal 2)) (FieldExpr .a))"
+        );
+    }
+
+    #[test]
     fn curried_lambda() {
         assert_eq!(
             body("f = x => y => x + y"),
@@ -861,6 +1024,34 @@ mod tests {
         assert!(p.errors.is_empty(), "{:?}", p.errors);
         let defs: Vec<_> = p.syntax().children().collect();
         assert_eq!(defs.len(), 2);
+    }
+
+    /// A top-level `;` is an optional item terminator.
+    #[test]
+    fn a_top_level_semicolon_terminates_an_item() {
+        let p = parse("a = 1; b = 2;\n");
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(defs(&p), ["a", "b"]);
+        let p = parse("import \"schema.cagara\" as s;\na = s.users\n");
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(defs(&p), ["a"]);
+        // A stray separator between items is harmless.
+        let p = parse("a = 1\n;\nb = 2\n");
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(defs(&p), ["a", "b"]);
+    }
+
+    /// An unindented continuation is parsed as part of the current item and
+    /// reported as a layout error, rather than silently becoming a new
+    /// definition or being swallowed by recovery.
+    #[test]
+    fn an_unindented_continuation_is_reported() {
+        let src = "a = users\nwhere (.age > 1)\nb = 2\n";
+        let p = parse(src);
+        assert_eq!(defs(&p), ["a", "b"], "{}", sexp(&p.syntax()));
+        assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+        assert!(p.errors[0].message.contains("indent"), "{:?}", p.errors);
+        assert_eq!(p.syntax().text().to_string(), src);
     }
 
     /// `case { cond => value; ... }`: arms separated by `;`, the whole thing
@@ -1373,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn column_zero_names_are_never_part_of_the_item_above() {
+    fn column_zero_definition_headers_are_never_part_of_the_item_above() {
         // Half-typed items: each used to take the next definition in.
         for (src, msg) in [
             ("x :\ny = 1\n", "expected a type"),
@@ -1381,7 +1572,6 @@ mod tests {
             ("x = {\ny = 1\n", "expected `}`"),
             ("x = (\ny = 1\n", "expected an expression"),
             ("import \"a\" as\ny = 1\n", "expected module alias"),
-            ("x =\ny => 1\n", "expected an expression"),
         ] {
             let p = parse(src);
             assert!(messages(&p).contains(&msg), "{src:?}: {:?}", p.errors);
@@ -1392,6 +1582,19 @@ mod tests {
             );
             assert_eq!(p.syntax().text().to_string(), src);
         }
+        // A column-0 name that is not a definition header is a continuation:
+        // it is parsed as the body, and reported as a layout error so the
+        // mistake is still visible. This is what lets a missing indent recover
+        // without swallowing the next actual definition.
+        let src = "x =\ny => 1\n";
+        let p = parse(src);
+        assert!(
+            messages(&p).iter().any(|m| m.contains("indent")),
+            "{:?}",
+            p.errors
+        );
+        assert_eq!(defs(&p), ["x"], "{}", sexp(&p.syntax()));
+        assert_eq!(p.syntax().text().to_string(), src);
         // `y` itself parses: its errors, if any, are its own.
         let p = parse("x :\ny = 1\n");
         assert!(p.errors.iter().all(|e| e.offset <= 4), "{:?}", p.errors);

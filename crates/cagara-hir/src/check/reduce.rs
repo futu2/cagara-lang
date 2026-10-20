@@ -310,22 +310,6 @@ pub(crate) fn row_or_tail(fs: Vec<(String, Ty)>, tail: Ty) -> Ty {
     }
 }
 
-pub(crate) fn contains_nullable_expr(t: &TypeExpr) -> bool {
-    match t {
-        TypeExpr::App { head, args, .. } => {
-            (head == "expr"
-                && args.len() == 2
-                && matches!(&args[1], TypeExpr::App { head, .. } if head == "maybe"))
-                || args.iter().any(contains_nullable_expr)
-        }
-        TypeExpr::Record { fields, .. } => fields.iter().any(|(_, t)| contains_nullable_expr(t)),
-        TypeExpr::Fun(a, b) => contains_nullable_expr(a) || contains_nullable_expr(b),
-        // A type-position string is an affix, not an expression type.
-        TypeExpr::Str(..) => false,
-        TypeExpr::Error(_) => false,
-    }
-}
-
 pub(crate) fn lit_name(l: &ast::Lit) -> &'static str {
     match l {
         ast::Lit::Int(_) => "int",

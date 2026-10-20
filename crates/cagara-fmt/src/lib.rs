@@ -229,7 +229,7 @@ fn field_name_tok(e: &SyntaxElement) -> Result<SyntaxToken, Bail> {
         Some(t)
             if matches!(
                 t.kind(),
-                K::Ident | K::SqlKw | K::CaseKw | K::PrimitiveKw | K::ImportKw | K::AsKw
+                K::Ident | K::SqlKw | K::CaseKw | K::PrimitiveKw | K::ImportKw | K::AsKw | K::LetKw
             ) =>
         {
             Ok(t.clone())
@@ -489,7 +489,9 @@ impl Fmt<'_> {
 
     fn huggable(&self, n: &SyntaxNode, top: bool) -> bool {
         match n.kind() {
-            K::RecordExpr | K::ListExpr | K::ParenExpr | K::Lambda | K::CaseExpr => true,
+            K::RecordExpr | K::ListExpr | K::ParenExpr | K::Lambda | K::CaseExpr | K::LetExpr => {
+                true
+            }
             K::BinExpr => top && bin_parts(n).is_ok_and(|(_, op, _, _)| is_pipe(&op)),
             K::App => self.hugs_last_arg(n),
             _ => false,
@@ -550,8 +552,39 @@ impl Fmt<'_> {
                 ]))
             }
             K::CaseExpr => self.case(n),
+            K::LetExpr => self.let_expr(n, top),
             _ => Err(Bail),
         }
+    }
+
+    /// `let name = value in body`.
+    ///
+    /// Flat when it fits; otherwise the value and the `in` clause move to an
+    /// indented line, so a long binding does not push the body off the width.
+    fn let_expr(&self, n: &SyntaxNode, top: bool) -> R {
+        let els = sig(n);
+        let [let_tok, name, eq, value, in_tok, body] = els.as_slice() else {
+            return Err(Bail);
+        };
+        let in_tok = token(Some(in_tok), K::Ident)?;
+        if in_tok.text() != "in" {
+            return Err(Bail);
+        }
+        Ok(group(concat(vec![
+            self.tok(&token(Some(let_tok), K::LetKw)?),
+            text(" "),
+            self.tok(&token(Some(name), K::Ident)?),
+            text(" "),
+            self.tok(&token(Some(eq), K::Eq)?),
+            indent(concat(vec![
+                Doc::Line,
+                self.expr(&node(Some(value))?, false)?,
+                Doc::Line,
+                self.tok(&in_tok),
+                text(" "),
+                self.expr(&node(Some(body))?, top)?,
+            ])),
+        ])))
     }
 
     /// `case { c1 => v1; c2 => v2 }`: flat if it fits, else one arm per line.

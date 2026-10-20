@@ -628,14 +628,25 @@ pub fn lower_expr(e: &ir::Expr, r: &Resolver) -> Result<Expr, String> {
     match e {
         ir::Expr::Col(side, n) => r(*side, n),
         ir::Expr::Lit(l) => Ok(lit(l)),
-        ir::Expr::In(value, list, negated) => Ok(Expr::InList {
-            expr: Box::new(lower_expr(value, r)?),
-            list: list
-                .iter()
-                .map(|item| lower_expr(item, r))
-                .collect::<Result<_, _>>()?,
-            negated: *negated,
-        }),
+        ir::Expr::In(value, list, negated) => {
+            // SQL has no empty `IN ()`: PostgreSQL, MySQL and the standard
+            // reject it. An empty compile-time list is a constant truth value,
+            // so lower it as one rather than emitting invalid syntax. The
+            // surface only builds non-negated `inList`, but the IR carries the
+            // flag for completeness.
+            if list.is_empty() {
+                // `x IN ()` is false; `x NOT IN ()` is true.
+                return Ok(Expr::Boolean(*negated));
+            }
+            Ok(Expr::InList {
+                expr: Box::new(lower_expr(value, r)?),
+                list: list
+                    .iter()
+                    .map(|item| lower_expr(item, r))
+                    .collect::<Result<_, _>>()?,
+                negated: *negated,
+            })
+        }
         ir::Expr::Tpl(sql, args) | ir::Expr::Agg(sql, args) => template(sql, all(args)?),
         ir::Expr::Group(k) => lower_expr(k, r),
         ir::Expr::Win(sql, args, spec) => {

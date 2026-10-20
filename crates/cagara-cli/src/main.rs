@@ -7,7 +7,8 @@
 //! `main` is a library and prints nothing. `cagara fmt` formats files in place.
 //! `cagara lsp` runs the language server over stdio.
 
-use cagara_hir::{check, compile_checked, Workspace};
+use cagara_hir::check::SchemeView;
+use cagara_hir::{check, compile_checked, TypeCheck, Workspace};
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
@@ -239,6 +240,25 @@ fn open_source(path: &Path) -> std::io::Result<Workspace> {
     Ok(Workspace::open_with(path, text))
 }
 
+/// The printed type of `main` when it exists, is well typed, and is not a
+/// query. `None` means there is nothing to report: no `main`, a query, or a
+/// definition whose own diagnostic already explains the problem.
+fn main_that_is_not_a_query(ws: &Workspace, tc: &TypeCheck) -> Option<String> {
+    let (def, _) = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .enumerate()
+        .find(|(_, d)| d.name == ENTRY_POINT)?;
+    if tc.error_for(ws.root, def).is_some() {
+        return None;
+    }
+    match tc.scheme_view(ws.root, def)? {
+        SchemeView::Query { .. } => None,
+        _ => Some(tc.type_of(ws.root, def).unwrap_or("?").to_string()),
+    }
+}
+
 /// `--types`: the inferred type of every selected root definition.
 fn report_types(
     ws: &Workspace,
@@ -305,6 +325,19 @@ fn report_sql(
     let shown = opts.file.display().to_string();
     let load_path = ws.modules[ws.root].path.display().to_string();
     let display = |d: &cagara_hir::workspace::Diag| rebase_path(d, &load_path, &shown);
+    // The entry point is a query, not a scalar. Without this check a scalar
+    // `main` compiled cleanly and printed nothing, which looks like success.
+    // `--only` is an explicit request for another definition, so it can still
+    // inspect a scalar helper in such a file.
+    if opts.only.is_none() {
+        if let Some(ty) = main_that_is_not_a_query(ws, tc) {
+            eprintln!(
+                "{shown}: error: `main` must be a query, found `{ty}`; a file without a query \
+                 entry point should omit `main` to be a library"
+            );
+            failed = true;
+        }
+    }
     // Every root definition that failed is reported, whether or not it is the
     // one being printed. A file is checked as a whole even when one definition
     // is the answer: a broken helper is a broken program, and reporting only

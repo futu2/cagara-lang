@@ -783,14 +783,18 @@ fn aggregate_nullability_is_explicit() {
         "q",
     );
     assert!(e.contains("non-null") && e.contains("maybe"), "{e}");
-    let e = err(
-        "bad : expr r (maybe a) -> agg (expr r (maybe a)) = sql \"SUM($1)\"\n",
-        "bad",
+    // Explicit nullable aggregates are the escape hatch: the signature says
+    // `maybe`, so the template is the place that decides what NULL means.
+    let t = ty(
+        "sumMaybeCustom : expr r (maybe a) -> agg (expr r (maybe a)) = sql \"SUM($1)\"\n",
+        "sumMaybeCustom",
     );
-    assert!(
-        e.contains("aggregate/window inputs cannot use `maybe`"),
-        "{e}"
+    assert!(t.contains("agg"), "{t}");
+    let t = ty(
+        &format!("{NULLABLE}q = people & agg {{ s = sumMaybe .score }}\n"),
+        "q",
     );
+    assert!(t.contains("s = maybe int"), "{t}");
 }
 
 #[test]

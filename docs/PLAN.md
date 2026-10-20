@@ -28,7 +28,8 @@ this page tracks the remaining boundaries and language work.
 
 ## Deferred language work
 
-Catalog declarations, typed bind parameters, first-class aggregate `FILTER`
+Catalog declarations, typed bind parameters, a decimal/numeric scalar type for
+exact money, name-aligned set operations, first-class aggregate `FILTER`
 emission (the prelude's `*Filter` helpers already cover the built-in aggregates
 portably), `qualify`, grouping sets, lateral or correlated subqueries, and
 richer window frames remain future work. The remaining features should extend

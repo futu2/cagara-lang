@@ -7,7 +7,7 @@ pub mod stage;
 
 pub use sqlglot_rust::Dialect;
 
-use cagara_hir::ir::Rel;
+use cagara_hir::ir::{JoinKind, Rel};
 
 /// Look up a dialect by name (`ansi`, `postgres`, `duckdb`, ...).
 pub fn dialect(name: &str) -> Option<Dialect> {
@@ -39,6 +39,13 @@ impl Default for Options {
 /// `CONCAT` for MySQL / T-SQL, `LIMIT` → `TOP` / `FETCH`).
 pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
     cagara_hir::schema::schema(rel)?;
+    if !dialect::supports_full_join(opts.dialect) && has_full_join(rel) {
+        return Err(
+            "`fullJoin` is not supported by the MySQL dialect family; rewrite it with \
+             `leftJoin`/`rightJoin` and `unionAll`"
+                .into(),
+        );
+    }
     let mut lowerer = lower::Lowerer::for_rel(rel);
     let st = lowerer.rel(rel)?;
     let mut select = st.into_statement();
@@ -54,6 +61,17 @@ pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
     } else {
         sqlglot_rust::generate(&stmt, opts.dialect)
     })
+}
+
+/// Whether a relation contains a `fullJoin`, including under `At` wrappers.
+fn has_full_join(rel: &Rel) -> bool {
+    match rel.bare() {
+        Rel::Join {
+            kind: JoinKind::Full,
+            ..
+        } => true,
+        rel => rel.children().into_iter().any(has_full_join),
+    }
 }
 
 #[cfg(test)]

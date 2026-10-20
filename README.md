@@ -43,12 +43,15 @@ example, `cagara examples/report.cagara --only adults`.
 
 - Pipelines with `&`: `where`, `select`, `agg`, `order`, `limit`, joins, window functions.
 - Filtered aggregates: `sumFilter p .amount`, `countFilter p` and friends compile to portable `CASE` equivalents of SQL's `FILTER (WHERE ...)`.
+- Explicit nullable aggregates: `sumMaybe`, `avgMaybe`, `minMaybe`, `maxMaybe`, `countOfMaybe` pass nullable columns to SQL's null-skipping aggregates without a semantics-changing `coalesce`.
+- Math helpers: `abs`, `round`, `roundTo`, `floor`, `ceil`, `sqrt`, `power`, `sign`, `greatest`, `least`.
 - Hindley–Milner type inference with extensible records, so column types flow through the pipeline.
-- Explicit nulls: the right side of a left join and aggregates like `sum` are `maybe`.
+- Local `let name = value in body` bindings for intermediate expressions.
+- Explicit nulls: `nothing` is SQL NULL, `just` lifts a non-null value, and the right side of a left join and aggregates like `sum` are `maybe`.
 - Multi-way conditionals: `case { cond => value; ...; true => default }`, which compiles to one searched `CASE`.
 - Modules via `import "file.cagara"`, plus a standard library written in Cagara (`prelude.cagara`).
 - ANSI SQL by default, with dialect support and test coverage described in [`docs/SQL-DIALECTS.md`](docs/SQL-DIALECTS.md).
-- A file's entry point is the definition named `main`, and that is the one statement `cagara` prints; a file without one is a library and prints nothing.
+- A file's entry point is the definition named `main`, which must be a query and is the one statement `cagara` prints; a file without one is a library and prints nothing.
 - A formatter (`cagara fmt`) and a language server (`cagara lsp`) with diagnostics, hover, go-to-definition and completion.
 
 Cagara is intentionally a query language rather than a general-purpose

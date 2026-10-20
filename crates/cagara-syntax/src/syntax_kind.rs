@@ -286,6 +286,10 @@ kind_table! {
         /// An unlexable character. A `"` also lands here, because no pattern
         /// claims it; the lexer recognises it and scans the literal itself.
         Error,
+
+        /// `let name = value in body`. `in` remains a contextual identifier
+        /// rather than a keyword, so the prelude's `in` alias is still usable.
+        LetKw #[token("let")],
     }
 
     nodes {
@@ -335,6 +339,8 @@ kind_table! {
         CaseArm,
         /// wraps unparseable input
         ErrorNode,
+        /// `let name = value in body`
+        LetExpr,
     }
 }
 
@@ -369,10 +375,10 @@ mod tests {
             AndAnd OrOr EqEq NotEq Diamond LtEq GtEq Lt Gt Plus Minus Star Slash Percent AmpOp Op \
             QuestionQuestion Question LtQuestion QuestionGt LtQuestionGt Dollar Bar LParen RParen \
             LBrace RBrace LBracket RBracket Comma Eq Colon Semicolon Field LeftField RightField \
-            Ident Int Float String UnterminatedString Error SourceFile ImportDecl \
+            Ident Int Float String UnterminatedString Error LetKw SourceFile ImportDecl \
             Definition TypeAnn TyApp TyRecord TyField TyFun TyParen TyStr Lambda BinExpr App \
             NegExpr ParenExpr RecordExpr RecordField ListExpr NameRef Literal FieldExpr ProjExpr \
-            SqlExpr PrimitiveExpr CaseExpr CaseArm ErrorNode";
+            SqlExpr PrimitiveExpr CaseExpr CaseArm ErrorNode LetExpr";
         let got: Vec<String> = ALL.iter().map(|k| format!("{k:?}")).collect();
         assert_eq!(got.join(" "), expected);
     }

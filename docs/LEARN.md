@@ -69,6 +69,11 @@ are helpers that build values for it; use `--only NAME` when you want to
 inspect one of them directly. A file without `main` is still checked, but it
 prints no SQL because it is a library.
 
+Definitions start in column 0; every continuation line is indented. An
+unindented continuation is parsed but reported as a layout error. A top-level
+`;` is an optional item terminator, useful when generated code cannot guarantee
+indentation; the formatter does not print it.
+
 ### Column references start with a dot
 
 `.name` means "the column `name` of the input row". This small syntax does a lot
@@ -293,6 +298,23 @@ t = orders & select {
 }
 ```
 
+### Local bindings
+
+`let name = value in body` names an intermediate value inside an expression.
+It is lexical, monomorphic, and inlined at compile time — no SQL stage is added:
+
+```haskell
+t = orders & select {
+  id = .id,
+  total = let base = .amount * 1.2 in base + 1.0,
+  doubled = let x = .id in x + x
+}
+```
+
+The binding cannot refer to itself (there is no `let rec`). Use a top-level
+definition instead when the helper must be polymorphic or shared between
+definitions; top-level definitions are generalized, local bindings are not.
+
 ### Operator precedence
 
 From tightest to loosest. The levels are fixed by the compiler; a larger number
@@ -428,6 +450,11 @@ the same function.
 `toDecimal 18 2 .amount` is `CAST(amount AS DECIMAL(18, 2))`. The language type
 stays `float` (there is no separate decimal scalar), but the SQL type is exact,
 which matters for money: binary floating point cannot represent it.
+
+`toInt` truncates a `float` toward zero in every dialect, and `toFloat` produces
+a 64-bit double; the backend casts to the matching SQL width (`BIGINT`,
+`DOUBLE PRECISION`/`DOUBLE`/`FLOAT`/`FLOAT64`) rather than a 32-bit
+`INT`/`FLOAT`. `toString` also accepts a `bool` and returns `"true"`/`"false"`.
 
 A cast that cannot be performed **fails the query**. Where the value may not be
 convertible — a `string` column holding a code, say — use the `try*` forms
@@ -761,6 +788,29 @@ non-null `int`. The filtered forms follow the same rule: `sumFilter`,
 `countOfFilter`, and `countDistinctFilter` are non-null `int`. See the next
 section.
 
+### Nullable aggregate inputs
+
+A column declared `maybe` is not accepted by `sum`, `avg`, `min`, `max`,
+`countOf`, or `countDistinct`: those signatures say non-null. The explicit
+spelling is a `*Maybe` helper, which passes the column straight to the SQL
+aggregate because SQL already skips `NULL`:
+
+```haskell
+q = t & agg {
+  total = coalesce 0 (sumMaybe .amount),
+  average = avgMaybe .amount,
+  n = countOfMaybe .code
+}
+```
+
+This is not the same as coalescing first. Over `[NULL, 5]`, `avgMaybe` is `5`,
+while `avg (coalesce 0 .amount)` is `2.5`; `minMaybe` over `[NULL, 5]` is `5`,
+while the coalesced form is `0`. Use `coalesce` when a missing value should
+count as a default; use `*Maybe` when SQL's null-skipping meaning is what you
+want. The value forms still return `maybe` for an all-`NULL` or empty input;
+the count forms return non-null `int`. There are no `*MaybeFilter` forms yet —
+filter the rows with `where` first, or combine the predicate and null test.
+
 ### Filtered aggregates
 
 A predicate on an aggregate's **input rows** is written with the `*Filter`
@@ -820,8 +870,10 @@ Where nullability comes from:
 | A column declared `maybe int` | reads as nullable |
 | The possibly-absent side of a left, right, or full join | its columns become `maybe` |
 | `sum`, `avg`, `min`, `max` and their `*Filter` forms | `maybe` |
+| `sumMaybe`, `avgMaybe`, `minMaybe`, `maxMaybe` | `maybe` |
 | `lag`, `lead`, `sumOver`, `avgOver` | `maybe` |
 | `count`, `countOf`, `countDistinct`, `countOver`; `countFilter`, `countOfFilter`, `countDistinctFilter` | non-null `int` |
+| `countOfMaybe`, `countDistinctMaybe` | non-null `int` |
 | `isNull`, `isNotNull`, `isTrue` | non-null `bool` |
 
 Handling nulls explicitly:
@@ -830,12 +882,18 @@ Handling nulls explicitly:
 |---|---|
 | `coalesce default x` | use `default` if `x` is `NULL` |
 | `x ?? default` | the same, infix (and it binds tighter than arithmetic) |
+| `nothing` | SQL `NULL` at any nullable type |
 | `just x` | mark a non-null value as nullable |
 | `nullIf x y` | return `NULL` when `x` equals `y` |
 | `isNull x` / `isNotNull x` | test for `NULL`, returning non-null `bool` |
 | `isTrue x` | treat a nullable boolean `NULL` as false |
 | `whereTrue p` | filter with a nullable predicate, treating `NULL` as false |
 | `eqMaybe x y` | compare nullable values, treating two `NULL`s as equal |
+
+`nothing` has type `maybe a`; a surrounding use fixes `a` (`coalesce 0 nothing`
+is `int`). A bare `x = nothing` projection remains `maybe a` until another use
+constrains it. `just x` is the opposite direction: it keeps `x` and only changes
+its type to `maybe`.
 
 The payoff is that the compiler refuses to let a `NULL` slip into a computation
 where it would silently poison the result:
@@ -859,23 +917,26 @@ t = u & leftJoin o (.<id == .>user_id) & select {.id, amt = coalesce 0.0 .amount
 ```
 
 `countOf` follows the same non-null rule even though SQL's `COUNT(x)` skips
-nulls. To count *matched* rows across a left join, use `countFilter` on the
-null-extended side: the synthetic row for an unmatched row fails the predicate,
-and the count stays non-null.
+nulls. Use `countOfMaybe` for that meaning: it counts matched rows across a
+left join, because the synthetic null-extended row has a `NULL` key:
 
 ```haskell
 matches = users
   & leftJoin orders (.<id == .>user_id)
-  & agg { id = group .id, n = countFilter (isNotNull .user_id) }
+  & agg { id = group .id, n = countOfMaybe .user_id }
 ```
 
-The same count without a filtered aggregate sums an indicator:
+The same count without a nullable helper sums an indicator:
 
 ```haskell
 matches = users
   & leftJoin orders (.<id == .>user_id)
   & agg { id = group .id, n = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0)) }
 ```
+
+The `*Maybe` value aggregates (`sumMaybe`, `avgMaybe`, `minMaybe`, `maxMaybe`)
+similarly preserve SQL's null-skipping semantics instead of treating a missing
+value as zero.
 
 For a full treatment, see the [nullability reference](NULLABILITY.md).
 
@@ -1270,6 +1331,15 @@ Expression types are written `expr r a` — an expression over row `r` producing
 You mostly will not write these yourself, but they appear in signatures and in
 error messages.
 
+A helper that reads a named column can still have a signature: name the fields
+it needs and use `| r` for the rest of the row. A bare `query r` says nothing
+about the row's fields, so it cannot be used for a column-reading helper:
+
+```haskell
+byId : expr { id = int | r } int -> query { id = int | r } -> query { id = int | r } =
+  i => q => where (.id == i) q
+```
+
 ### The prelude at a glance
 
 **Comparison and logic:** `==` `!=` `<` `<=` `>` `>=` `&&` `||` `not`
@@ -1287,10 +1357,21 @@ error messages.
 `truncDay` `truncHour` `truncMinute`; `year` `quarter` `month` `day`
 `dayOfWeek` `dayOfYear` `hour` `minute`; `daysBetween start end`
 
-**Nulls:** `coalesce` `??` `just` `nullIf` `isNull` `isNotNull` `isTrue`
+**Math:** `abs` `round` `roundTo digits x` `floor` `ceil` `sqrt`
+`power exponent base` `sign` `greatest a b` `least a b`
+
+**Aggregates:** `count` `countOf` `countDistinct` `sum` `avg` `min` `max`;
+`sumFilter` `avgFilter` `minFilter` `maxFilter` `countFilter` `countOfFilter`
+`countDistinctFilter`; nullable inputs use `sumMaybe` `avgMaybe` `minMaybe`
+`maxMaybe` `countOfMaybe` `countDistinctMaybe`
+
+**Nulls:** `nothing` `coalesce` `??` `just` `nullIf` `isNull` `isNotNull` `isTrue`
 `whereTrue` `eqMaybe`
 
-**Casts:** `toInt` `toFloat` `toBool` `toString` `toDecimal` `tryInt` `tryFloat` `tryDecimal` (`from*` spellings: `fromString`, `fromInt`, `fromFloat`)
+**Casts:** `toInt` `toFloat` `toBool` `toString` `toDecimal` `tryInt` `tryFloat` `tryDate` `tryTimestamp` `tryDecimal` (`from*` spellings: `fromString`, `fromInt`, `fromFloat`)
+
+**Windows:** `rowNumber` `rank` `denseRank` `lag` `lead` `sumOver` `avgOver`
+`countOver` `firstValue` `lastValue` `ntile spec n` `percentRank` `cumeDist`
 
 **Conditionals:** `ifThenElse` (alias `caseWhen`), `case { cond => value; ...; true => default }`
 
@@ -1810,8 +1891,10 @@ cagara lsp
 
 A file is compiled for its **entry point**, the definition named `main`:
 that is the one statement printed, so helpers do not bury the answer, and a
-module of table declarations does not dump its whole schema. `--only DEF`
-reads a different definition, which is how a helper is inspected.
+module of table declarations does not dump its whole schema. `main` must be a
+query; a scalar definition named `main` is an error rather than a silent
+no-output success. `--only DEF` reads a different definition of any type, which
+is how a helper is inspected.
 
 A file with no `main` is a library: it prints nothing and exits 0, because
 compiling it succeeded. It is still checked as a whole — a broken helper in a
@@ -1867,6 +1950,10 @@ common ones, with the fix:
 | `` `where` cannot filter on a window function `` | `select` the window, then filter the new column |
 | `type mismatch: expected int, found float` | convert explicitly with `toFloat` / `toInt` |
 | `only one side is nullable` | wrap with `coalesce`, or use `just` |
+| `expected a non-null value, found a \`maybe\`` | handle it; for an aggregate input use the `*Maybe` helper |
+| `a line starting with an identifier in column 0` | indent the continuation, or terminate the previous item with `;` |
+| `\`main\` must be a query` | make `main` a query, or omit it for a library |
+| `helper does not match its signature` | use a field-tail row: `query { id = int \| r }` |
 | `join predicates must say which input a column comes from` | use `.<x` / `.>x` |
 | `` `.<x` and `.>x` ... only be used in a join predicate `` | refer to `.x` on the joined row instead |
 | `sort and partition keys must be plain column expressions` | compute it in an earlier stage |

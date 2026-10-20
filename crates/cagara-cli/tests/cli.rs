@@ -155,6 +155,29 @@ fn offset_without_limit_is_spelled_per_dialect() {
 
 // ── output modes ──────────────────────────────────────────────────────────
 
+/// A scalar `main` used to compile cleanly and print nothing. It is now an
+/// error: a file's entry point is a query. `--only` can still inspect a scalar
+/// helper, and a library is still allowed to have no `main` at all.
+#[test]
+fn main_must_be_a_query() {
+    let dir = TempDir::new("main-scalar");
+    let f = dir.write("scalar.cagara", "main = 1\n");
+    let out = run(&f);
+    let err = stderr(&out);
+    assert!(!out.status.success(), "scalar main must fail:\n{err}");
+    assert!(
+        err.contains("`main` must be a query") && err.contains("int"),
+        "{err}"
+    );
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+
+    // A library without `main` remains a normal outcome.
+    let lib = dir.write("lib.cagara", "q = 1\n");
+    let out = run(&lib);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+}
+
 /// `--types` prints one `name : type` line per root definition.
 #[test]
 fn types_prints_inferred_types() {

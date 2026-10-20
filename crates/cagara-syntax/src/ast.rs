@@ -153,7 +153,7 @@ fn field_name(n: &SyntaxNode) -> Option<String> {
         .find(|t| {
             matches!(
                 t.kind(),
-                K::Ident | K::SqlKw | K::CaseKw | K::PrimitiveKw | K::ImportKw | K::AsKw
+                K::Ident | K::SqlKw | K::CaseKw | K::PrimitiveKw | K::ImportKw | K::AsKw | K::LetKw
             )
         })
         .map(|t| t.text().to_string())
@@ -468,6 +468,30 @@ impl Lower<'_> {
                     })
                     .collect();
                 ExprKind::Case(arms)
+            }
+            K::LetExpr => {
+                let name = token(n, K::Ident);
+                let mut cs = n.children();
+                match (name, cs.next(), cs.next()) {
+                    (Some(name), Some(value), Some(body)) => {
+                        let binding = name.text().to_string();
+                        let range = name.text_range();
+                        // The desugared lambda spans the binding name through
+                        // the end of the `let`, which is exactly the local
+                        // scope the LSP needs for hover, go-to-definition, and
+                        // completion.
+                        let lambda_span = Span {
+                            start: range.start().into(),
+                            end: sp.end,
+                        };
+                        let value = self.expr(&value);
+                        let body = self.expr(&body);
+                        let lambda =
+                            self.mk(lambda_span, ExprKind::Lambda(binding, Box::new(body)));
+                        ExprKind::App(Box::new(lambda), vec![value].into())
+                    }
+                    _ => ExprKind::Error,
+                }
             }
             K::SqlExpr => match token(n, K::String) {
                 Some(t) => ExprKind::Sql(unescape(t.text())),

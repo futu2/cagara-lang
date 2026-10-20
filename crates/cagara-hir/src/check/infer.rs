@@ -558,15 +558,8 @@ impl<'w> Checker<'w> {
     /// is flexible (a plain `expr` may be used at any phase).
     pub(crate) fn annotation(&mut self, t: &TypeExpr) -> Result<Ty, String> {
         let mut res = t;
-        let mut args = Vec::new();
-        while let TypeExpr::Fun(a, r) = res {
-            args.push(a.as_ref());
+        while let TypeExpr::Fun(_, r) = res {
             res = r;
-        }
-        if matches!(res, TypeExpr::App { head, .. } if head == "agg" || head == "win")
-            && args.iter().any(|a| contains_nullable_expr(a))
-        {
-            return Err("aggregate/window inputs cannot use `maybe`; use `coalesce` first".into());
         }
         // A plain `expr` result takes the phase of an `agg` / `win`
         // argument (a scalar template over an aggregate is an aggregate).

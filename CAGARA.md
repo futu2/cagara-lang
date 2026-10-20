@@ -24,9 +24,13 @@ Give this file to an agent as context, then ask for **one** `.cagara` file.
 ## 0. Contract: twelve rules that prevent most errors
 
 1. **A file is definitions only.** Each item is `name = expression`, optionally `name : type = expression`.
-   There are no statements, no `let`, no `return`, no top-level `;`.
-2. **Indentation is structural.** An identifier or `import` in **column 0** starts a new definition.
-   Indent every continuation line: record fields, list items, `case` arms, and row-type fields.
+   There are no statements and no `return`; local values use `let name = value in body` (§4.1.1).
+   A top-level `;` is an optional item terminator; it is not a statement separator inside an
+   expression.
+2. **Indentation is structural.** A definition header (`name =` or `name : type =`) in **column 0**
+   starts a new definition. A column-0 identifier that is not a header is treated as a
+   continuation and reported as a layout error. Indent every continuation line: record fields,
+   list items, `case` arms, and row-type fields.
 3. **Every table has a closed row annotation.**
    `users : query { id = int, name = string } = table "public" "users"`.
 4. **`.col` reads the current row. A bare `name` is a definition, never a column.**
@@ -44,8 +48,8 @@ Give this file to an agent as context, then ask for **one** `.cagara` file.
 10. **Set operations require identical rows:** same names, same order, same types.
 11. **`[..]` is a fixed key list, not a general list value.** It is valid as `order` keys, a window
     spec's `partition`/`order`, and `inList` members. Nowhere else.
-12. **`main` is the entry point and should be a `query`.** A scalar `main = 1` compiles but
-    prints no SQL, so make `main` a query when you want output.
+12. **`main` is the entry point and must be a `query`.** A scalar `main = 1` is rejected; omit
+    `main` if the file is a library. `--only name` can still compile another definition.
 
 If code can be executed, run `cagara file.cagara` before answering. Diagnostics are specific; §11
 maps each common one to its fix.
@@ -74,7 +78,9 @@ main = adults
 
 ### 1.1 Layout rule
 
-The parser ends a definition at the next `ident` or `import` that begins in **column 0**. Therefore:
+The parser ends a definition at the next **definition header** in **column 0**: `name =` or
+`name : type =`. An identifier in column 0 that is not a header is treated as a continuation and
+reported as a layout error, so a missing indent is recoverable but still an error. Therefore:
 
 ```text
 main = users
@@ -88,15 +94,25 @@ main = users
 
 ```text
 main = users
-where (.age > 18)            # WRONG: `where` in column 0 starts a new definition
+where (.age > 18)            # WRONG: layout error; `where` is not a definition header
 ```
 
 ```text
 main =
-users                        # WRONG: body starts in column 0
+users                        # WRONG: layout error; indent the body
 ```
 
-This applies inside brackets too. Indent record fields, list elements, `case` arms, and type fields:
+A top-level `;` may terminate an item. This is the robust spelling for generated code when a
+continuation might land in column 0:
+
+```text
+main = users
+  & where (.age > 18);
+next = ...
+```
+
+The formatter does not print the terminator. This applies inside brackets too. Indent record fields,
+list elements, `case` arms, and type fields:
 
 ```cagara
 users : query { id = int, name = string, age = int } =
@@ -108,8 +124,8 @@ main = users & select {
   }
 ```
 
-Trailing commas are allowed in records, lists, and row types. A `;` is used **only** between `case`
-arms.
+Trailing commas are allowed in records, lists, and row types. Inside `case`, `;` separates arms;
+at top level it is only the optional item terminator.
 
 ### 1.2 Definitions, annotations, overloading
 
@@ -129,22 +145,27 @@ main = users & select { .id, next = addOne .age }
 - A name defined more than once must have a type signature on **every** definition; that is
   overloading (§4.7). Duplicate unannotated definitions are an error.
 - Definitions without signatures are inferred and may be polymorphic. A helper that reads a named
-  column must **not** be annotated with an open `query r` row; either omit the signature or write a
-  closed row. This fails:
+  column needs that column in its row annotation. A bare `query r` says nothing about the row's
+  fields, so it cannot be used; name the fields it needs and let `| r` stand for the rest:
 
 ```text
-byId : query r -> expr r int -> query r = i => q => where (.id == i) q
-# error: `byId` does not match its signature: no column `id`
+byId : expr r int -> query r -> query r = i => q => where (.id == i) q
+# error: `byId` does not match its signature; `r`'s fields are unknown
 ```
 
-Use this instead:
+Use a field tail instead:
 
 ```cagara
 users : query { id = int, name = string } = table "public" "users"
 
-byId = i => q => where (.id == i) q
+byId : expr { id = int | r } int -> query { id = int | r } -> query { id = int | r } =
+  i => q => where (.id == i) q
+
 main = users & byId 3
 ```
+
+The row `{ id = int | r }` means “a row with an `int` column `id`, and possibly more”; call sites
+instantiate `r` with the rest of the caller's row.
 
 ### 1.3 Imports
 
@@ -163,8 +184,9 @@ Recommended style: always use `as`, and keep table declarations in one `schema.c
 
 ### 1.4 Modules and entry points
 
-`cagara file.cagara` compiles the definition named `main`. `--only name` compiles another definition.
-A file with no `main` is a library: it is still checked, but prints nothing and exits 0.
+`cagara file.cagara` compiles the definition named `main`, which must be a `query`. `--only name`
+compiles another definition of any type. A file with no `main` is a library: it is still checked,
+but prints nothing and exits 0.
 
 ---
 
@@ -182,9 +204,10 @@ qualified   := name '.' name               e.g. schema.users  (no space around t
 ```
 
 Names are case-sensitive. A column name must match `[A-Za-z_][A-Za-z0-9_]*`; quoted column names are
-not representable. `import`, `as`, `sql`, `primitive`, and `case` are keywords only where a keyword
-is expected; they are legal field names (`.case`, `{ case = int }`). `true` and `false` are boolean
-literals, not names.
+not representable. `import`, `as`, `sql`, `primitive`, `case`, and `let` are keywords only where a
+keyword is expected; they are legal field names (`.case`, `{ case = int }`). `in` is a contextual
+identifier: it ends a `let` binding's value, but remains the prelude's `inList` alias elsewhere.
+`true` and `false` are boolean literals, not names.
 
 ### 2.2 Literals
 
@@ -196,8 +219,8 @@ literals, not names.
 | `"text"` | `string` | must close on the same line |
 | `true`, `false` | `bool` | lowercase |
 
-Strings understand `\n`, `\t`, `\\`, `\"`. Any other `\x` is kept literally. There is no `NULL`
-literal, no multiline string, and no interpolation.
+Strings understand `\n`, `\t`, `\\`, `\"`. Any other `\x` is kept literally. There is no SQL
+`NULL` literal; use `nothing` (§7.5). There are no multiline strings and no interpolation.
 
 Negative numbers use unary `-`, which is part of the expression grammar. When a negative number is a
 function argument, parenthesize it:
@@ -214,7 +237,7 @@ main = orders & select { .id, week_ago = addDays (-7) .d }
 
 ```text
 file        := item*
-item        := import | definition
+item        := (import | definition) ';'?
 import      := 'import' STRING ('as' IDENT)?
 definition  := IDENT (':' type)? '=' expr
 
@@ -223,8 +246,9 @@ ty_app      := IDENT ty_atom* | ty_atom
 ty_atom     := IDENT | STRING | '(' type ')' | '{' ty_field (',' ty_field)* ','? ('|' IDENT)? '}'
 ty_field    := field_name '=' type
 
-expr        := lambda | binary
+expr        := lambda | let_expr | binary
 lambda      := IDENT '=>' expr
+let_expr    := 'let' IDENT '=' expr 'in' expr
 binary      := unary (OP binary)?          -- precedence per §4.2
 unary       := '-' unary | application
 application := atom+
@@ -237,6 +261,7 @@ atom        := IDENT ('.' name)*
              | 'sql' STRING
              | 'primitive' STRING
              | 'case' '{' arm (';' arm)* ';'? '}'
+             | let_expr
 fields      := (IDENT '=' expr | '.' name) (',' ...)* ','?
 arm         := expr '=>' expr
 ```
@@ -318,6 +343,32 @@ byName = n => q => where (.name == n) q
 
 main = users & byName "ada" & select { .id, x = addOne .id, e = .name & clean }
 ```
+
+### 4.1.1 Local bindings
+
+`let name = value in body` names an intermediate expression. The binding is lexical and
+monomorphic, and it is inlined at compile time, so it adds no SQL stage:
+
+```cagara
+users : query { id = int, amount = float } = table "public" "users"
+
+main = users & select {
+    .id,
+    total = let base = .amount * 1.2 in base + 1.0,
+    doubled = let x = .id in x + x
+  }
+```
+
+The value is evaluated in the surrounding row/phase context. The body can use the name any number
+of times; a `let` cannot refer to itself (there is no `let rec`). Nested forms work:
+
+```text
+let x = 1 in let y = 2 in x + y
+```
+
+Because the binding is monomorphic, a helper that must be used at two different types should stay a
+top-level definition (top-level definitions are generalized). Use `let` for intermediate values and
+for keeping a computation in one projection.
 
 ### 4.2 Operators and precedence
 
@@ -413,14 +464,16 @@ Casts are named by their destination and are explicit:
 | `toInt x` | `float`, `string` | `int` |
 | `toFloat x` | `int`, `string` | `float` |
 | `toBool x` | `int`, `float` | `bool` |
-| `toString x` | `int`, `float`, `date`, `timestamp` | `string` |
+| `toString x` | `int`, `float`, `date`, `timestamp`, `bool` | `string` |
 | `toDate x` | `timestamp`, `string` | `date` |
 | `toTimestamp x` | `date`, `string` | `timestamp` |
 | `toDecimal p s x` | `int`, `float`, `string` | `float` (SQL `DECIMAL(p,s)`) |
 | `tryInt x`, `tryFloat x` | `string` | `maybe int` / `maybe float` |
+| `tryDate x`, `tryTimestamp x` | `string` | `maybe date` / `maybe timestamp` |
 | `tryDecimal p s x` | `string` | `maybe float` |
 
-`try*` returns `maybe`; handle it (`coalesce 0 (tryInt .code)`). SQLite has no `TRY_CAST`; a `try*`
+`toInt` truncates a `float` toward zero; `toFloat` produces a 64-bit double. `try*` returns `maybe`;
+handle it (`coalesce 0 (tryInt .code)`). SQLite has no `TRY_CAST`; a `try*`
 cast is not portable there. `fromString`/`fromInt`/`fromFloat` are alternative spellings of the
 `to*` functions, named by source; `fromString` is overloaded and often ambiguous.
 
@@ -567,6 +620,8 @@ Rules:
 - Aggregates belong only in `agg`; `select { x = sum .amount }` fails.
 - A later `agg` may aggregate the previous `agg`'s output; that is a separate stage, not nesting.
 - `sum`, `avg`, `min`, `max` return `maybe`. `count`, `countOf`, `countDistinct` return `int`.
+- A nullable column uses `sumMaybe`/`avgMaybe`/`minMaybe`/`maxMaybe` or
+  `countOfMaybe`/`countDistinctMaybe`; coalescing first changes `avg`/`min`/`max`.
 - Filtered aggregates apply a predicate to one aggregate's input rows:
   `paid = sumFilter (.status == "paid") .amount`, `n = countFilter (.status == "paid")`.
   The predicate is a non-null row-phase `bool` with no aggregate or window. The
@@ -690,8 +745,8 @@ after the join refer to `.x`, which follows the left-wins rule.
 
 Filtering the nullable side is a semantic choice. `where (isNotNull .amount)` drops the unmatched
 rows; omit it to keep them. A comparison such as `where (.amount > 0.0)` is a type error until the
-value is handled (`coalesce`, `isNull`). Do not use `countOf` on the nullable side to count matches;
-the nullable argument is rejected. Sum an indicator instead:
+value is handled (`coalesce`, `isNull`). `countOf` rejects a nullable argument, but `countOfMaybe`
+is SQL `COUNT(x)` over the null-extended side: it counts matched rows and is never NULL:
 
 ```cagara
 users : query { id = int } = table "public" "users"
@@ -701,7 +756,7 @@ main = users
   & leftJoin orders (.<id == .>user_id)
   & agg {
       id = group .id,
-      matched = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0))
+      matched = countOfMaybe .user_id
     }
 ```
 
@@ -806,8 +861,10 @@ Where `maybe` comes from:
 | column declared `maybe` | `maybe` |
 | nullable side of left/right/full join | that side's columns `maybe` |
 | `sum`, `avg`, `min`, `max` and their `*Filter` forms | `maybe` (empty/all-null input) |
+| `sumMaybe`, `avgMaybe`, `minMaybe`, `maxMaybe` | `maybe` (empty/all-null input) |
 | `lag`, `lead`, `sumOver`, `avgOver` | `maybe` |
 | `count`, `countOf`, `countDistinct`, `countOver`; `countFilter`, `countOfFilter`, `countDistinctFilter` | non-null `int` |
+| `countOfMaybe`, `countDistinctMaybe` | non-null `int` |
 | `isNull`, `isNotNull`, `isTrue` | non-null `bool` |
 | `try*` casts | `maybe` |
 
@@ -817,12 +874,14 @@ Handling:
 |---|---|
 | `coalesce default x` | use `default` if `x` is NULL |
 | `x ?? default` | the same, infix |
-| `just x` | treat non-null `x` as nullable |
+| `nothing` | SQL NULL at any `maybe` type |
+| `just x` | treat non-null `x` as nullable (does not create NULL) |
 | `nullIf x y` | NULL when `x == y` |
 | `isNull x`, `isNotNull x` | tests, non-null `bool` |
 | `isTrue x` | nullable bool, NULL becomes false |
 | `whereTrue p` | filter with a nullable predicate |
 | `eqMaybe x y` | nullable equality; two NULLs are equal |
+| `sumMaybe x`, `avgMaybe x`, ... | aggregate a nullable input with SQL's null-skipping semantics |
 
 Examples:
 
@@ -834,13 +893,15 @@ main = users
   & leftJoin orders (.<id == .>user_id)
   & agg {
       id = group .id,
-      total = coalesce 0.0 (sum (coalesce 0.0 .amount)),
-      n = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0))
+      total = coalesce 0.0 (sumMaybe .amount),
+      n = countOfMaybe .user_id
     }
 ```
 
-`countOf .maybe_column` is rejected because its argument must be non-null. To count matches across a
-left join, sum an indicator over the nullable side, as above.
+`countOf .maybe_column` is rejected because its argument must be non-null. Use `countOfMaybe` for
+SQL `COUNT(x)` (NULLs skipped), or sum an indicator over the nullable side. `sumMaybe`/`avgMaybe`
+pass the nullable input straight through, so `avgMaybe` does not count a missing value as zero the
+way `avg (coalesce 0 .x)` would.
 
 A nullable value also cannot be a sort key or a group key. Wrap it first:
 
@@ -867,7 +928,7 @@ main = accounts
       name = group .name,
       deposits = coalesce 0.0 (sum (ifThenElse (coalesce "" .kind == "deposit") (coalesce 0.0 .amount) 0.0)),
       withdrawals = coalesce 0.0 (sum (ifThenElse (coalesce "" .kind == "withdrawal") (coalesce 0.0 .amount) 0.0)),
-      n = coalesce 0 (sum (ifThenElse (isNotNull .account_id) 1 0))
+      n = countOfMaybe .account_id
     }
 ```
 
@@ -916,6 +977,15 @@ strpos                 : expr r string -> expr r string -> expr r int
 contains               : expr r string -> expr r string -> expr r bool
 startsWith endsWith    : expr r string -> expr r string -> expr r bool
 like ilike             : expr r string -> expr r string -> expr r bool
+
+abs                    : expr r int|float -> same
+round                  : expr r float -> expr r float
+roundTo                : expr r int -> expr r float -> expr r float
+floor ceil             : expr r float -> expr r float
+sqrt                   : expr r float -> expr r float
+power                  : expr r float -> expr r float -> expr r float
+sign                   : expr r int|float -> same
+greatest least         : expr r a -> expr r a -> expr r a     (two arguments)
 ```
 
 Argument order is subject-last, which is the reverse of the SQL spelling:
@@ -930,6 +1000,8 @@ Argument order is subject-last, which is the reverse of the SQL spelling:
 | `contains sub s` | plain substring test | `STRPOS(s, sub) > 0` |
 | `like pattern s` | SQL `LIKE` | `s LIKE pattern` |
 | `concat a b` / `a <> b` | concatenation | `a \|\| b` |
+| `roundTo digits x` | round to `digits` places | `ROUND(x, digits)` |
+| `power exponent base` | `base` raised to `exponent` | `POW(base, exponent)` (`POWER` where the dialect needs it) |
 
 Positions and lengths are 1-based. `contains`/`startsWith`/`endsWith` treat `%` and `_` literally;
 `like` does not. `length` counts characters, including trailing spaces.
@@ -952,12 +1024,14 @@ main = orders & select {
 toInt        : expr r float|string -> expr r int
 toFloat      : expr r int|string -> expr r float
 toBool       : expr r int|float -> expr r bool
-toString     : expr r int|float|date|timestamp -> expr r string
+toString     : expr r int|float|date|timestamp|bool -> expr r string
 toDate       : expr r timestamp|string -> expr r date
 toTimestamp  : expr r date|string -> expr r timestamp
 toDecimal    : expr r int -> expr r int -> expr r string|int|float -> expr r float
 tryInt       : expr r string -> expr r (maybe int)
 tryFloat     : expr r string -> expr r (maybe float)
+tryDate      : expr r string -> expr r (maybe date)
+tryTimestamp : expr r string -> expr r (maybe timestamp)
 tryDecimal   : expr r int -> expr r int -> expr r string -> expr r (maybe float)
 fromString   : expr r string -> expr r int|float|date     (overloaded; may be ambiguous)
 fromInt      : expr r int -> expr r float
@@ -965,6 +1039,8 @@ fromFloat    : expr r float -> expr r int
 ```
 
 `toDecimal 18 2 .amount` emits `CAST(amount AS DECIMAL(18, 2))`; the language type stays `float`.
+`toInt` of a `float` truncates toward zero in every dialect, and `toFloat` is a 64-bit double;
+the backend casts to the matching SQL width rather than a 32-bit `INT`/`FLOAT`.
 
 ### 7.4 Dates and timestamps
 
@@ -1017,6 +1093,7 @@ main = orders & select {
 ```text
 coalesce   : expr r a -> expr r (maybe a) -> expr r a
 ??         : expr r (maybe a) -> expr r a -> expr r a
+nothing    : expr r (maybe a)
 just       : expr r a -> expr r (maybe a)
 nullIf     : expr r a -> expr r a -> expr r (maybe a)
 isNull     : expr r (maybe a) -> expr r bool
@@ -1028,6 +1105,15 @@ eqMaybe    : expr r (maybe a) -> expr r (maybe a) -> expr r bool
 
 `coalesce` takes the default **first**; `??` takes the value first: `coalesce 0 .score` and
 `.score ?? 0` mean the same. `coalesce` requires a `maybe` input; do not wrap a non-null value in it.
+
+`nothing` is SQL `NULL` at any nullable type; `just x` marks a non-null `x` as nullable and emits
+`x`. A value also becomes `NULL` through a nullable column, an outer join, `nullIf`, a `try*` cast,
+or an aggregate/window with no value. In particular, `just 1` still emits `1`, while
+`nothing` emits `NULL`.
+
+`nothing` has type `maybe a`; a surrounding context fixes `a` (`coalesce 0 nothing` is `int`,
+`isNull nothing` is legal anywhere). A bare projection such as `n = nothing` stays `maybe a` until
+another use constrains it.
 
 ### 7.6 Aggregates (only in `agg`)
 
@@ -1041,6 +1127,13 @@ sum            : expr r float -> agg (expr r (maybe float))
 avg            : expr r int|float -> agg (expr r (maybe float))
 min max        : expr r a -> agg (expr r (maybe a))
 
+sumMaybe       : expr r (maybe int) -> agg (expr r (maybe int))
+sumMaybe       : expr r (maybe float) -> agg (expr r (maybe float))
+avgMaybe       : expr r (maybe int|float) -> agg (expr r (maybe float))
+minMaybe maxMaybe : expr r (maybe a) -> agg (expr r (maybe a))
+countOfMaybe   : expr r (maybe a) -> agg (expr r int)
+countDistinctMaybe : expr r (maybe a) -> agg (expr r int)
+
 countFilter          : expr r bool -> agg (expr r int)
 countOfFilter        : expr r bool -> expr r a -> agg (expr r int)
 countDistinctFilter  : expr r bool -> expr r a -> agg (expr r int)
@@ -1053,6 +1146,12 @@ minFilter maxFilter : expr r bool -> expr r a -> agg (expr r (maybe a))
 
 `count` is a value, not a call: write `n = count`, not `count ()`. `sum`/`avg`/`min`/`max` return
 `maybe`; `coalesce 0 (sum .x)` makes a number. `countOf`/`countDistinct` require non-null input.
+
+The `*Maybe` forms are the explicit spelling for a nullable input. SQL's aggregates skip `NULL`
+already, so they pass the column straight through: `sumMaybe .x` emits `SUM(x)`, not
+`SUM(COALESCE(x, 0))`. This matters for `avg`/`min`/`max`: over `[NULL, 5]`, `avgMaybe` is `5`,
+while `avg (coalesce 0 .x)` is `2.5`. `countOfMaybe`/`countDistinctMaybe` are `COUNT(x)` and
+`COUNT(DISTINCT x)`. For an all-NULL or empty input the value aggregates are still `maybe`.
 
 The `*Filter` forms take a non-null row-phase `bool` predicate first and apply it to that
 aggregate's input rows, so `sumFilter p .x` means `SUM(x) FILTER (WHERE p)` (compiled to the
@@ -1077,6 +1176,9 @@ sumOver                  : winspec r -> expr r int -> win (expr r (maybe int))
 sumOver                  : winspec r -> expr r float -> win (expr r (maybe float))
 avgOver                  : winspec r -> expr r int|float -> win (expr r (maybe float))
 countOver                : winspec r -> win (expr r int)
+firstValue lastValue     : winspec r -> expr r a -> win (expr r (maybe a))
+ntile                    : winspec r -> expr r int -> win (expr r int)
+percentRank cumeDist     : winspec r -> win (expr r float)
 
 rows                     : bound -> bound -> frame
 unboundedPreceding       : bound
@@ -1100,7 +1202,8 @@ main = orders & select {
 
 A frame is not a spec: `lag wholePartition .amount` is wrong; write
 `lag {frame = wholePartition} .amount`. A spec is a record, not a list: `rowNumber [asc .id]` is
-wrong; write `rowNumber {order = [asc .id]}`.
+wrong; write `rowNumber {order = [asc .id]}`. The spec comes first: `ntile {order = [asc .id]} 4`,
+not `ntile 4 {order = [asc .id]}`.
 
 ---
 
@@ -1217,6 +1320,8 @@ Use this to map a request, not to write SQL.
 | `COUNT(*) FILTER (WHERE p)` | `countFilter p` |
 | `COUNT(x) FILTER (WHERE p)` | `countOfFilter p .x` |
 | `COUNT(DISTINCT x) FILTER (WHERE p)` | `countDistinctFilter p .x` |
+| `COUNT(x)` where `x` is `maybe` | `countOfMaybe .x` |
+| `SUM/AVG/MIN/MAX(x)` where `x` is `maybe` | `sumMaybe`/`avgMaybe`/`minMaybe`/`maxMaybe` |
 | `COALESCE(x, 0)` | `coalesce 0 .x` or `.x ?? 0` |
 | `CASE WHEN c THEN a ELSE b END` | `ifThenElse c a b` |
 | `CASE WHEN ... WHEN ... ELSE ... END` | `case { c1 => v1; c2 => v2; true => v3 }` |
@@ -1240,7 +1345,8 @@ If a request needs one of these, say so or write a `sql` template; do not guess 
   and `agg` are functions/stages, not clauses.
 - **Operators:** words `AND`, `OR`, `NOT`; `=` for equality (use `==`); `<>` for inequality (it is
   concatenation); `\|\|` for concatenation (it is boolean or); `!`; `^` as power.
-- **Values:** `NULL`, uppercase `TRUE`/`FALSE`, `INTERVAL`, `DATE '...'`, single-quoted strings.
+- **Values:** `NULL` (use `nothing`), uppercase `TRUE`/`FALSE`, `INTERVAL`, `DATE '...'`,
+  single-quoted strings.
 - **Casts:** `CAST(x AS t)`; use `toInt`/`toFloat`/`toString`/`toDate`/`toTimestamp`.
 - **Predicates:** infix `BETWEEN`, `IS NULL`, `LIKE`, `IN (SELECT ...)`, `EXISTS`. Use two
   comparisons, `isNull`, `like`, `semiJoin`, `antiJoin`.
@@ -1249,13 +1355,12 @@ If a request needs one of these, say so or write a `sql` template; do not guess 
 - **Aggregation:** `HAVING` (use `where` after `agg`), `GROUPING SETS`, `DISTINCT ON`, `QUALIFY`.
   SQL's `FILTER (WHERE ...)` clause is not syntax; use the `*Filter` helpers
   (`sumFilter`, `countFilter`, ...) or spell `CASE` in a custom aggregate template.
-- **Functions not in §7:** math (`abs`, `round`, `floor`, `ceil`, `sqrt`, `power`, `random`), more
-  aggregates (`median`, `stddev`, `string_agg`, `array_agg`, `bool_and`), more windows
-  (`first_value`, `last_value`, `ntile`, `percent_rank`, `cume_dist`), `split`, `regexp_*`.
-  These may be added as `sql` templates, but only with a signature.
-- **Language features:** user types, record values as data, arrays/maps, `let`, `if` statements,
-  loops, exceptions, parameters, multiple statements, DDL/DML (`INSERT`, `UPDATE`, `DELETE`,
-  `CREATE`), `infixl`/`infixr`, user-defined operators.
+- **Functions not in §7:** `random`, more aggregates (`median`, `stddev`, `string_agg`,
+  `array_agg`, `bool_and`/`bool_or`), `split`, `regexp_*`. These may be added as `sql` templates,
+  but only with a signature.
+- **Language features:** user types, record values as data, arrays/maps, `if` statements, loops,
+  exceptions, parameters, multiple statements, DDL/DML (`INSERT`, `UPDATE`, `DELETE`, `CREATE`),
+  `infixl`/`infixr`, user-defined operators.
 - **Escaping:** string interpolation, raw multiline strings, backslash line continuation.
 
 ---
@@ -1311,8 +1416,8 @@ report = users
   & agg {
       id = group .id,
       name = group .name,
-      total = coalesce 0.0 (sum (coalesce 0.0 .amount)),
-      matched = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0))
+      total = coalesce 0.0 (sumMaybe .amount),
+      matched = countOfMaybe .user_id
     }
   & order [desc .total]
 
@@ -1436,7 +1541,7 @@ The compiler names the column and often the fix. Match the wording, then apply t
 | `uses a column that is not grouped; wrap it in \`group\` or aggregate it` | bare column in `agg` | `x = group .x` or aggregate it |
 | `this argument contains an aggregate; aggregates cannot nest` | `sum (sum .x)` | aggregate in an earlier `agg` stage |
 | `field \`x\` is an aggregate; aggregates belong in \`agg\`, not \`select\`` | aggregate in `select`/`update` | move it into `agg` |
-| `expected a non-null value, found a \`maybe\`` | operator/aggregate/predicate on nullable | `coalesce`, `??`, `isNull`, `isTrue`, `whereTrue` |
+| `expected a non-null value, found a \`maybe\`` | operator/aggregate/predicate on nullable | `coalesce`, `??`, `isNull`, `isTrue`, `whereTrue`; for an aggregate input use a `*Maybe` helper |
 | `only one side is nullable: \`coalesce default x\` takes a \`maybe\`` | `coalesce`/`just` mismatch | `coalesce` only on `maybe`; `just` to add maybe |
 | `join predicates must say which input a column comes from` | plain `.x` in a join predicate | `.<x` / `.>x` |
 | `\`.<x\` and \`.>x\` ... only be used in a join predicate` | side field after the join | use `.x` on the output row |
@@ -1447,7 +1552,7 @@ The compiler names the column and often the fix. Match the wording, then apply t
 | `select needs at least one field` / `agg needs at least one field` | empty record | list at least one field |
 | `field \`a\` appears twice` | duplicate field name | rename one |
 | `a \`case\` must end with a default arm, written \`true => value\`` | no default | append `true => value` |
-| `unknown name \`null\`` | SQL NULL literal | use `just`/`coalesce`/`nullIf` |
+| `unknown name \`null\`` | SQL NULL literal | use `nothing` |
 | `integer literal is too large (the limit is 9223372036854775807)` | overflow | use a smaller literal |
 | `needs a type signature: a \`sql\` template...` | template without signature | add `name : expr r a -> expr r b` |
 | `template uses placeholders up to $2 but its signature has 1 ...` | placeholder/arity mismatch | number placeholders `$1..$n` exactly |
@@ -1457,7 +1562,9 @@ The compiler names the column and often the fix. Match the wording, then apply t
 | `type mismatch: expected int, found float` | int/float mix | `toInt` / `toFloat` |
 | `cannot apply a value of type int to an argument` | juxtaposition of non-functions (e.g. `1e3`) | use a correct literal/function |
 | `field \`x\` of \`select\` must be a column expression or constant, found list int` | list as a value | lists are only keys/`inList` |
-| `\`byId\` does not match its signature: no column \`id\`` | open `query r` annotation on a column-reading helper | omit the signature or use a closed row |
+| `\`byId\` does not match its signature` | bare `query r` annotation on a column-reading helper | name the field: `query { id = int \| r }` |
+| `\`main\` must be a query, found ...` | scalar definition named `main` | make `main` a query, or omit it for a library |
+| `a line starting with an identifier in column 0 begins a new definition` | unindented continuation | indent the line, or terminate the previous item with `;` |
 | `unknown name \`_&_\`` | prelude disabled | remove `# no prelude` or define your own |
 
 Two habits prevent the rest: give every table an accurate closed annotation, and ask **which phase**
@@ -1470,15 +1577,18 @@ one stage earlier.
 
 Run this in order before returning a file.
 
-1. **Layout:** every definition starts in column 0; every continuation line is indented; no stray
-   top-level `;`.
+1. **Layout:** every definition header starts in column 0; every continuation line is indented, or
+   the item ends with `;`. A column-0 identifier that is not a header is a layout error.
 2. **Tables:** each `table` definition has a closed `query { ... }` annotation.
 3. **Entry point:** `main` exists and is a query (or the file is intentionally a library).
-4. **Columns:** every `.x` is a column of the row at that point; no bare column names.
+4. **Columns:** every `.x` is a column of the row at that point; no bare column names. Local `let`
+   bindings are lexical and cannot refer to themselves.
 5. **Row changes:** `select` (replace) vs `update` (merge) vs `omit` (drop) chosen deliberately.
 6. **Aggregation:** aggregates only in `agg`; every non-`group` field is an aggregate or constant;
    no nested aggregates; `sum`/`avg`/`min`/`max` and their `*Filter` forms wrapped in `coalesce`
-   when a non-null is needed; filtered aggregates use the helpers, not `ifThenElse` with `ELSE 0`.
+   when a non-null is needed; a nullable aggregate input uses the `*Maybe` form (not `coalesce`,
+   which changes `avg`/`min`/`max`); filtered aggregates use the helpers, not `ifThenElse` with
+   `ELSE 0`.
 7. **Windows:** only in `select`/`update` fields; filter/sort on the named column in a later stage.
 8. **Nulls:** predicates and operators see non-null values; every `maybe` is handled.
 9. **Joins:** predicate uses `.<` and `.>`; both columns exist on the correct sides; output

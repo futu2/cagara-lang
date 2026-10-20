@@ -14,6 +14,9 @@
 //! | `CAGARA_DAYS_BETWEEN(a, b)`         | whole days from date `a` to date `b`      |
 //! | `CAGARA_NOW()`                      | current timestamp                         |
 //! | `CAGARA_TO_DATE(x)` / `CAGARA_TO_TIMESTAMP(x)` / `CAGARA_TO_STRING(x)` | casts |
+//! | `CAGARA_TO_INT(x)` / `CAGARA_TO_FLOAT(x)` | width-correct casts (64-bit) |
+//! | `CAGARA_TRUNC_INT(x)`              | truncate toward zero, then 64-bit int  |
+//! | `CAGARA_TRY_INT(x)` / `CAGARA_TRY_FLOAT(x)` | casts that yield NULL on failure |
 //! | `CAGARA_LEFT(s, n)` / `CAGARA_RIGHT(s, n)` | first / last `n` characters        |
 //! | `CAGARA_STRPOS(s, sub)`             | 1-based position of `sub` in `s`, 0 if absent |
 //! | `CAGARA_LENGTH(s)`                  | length in characters (trailing spaces count) |
@@ -142,13 +145,21 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
                 scale: num(2),
             },
         ),
+        // Widths follow the language: `int` is 64-bit, so a cast to it is
+        // `BIGINT`, not the 32-bit `INT` that PostgreSQL, MySQL, DuckDB and
+        // T-SQL would otherwise produce. `float` is an IEEE double, so the
+        // target is `DOUBLE PRECISION` / `DOUBLE` / `FLOAT` / `FLOAT64` as the
+        // engine spells it.
+        ("CAGARA_TO_INT", 1) => cast(a[0].clone(), DataType::BigInt),
+        ("CAGARA_TRUNC_INT", 1) => trunc_int(a[0].clone(), f),
+        ("CAGARA_TO_FLOAT", 1) => cast(a[0].clone(), float_type(f)),
         // `TRY_CAST` cannot be spelled as a template: sqlglot's parser reads
         // `TRY_CAST(x AS INT)` as `Cast`, dropping the "try" before the
         // backend ever sees it, so a template would silently become a hard
         // cast that fails on the first unparseable row. The node has to be
         // built here instead. SQLite has no equivalent; see `try_cast`.
-        ("CAGARA_TRY_INT", 1) => try_cast(a[0].clone(), DataType::Int),
-        ("CAGARA_TRY_FLOAT", 1) => try_cast(a[0].clone(), DataType::Float),
+        ("CAGARA_TRY_INT", 1) => try_cast(a[0].clone(), DataType::BigInt),
+        ("CAGARA_TRY_FLOAT", 1) => try_cast(a[0].clone(), float_type(f)),
         ("CAGARA_TRY_DATE", 1) => try_cast(a[0].clone(), DataType::Date),
         ("CAGARA_TRY_TIMESTAMP", 1) => try_cast(a[0].clone(), timestamp()),
         ("CAGARA_TRY_DECIMAL", 3) => try_cast(
@@ -582,6 +593,35 @@ fn timestamp() -> DataType {
     DataType::Timestamp {
         precision: None,
         with_tz: false,
+    }
+}
+
+/// The SQL type that holds an IEEE-754 double, in the target's spelling.
+///
+/// `FLOAT` is not that type everywhere: it is single precision on MySQL and
+/// DuckDB, and T-SQL spells the double as `FLOAT` rather than `DOUBLE`.
+fn float_type(f: Fam) -> DataType {
+    match f {
+        Fam::Ansi => DataType::UserDefined("DOUBLE PRECISION".into()),
+        Fam::Mysql | Fam::Sqlite | Fam::Duck | Fam::Snowflake | Fam::Trino | Fam::Spark => {
+            DataType::Double
+        }
+        Fam::Tsql => DataType::Float,
+        Fam::BigQuery => DataType::UserDefined("FLOAT64".into()),
+    }
+}
+
+/// Truncate toward zero, then convert to a 64-bit integer.
+///
+/// A plain cast is not portable: PostgreSQL and MySQL round when converting a
+/// float to an integer, while SQLite and T-SQL truncate. `TRUNC` (or MySQL's
+/// `TRUNCATE`) makes the result the same everywhere before the cast.
+fn trunc_int(e: Expr, f: Fam) -> Expr {
+    match f {
+        Fam::Mysql => cast(func("TRUNCATE", vec![e, n("0")]), DataType::BigInt),
+        // SQLite and T-SQL cast truncates toward zero already.
+        Fam::Sqlite | Fam::Tsql => cast(e, DataType::BigInt),
+        _ => cast(func("TRUNC", vec![e]), DataType::BigInt),
     }
 }
 

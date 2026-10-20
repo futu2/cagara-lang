@@ -362,7 +362,137 @@ fn distinct_case_cast_and_membership() {
         s.contains("CASE WHEN (id = 1) THEN 'yes' ELSE 'no' END"),
         "{s}"
     );
-    assert!(s.contains("CAST(id AS FLOAT) AS n"), "{s}");
+    assert!(s.contains("CAST(id AS DOUBLE PRECISION) AS n"), "{s}");
+}
+
+#[test]
+fn empty_membership_is_a_constant_false() {
+    let s = sql("q = users & where (inList [] .id)\n", "q");
+    assert!(s.contains("WHERE FALSE"), "{s}");
+    let tsql = dialect("q = users & where (inList [] .id)\n", "q", "tsql").unwrap();
+    assert!(tsql.contains("WHERE 1 = 0"), "{tsql}");
+}
+
+#[test]
+fn nullable_aggregates_keep_sql_null_semantics() {
+    let s = sql(
+        r#"nulls : query { x = maybe int } = table "public" "nulls"
+q = nulls & agg {
+  s = sumMaybe .x, a = avgMaybe .x, lo = minMaybe .x, hi = maxMaybe .x,
+  n = countOfMaybe .x, d = countDistinctMaybe .x
+}
+"#,
+        "q",
+    );
+    // Each helper passes the nullable column straight through: SQL already
+    // skips NULL in these aggregates. Coalescing first would change `avg`
+    // (and `min`/`max`) rather than merely satisfy the checker.
+    for expected in [
+        "SUM(x) AS s",
+        "AVG(x) AS a",
+        "MIN(x) AS lo",
+        "MAX(x) AS hi",
+        "COUNT(x) AS n",
+        "COUNT(DISTINCT x) AS d",
+    ] {
+        assert!(s.contains(expected), "missing `{expected}` in {s}");
+    }
+}
+
+#[test]
+fn casts_use_the_language_widths() {
+    let s = sql(
+        "q = users & select { i = toInt (toFloat .id), f = toFloat .id }\n",
+        "q",
+    );
+    assert!(s.contains("AS BIGINT"), "{s}");
+    assert!(s.contains("AS DOUBLE PRECISION"), "{s}");
+    assert!(!s.contains("AS INT)"), "{s}");
+    assert!(!s.contains("AS FLOAT)"), "{s}");
+}
+
+#[test]
+fn let_bindings_are_inlined() {
+    let s = sql(
+        "q = users & select { x = let y = .age in y + 1, z = let a = .age in let b = 2 in a + b }\n",
+        "q",
+    );
+    assert!(s.contains("age + 1 AS x"), "{s}");
+    assert!(s.contains("age + 2 AS z"), "{s}");
+    assert!(!s.contains("let"), "{s}");
+}
+
+#[test]
+fn nothing_is_sql_null() {
+    let s = sql(
+        "q = users & select { x = nothing, y = coalesce 0 nothing }\n",
+        "q",
+    );
+    assert!(s.contains("NULL AS x"), "{s}");
+    assert!(s.contains("COALESCE(NULL, 0) AS y"), "{s}");
+}
+
+#[test]
+fn full_join_is_rejected_for_mysql_family() {
+    let src = "q = orders & fullJoin users (.<user_id == .>id)\n";
+    let e = dialect(src, "q", "mysql").unwrap_err();
+    assert!(e.contains("`fullJoin`"), "{e}");
+    assert!(dialect(src, "q", "postgres").is_ok());
+}
+
+#[test]
+fn math_helpers_are_available() {
+    let s = sql(
+        r#"q = users & select {
+  a = abs .age, b = roundTo 2 (toFloat .age), c = floor (toFloat .age),
+  d = ceil (toFloat .age), e = sqrt (toFloat .age),
+  f = power 2 (toFloat .age), g = greatest .age 18, h = least .age 18,
+  i = toString .active
+}
+"#,
+        "q",
+    );
+    for expected in [
+        "ABS(age)",
+        "ROUND(CAST(age AS DOUBLE PRECISION), 2)",
+        "FLOOR(CAST(age AS DOUBLE PRECISION))",
+        "CEIL(CAST(age AS DOUBLE PRECISION))",
+        "SQRT(CAST(age AS DOUBLE PRECISION))",
+        "CASE WHEN age >= 18 THEN age ELSE 18 END",
+        "CASE WHEN active THEN 'true' ELSE 'false' END",
+    ] {
+        assert!(s.contains(expected), "missing `{expected}` in {s}");
+    }
+}
+
+#[test]
+fn analytic_and_try_date_helpers_are_available() {
+    let s = sql(
+        r#"q = users & select {
+  f = firstValue {order = [asc .id]} .name,
+  l = lastValue {order = [asc .id]} .name,
+  n = ntile {order = [asc .id]} 4,
+  p = percentRank {order = [asc .id]},
+  c = cumeDist {order = [asc .id]}
+}
+"#,
+        "q",
+    );
+    for expected in [
+        "FIRST_VALUE(name)",
+        "LAST_VALUE(name)",
+        "NTILE(4)",
+        "PERCENT_RANK()",
+        "CUME_DIST()",
+    ] {
+        assert!(s.contains(expected), "missing `{expected}` in {s}");
+    }
+    let casts = sql(
+        "q = users & select { d = tryDate .name, ts = tryTimestamp .name }\n",
+        "q",
+    );
+    assert!(casts.contains("TRY_CAST(name AS DATE)"), "{casts}");
+    assert!(casts.contains("TRY_CAST(name AS TIMESTAMP)"), "{casts}");
 }
 
 #[test]
@@ -2199,8 +2329,8 @@ fn try_cast_is_not_a_plain_cast() {
          q = t & select { v = tryInt .a }\n",
         "q",
     );
-    assert!(s.contains("TRY_CAST(a AS INT)"), "{s}");
-    assert!(!s.contains("SELECT CAST(a AS INT)"), "{s}");
+    assert!(s.contains("TRY_CAST(a AS BIGINT)"), "{s}");
+    assert!(!s.contains("SELECT CAST(a AS BIGINT)"), "{s}");
 }
 
 /// A cast that fails is worth failing on; a `try*` cast is not.
@@ -2216,5 +2346,8 @@ fn a_try_cast_yields_a_maybe() {
          q = t & select { v = coalesce 0 (tryInt .a) }\n",
         "q",
     );
-    assert!(s.contains("COALESCE((TRY_CAST(a AS INT)), 0) AS v"), "{s}");
+    assert!(
+        s.contains("COALESCE((TRY_CAST(a AS BIGINT)), 0) AS v"),
+        "{s}"
+    );
 }

@@ -232,7 +232,12 @@ _<?>_ : query s
 
 # ── aggregates (depth 1: arguments must be row expressions) ───────────────
 # Type variables in signatures are non-null; nullable inputs must be handled
-# explicitly with `coalesce`.
+# explicitly. The `*Maybe` forms are the explicit spelling for a nullable
+# aggregate input: SQL's own aggregate functions already skip NULLs, so these
+# pass the column through unchanged (`SUM(x)`, `COUNT(x)`) rather than
+# coalescing it first. That matters for `avg`/`min`/`max`, where a sentinel
+# would change the answer: over `[NULL, 5]`, `avgMaybe` is 5 while
+# `avg (coalesce 0 .x)` is 2.5.
 # `sum` / `avg` / `min` / `max` are NULL for an all-NULL or empty input, so
 # they return `maybe`: write `coalesce 0 (sum .x)` for a number.
 
@@ -245,6 +250,15 @@ avg : expr r int -> agg (expr r (maybe float)) = sql "AVG($1)"
 avg : expr r float -> agg (expr r (maybe float)) = sql "AVG($1)"
 min : expr r a -> agg (expr r (maybe a)) = sql "MIN($1)"
 max : expr r a -> agg (expr r (maybe a)) = sql "MAX($1)"
+
+sumMaybe : expr r (maybe int) -> agg (expr r (maybe int)) = sql "SUM($1)"
+sumMaybe : expr r (maybe float) -> agg (expr r (maybe float)) = sql "SUM($1)"
+avgMaybe : expr r (maybe int) -> agg (expr r (maybe float)) = sql "AVG($1)"
+avgMaybe : expr r (maybe float) -> agg (expr r (maybe float)) = sql "AVG($1)"
+minMaybe : expr r (maybe a) -> agg (expr r (maybe a)) = sql "MIN($1)"
+maxMaybe : expr r (maybe a) -> agg (expr r (maybe a)) = sql "MAX($1)"
+countOfMaybe : expr r (maybe a) -> agg (expr r int) = sql "COUNT($1)"
+countDistinctMaybe : expr r (maybe a) -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
 
 # Filtered aggregates apply a predicate to the aggregate's *input* rows, the
 # portable spelling of SQL's `agg(x) FILTER (WHERE p)`. The predicate is a
@@ -285,6 +299,14 @@ sumOver : winspec r -> expr r float -> win (expr r (maybe float)) = sql "SUM($1)
 avgOver : winspec r -> expr r int -> win (expr r (maybe float)) = sql "AVG($1)"
 avgOver : winspec r -> expr r float -> win (expr r (maybe float)) = sql "AVG($1)"
 countOver : winspec r -> win (expr r int) = sql "COUNT(*)"
+# `firstValue` / `lastValue` can be NULL when the frame is empty, so they
+# return `maybe`. `ntile spec buckets` numbers the partition's rows 1..n;
+# `percentRank` and `cumeDist` return a fraction in `float`.
+firstValue : winspec r -> expr r a -> win (expr r (maybe a)) = sql "FIRST_VALUE($1)"
+lastValue : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LAST_VALUE($1)"
+ntile : winspec r -> expr r int -> win (expr r int) = sql "NTILE($1)"
+percentRank : winspec r -> win (expr r float) = sql "PERCENT_RANK()"
+cumeDist : winspec r -> win (expr r float) = sql "CUME_DIST()"
 
 # ── window functions (depth 1) ────────────────────────────────────────────
 # spec = { partition = [..], order = [asc .x, desc .y], frame = .. }
@@ -373,21 +395,43 @@ startsWith : expr r string -> expr r string -> expr r bool =
 endsWith : expr r string -> expr r string -> expr r bool =
   sql "CAGARA_RIGHT($2, CAGARA_LENGTH($1)) = $1"
 
+# Math is scalar and non-null. `roundTo digits x` follows the subject-last
+# order: `roundTo 2 .amount`. `power exponent base` is the same order, so
+# `power 2` squares its argument. Engines round ties differently; `round`
+# leaves that to the target rather than pretending one rule is universal.
+abs : expr r int -> expr r int = sql "ABS($1)"
+abs : expr r float -> expr r float = sql "ABS($1)"
+round : expr r float -> expr r float = sql "ROUND($1)"
+roundTo : expr r int -> expr r float -> expr r float = sql "ROUND($2, $1)"
+floor : expr r float -> expr r float = sql "FLOOR($1)"
+ceil : expr r float -> expr r float = sql "CEILING($1)"
+sqrt : expr r float -> expr r float = sql "SQRT($1)"
+power : expr r float -> expr r float -> expr r float = sql "POWER($2, $1)"
+sign : expr r int -> expr r int = sql "SIGN($1)"
+sign : expr r float -> expr r float = sql "SIGN($1)"
+# Two-argument forms; SQLite has no GREATEST/LEAST, so the CASE spelling is
+# the portable one. Arguments are non-null, so no NULL has to be resolved.
+greatest : expr r a -> expr r a -> expr r a = sql "CASE WHEN $1 >= $2 THEN $1 ELSE $2 END"
+least : expr r a -> expr r a -> expr r a = sql "CASE WHEN $1 <= $2 THEN $1 ELSE $2 END"
+
 toString : expr r int -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r float -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r date -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r timestamp -> expr r string = sql "CAGARA_TO_STRING($1)"
+toString : expr r bool -> expr r string = sql "CASE WHEN $1 THEN 'true' ELSE 'false' END"
 
 # Casts are named for the type they produce. Overloading picks the one that
 # fits, so `toInt` applied to a `float` is a narrowing and `toInt` applied to a
 # `string` is a parse -- the same destination reached from different sources.
 #
-# `INT` and `INTEGER` are the same SQL type, so both spellings of the source
-# produce the same cast.
-toInt : expr r float -> expr r int = sql "CAST($1 AS INT)"
-toInt : expr r string -> expr r int = sql "CAST($1 AS INT)"
-toFloat : expr r int -> expr r float = sql "CAST($1 AS FLOAT)"
-toFloat : expr r string -> expr r float = sql "CAST($1 AS FLOAT)"
+# `toInt` of a float truncates toward zero, in every dialect; of a string it
+# parses an integer. `toFloat` produces a 64-bit IEEE double. The language's
+# `int` is 64-bit, so the backend casts to `BIGINT` rather than the 32-bit
+# `INT` some engines use for `CAST`.
+toInt : expr r float -> expr r int = sql "CAGARA_TRUNC_INT($1)"
+toInt : expr r string -> expr r int = sql "CAGARA_TO_INT($1)"
+toFloat : expr r int -> expr r float = sql "CAGARA_TO_FLOAT($1)"
+toFloat : expr r string -> expr r float = sql "CAGARA_TO_FLOAT($1)"
 toBool : expr r int -> expr r bool = sql "CAST($1 AS BOOLEAN)"
 toBool : expr r float -> expr r bool = sql "CAST($1 AS BOOLEAN)"
 
@@ -419,6 +463,8 @@ fromFloat : expr r float -> expr r int = toInt
 # somewhere: `coalesce 0 (tryInt .x)`.
 tryInt : expr r string -> expr r (maybe int) = sql "CAGARA_TRY_INT($1)"
 tryFloat : expr r string -> expr r (maybe float) = sql "CAGARA_TRY_FLOAT($1)"
+tryDate : expr r string -> expr r (maybe date) = sql "CAGARA_TRY_DATE($1)"
+tryTimestamp : expr r string -> expr r (maybe timestamp) = sql "CAGARA_TRY_TIMESTAMP($1)"
 tryDecimal : expr r int -> expr r int -> expr r string -> expr r (maybe float) =
   sql "CAGARA_TRY_DECIMAL($3, $1, $2)"
 
@@ -506,6 +552,9 @@ daysBetween : expr r date -> expr r date -> expr r int = sql "CAGARA_DAYS_BETWEE
 coalesce : expr r a -> expr r (maybe a) -> expr r a = sql "COALESCE($2, $1)"
 _??_ : expr r (maybe a) -> expr r a -> expr r a = sql "COALESCE($1, $2)"
 just : expr r a -> expr r (maybe a) = sql "$1"
+# `nothing` is a SQL NULL at any nullable type. `just x` lifts a non-null
+# value; it does not create NULL.
+nothing : expr r (maybe a) = sql "NULL"
 nullIf : expr r a -> expr r a -> expr r (maybe a) = sql "NULLIF($1, $2)"
 isNull : expr r (maybe a) -> expr r bool = sql "$1 IS NULL"
 isNotNull : expr r (maybe a) -> expr r bool = sql "$1 IS NOT NULL"

@@ -255,7 +255,7 @@ pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
     let here = o.site.and_then(|sp| tc.use_type(ws.root, sp));
     let Target::Global(b) = &o.target else {
         let head = here.map_or_else(|| name.to_string(), |t| sig(name, t));
-        return Some(format!("```cagara\n{head}\n```\nlambda parameter"));
+        return Some(format!("```cagara\n{head}\n```\nlocal binding"));
     };
     // (name, type) of the definition, or of every candidate.
     let def_ty = |m: usize, i: usize| {
@@ -594,7 +594,7 @@ fn name_completion(ws: &Workspace, offset: usize) -> Vec<CompletionItem> {
         .map(|o| CompletionItem {
             label: text[o.start..o.end].to_string(),
             kind: Some(CompletionItemKind::VARIABLE),
-            detail: Some("lambda parameter".into()),
+            detail: Some("local binding".into()),
             ..Default::default()
         })
         .collect();
@@ -937,7 +937,7 @@ mod tests {
         assert!(h.contains(".age : "), "{h}");
         // A lambda parameter shadows the table.
         let h = hover(&ws, at("shadow = users", 10)).unwrap();
-        assert!(h.contains("lambda parameter"), "{h}");
+        assert!(h.contains("local binding"), "{h}");
     }
 
     #[test]
@@ -968,7 +968,7 @@ mod tests {
         // A lambda parameter shows its inferred type.
         let h = hover(&ws, at_in(src, "=> x", 3)).unwrap();
         assert!(
-            h.contains("x : expr ") && h.contains("lambda parameter"),
+            h.contains("x : expr ") && h.contains("local binding"),
             "{h}"
         );
     }
@@ -1038,6 +1038,31 @@ mod tests {
         // Both halves are recorded as references to what they name.
         let rs = references(&ws, at_in(src, "adult =>", 2), false);
         assert!(!rs.is_empty(), "the condition is a use of `adult`");
+    }
+
+    /// A `let` binding is a local name for hover, go-to-definition,
+    /// references, and completion. The AST desugars it to a lambda whose span
+    /// starts at the binding name and ends at the `let`, which is the scope the
+    /// walk needs.
+    #[test]
+    fn let_bindings_hover_and_navigate() {
+        let src = "users : query { id = int, age = int } = table \"p\" \"users\"\n\
+                   q = users & select { x = let age2 = .age in age2 + 1 }\n";
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        let use_pos = at_in(src, "age2 + 1", 0);
+        let h = hover(&ws, use_pos).unwrap_or_default();
+        assert!(h.contains("age2") && h.contains("local binding"), "{h}");
+        assert!(h.contains("int"), "{h}");
+        let d = definition(&ws, use_pos);
+        assert_eq!(d.len(), 1, "{d:?}");
+        let decl = src.find("let age2").expect("binding text") + 4;
+        assert_eq!(d[0].1.start, Positions::new(src).position(decl));
+        let rs = references(&ws, use_pos, true);
+        assert_eq!(rs.len(), 2, "binding and use: {rs:?}");
+        // Completion inside the body sees the binding.
+        let p = Positions::new(src).position(src.find("in age2").expect("body text") + 3);
+        let labels: Vec<String> = completion(&ws, p).into_iter().map(|i| i.label).collect();
+        assert!(labels.iter().any(|l| l == "age2"), "{labels:?}");
     }
 
     #[test]

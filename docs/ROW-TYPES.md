@@ -5,6 +5,21 @@ optional open tail, and `query r` carries a row `r`. The checker reduces row
 operations when their inputs are known and retains them until an open row is
 resolved.
 
+## Open rows in signatures
+
+A row type may name the fields a helper needs and leave the rest open:
+
+```haskell
+byId : expr { id = int | r } int -> query { id = int | r } -> query { id = int | r } =
+  i => q => where (.id == i) q
+```
+
+`{ id = int | r }` means “a row with an `int` column `id`, plus whatever `r`
+turns out to be”; a call with a wider row instantiates `r` with the remaining
+columns. The bare `query r` form says nothing about the row's fields, so a
+helper that reads `.id` cannot be annotated with it — the checker reports “no
+column `id`” because `r` is unconstrained. Name the field instead.
+
 ## Operations
 
 | Type term | Meaning |

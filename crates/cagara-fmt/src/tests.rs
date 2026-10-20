@@ -53,6 +53,12 @@ fn every_construct_is_actually_reformatted() {
             "q=t&select{b=case{.a>1=>\"x\";true=>\"y\"}}\n",
             "q = t & select { b = case { .a > 1 => \"x\"; true => \"y\" } }\n",
         ),
+        // A `let` keeps its binding and body, with the `in` clause on one line
+        // when it fits.
+        (
+            "q=t&select{x=let y=.a in y+1}\n",
+            "q = t & select { x = let y = .a in y + 1 }\n",
+        ),
         // `infixl` / `infixr` are ordinary names now, not declarations, so a
         // line beginning with one is a plain definition and formats as one.
         ("infixl=1\n", "infixl = 1\n"),

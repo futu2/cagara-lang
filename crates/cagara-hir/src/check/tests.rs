@@ -2965,3 +2965,21 @@ fn a_literal_fork_takes_the_cases_type() {
         }
     }
 }
+
+/// Self and mutual recursion are rejected even without a type annotation.
+///
+/// An unannotated cycle used to receive a fresh type variable: `q = q` checked
+/// as `q : a`, and the file exited successfully with no SQL because only the
+/// normalizer — reached for query-typed definitions — noticed the recursion.
+#[test]
+fn unannotated_recursion_is_rejected() {
+    for src in ["q = q\n", "a = b\nb = a\n", "q = q + 1\n"] {
+        let ts = types(src);
+        assert!(
+            ts.iter().any(|(_, r)| r
+                .as_ref()
+                .is_err_and(|e| e.contains("refers to itself; recursion is not supported"))),
+            "{src:?} produced {ts:?}"
+        );
+    }
+}

@@ -70,7 +70,7 @@ pub struct TypedExpr {
     /// operation was read and the signature instantiated.
     pub stage: Option<RowStageView>,
     pub combine: Option<CombineView>,
-    /// Sub-expressions, as arena indices, in [`crate::check::child_exprs`]
+    /// Sub-expressions, as arena indices, in `crate::check::child_exprs`
     /// order.
     ///
     /// Public so a reader that identifies an expression by its *path* — from

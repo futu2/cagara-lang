@@ -62,7 +62,7 @@ pub(crate) fn join_row(kind: JoinKind, left: &RowType, right: &RowType) -> RowTy
 /// `agg`-phase node carrying a
 /// `row` phase would place an aggregate where SQL rejects one — and the
 /// constructors are what establish that agreement. Use [`CheckedExpr::phase`],
-/// [`CheckedExpr::ty`], [`CheckedExpr::node`] and [`CheckedExpr::origin`].
+/// [`CheckedExpr::ty`], `CheckedExpr::node` and [`CheckedExpr::origin`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckedExpr {
     phase: Phase,

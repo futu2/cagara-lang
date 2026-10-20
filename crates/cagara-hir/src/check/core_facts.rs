@@ -25,7 +25,7 @@ pub type DefId = (usize, usize);
 /// distinction survives, because once a template is applied its scheme says
 /// what it *returned*, not which node built it.
 ///
-/// One enum with one reader ([`declared_template_kind`]) on purpose. A second
+/// One enum with one reader (`declared_template_kind`) on purpose. A second
 /// copy of this three-case enum already existed once — every reader built its
 /// checked node from a `kind` read off the same three strings — and a `head`
 /// added to one copy and not the other would have been two silently different

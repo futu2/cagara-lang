@@ -581,3 +581,41 @@ fn diagnostics_use_the_path_as_typed() {
         "the absolute path leaked into a diagnostic: {err}"
     );
 }
+
+/// A UTF-8 BOM is transport metadata: compile it, and preserve it when
+/// formatting so a Windows file does not silently change encoding.
+#[test]
+fn bom_input_compiles_and_is_preserved_by_fmt() {
+    let dir = TempDir::new("bom");
+    let f = dir.write(
+        "bom.cagara",
+        "\u{feff}t : query { a = int } = table \"s\" \"t\"\nmain=t\n",
+    );
+    let out = run(&f);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("SELECT a FROM s.t;"),
+        "{}",
+        stdout(&out)
+    );
+
+    let out = cagara([OsStr::new("fmt"), f.as_os_str()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = std::fs::read_to_string(&f).expect("read formatted file");
+    assert!(
+        text.starts_with('\u{feff}'),
+        "fmt dropped the BOM: {text:?}"
+    );
+    assert!(text.contains("main = t"), "fmt did not format: {text:?}");
+}
+
+/// `cagara lsp --help` explains the subcommand instead of rejecting the flag.
+#[test]
+fn lsp_help_succeeds() {
+    for flag in ["--help", "-h"] {
+        let out = cagara(["lsp", flag]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(stdout(&out).contains("cagara lsp"), "{}", stdout(&out));
+        assert!(stderr(&out).is_empty(), "{}", stderr(&out));
+    }
+}

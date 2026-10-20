@@ -6,8 +6,6 @@ endif
 
 syn keyword cagaraImport   import as
 syn keyword cagaraKeyword  sql case
-" Fixity keywords: how an operator is declared in prelude.cagara.
-syn keyword cagaraFixity   infixl infixr
 syn keyword cagaraBoolean  true false
 syn keyword cagaraType     query expr agg win maybe list int float string bool date timestamp sortkey winspec bound frame
 
@@ -21,8 +19,8 @@ syn match   cagaraFloat    "\<\d\+\.\d\+\([eE][+-]\=\d\+\)\=\>"
 syn match   cagaraNumber   "\<\d\+\>"
 syn match   cagaraOpName   "\<_[^a-zA-Z0-9_\s]\+_"
 syn match   cagaraArrow    "=>\|->"
-" Character classes rather than a list of spellings: an operator newly
-" declared in the prelude is highlighted without touching this file.
+" Character classes rather than a list of spellings: a new entry in the
+" compiler's fixed operator table is highlighted without touching this file.
 syn match   cagaraOperator "&[=!<>*/%|?$^~+.\-]*\|[=!<>*/%|?$^~]\+\|[+-]"
 " A top-level name at column 0, before its signature or body.
 syn match   cagaraDef      "^\(\h\w*\|_[^a-zA-Z0-9_\s]\+_\)\ze\s*\(:\|=[^=]\)"

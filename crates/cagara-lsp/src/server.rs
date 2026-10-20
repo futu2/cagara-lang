@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 pub(crate) type Res<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -127,7 +128,26 @@ fn serve(conn: &Connection) -> Res<()> {
     conn.initialize(serde_json::to_value(caps)?)?;
     // Keyed by the URI string: `Uri` has interior mutability.
     let mut state = State::new();
-    for msg in &conn.receiver {
+    // A change is published for its own document immediately. Other open
+    // documents may import it, so their diagnostics are refreshed once the
+    // typing pauses. Recompiling every open document on every keystroke made
+    // each edit scale with the number of editors.
+    let debounce = Duration::from_millis(150);
+    let mut publish_at: Option<Instant> = None;
+    loop {
+        let timeout = publish_at
+            .map(|at| at.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::from_secs(3600));
+        let msg = match conn.receiver.recv_timeout(timeout) {
+            Ok(msg) => msg,
+            Err(_) if publish_at.is_some_and(|at| Instant::now() >= at) => {
+                publish_all(conn, &mut state)?;
+                publish_at = None;
+                continue;
+            }
+            // Disconnected; the writer thread will end with it.
+            Err(_) => break,
+        };
         match msg {
             Message::Request(req) => {
                 if conn.handle_shutdown(&req)? {
@@ -149,7 +169,11 @@ fn serve(conn: &Connection) -> Res<()> {
             Message::Notification(n) => {
                 let method = n.method.clone();
                 match catch_unwind(AssertUnwindSafe(|| notification(conn, &mut state, n))) {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(needs_refresh)) => {
+                        if needs_refresh {
+                            publish_at = Some(Instant::now() + debounce);
+                        }
+                    }
                     Ok(Err(e)) => eprintln!("cagara lsp: {method}: {e}"),
                     Err(p) => {
                         rebuild(&mut state);
@@ -285,12 +309,12 @@ fn request(
     }
 }
 
-fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<()> {
+fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<bool> {
     match n.method.as_str() {
         DidOpenTextDocument::METHOD => {
             let p: lsp_types::DidOpenTextDocumentParams = serde_json::from_value(n.params)?;
             let Some(path) = uri::to_path(&p.text_document.uri) else {
-                return Ok(());
+                return Ok(false);
             };
             let path = path.canonicalize().unwrap_or(path);
             let text = p.text_document.text;
@@ -298,14 +322,16 @@ fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<()
             state.docs.insert(key, Doc { path, text });
             state.rebuild();
             publish_all(conn, state)?;
+            Ok(false)
         }
         DidChangeTextDocument::METHOD => {
             let p: lsp_types::DidChangeTextDocumentParams = serde_json::from_value(n.params)?;
             let Some(change) = p.content_changes.into_iter().last() else {
-                return Ok(());
+                return Ok(false);
             };
-            let Some(doc) = state.docs.get_mut(p.text_document.uri.as_str()) else {
-                return Ok(());
+            let key = doc_key(&p.text_document.uri);
+            let Some(doc) = state.docs.get_mut(&key) else {
+                return Ok(false);
             };
             doc.text = change.text;
             // A keystroke usually does not change imports: patch that module
@@ -318,7 +344,11 @@ fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<()
             if !patched {
                 state.rebuild();
             }
-            publish_all(conn, state)?;
+            // The edited document's diagnostics are what the user is looking
+            // at; publish them now. The caller schedules a refresh of the
+            // other open documents after a short pause.
+            publish_doc(conn, state, &key)?;
+            Ok(true)
         }
         DidSaveTextDocument::METHOD => {
             let p: lsp_types::DidSaveTextDocumentParams = serde_json::from_value(n.params)?;
@@ -331,11 +361,13 @@ fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<()
             // reload the graph from disk while retaining all open overlays.
             state.rebuild();
             publish_all(conn, state)?;
+            Ok(false)
         }
         DidChangeWatchedFiles::METHOD => {
             let _: lsp_types::DidChangeWatchedFilesParams = serde_json::from_value(n.params)?;
             state.rebuild();
             publish_all(conn, state)?;
+            Ok(false)
         }
         DidCloseTextDocument::METHOD => {
             let p: lsp_types::DidCloseTextDocumentParams = serde_json::from_value(n.params)?;
@@ -351,10 +383,21 @@ fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<()
             )))?;
             state.rebuild();
             publish_all(conn, state)?;
+            Ok(false)
         }
-        _ => {}
+        _ => Ok(false),
     }
-    Ok(())
+}
+
+/// Publish diagnostics for one open document, making it the workspace root.
+fn publish_doc(conn: &Connection, state: &mut State, key: &str) -> Res<()> {
+    if !state.select(key) {
+        return Ok(());
+    }
+    let uri: Uri = key
+        .parse()
+        .map_err(|e| format!("invalid document URI: {e}"))?;
+    publish(conn, uri, &state.ws)
 }
 
 fn publish_all(conn: &Connection, state: &mut State) -> Res<()> {

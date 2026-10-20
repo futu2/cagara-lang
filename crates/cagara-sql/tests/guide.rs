@@ -1,9 +1,9 @@
-//! The language guide's operator claims, checked against the prelude.
+//! The language guide's operator claims, checked against the compiler.
 //!
 //! `docs/LEARN.md` teaches the stage shorthands with a table, and every
-//! shorthand in it is a claim about `prelude.cagara`: that the symbol is
-//! declared, and that it means the stage the table names. Both halves were
-//! wrong at once and nothing noticed.
+//! shorthand in it is a claim about two things: that the symbol is in the
+//! compiler's fixed operator table, and that `prelude.cagara` defines it as the
+//! stage the table names. Both halves were wrong at once and nothing noticed.
 //!
 //! `&^` was documented as `offset` for several releases. It had been accurate
 //! when written — `offset` then took a record of fields — and was left behind
@@ -15,15 +15,15 @@
 //! review: someone reading the table had no way to notice a symbol was missing,
 //! and therefore no reason to doubt the symbol that was there.
 //!
-//! So this test parses both sides — the table and the prelude — and requires
-//! them to agree exactly. It is deliberately a *set* comparison in both
-//! directions:
+//! So this test parses both sides — the fixed table and the prelude — and
+//! requires them to agree exactly. It is deliberately a *set* comparison in
+//! both directions:
 //!
-//! * a shorthand the prelude declares and the table omits fails, because an
+//! * a shorthand in the fixed table that the guide omits fails, because an
 //!   incomplete table is how a wrong entry hides;
-//! * a table row whose meaning differs from the prelude's binding fails, which
+//! * a guide row whose meaning differs from the prelude's binding fails, which
 //!   is the `&^` bug directly;
-//! * a table row for a symbol the prelude does not declare fails.
+//! * a guide row for a symbol the fixed table does not contain fails.
 //!
 //! A hand-written expectation would not have caught any of these, because
 //! writing the table out again is exactly how the original error was introduced.
@@ -98,11 +98,12 @@ fn documented() -> BTreeMap<String, String> {
     out
 }
 
-/// The stage shorthands `prelude.cagara` declares, as `symbol -> stage`.
+/// The stage shorthands in the fixed table and their prelude meanings, as
+/// `symbol -> stage`.
 ///
-/// A declaration is `infixl 1 &X`; the definition is `_&X_ : ... = body`. The
-/// stage is read from the **body's final call**, which is the only place it
-/// appears:
+/// The symbol comes from `ops.rs`; the definition in `prelude.cagara` is
+/// `_&X_ : ... = body`. The stage is read from the **body's final call**, which
+/// is the only place it appears:
 ///
 /// ```text
 /// _&-_ : query r -> expr r int -> query r = q => n => limit n q
@@ -121,13 +122,14 @@ fn documented() -> BTreeMap<String, String> {
 /// `prelude.cagara` also contains a commented-out example of exactly this form —
 /// a plain `find` over the text matches the comment first, which is how the
 /// `&^` row was read as `...` on the first attempt.
+///
 /// The shorthands the language has, and what each means.
 ///
-/// The **symbols** come from the core's fixity table, which is now the only
-/// place a shorthand's spelling lives; the prelude declares none. The
-/// **meaning** still comes from `prelude.cagara`, as the `_&^_` definition —
-/// spelling and meaning are two different facts and live in two places.
-fn declared() -> BTreeMap<String, String> {
+/// The **symbols** come from the core's fixed table, which is the only place a
+/// shorthand's spelling lives. The **meaning** comes from `prelude.cagara`, as
+/// the `_&^_` definition — spelling and meaning are two different facts and
+/// live in two places.
+fn shorthands() -> BTreeMap<String, String> {
     let text = std::fs::read_to_string(repo_root().join("prelude.cagara")).expect("prelude.cagara");
     let ops = std::fs::read_to_string(repo_root().join("crates/cagara-syntax/src/ops.rs"))
         .expect("ops.rs");
@@ -176,15 +178,15 @@ fn declared() -> BTreeMap<String, String> {
 #[test]
 fn the_guide_shorthand_table_matches_the_prelude() {
     let doc = documented();
-    let prelude = declared();
+    let shorthands = shorthands();
 
     for (sym, stage) in &doc {
-        let Some(actual) = prelude.get(sym) else {
+        let Some(actual) = shorthands.get(sym) else {
             panic!(
-                "docs/LEARN.md documents `{sym}` as `{stage}`, but `prelude.cagara` \
-                 does not declare `{sym}`. Either declare it or remove the row — a \
-                 row for an undeclared symbol is what `&~` was when the guide used \
-                 it as its example of an unknown operator."
+                "docs/LEARN.md documents `{sym}` as `{stage}`, but the fixed operator \
+                 table does not contain `{sym}`. Remove the row — a row for an \
+                 unknown symbol is what `&~` was when the guide used it as its \
+                 example of an unknown operator."
             );
         };
         assert_eq!(
@@ -197,20 +199,23 @@ fn the_guide_shorthand_table_matches_the_prelude() {
     }
 }
 
-/// The guide's table is not missing any shorthand the prelude declares.
+/// The guide's table is not missing any shorthand in the fixed table.
 ///
 /// The completeness half, and the one that would have caught the `&^` bug
 /// sooner: an incomplete table gives a reader no reason to doubt the rows it
 /// does have.
 #[test]
-fn the_guide_lists_every_declared_shorthand() {
+fn the_guide_lists_every_table_shorthand() {
     let doc = documented();
-    let prelude = declared();
+    let shorthands = shorthands();
 
-    let missing: Vec<&String> = prelude.keys().filter(|s| !doc.contains_key(*s)).collect();
+    let missing: Vec<&String> = shorthands
+        .keys()
+        .filter(|s| !doc.contains_key(*s))
+        .collect();
     assert!(
         missing.is_empty(),
-        "prelude.cagara declares {missing:?} but docs/LEARN.md does not list them. \
+        "the fixed table contains {missing:?} but docs/LEARN.md does not list them. \
          An incomplete table is how a wrong entry hides — the guide omitted the \
          four set operations while documenting `&^` as the wrong stage."
     );

@@ -264,8 +264,8 @@ fn comment_text(t: &SyntaxToken) -> Doc {
     text(t.text().trim_end())
 }
 
-/// Binding powers of a `BinExpr`'s operator, from the language's operator
-/// table (the built-ins plus the prelude's declarations).
+/// Binding powers of a `BinExpr`'s operator, from the language's fixed
+/// operator table.
 fn bin_parts(n: &SyntaxNode) -> Result<(SyntaxNode, SyntaxToken, SyntaxNode, (u8, u8)), Bail> {
     let els = sig(n);
     let [l, op, r] = els.as_slice() else {

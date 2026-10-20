@@ -19,7 +19,7 @@
 //! ```
 //!
 //! where the `FLAGS` part and the attributes are both optional, flags are
-//! [`flag`] bits, and node rows have neither.
+//! `flag` bits, and node rows have neither.
 
 use logos::Logos;
 
@@ -29,8 +29,8 @@ pub(crate) mod flag {
     /// Skipped by the parser: whitespace and comments.
     pub(crate) const TRIVIA: u16 = 1 << 0;
     /// Can be an infix operator's spelling. Fixity and meaning are not here —
-    /// they come from the operator table in [`crate::ops`], which the prelude
-    /// declares — so this only says what the lexer *could* have produced.
+    /// they come from the fixed operator table in [`crate::ops()`] — so this
+    /// only says what the lexer *could* have produced.
     pub(crate) const OP: u16 = 1 << 1;
 }
 
@@ -77,9 +77,8 @@ macro_rules! kind_table {
         }
 
         /// Token and node kinds of the lossless rowan tree. Spellings are not
-        /// here: they come from the operator table in [`crate::ops`], which
-        /// the prelude declares, so this only says what the lexer *could* have
-        /// produced.
+        /// here: they come from the fixed operator table in [`crate::ops()`],
+        /// so this only says what the lexer *could* have produced.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[repr(u16)]
         pub enum SyntaxKind {
@@ -99,21 +98,20 @@ macro_rules! kind_table {
         /// discriminant, which is what both `From` impls below index.
         const ALL: &[SyntaxKind] = &[$(SyntaxKind::$token,)* $(SyntaxKind::$node,)*];
 
-        /// One [`flag`] mask per kind, in the same order. Only tokens carry
+        /// One `flag` mask per kind, in the same order. Only tokens carry
         /// flags, so this is shorter than [`ALL`] and indexed with the same
         /// discriminant.
         const FLAGS: &[u16] = &[$(kind_flags!($($flag)*)),*];
 
         impl SyntaxKind {
-            /// The [`flag`] bits of a kind; `0` for a node.
+            /// The `flag` bits of a kind; `0` for a node.
             fn flags(self) -> u16 {
                 FLAGS.get(self as usize).copied().unwrap_or(0)
             }
 
-            /// A token that can be the spelling in an operator declaration.
+            /// A token that can be an infix operator spelling.
             /// Every operator the lexer can produce answers `true`; nothing
-            /// else does, so a declaration cannot quietly make an identifier
-            /// infix.
+            /// else does, so a new spelling has to be a real token kind.
             pub fn is_op_symbol(self) -> bool {
                 self.flags() & flag::OP != 0
             }
@@ -199,12 +197,12 @@ kind_table! {
 
         /// A `&`-shorthand: `&` followed by any operator punctuation — `&`,
         /// `&?`, `&=`, `&+`, `&*`, `&.`, `&-`, and anything of the same shape
-        /// a declaration introduces (`&^`, `&>>`). Which of them exist, and
-        /// what each one means, is decided by `prelude.cagara` (see
-        /// [`crate::ops`]), so a new stage shorthand needs no change here.
+        /// (`&^`, `&>>`). Which of them exist is decided by the fixed table
+        /// (see [`crate::ops()`]); what each one means is a prelude definition.
+        /// A new stage shorthand needs no change here.
         AmpOp OP #[regex(r"&[=!<>*/%|?$^~+\-.]*", priority = 1)],
-        /// Any other operator spelling (`~=`, `|>`, `>>`), so a declared
-        /// operator does not have to be a token kind. Greedy, but `-`, `+` and
+        /// Any other operator spelling (`~=`, `|>`, `>>`), so the table does
+        /// not need a dedicated token kind for every entry. Greedy, but `-`, `+` and
         /// `.` are deliberately outside the class: `x=-1`, `a*-1` and
         /// `{a=.b}` have to keep lexing as a sign, a product and a field, and
         /// maximal munch would otherwise swallow them into one spelling nobody
@@ -260,7 +258,7 @@ kind_table! {
         /// operator name is `_`, a run of punctuation, `_` — deliberately
         /// broader than the operator classes above, because a name only has to
         /// be *definable*: whether a spelling is an operator at all is decided
-        /// by those classes and by the prelude's declarations.
+        /// by those classes and the fixed operator table.
         Ident #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")] #[regex(r"_[^a-zA-Z0-9_\s]+_")],
 
         Int #[regex(r"[0-9]+")],
@@ -293,8 +291,7 @@ kind_table! {
     nodes {
         SourceFile,
         ImportDecl,
-        /// `infixl 1 &+` / `infixr 21 ??` — gives an operator its precedence
-        /// and associativity. Only the prelude's declarations are honoured.
+        /// A definition: `name = body` or `name : ty = body`.
         Definition,
         TypeAnn,
         /// `name arg arg` in a type (`query r`, `expr r bool`, `int`)

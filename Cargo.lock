@@ -46,6 +46,7 @@ dependencies = [
  "cagara-hir",
  "cagara-lsp",
  "cagara-sql",
+ "cagara-syntax",
  "tempfile",
 ]
 

@@ -8,47 +8,34 @@
 //!
 //! There is one kind of thing here. `+`, `&` and `&+` are all infix operators
 //! and differ only in precedence and associativity; the pipeline is not a
-//! special class of operator but the *level* the operator `&` is declared at.
-//! An operator at that same fixity is a pipeline link, which is the only
-//! reason `&+` behaves like `&` and not like `+`.
+//! special class of operator but the *level* of `&`. An operator at that same
+//! fixity is a pipeline link, which is the only reason `&+` behaves like `&`
+//! and not like `+`.
 //!
-//! Two sources fill the table:
-//!
-//! * The **built-ins** below — arithmetic, comparison, logic and
-//!   concatenation. They are the language's own expression operators, and they
-//!   are what the prelude itself is parsed with in order to read the prelude's
-//!   declarations.
-//! * Everything **declared in `prelude.cagara`** with `infixl` / `infixr`.
-//!   That includes the query-syntax operators (the `&` pipeline family and the
-//!   joins) and the function combinators `&`, `$` and `>>>`, whose fixity
-//!   follows Haskell. The prelude is parsed once with the built-in table to
-//!   collect the declarations, and the result is what the parser uses for
-//!   everything else.
-//!
-//! That split is what makes a new stage shorthand a prelude edit rather than a
-//! Rust edit: `infixl 1 &^` plus `_&^_ = q => fields => ...` is the whole
-//! change. A declaration is read only from the prelude — the fixity of an
-//! operator is a property of the language, not of one module — and
-//! `cagara-hir` reports a declaration anywhere else.
+//! The table is **fixed at build time**. Source cannot add an operator or
+//! change one's precedence: `infixl` and `infixr` are not part of the language.
+//! The prelude defines what the operators *mean* (`_&^_` is `intersect`), but
+//! the spelling and fixity are the compiler's. That split is deliberate: every
+//! file is parsed with the same grammar whether or not it imports the prelude.
+//! A module can opt out of the names and still write `1 + 2` — the operator
+//! parses, and `_+_` is a name it has not defined.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// The prelude *is* the language definition (it declares the operators and
-/// defines their meaning), so this crate reads it. Every other use of the
-/// prelude is in `cagara-hir`, which loads it as module 0.
+/// The prelude defines the language's *meanings* (`_+_`, `_&^_`, …), so this
+/// crate reads it to check that the table and the definitions agree. Every
+/// other use of the prelude is in `cagara-hir`, which loads it as module 0.
 pub const PRELUDE_SRC: &str = include_str!("../../../prelude.cagara");
 
-/// Loosest precedence a declaration may name. `$` is declared here, so the
-/// scale starts at zero like Haskell's.
+/// Loosest level used by the table. `$` sits here, so the scale starts at
+/// zero like Haskell's.
 pub const MIN_LEVEL: u8 = 0;
 
-/// Tightest precedence a declaration may name. Binding powers are compared as
-/// `u8` and an operator at level `n` spends `n + 1` on one of its two binding
-/// powers, so the level must leave room for that increment: the tightest
-/// binding power the language can produce is `MAX_LEVEL + 1` = 251, which still
-/// fits in `u8`. A declaration outside `MIN_LEVEL..=MAX_LEVEL` is rejected
-/// before a `Fixity` is built (`ast::lower` and the parser's declaration arm).
+/// Tightest level the table could use. Binding powers are compared as `u8` and
+/// an operator at level `n` spends `n + 1` on one of its two binding powers,
+/// so a level must leave room for that increment; `MAX_LEVEL + 1` still fits
+/// in `u8`.
 pub const MAX_LEVEL: u8 = 250;
 
 /// Binding powers of one operator: the tightness required of its left and
@@ -102,8 +89,8 @@ const FIXITY: &[(&str, Fixity)] = &[
     // Loosest: function application, reversed.
     ("$", Fixity::right(0)),
     // The pipeline, and every stage shorthand beside it. An operator is a
-    // stage because it is declared at `&`'s level, so adding one here is what
-    // makes `&^` a stage rather than an ordinary operator.
+    // stage because it sits at `&`'s level, so adding one here is what makes
+    // `&^` a stage rather than an ordinary operator.
     ("&", Fixity::left(1)),
     ("&!", Fixity::left(1)),
     ("&*", Fixity::left(1)),
@@ -178,15 +165,15 @@ impl Ops {
         self.map.get(spelling).copied()
     }
 
-    /// The pipe level: whatever fixity `&` is declared with. No operator has a
-    /// "stage" mark of its own — an operator is a pipeline link exactly when
-    /// it sits where the pipeline sits.
+    /// The pipe level: the fixed fixity of `&`. No operator has a "stage"
+    /// mark of its own — an operator is a pipeline link exactly when it sits
+    /// where the pipeline sits.
     pub fn pipe_fixity(&self) -> Option<Fixity> {
         self.find(PIPE)
     }
 
     /// Does `spelling` build a pipeline stage? True for `&` itself and for
-    /// every operator declared at the same precedence and associativity —
+    /// every operator at the same precedence and associativity —
     /// `&?`, `&=`, `&+`, …, but not the joins at their own looser level.
     ///
     /// Two things follow from this and nothing else has to declare them: the
@@ -271,20 +258,19 @@ mod tests {
     /// The prelude parses against the fixed table, and its bodies use nothing
     /// the table does not have.
     ///
-    /// The table is no longer built *from* the prelude's declarations, so a
-    /// prelude body that reached for an undeclared operator would now fail to
-    /// parse rather than silently declare nothing. This is the test that says
-    /// so.
+    /// The table is fixed, so a prelude body that reaches for a spelling it
+    /// does not contain fails to parse rather than silently declaring
+    /// nothing. This is the test that says so.
     #[test]
     fn the_prelude_parses_against_the_fixed_table() {
         let (_module, errors) = crate::ast::lower_with(PRELUDE_SRC, &Ops::default());
         assert!(errors.is_empty(), "{errors:?}");
     }
 
-    /// The function combinators carry Haskell's fixities: `$` infixr 0, `&`
-    /// infixl 1 (`Data.Function`), and the two directions of composition at
-    /// infixr 23, tighter than every other operator the way `(.)` is in
-    /// Haskell.
+    /// The function combinators carry Haskell's fixities: `$` is right at
+    /// level 0, `&` is left at level 1 (`Data.Function`), and the two
+    /// directions of composition are right at level 23, tighter than every
+    /// other operator the way `(.)` is in Haskell.
     #[test]
     fn the_combinators_follow_haskell() {
         let ops = ops();
@@ -318,10 +304,10 @@ mod tests {
         assert!(!ops.is_stage("<<<"));
     }
 
-    /// The compiled-in table is the built-ins plus the prelude's declarations,
-    /// and the pipeline is the level `&` sits at.
+    /// The fixed table contains the pipeline and every stage shorthand, all
+    /// at the level `&` sits at.
     #[test]
-    fn the_prelude_declares_the_pipeline() {
+    fn the_fixed_table_places_the_pipeline() {
         let ops = ops();
         assert_eq!(ops.pipe_fixity().unwrap().precedence(), (1, 2));
         for s in [
@@ -331,18 +317,17 @@ mod tests {
             assert_eq!(f.precedence(), (1, 2), "`{s}` must sit at the pipe level");
             assert!(ops.is_stage(s), "`{s}` must be a stage");
         }
-        // The joins are declared too, at their own level, so they are not
+        // The joins are in the table at their own level, so they are not
         // stages despite building a query.
         for s in ["?", "<?", "?>", "<?>"] {
             let f = ops.find(s).unwrap_or_else(|| panic!("`{s}` is undeclared"));
             assert_eq!(f.precedence(), (3, 4));
             assert!(!ops.is_stage(s), "`{s}` is a join, not a stage");
         }
-        // Every operator declared at the pipe level is a stage, and this list
-        // is the whole of them. Keeping it exact is the point: the stage set
-        // is what source elaboration uses to recognise `q & stage`, so a new
-        // declaration at this level changes how a pipeline is
-        // located for diagnostics.
+        // Every operator at the pipe level is a stage, and this list is the
+        // whole of them. Keeping it exact is the point: the stage set is what
+        // source elaboration uses to recognise `q & stage`, so a new entry at
+        // this level changes how a pipeline is located for diagnostics.
         assert_eq!(
             ops.stages(),
             ["&", "&!", "&*", "&+", "&-", "&.", "&=", "&?", "&^", "&|", "&~"]
@@ -441,9 +426,8 @@ mod tests {
 
     /// `SyntaxKind::is_op_symbol` is what makes the parser look up a fixity
     /// instead of reporting an unexpected token, and it is a third list of the
-    /// operator spellings. Every spelling this table knows — including the ones
-    /// `prelude.cagara` declares — must lex to a token that answers `true`, or
-    /// the operator would be declared yet unusable.
+    /// operator spellings. Every spelling this table knows must lex to a token
+    /// that answers `true`, or it would be in the table yet unusable.
     #[test]
     fn every_known_operator_spelling_lexes_to_an_op_symbol() {
         for spelling in ops().spellings() {

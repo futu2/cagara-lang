@@ -5,6 +5,6 @@ union_named: query { id = int, name = string } => SELECT t1.id, t1.name FROM (SE
 union_op: query { id = int, name = string } => SELECT t1.id, t1.name FROM (SELECT id, name FROM public.users UNION SELECT id, name FROM public.admins) AS t1
 union_direct: query { id = int, name = string } => SELECT t1.id, t1.name FROM (SELECT id, name FROM public.users UNION SELECT id, name FROM public.admins) AS t1
 union_all: query { id = int, name = string } => SELECT t1.id, t1.name FROM (SELECT id, name FROM public.admins UNION ALL SELECT id, name FROM public.users) AS t1
-intersect: a
+intersect_named: query { id = int, name = string } => SELECT t1.id, t1.name FROM (SELECT id, name FROM public.admins INTERSECT SELECT id, name FROM public.users) AS t1
 except_named: query { id = int, name = string } => SELECT t1.id, t1.name FROM (SELECT id, name FROM public.admins EXCEPT SELECT id, name FROM public.users) AS t1
 except_op: query { id = int, name = string } => SELECT t1.id, t1.name FROM (SELECT id, name FROM public.users EXCEPT SELECT id, name FROM public.admins) AS t1

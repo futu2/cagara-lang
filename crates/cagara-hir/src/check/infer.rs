@@ -83,8 +83,23 @@ impl<'w> Checker<'w> {
             return Some(s.clone());
         }
         if self.active.contains(&(m, i)) {
-            // Recursive definition.
-            return None;
+            // A use of a definition that is still being checked is a cycle.
+            // Returning a fresh type here used to let `q = q` check as `q : a`
+            // and exit successfully with no SQL, because only the normalizer —
+            // which runs for query definitions — noticed the recursion.
+            // Report it where the cycle closes, then continue with a fresh
+            // type so the rest of the definition still gets checked.
+            if self.recursion_reported.insert((m, i)) {
+                let name = &self.env.defs[i].name;
+                self.errors.push(RawTypeError {
+                    module: m,
+                    def: i,
+                    span: self.env.defs[i].span,
+                    message: format!("`{name}` refers to itself; recursion is not supported"),
+                });
+            }
+            let v = self.fresh();
+            return Some(self.generalize(&v, vec![]));
         }
         if self.depth >= MAX_DEF_DEPTH {
             // The chain of forward references is deeper than any real program

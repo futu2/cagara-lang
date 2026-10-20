@@ -36,8 +36,8 @@ pub mod winspec {
 /// diagnostic points at the stage that failed.
 ///
 /// Which operators are stages is not listed here: an operator is a stage when
-/// it is declared at `&`'s level in `prelude.cagara`, so the language, not
-/// Rust, decides what a shorthand means.
+/// its fixity equals `&`'s in the fixed table, so the table, not this file,
+/// decides which spellings are shorthands.
 pub fn is_pipe_name(name: &str) -> bool {
     cagara_syntax::ops().is_stage_name(name)
 }
@@ -159,20 +159,20 @@ mod tests {
         assert_eq!(winspec::names(), "partition, order, frame");
     }
 
-    /// Every stage operator is declared *and* defined in the prelude: the
-    /// declaration gives it its place in the grammar, the definition gives it
-    /// its meaning, and neither works alone.
+    /// Every stage operator is in the fixed table *and* defined in the
+    /// prelude: the table gives it its place in the grammar, the definition
+    /// gives it its meaning, and neither works alone.
     #[test]
-    fn every_stage_operator_is_declared_and_defined_in_the_prelude() {
+    fn every_stage_operator_is_in_the_table_and_defined_in_the_prelude() {
         let prelude = include_str!("../../../prelude.cagara");
         let ops = cagara_syntax::ops();
         let stages = ops.stages();
         assert!(
             !stages.is_empty(),
-            "the prelude declares no stage operators"
+            "the fixed table contains no stage operators"
         );
         for spelling in stages {
-            let pipe = ops.pipe_fixity().expect("the prelude declares `&`");
+            let pipe = ops.pipe_fixity().expect("the fixed table contains `&`");
             assert_eq!(
                 ops.find(spelling).map(|f| f.precedence()),
                 Some(pipe.precedence()),

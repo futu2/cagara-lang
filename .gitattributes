@@ -1,0 +1,4 @@
+# The compiler and its snapshots are line-ending independent, but a CRLF
+# checkout would make `cagara fmt --check` fail on every file. Keep the
+# working tree LF and let Git normalize on the way in.
+* text=auto eol=lf

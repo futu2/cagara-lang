@@ -19,8 +19,9 @@ this page tracks the remaining boundaries and language work.
 
 1. Separate relational rewrites from SQL emission. A `Rel -> Rel` pass can fuse
    stages or choose derived tables while keeping dialect rules in the backend.
-2. Add execution-backed examples against SQLite and DuckDB to cover the
-   generated SQL beyond structural compilation tests.
+2. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
+   beyond SQLite and DuckDB, and run it with `--optimize` as well as the
+   default lowering.
 
 ## Deferred language work
 

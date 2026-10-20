@@ -12,7 +12,7 @@ A small typed query language that compiles to SQL. Write queries as
 pipelines, and the type checker catches mistakes like missing columns,
 ungrouped fields in an aggregate, or `null` misuse before any SQL runs.
 
-```haskell
+```cagara
 orders : query { id = int, user_id = int, amount = float, status = string } =
   table "public" "orders"
 
@@ -20,7 +20,7 @@ main = orders
   & where (.status == "paid")
   & agg { user_id = group .user_id, revenue = sum .amount, n = count }
   & where (.n >= 5)
-  & order [desc .revenue]
+  & order [desc (coalesce 0.0 .revenue)]
 ```
 
 `cagara your-file.cagara` compiles `main` — the file's entry point — to:
@@ -32,7 +32,7 @@ FROM (SELECT user_id, SUM(amount) AS revenue, COUNT(*) AS n
       WHERE (status = 'paid')
       GROUP BY user_id) AS t1
 WHERE (n >= 5)
-ORDER BY revenue DESC NULLS LAST;
+ORDER BY COALESCE(revenue, 0.0) DESC NULLS LAST;
 ```
 
 The repository's [`examples/report.cagara`](examples/report.cagara) uses its
@@ -61,7 +61,8 @@ VSIX for your platform from
 [Releases](https://github.com/futu2/cagara-lang/releases) and
 `code --install-extension` it.
 
-For the command line, download a static Linux binary (amd64 / arm64) from
+For the command line, download a static binary for Linux (amd64 / arm64),
+macOS, or Windows from
 [Releases](https://github.com/futu2/cagara-lang/releases), or build from
 source:
 
@@ -78,6 +79,8 @@ cagara fmt [--check] <files...>
 cagara lsp
 cagara --version
 ```
+
+`cagara fmt` normalizes line endings to LF and preserves a leading UTF-8 BOM.
 
 ## Learn more
 

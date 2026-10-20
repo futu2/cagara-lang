@@ -295,9 +295,9 @@ t = orders & select {
 
 ### Operator precedence
 
-From tightest to loosest. The levels are the ones the operators are *declared*
-with in `prelude.cagara`; a larger number binds tighter, and application
-(`f x y`) is tighter than any operator.
+From tightest to loosest. The levels are fixed by the compiler; a larger number
+binds tighter, and application (`f x y`) is tighter than any operator. A source
+file cannot declare an operator or change one's level.
 
 | Level | Operators | Associativity |
 |---|---|---|
@@ -325,11 +325,13 @@ b = t & select { l = .first <> " " <> .last }
 ```
 
 This table is a summary, not the definition: an operator's precedence is what
-the table says. Every operator is fixed in the compiler — arithmetic,
+the compiler's fixed table says. Every operator is fixed there — arithmetic,
 comparison, logic and concatenation, the pipeline, the joins, and the three
 combinators alike — and the prelude supplies their meanings (see
 [Shorthands](#shorthands)). The gaps in the numbering leave room for the
-operators Cagara has that Haskell does not.
+operators Cagara has that Haskell does not. The words `infixl` and `infixr`
+below are Haskell's names for associativity, used only to compare the two
+languages; they are not Cagara syntax.
 
 Two associativities differ from Haskell on purpose, both harmless: `&&` and
 `||` are `infixl` where Haskell writes `infixr` (both are associative, so the
@@ -1136,16 +1138,16 @@ The combinators:
 
 | Name | Meaning | Fixity |
 |---|---|---|
-| `f >>> g` | `g` after `f` (composition) | `infixr 23`, tighter than every other operator |
-| `x & f` | apply `f` to `x` | `infixl 1`, the pipeline |
-| `f $ x` | apply `f` to `x` | `infixr 0`, the loosest operator |
+| `f >>> g` | `g` after `f` (composition) | right at level 23, tighter than every other operator |
+| `x & f` | apply `f` to `x` | left at level 1, the pipeline |
+| `f $ x` | apply `f` to `x` | right at level 0, the loosest operator |
 
 These are Haskell's own fixities: `$` is `infixr 0` and `&` is `infixl 1` from
 `Data.Function`, and `>>>` is `Control.Category`'s forward composition, which
 in Haskell binds tighter than everything (as `(.)` does). Keeping composition
 tight is what makes `trim >>> lower >>> replaceAll "-" ""` read left to right
-and `f >>> g $ x` mean `(f >>> g) $ x`. They are declared in `prelude.cagara`
-next to their definitions, like every other operator.
+and `f >>> g $ x` mean `(f >>> g) $ x`. The fixed table gives them these
+levels; `prelude.cagara` defines what they mean, like every other operator.
 
 Composition with `>>>` is why subject-last matters:
 

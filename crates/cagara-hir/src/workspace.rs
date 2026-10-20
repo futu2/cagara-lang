@@ -61,12 +61,71 @@ pub struct LoadedModule {
 pub struct Diag {
     pub path: String,
     pub line: usize,
+    /// One-based **byte** offset in `source`. The language server slices with
+    /// it; `Display` converts it to a character column for humans.
     pub col: usize,
     pub message: String,
     /// The source line, for the excerpt (empty if unknown).
     pub source: String,
-    /// Characters to underline, starting at `col`.
+    /// Characters to underline, starting at the column shown in the display.
     pub width: usize,
+}
+
+/// The widest source excerpt a diagnostic prints.
+///
+/// A pathological line (a generated query with thousands of nested calls) used
+/// to print in full; one diagnostic could then be hundreds of kilobytes and
+/// bury the message in a terminal or CI log.
+const MAX_EXCERPT: usize = 160;
+
+impl Diag {
+    /// The 1-based character column shown to a person.
+    ///
+    /// `col` itself is a byte offset: the language server slices the source at
+    /// it, so it has to stay one. Rendering converts it, or a line with `é` in
+    /// it reports a column three bytes too far right.
+    fn display_col(&self) -> usize {
+        if self.col == 0 {
+            return 0;
+        }
+        self.source
+            .get(..self.col.saturating_sub(1))
+            .map_or(self.col, |prefix| prefix.chars().count() + 1)
+    }
+
+    /// The excerpt, the caret's character offset in it, and how many carets to
+    /// draw. The excerpt is clipped around the caret with ellipses.
+    fn excerpt(&self) -> (String, usize, usize) {
+        let chars: Vec<char> = self.source.chars().collect();
+        let col = self.display_col().saturating_sub(1).min(chars.len());
+        let width = self.width.max(1);
+        if chars.len() <= MAX_EXCERPT {
+            return (
+                self.source.clone(),
+                col,
+                width.min(chars.len().saturating_sub(col)).max(1),
+            );
+        }
+
+        let half = MAX_EXCERPT / 2;
+        let mut start = col.saturating_sub(half);
+        let end = (start + MAX_EXCERPT).min(chars.len());
+        if end == chars.len() {
+            start = end.saturating_sub(MAX_EXCERPT);
+        }
+
+        let mut text = String::new();
+        let mut pad = col - start;
+        if start > 0 {
+            text.push('…');
+            pad += 1;
+        }
+        text.extend(&chars[start..end]);
+        if end < chars.len() {
+            text.push('…');
+        }
+        (text, pad, width.min(end.saturating_sub(col)).max(1))
+    }
 }
 
 impl fmt::Display for Diag {
@@ -79,21 +138,20 @@ impl fmt::Display for Diag {
         write!(
             f,
             "{}:{}:{}: error: {}",
-            self.path, self.line, self.col, self.message
+            self.path,
+            self.line,
+            self.display_col(),
+            self.message
         )?;
         if !self.source.is_empty() {
             let n = self.line.to_string();
-            let pad = self
-                .source
-                .get(..self.col.saturating_sub(1))
-                .map_or(0, |s| s.chars().count());
+            let (excerpt, pad, width) = self.excerpt();
             let gutter = " ".repeat(n.len());
             write!(
                 f,
-                "\n {n} | {}\n {gutter} | {}{}",
-                self.source,
+                "\n {n} | {excerpt}\n {gutter} | {}{}",
                 " ".repeat(pad),
-                "^".repeat(self.width.max(1))
+                "^".repeat(width)
             )?;
         }
         Ok(())
@@ -268,6 +326,8 @@ impl Workspace {
         if let Some(&existing) = self.by_path.get(&path) {
             return existing;
         }
+        // A BOM is transport metadata; keep it out of every span and excerpt.
+        let text = cagara_syntax::strip_bom(&text).to_string();
         self.stack.push(path.clone());
         let file = SourceFile::new(&self.db, text.clone());
         self.files.insert(path.clone(), file);
@@ -323,6 +383,8 @@ impl Workspace {
     /// span from a query always indexes the text the diagnostics are
     /// rendered against (see `db.rs`).
     pub fn set_source(&mut self, m: usize, text: String) -> bool {
+        // A BOM is transport metadata; keep it out of every span and excerpt.
+        let text = cagara_syntax::strip_bom(&text).to_string();
         // Parse the candidate text up front, so a rejected edit (one that
         // changes the imports) leaves both texts as they were.
         let parsed = parse_text(&text);
@@ -580,7 +642,7 @@ fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: S
 
 #[cfg(test)]
 mod tests {
-    use super::Workspace;
+    use super::{Diag, Workspace};
     use crate::db::SourceFile;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -769,6 +831,65 @@ mod tests {
             assert_eq!(d.line, expected_line, "line at offset {offset}");
             assert_eq!(d.col, offset - line_start + 1, "col at offset {offset}");
         }
+    }
+
+    /// A diagnostic prints character columns, while `col` stays a byte offset
+    /// for the language server.
+    #[test]
+    fn a_rendered_column_counts_characters() {
+        let diag = Diag {
+            path: "q.cagara".into(),
+            line: 1,
+            col: 12,
+            message: "boom".into(),
+            source: "q = \"é\" & nope".into(),
+            width: 4,
+        };
+        let rendered = diag.to_string();
+        assert!(
+            rendered.starts_with("q.cagara:1:11: error: boom"),
+            "{rendered}"
+        );
+        assert_eq!(diag.col, 12, "the stored offset must stay a byte offset");
+    }
+
+    /// A long source line is clipped around the caret rather than printed in
+    /// full.
+    #[test]
+    fn a_long_diagnostic_line_is_clipped() {
+        let source: String = "a".repeat(1000);
+        let diag = Diag {
+            path: "q.cagara".into(),
+            line: 1,
+            col: 500,
+            message: "boom".into(),
+            source,
+            width: 3,
+        };
+        let rendered = diag.to_string();
+        assert!(rendered.contains('…'), "{rendered}");
+        assert!(
+            rendered
+                .lines()
+                .nth(1)
+                .is_some_and(|line| line.chars().count() < 250),
+            "the excerpt was not clipped: {rendered}"
+        );
+    }
+
+    /// A UTF-8 BOM is accepted and never enters a span or excerpt.
+    #[test]
+    fn a_bom_is_not_source_text() {
+        let src = "\u{feff}main = 1\n";
+        let ws = Workspace::from_source(src);
+        assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+        assert_eq!(ws.modules[ws.root].text, "main = 1\n");
+        assert!(crate::check::check(&ws).errors().is_empty());
+
+        let mut ws = Workspace::from_source("q = 1\n");
+        let root = ws.root;
+        assert!(ws.set_source(root, "\u{feff}q = 2\n".to_string()));
+        assert_eq!(ws.modules[root].text, "q = 2\n");
     }
 
     /// Fixity cannot be declared, because the table is fixed.

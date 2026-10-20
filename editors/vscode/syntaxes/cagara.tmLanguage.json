@@ -49,11 +49,6 @@
           "name": "keyword.other.sql.cagara"
         },
         {
-          "comment": "An operator declaration: the fixity keywords. Declaring one is how a new operator is added; see prelude.cagara.",
-          "match": "^(infixl|infixr)\\b",
-          "name": "keyword.other.fixity.cagara"
-        },
-        {
           "match": "\\b(true|false)\\b",
           "name": "constant.language.boolean.cagara"
         },

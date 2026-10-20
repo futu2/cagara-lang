@@ -92,7 +92,7 @@ impl NodeRef {
 
 /// The query stage a definition *is*, when its body is a `primitive`.
 ///
-/// The kind travels in the definition's [`Scheme`], so a use site can name the
+/// The kind travels in the definition's `Scheme`, so a use site can name the
 /// operation it applied without reading it back out of a composed result type.
 /// A helper is not a stage: its scheme carries `None`, and the stages it
 /// applies are the nodes recorded in its own body.
@@ -189,7 +189,7 @@ pub(crate) struct PendingRowStage {
 pub struct RowStageView {
     pub kind: RowStage,
     pub site: u32,
-    /// The stable identity of the application; see [`PendingRowStage::node`].
+    /// The stable identity of the application; see `PendingRowStage::node`.
     pub node: NodeRef,
     pub span: Span,
     /// The closed witness supplied to the stage (`prefix`/`suffix` affix,

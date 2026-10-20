@@ -29,8 +29,8 @@ pub fn parse(input: &str) -> Parse {
 }
 
 /// Parse against an explicit operator table. The table says which spellings
-/// are infix operators and how tightly they bind; `crate::ops` builds the
-/// language's table from the prelude's declarations.
+/// are infix operators and how tightly they bind; [`crate::ops()`] supplies the
+/// language's fixed table.
 pub fn parse_with(input: &str, ops: &Ops) -> Parse {
     let mut p = Parser {
         toks: lex(input),
@@ -87,11 +87,16 @@ struct Parser<'a> {
 /// iteratively, so there is no separate pipeline-specific cap.
 const MAX_DEPTH: usize = 128;
 
-/// A token shaped like an operator that no declaration claims.
-fn unknown_op(spelling: &str) -> String {
+/// A token shaped like an operator that the fixed table does not contain.
+///
+/// Operators are part of the language, not something a source file can add;
+/// the message says so and lists what is available, because the old wording
+/// told readers to write an `infixl` line that the parser would then reject.
+fn unknown_op(spelling: &str, table: &Ops) -> String {
     format!(
-        "unknown operator `{spelling}`; declare it in `prelude.cagara`, e.g. \
-         `infixl 1 {spelling}` for a pipeline stage (`&` is declared at level 1)"
+        "unknown operator `{spelling}`; Cagara's operator set is fixed and cannot be \
+         extended from source. Known operators: {}",
+        table.spellings().join(", ")
     )
 }
 
@@ -475,7 +480,7 @@ impl<'a> Parser<'a> {
                 // known to sit in operator position, instead of letting it
                 // fall through to a generic "unexpected tokens" error.
                 if l.kind.is_op_symbol() {
-                    let msg = unknown_op(l.text);
+                    let msg = unknown_op(l.text, self.ops);
                     self.bail(&msg);
                 }
                 break;
@@ -670,7 +675,7 @@ impl<'a> Parser<'a> {
                 // operand) is still an undeclared-operator problem, not a
                 // missing expression.
                 Some(l) if l.kind.is_op_symbol() && self.ops.find(l.text).is_none() => {
-                    let msg = unknown_op(l.text);
+                    let msg = unknown_op(l.text, self.ops);
                     self.bail(&msg);
                 }
                 _ => {

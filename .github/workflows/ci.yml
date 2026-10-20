@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -16,6 +20,7 @@ jobs:
   rust:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -37,9 +42,37 @@ jobs:
         env:
           CAGARA_REQUIRE_ENGINES: "1"
 
+  docs:
+    name: Rustdoc
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+
+  cross-platform:
+    name: Compile on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Execution tests need the SQLite and DuckDB shells, which this job does
+      # not install; `cargo test` skips absent engines, but compiling every
+      # target is the part that catches path and platform assumptions here.
+      - run: cargo check --workspace --all-targets --locked
+
   vscode:
     name: VS Code extension
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: editors/vscode

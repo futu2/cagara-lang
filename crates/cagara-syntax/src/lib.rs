@@ -22,6 +22,16 @@ pub use ops::{op_name, ops, Fixity, Ops};
 pub use parser::{parse, parse_with, Parse, ParseError};
 pub use syntax_kind::SyntaxKind;
 
+/// Strip a leading UTF-8 byte-order mark.
+///
+/// A BOM is transport metadata, not source text: editors on Windows add one,
+/// and every diagnostic should point at the code rather than three bytes before
+/// it. The lexer does not accept it, so callers that receive arbitrary file
+/// contents (the workspace, the formatter) strip it once at the boundary.
+pub fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 pub type SyntaxNode = rowan::SyntaxNode<CagaraLanguage>;
 pub type SyntaxToken = rowan::SyntaxToken<CagaraLanguage>;
 pub type SyntaxElement = rowan::SyntaxElement<CagaraLanguage>;

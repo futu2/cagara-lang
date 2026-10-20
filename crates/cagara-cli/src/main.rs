@@ -2,13 +2,15 @@
 //! `cagara fmt [--check] <files...|->`
 //! `cagara lsp`
 //!
-//! Prints one SQL statement per query definition in the root file, or with
-//! `--types` the inferred type of every root definition. `cagara fmt`
-//! formats files in place. `cagara lsp` runs the language server over stdio.
+//! Prints the SQL for the root file's `main` definition, or with `--only`
+//! another definition; `--types` prints inferred types instead. A file without
+//! `main` is a library and prints nothing. `cagara fmt` formats files in place.
+//! `cagara lsp` runs the language server over stdio.
 
 use cagara_hir::{check, compile_checked, Workspace};
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -63,11 +65,18 @@ fn main_inner() -> std::io::Result<ExitCode> {
         return fmt(rest);
     }
     if first.as_deref() == Some(OsStr::new("lsp")) {
+        let rest: Vec<OsString> = rest.collect();
+        if rest
+            .iter()
+            .any(|a| a == OsStr::new("-h") || a == OsStr::new("--help"))
+        {
+            return out(USAGE).map(|()| ExitCode::SUCCESS);
+        }
         // Editors may pass `--stdio`; stdio is the only transport.
-        if let Some(a) = rest.find(|a| a != OsStr::new("--stdio")) {
+        if let Some(a) = rest.iter().find(|a| *a != OsStr::new("--stdio")) {
             return Ok(usage(&format!(
                 "unexpected argument `{}` for `cagara lsp`",
-                display(&a)
+                display(a)
             )));
         }
         return match cagara_lsp::run() {
@@ -361,7 +370,8 @@ fn report_sql(
 /// `cagara fmt`: rewrite files in place, or with `--check` list the files
 /// that are not formatted. Files with syntax errors are reported and left
 /// unchanged. `-` formats stdin to stdout (echoing it on failure, so editor
-/// filters never lose text).
+/// filters never lose text). Output uses LF line endings; a leading UTF-8 BOM
+/// is preserved.
 fn fmt(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
     let mut check = false;
     let mut files = Vec::new();
@@ -406,11 +416,20 @@ fn fmt(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
                 continue;
             }
         };
-        let formatted = match cagara_fmt::format(&src) {
-            Ok(f) if f.errors.is_empty() => Some(f.text),
+        // A BOM is transport metadata. Format the body, then put the marker
+        // back so formatting a Windows file does not silently change its
+        // encoding.
+        let has_bom = src.starts_with('\u{feff}');
+        let body = cagara_syntax::strip_bom(&src);
+        let formatted = match cagara_fmt::format(body) {
+            Ok(f) if f.errors.is_empty() => Some(if has_bom {
+                format!("\u{feff}{}", f.text)
+            } else {
+                f.text
+            }),
             Ok(f) => {
                 for e in &f.errors {
-                    let (line, col) = cagara_fmt::line_col(&src, e.offset);
+                    let (line, col) = cagara_fmt::line_col(body, e.offset);
                     eprintln!(
                         "{name}:{line}:{col}: error: {} (file not formatted)",
                         e.message
@@ -442,13 +461,64 @@ fn fmt(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
             out(name)?;
             failed = true;
         } else if !stdin {
-            if let Err(e) = std::fs::write(file, formatted) {
+            if let Err(e) = write_atomic(Path::new(file), formatted.as_bytes()) {
                 eprintln!("{name}: {e}");
                 failed = true;
             }
         }
     }
     Ok(done(failed))
+}
+
+/// Replace `path` with `contents`, writing a sibling temporary first.
+///
+/// A crash during a plain `fs::write` can leave a truncated source file. The
+/// rename is atomic on Unix; Windows has no portable rename-over-existing, so
+/// the old file is removed first there. The file's permissions are copied to
+/// the temporary so replacing it does not change its mode.
+fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    // Follow a symlink, so formatting a link updates its target rather than
+    // replacing the link with a regular file.
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let parent = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut last = None;
+    for attempt in 0..100_u32 {
+        let tmp = parent.join(format!(".cagara-fmt-{}-{attempt}", std::process::id()));
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        let result = (|| {
+            if let Ok(meta) = fs::metadata(&target) {
+                fs::set_permissions(&tmp, meta.permissions())?;
+            }
+            file.write_all(contents)?;
+            file.sync_all()?;
+            drop(file);
+            #[cfg(windows)]
+            if target.exists() {
+                fs::remove_file(&target)?;
+            }
+            fs::rename(&tmp, &target)
+        })();
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        std::io::Error::other(format!(
+            "could not create a temporary file next to {}",
+            path.display()
+        ))
+    }))
 }
 
 fn usage(msg: &str) -> ExitCode {

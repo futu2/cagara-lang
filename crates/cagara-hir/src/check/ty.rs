@@ -406,8 +406,8 @@ pub(crate) fn ty_fields(t: &Ty) -> Vec<(String, ScalarType)> {
 
 /// What a definition's scheme *is*, structurally.
 ///
-/// [`ty_fields`] returns `vec![]` for every non-row type and
-/// [`ty_to_scalar`] returns `Unknown` for every non-scalar one, so neither can
+/// `ty_fields` returns `vec![]` for every non-row type and
+/// `ty_to_scalar` returns `Unknown` for every non-scalar one, so neither can
 /// say "this is a function" or "this is a query". The checked layer needs that
 /// distinction — asking a helper (`f = q => q & where …`) for its columns and
 /// getting an empty list claims it is a query with no fields — and reading the
@@ -712,6 +712,9 @@ pub(crate) struct Checker<'w> {
     pub(crate) schemes: HashMap<(usize, usize), Scheme>,
     pub(crate) failed: HashSet<(usize, usize)>,
     pub(crate) active: Vec<(usize, usize)>,
+    /// Cycles already reported, so a recursive use reached twice does not
+    /// produce the same diagnostic twice.
+    pub(crate) recursion_reported: HashSet<(usize, usize)>,
     /// How many `def_scheme` calls are on the stack, for `MAX_DEF_DEPTH`.
     pub(crate) depth: usize,
     /// Whether the `MAX_DEF_DEPTH` diagnostic was already reported.

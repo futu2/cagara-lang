@@ -63,7 +63,8 @@ query union_named def 2 fault None: At(Loc { module: 1, span: Span { start: 879,
 query union_op def 3 fault None: At(Loc { module: 0, span: Span { start: 9071, end: 9080 } }, Set { kind: Union, left: At(Loc { module: 1, span: Span { start: 764, end: 786 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 832, end: 855 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name"]) }) })
 query union_direct def 4 fault None: At(Loc { module: 1, span: Span { start: 934, end: 952 } }, Set { kind: Union, left: At(Loc { module: 1, span: Span { start: 764, end: 786 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 832, end: 855 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name"]) }) })
 query union_all def 5 fault None: At(Loc { module: 1, span: Span { start: 974, end: 989 } }, Set { kind: UnionAll, left: At(Loc { module: 1, span: Span { start: 832, end: 855 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 764, end: 786 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }) })
-query except_named def 7 fault None: At(Loc { module: 1, span: Span { start: 1121, end: 1134 } }, Set { kind: Except, left: At(Loc { module: 1, span: Span { start: 832, end: 855 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 764, end: 786 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }) })
+query intersect_named def 6 fault None: At(Loc { module: 1, span: Span { start: 1016, end: 1032 } }, Set { kind: Intersect, left: At(Loc { module: 1, span: Span { start: 832, end: 855 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 764, end: 786 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }) })
+query except_named def 7 fault None: At(Loc { module: 1, span: Span { start: 1127, end: 1140 } }, Set { kind: Except, left: At(Loc { module: 1, span: Span { start: 832, end: 855 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 764, end: 786 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }) })
 query except_op def 8 fault None: At(Loc { module: 0, span: Span { start: 9255, end: 9265 } }, Set { kind: Except, left: At(Loc { module: 1, span: Span { start: 764, end: 786 } }, Table { schema: "public", name: "users", columns: Some(["id", "name"]) }), right: At(Loc { module: 1, span: Span { start: 832, end: 855 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name"]) }) })
 == crates/cagara-hir/tests/corpus/stages.cagara (2 modules, root 1)
 query users def 0 fault None: At(Loc { module: 1, span: Span { start: 659, end: 681 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age"]) })
@@ -140,7 +141,7 @@ query orders def 1 fault None: At(Loc { module: 1, span: Span { start: 154, end:
 query admins def 2 fault None: At(Loc { module: 1, span: Span { start: 249, end: 272 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name", "age", "active"]) })
 query q def 3 fault None: At(Loc { module: 1, span: Span { start: 285, end: 320 } }, Join { kind: Left, left: At(Loc { module: 1, span: Span { start: 70, end: 92 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) }), right: At(Loc { module: 1, span: Span { start: 154, end: 177 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) }), on: Tpl("$1 = $2", [Col(Left, "id"), Col(Right, "user_id")]) })
 == piped join (2 modules, root 1)
-diagnostic <input>:4:11 syntax error: unknown operator `?<`; declare it in `prelude.cagara`, e.g. `infixl 1 ?<` for a pipeline stage (`&` is declared at level 1)
+diagnostic <input>:4:11 syntax error: unknown operator `?<`; Cagara's operator set is fixed and cannot be extended from source. Known operators: !=, $, %, &, &!, &&, &*, &+, &-, &., &=, &?, &^, &|, &~, *, +, -, /, <, <<<, <=, <>, <?, <?>, ==, >, >=, >>>, ?, ?>, ??, ||
 query users def 0 fault None: At(Loc { module: 1, span: Span { start: 70, end: 92 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) })
 query orders def 1 fault None: At(Loc { module: 1, span: Span { start: 154, end: 177 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) })
 query admins def 2 fault None: At(Loc { module: 1, span: Span { start: 249, end: 272 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name", "age", "active"]) })
@@ -226,14 +227,18 @@ query orders def 1 fault None: At(Loc { module: 1, span: Span { start: 154, end:
 query admins def 2 fault None: At(Loc { module: 1, span: Span { start: 249, end: 272 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name", "age", "active"]) })
 query q def 4 fault None: At(Loc { module: 1, span: Span { start: 70, end: 92 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) })
 == recursive query (2 modules, root 1)
+diagnostic <input>:4:1 `a` refers to itself; recursion is not supported
 query users def 0 fault None: At(Loc { module: 1, span: Span { start: 70, end: 92 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) })
 query orders def 1 fault None: At(Loc { module: 1, span: Span { start: 154, end: 177 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) })
 query admins def 2 fault None: At(Loc { module: 1, span: Span { start: 249, end: 272 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name", "age", "active"]) })
+query a def 3 fault Some(Program): ERR <input>:4:1 `a` refers to itself; recursion is not supported
 == recursive scalar (2 modules, root 1)
+diagnostic <input>:4:1 `f` refers to itself; recursion is not supported
 diagnostic <input>:4:5 `f` refers to itself; recursion is not supported
 query users def 0 fault None: At(Loc { module: 1, span: Span { start: 70, end: 92 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) })
 query orders def 1 fault None: At(Loc { module: 1, span: Span { start: 154, end: 177 } }, Table { schema: "public", name: "orders", columns: Some(["id", "user_id", "amount"]) })
 query admins def 2 fault None: At(Loc { module: 1, span: Span { start: 249, end: 272 } }, Table { schema: "public", name: "admins", columns: Some(["id", "name", "age", "active"]) })
+query f def 3 fault Some(Program): ERR <input>:4:1 `f` refers to itself; recursion is not supported
 query q def 4 fault Some(Program): ERR <input>:4:5 `f` refers to itself; recursion is not supported
 == unknown table (2 modules, root 1)
 query users def 0 fault None: At(Loc { module: 1, span: Span { start: 70, end: 92 } }, Table { schema: "public", name: "users", columns: Some(["id", "name", "age", "active"]) })

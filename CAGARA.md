@@ -44,7 +44,8 @@ Give this file to an agent as context, then ask for **one** `.cagara` file.
 10. **Set operations require identical rows:** same names, same order, same types.
 11. **`[..]` is a fixed key list, not a general list value.** It is valid as `order` keys, a window
     spec's `partition`/`order`, and `inList` members. Nowhere else.
-12. **`main` is the entry point and must be a `query`.** A scalar `main = 1` compiles but prints no SQL.
+12. **`main` is the entry point and should be a `query`.** A scalar `main = 1` compiles but
+    prints no SQL, so make `main` a query when you want output.
 
 If code can be executed, run `cagara file.cagara` before answering. Diagnostics are specific; §11
 maps each common one to its fix.

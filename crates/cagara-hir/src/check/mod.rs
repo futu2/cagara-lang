@@ -45,7 +45,7 @@
 //! schema helpers are used by IR validation (see `docs/ROW-TYPES.md`).
 //!
 //! The implementation is split by concern; see each module for its part:
-//! [`ty`], [`reduce`], [`unify`], [`overload`], [`infer`], [`print`].
+//! `ty`, `reduce`, `unify`, `overload`, `infer`, and `print`.
 
 mod core_facts;
 mod facts;
@@ -645,6 +645,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         schemes: HashMap::new(),
         failed: HashSet::new(),
         active: Vec::new(),
+        recursion_reported: HashSet::new(),
         depth: 0,
         depth_reported: false,
         pending: Vec::new(),

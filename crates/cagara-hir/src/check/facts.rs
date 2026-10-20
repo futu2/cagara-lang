@@ -88,7 +88,7 @@ pub(crate) fn definition_facts(
             _ => {}
         }
         // Pushed in reverse so the stack pops them in source order, which is
-        // the order [`child_exprs`] states once.
+        // the order `child_exprs` states once.
         pending.extend(child_exprs(e).into_iter().rev());
     }
     facts

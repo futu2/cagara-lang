@@ -18,8 +18,9 @@ pub fn dialect(name: &str) -> Option<Dialect> {
 pub struct Options {
     pub dialect: Dialect,
     pub pretty: bool,
-    /// Run sqlglot's optimizer. Off by default: its predicate pushdown can
-    /// move a filter across a window or LIMIT boundary.
+    /// Run sqlglot's optimizer. Off by default: it folds, simplifies and
+    /// pushes predicates, so it is opt-in. The stage-boundary tests in
+    /// `tests.rs` pin the cases Cagara relies on (window, LIMIT, aggregate).
     pub optimize: bool,
 }
 

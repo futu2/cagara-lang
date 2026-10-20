@@ -105,8 +105,8 @@ pub enum ExprKind {
     Error,
 }
 
-/// Parse and lower a source file with the language's operator table (the
-/// built-ins plus the prelude's declarations). Parse errors are returned
+/// Parse and lower a source file with the language's fixed operator table.
+/// Parse errors are returned
 /// alongside a best-effort module (erroneous parts become `ExprKind::Error`).
 pub fn lower_source(src: &str) -> (Module, Vec<ParseError>) {
     lower_with(src, ops())
@@ -234,12 +234,7 @@ impl Lower<'_> {
         m
     }
 
-    /// `infixl 1 &+` / `infixr 21 ??`: a level and a spelling.
-    ///
-    /// A declaration the parser rejected is dropped rather than recorded, so a
-    /// malformed one never takes effect: whatever the parser complained about
-    /// (a missing level, a spelling that is not an operator) has already been
-    /// reported, and an out-of-range level is refused here for the same
+    /// Lower one `name = body` or `name : ty = body` definition.
     fn def(&mut self, n: &SyntaxNode) -> Option<Def> {
         let name = token(n, K::Ident)?.text().to_string();
         let ty = n

@@ -24,7 +24,11 @@
 //!
 //! ```text
 //! normalize  (Name/Proj)   = a local, or the body of the definition it resolved to
-//! normalize  (Field/Lit)   = a checked column or literal
+//! normalize  (Field)       = a checked column
+//! normalize  (Lit str, int in a symbol position) = a `Label`: the operation
+//!                            that consumes it says whether it names an affix, a
+//!                            column, or a count
+//! normalize  (Lit other)   = a checked literal
 //! normalize  (Lambda p… e) = a closure over the environment
 //! normalize  (Case)        = a searched CASE template
 //! normalize  (Record/List) = a record or list of the arguments' values
@@ -42,7 +46,8 @@
 //!                             saturated
 //! apply (Join/Set c, v)     = accumulate; build the join/set node when
 //!                             saturated
-//! apply (Table/Label, v)    = a column, a name, or a count
+//! apply (Fold f, v)         = accumulate; build a frame bound, or a Frame
+//! apply (Table/Label, v)    = a table leaf, or a symbol argument
 //! apply (Overloads cands, v)= the first candidate that applies
 //! ```
 //!
@@ -61,7 +66,7 @@
 //!
 //! One [`budget::Budget`] replaces the depth constants five separate passes
 //! carried: a recursion bound (how many definitions down one path) and a work
-//! bound (nodes visited and nodes built). Exceeding either is
+//! bound (nodes visited). Exceeding either is
 //! [`Control::Unsupported`] — the accepted-program boundary that becomes a
 //! compiler fault, never a crash and never a wrong query.
 
@@ -71,7 +76,6 @@ mod env;
 mod frame;
 pub(crate) mod route;
 mod scalar;
-mod thunk;
 mod value;
 
 use crate::compile::CompilerInput;
@@ -218,35 +222,13 @@ pub(crate) enum Value<'a> {
     },
 }
 
-#[allow(dead_code)] // The erase boundary reads these once the route is cut over.
-impl<'a> Value<'a> {
+impl Value<'_> {
     /// Whether this value is a query already built in the arena.
     fn as_query(&self) -> Option<arena::NodeId> {
         match self {
             Value::Query(id) => Some(*id),
             _ => None,
         }
-    }
-
-    /// The bare function this value denotes, if it is the identity function.
-    ///
-    /// One syntactic clause: a lambda whose body is its own parameter.
-    /// `id : a -> a = x => x` is applied away by β-reduction wherever it is
-    /// *applied*, but a composition written `>>> id` never applies it — the
-    /// composition itself is a value — so the reduction has to recognise it
-    /// as a value that composes to nothing, which is exactly what the identity
-    /// function is. The normalizer erases the same definition by reducing its
-    /// body.
-    pub(crate) fn is_identity(&self) -> bool {
-        let Value::Closure(closure) = self else {
-            return false;
-        };
-        if closure.params.len() != 1 {
-            return false;
-        }
-        let parameter = &closure.params[0];
-        matches!(&closure.body.expr.kind, cagara_syntax::ast::ExprKind::Name(name) if name == parameter)
-            && closure.env.is_empty()
     }
 }
 

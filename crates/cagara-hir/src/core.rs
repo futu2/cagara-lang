@@ -5,21 +5,18 @@
 //! Everything here is plain owned data. There is no `Rc`, no closure, and —
 //! deliberately — no dependency on the type checker's internal `Ty`: the
 //! checked layer is the *result* of checking, so it must not read the
-//! mutable machinery that produced it. `Verified` is the one wrapper for
-//! values that a constructor has already validated.
+//! mutable machinery that produced it.
 
-use crate::primitive::TplKind;
 use crate::rules;
 use crate::schema;
-use crate::workspace::Diag;
 use cagara_syntax::ast::Span;
 use std::collections::{HashMap, HashSet};
 
 /// Where a checked node was written.
 ///
-/// The target design puts this on every node instead of wrapping the
-/// relational tree in a transparent `Rel::At`, so a later phase can name the
-/// node that made an operation invalid without unwrapping anything.
+/// Every checked node carries its origin, and erasure stamps the `Rel` node it
+/// produces with `Rel::At(origin)`, so a later phase can name the node that made
+/// an operation invalid without re-deriving it from a span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Origin {
     pub module: usize,
@@ -40,7 +37,6 @@ pub enum ScalarType {
     Float,
     String,
     Bool,
-    Decimal,
     Date,
     Timestamp,
     Maybe(Box<ScalarType>),
@@ -57,11 +53,6 @@ impl ScalarType {
     /// cannot decide without one (`where` needs a bool, joins need rows).
     pub fn is_unknown(&self) -> bool {
         matches!(self, ScalarType::Unknown)
-    }
-
-    /// Is this a `maybe` at the top level?
-    pub fn is_maybe(&self) -> bool {
-        matches!(self, ScalarType::Maybe(_))
     }
 
     /// Wrap in `maybe`. Idempotent, matching `ValueMap::AsNullable` in the
@@ -81,41 +72,6 @@ impl ScalarType {
         ScalarType::maybe(self)
     }
 
-    /// The scalar constructor this type is written with (`int`, `maybe`, …).
-    ///
-    /// A plain `Display` writes a *readable* type for a user; this is the
-    /// spelling a `Ty` constructor uses, for comparing against one.
-    pub fn pow_name(&self) -> &'static str {
-        match self {
-            ScalarType::Int => "int",
-            ScalarType::Float => "float",
-            ScalarType::Decimal => "decimal",
-            ScalarType::String => "string",
-            ScalarType::Bool => "bool",
-            ScalarType::Date => "date",
-            ScalarType::Timestamp => "timestamp",
-            ScalarType::Maybe(_) => "maybe",
-            ScalarType::List(_) => "list",
-            ScalarType::Unknown => "?",
-        }
-    }
-
-    /// The type inside a `maybe`, if there is one.
-    pub fn strip_maybe(&self) -> Option<&ScalarType> {
-        match self {
-            ScalarType::Maybe(t) => Some(t),
-            _ => None,
-        }
-    }
-
-    /// The element type of a `list`, if this is one.
-    pub fn elem(&self) -> Option<&ScalarType> {
-        match self {
-            ScalarType::List(t) => Some(t),
-            _ => None,
-        }
-    }
-
     /// Is a value of this type usable as a condition? A `maybe bool` is not:
     /// the language requires `coalesce` first, the same way its operators
     /// refuse nullable arguments.
@@ -131,7 +87,6 @@ impl std::fmt::Display for ScalarType {
             ScalarType::Float => f.write_str("float"),
             ScalarType::String => f.write_str("string"),
             ScalarType::Bool => f.write_str("bool"),
-            ScalarType::Decimal => f.write_str("decimal"),
             ScalarType::Date => f.write_str("date"),
             ScalarType::Timestamp => f.write_str("timestamp"),
             ScalarType::Unknown => f.write_str("?"),
@@ -387,11 +342,6 @@ impl Error {
         }
     }
 
-    /// Whether this is a gap in this phase rather than a fault in the program.
-    pub fn is_unsupported(&self) -> bool {
-        self.fault == Fault::Compiler
-    }
-
     /// Point the error at an origin, unless it already has one (the innermost
     /// node is the one that failed).
     pub fn at(mut self, origin: Origin) -> Self {
@@ -405,77 +355,6 @@ impl Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
-    }
-}
-
-/// A diagnostic about one module, and optionally one definition of it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Diagnostic {
-    pub module: usize,
-    pub def: Option<usize>,
-    pub diag: Diag,
-}
-
-impl Diagnostic {
-    pub fn new(module: usize, def: Option<usize>, diag: Diag) -> Self {
-        Diagnostic { module, def, diag }
-    }
-}
-
-/// A value a constructor has already validated.
-///
-/// This wrapper lets a consumer distinguish validated input from unchecked
-/// input without repeating the validation.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Verified<T>(T);
-
-impl<T> Verified<T> {
-    pub fn new(value: T) -> Self {
-        Verified(value)
-    }
-
-    pub fn get(&self) -> &T {
-        &self.0
-    }
-
-    pub fn into_inner(self) -> T {
-        self.0
-    }
-}
-
-/// The scalar type a value of this template phase has.
-///
-/// A template's *kind* says which checked constructor builds it; this maps the
-/// three-case enum onto that split, so a caller holding a `TplKind` knows
-/// which checked constructor to call without matching on the enum itself.
-pub fn template_node_kind(kind: TplKind) -> TemplateNodeKind {
-    match kind {
-        TplKind::Scalar => TemplateNodeKind::Scalar,
-        TplKind::Agg => TemplateNodeKind::Aggregate,
-        TplKind::Win => TemplateNodeKind::Window,
-    }
-}
-
-/// Which checked expression node a template builds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TemplateNodeKind {
-    /// `CheckedExprNode::Template`, phase from the arguments' mix.
-    Scalar,
-    /// `CheckedExprNode::AggTemplate`, `Agg` phase.
-    Aggregate,
-    /// `CheckedExprNode::WinTemplate`, `Win` phase, with a window spec.
-    Window,
-}
-
-impl TemplateNodeKind {
-    /// The phase this kind of template always produces. A scalar template's
-    /// phase depends on its arguments and is not decided here.
-    pub fn fixed_phase(self) -> Option<crate::ir::Phase> {
-        match self {
-            TemplateNodeKind::Scalar => None,
-            TemplateNodeKind::Aggregate => Some(crate::ir::Phase::Agg),
-            TemplateNodeKind::Window => Some(crate::ir::Phase::Win),
-        }
     }
 }
 

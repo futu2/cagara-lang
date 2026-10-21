@@ -17,9 +17,9 @@ pub use checked::{CheckedExpr, ExprKind};
 pub use compile::{
     compile, compile_checked, compile_diagnostics, compile_input, root_queries,
     root_queries_checked, root_verdicts, Compilation, CompiledQuery, CompilerInput, DefinitionId,
-    DefinitionKey, ModuleSnapshot,
+    ModuleSnapshot,
 };
-pub use core::{Diagnostic, Error, Fault, Origin, RowType, ScalarType};
+pub use core::{Error, Fault, Origin, RowType, ScalarType};
 pub use db::{Database, SourceFile};
 pub use workspace::{Diag, Workspace};
 

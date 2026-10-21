@@ -12,10 +12,10 @@
 //! * **recursion** — how many definitions down one normalization path. A chain of
 //!   definitions that merely name each other is linear in this, and a recursive
 //!   definition is unbounded, so this is also where a cycle is caught.
-//! * **work** — nodes visited and relational nodes constructed. A definition
-//!   that uses its argument twice doubles the work at every level, so this is
-//!   the bound that catches the exponential shape, and it is charged for every
-//!   node *before* that node is built.
+//! * **work** — nodes visited. A definition that uses its argument twice
+//!   doubles the work at every level, so this is the bound that catches the
+//!   exponential shape, and it is charged for every node the reduction enters,
+//!   *before* the operation that node heads is applied.
 //!
 //! Exceeding either is a capability gap, not a program error: the program is
 //! well-typed and the compiler cannot build it within its limits.
@@ -54,12 +54,6 @@ impl Budget {
         Budget { depth: 0, work: 0 }
     }
 
-    /// How deep normalization currently is, for a caller that wants to say so.
-    #[allow(dead_code)] // Kept for diagnostics and budget-focused tests.
-    pub(crate) fn depth(&self) -> usize {
-        self.depth
-    }
-
     /// Account for entering a definition.
     pub(crate) fn enter(&mut self, origin: Origin) -> Result<(), Control> {
         if self.depth >= MAX_DEPTH {
@@ -93,11 +87,6 @@ impl Budget {
             ));
         }
         Ok(())
-    }
-
-    /// Account for constructing one relational node.
-    pub(crate) fn spend_node(&mut self, origin: Origin) -> Result<(), Control> {
-        self.spend(origin)
     }
 }
 

@@ -573,7 +573,6 @@ impl<'a> Normalizer<'a, 'a> {
         // itself lives in the prelude and has no row of its own.
         let row = call_row;
         let call_origin = self.origin();
-        self.builder.charge(call_origin)?;
         let site = NodeRef::new(call_origin.module, self.defining, self.call_id());
         self.builder
             .table(site, call_origin, schema, name, row)
@@ -638,7 +637,6 @@ impl<'a> Normalizer<'a, 'a> {
                 ),
             ));
         };
-        self.builder.charge(origin)?;
         let built = match spec.kind {
             QueryNodeKind::Prefix
             | QueryNodeKind::Suffix
@@ -820,7 +818,6 @@ impl<'a> Normalizer<'a, 'a> {
             },
             operation_site,
         );
-        self.builder.charge(origin)?;
         match combine {
             CombineFn::Join { kind, .. } => {
                 // `innerJoin` is `query s -> expr (join r s) bool -> query r`,

@@ -612,6 +612,35 @@ fn overloads_resolve_by_type() {
     assert!(err("q = orders & select { x = .amount + .user_id }\n", "q")
         .contains("expected int, found float"));
     assert!(err("q = users & select { s = .name <> .age }\n", "q").contains("type mismatch"));
+    // `%` has an `int` overload only: a float remainder has to be spelled
+    // out, and the docs say so. Pinned here because `+ - * /` do have both.
+    assert!(err("q = orders & select { x = .amount % 2.0 }\n", "q")
+        .contains("expected int, found float"));
+}
+
+/// A type position named with something that is not a built-in constructor is a
+/// **type parameter**, not an unknown type.
+///
+/// Signatures carry their parameters implicitly, so `id : a -> a` works; the
+/// same mechanism takes any other free name, which means `amount = decimal`
+/// makes the definition polymorphic rather than being rejected. Nothing checks
+/// such a column, and two use sites may pick different types for it — the
+/// behaviour `docs/CAGARA.md` and `docs/LEARN.md` warn generated code about, and
+/// the gap `docs/PLAN.md` records. This test is the executable statement of it:
+/// if the checker ever learns to reject an unknown type name, this is the test
+/// to change, and the three documents with it.
+#[test]
+fn an_unknown_type_name_is_a_type_parameter() {
+    let src = "money : query { amount = decimal } = table \"public\" \"money\"\n\
+               as_text : query { s = string } = money & select { s = upper .amount }\n\
+               as_int : query { n = int } = money & select { n = .amount + 1 }\n";
+    assert_eq!(ty(src, "as_text"), "query { s = string }");
+    assert_eq!(ty(src, "as_int"), "query { n = int }");
+    // Within one use, the column still has *one* type, so forcing it to be a
+    // string and an int at once is the mismatch the annotation never reported.
+    let mixed = "money : query { amount = decimal } = table \"public\" \"money\"\n\
+                 q = money & select { s = upper .amount, n = .amount + 1 }\n";
+    assert!(err(mixed, "q").contains("no overload of `+` matches"));
 }
 
 #[test]
@@ -1480,6 +1509,16 @@ fn a_map_value_node_records_the_wrapped_row() {
     assert_eq!(nodes[0].0, RowStage::MapValue);
     assert_eq!(nodes[0].1.as_ref(), Some(&users));
     assert_eq!(nodes[0].2.as_ref(), Some(&users));
+    // Every wrapper the type-level table names is accepted by the stage too,
+    // `id` included: the stage's decode and the checker's reducer share one
+    // table, so they cannot disagree about a wrapper. No wrapper renames a
+    // column, so the row's names are the input's in every case.
+    for wrapper in ["id", "list"] {
+        let src = format!("q = users & mapValue \"{wrapper}\"\n");
+        let nodes = row_stage_nodes(&src, "q");
+        assert_eq!(nodes.len(), 1, "{wrapper}: {nodes:?}");
+        assert_eq!(nodes[0].2.as_ref(), Some(&users), "{wrapper}");
+    }
 }
 
 #[test]
@@ -2045,13 +2084,6 @@ fn kind_checking_basic() {
     // prelude, or `suffix` silently prepends.
     assert!(ty("q = users & prefix \"u_\"\n", "q").contains("u_id"));
     assert!(ty("q = users & suffix \"_v2\"\n", "q").contains("id_v2"));
-}
-
-#[test]
-fn merge_basic() {
-    // merge combines two rows: names in both take the right's type, names only
-    // in the right are appended.
-    let _ = ty("q = users & merge orders\n", "q");
 }
 
 /// Whether `name` is a program the whole pipeline accepts: the checker takes

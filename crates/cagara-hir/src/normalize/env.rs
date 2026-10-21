@@ -49,11 +49,6 @@ impl<'a> Env<'a> {
             })),
         }
     }
-
-    /// Whether anything is bound.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.frames.is_none()
-    }
 }
 
 #[cfg(test)]

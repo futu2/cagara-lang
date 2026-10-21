@@ -7,7 +7,7 @@
 //! than a second copy of it.
 
 use crate::core::Origin;
-use crate::ir::{Bound, Frame};
+use crate::ir::Bound;
 
 use super::{Control, Label, Normalizer, Value};
 use crate::checked::CheckedExprNode;
@@ -116,9 +116,4 @@ pub(crate) fn fold<'a>(
             }))
         }
     }
-}
-
-/// A frame's start and end, for a consumer that needs to inspect one.
-pub(crate) fn _frame_of(frame: Frame) -> Frame {
-    frame
 }

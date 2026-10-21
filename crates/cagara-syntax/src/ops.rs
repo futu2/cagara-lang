@@ -28,10 +28,6 @@ use std::sync::OnceLock;
 /// other use of the prelude is in `cagara-hir`, which loads it as module 0.
 pub const PRELUDE_SRC: &str = include_str!("../../../prelude.cagara");
 
-/// Loosest level used by the table. `$` sits here, so the scale starts at
-/// zero like Haskell's.
-pub const MIN_LEVEL: u8 = 0;
-
 /// Tightest level the table could use. Binding powers are compared as `u8` and
 /// an operator at level `n` spends `n + 1` on one of its two binding powers,
 /// so a level must leave room for that increment; `MAX_LEVEL + 1` still fits

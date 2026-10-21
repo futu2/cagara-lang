@@ -118,9 +118,6 @@ prefix : symbol k -> query r -> query (keyMap (prependSym k) r) = primitive "__p
 # label-driven witness with its result in the same way as `prefix`.
 suffix : symbol k -> query r -> query (keyMap (appendSym k) r) = primitive "__suffix"
 
-# `merge left right` combines two queries; fields from right overwrite duplicates from left.
-merge : query r -> query s -> query (merge r s) = primitive "__merge"
-
 agg : agg (expr r (row s)) -> query r -> query s = primitive "__agg"
 
 # `order [asc .x, desc .y]`; NULLs sort last in either direction.

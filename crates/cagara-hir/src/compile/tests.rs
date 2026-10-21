@@ -938,37 +938,6 @@ fn overloaded_query_definitions_keep_source_identity() {
             .collect::<Vec<_>>(),
         vec![0, 1]
     );
-    assert_ne!(
-        compilation.queries[0].key, compilation.queries[1].key,
-        "duplicate definitions need distinct cache identities"
-    );
-}
-
-#[test]
-fn definition_keys_survive_unrelated_insertions() {
-    let mut ws = Workspace::from_source(
-        "first : query { a = int } = table \"public\" \"first\"\n\
-         second : query { a = int } = table \"public\" \"second\"\n",
-    );
-    let before = compile(&ws);
-    let keys_before: Vec<_> = before.queries.iter().map(|query| query.key).collect();
-
-    assert!(ws.set_source(
-        ws.root,
-        "inserted : query { a = int } = table \"public\" \"inserted\"\n\
-         first : query { a = int } = table \"public\" \"first\"\n\
-         second : query { a = int } = table \"public\" \"second\"\n"
-            .into()
-    ));
-    let after = compile(&ws);
-    let by_name: HashMap<_, _> = after
-        .queries
-        .iter()
-        .map(|query| (query.name.as_str(), query.key))
-        .collect();
-
-    assert_eq!(by_name["first"], keys_before[0]);
-    assert_eq!(by_name["second"], keys_before[1]);
 }
 
 #[test]
@@ -1024,15 +993,20 @@ fn changing_a_dependency_reelaborates_its_users() {
     );
 }
 
+/// A one-definition edit rebuilds that definition's *module* and the cached
+/// result still matches a fresh compile.
+///
+/// Reuse is per definition, but the unit of invalidation is the module check, so
+/// a sibling query in the same module is re-elaborated too. That is the boundary
+/// `docs/PERFORMANCE.md` states: an edit inside a module rechecks that module.
 #[test]
-fn editing_one_definition_changes_only_its_key() {
+fn an_edit_rebuilds_its_module_and_stays_fresh() {
     let mut ws = Workspace::from_source(
         "first : query { a = int } = table \"public\" \"first\"\n\
          second : query { a = int } = table \"public\" \"second\"\n",
     );
-    let before = compile(&ws);
-    let first_before = before.queries[0].key;
-    let second_before = before.queries[1].key;
+    compile(&ws);
+    let before = crate::elaborate::elaborated_defs().len();
 
     assert!(ws.set_source(
         ws.root,
@@ -1042,8 +1016,13 @@ fn editing_one_definition_changes_only_its_key() {
     ));
     let after = compile(&ws);
 
-    assert_ne!(after.queries[0].key, first_before);
-    assert_eq!(after.queries[1].key, second_before);
+    assert!(after.diagnostics.is_empty(), "{:?}", after.diagnostics);
+    assert_eq!(
+        &crate::elaborate::elaborated_defs()[before..],
+        &[(ws.root, 0), (ws.root, 1)],
+        "an edit invalidates the module check, so both definitions are rebuilt"
+    );
+    assert_eq!(after, compile_checked(&ws, &crate::check::check(&ws)));
 }
 
 #[test]

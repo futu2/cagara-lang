@@ -405,13 +405,6 @@ impl TypeCheck {
     /// neither can distinguish "a function taking a query" from "a query";
     /// this can, because it is computed from the type rather than from the
     /// shape of a printed string.
-    /// The phase and scalar type a definition *returns*, for a call site. See
-    /// `check::ty::scheme_result_expr`.
-    pub fn result_expr(&self, module: usize, def: usize) -> Option<(Phase, ScalarType)> {
-        let s = self.modules.get(module)?.schemes.get(&(module, def))?;
-        scheme_result_expr(&s.ty)
-    }
-
     /// The scalar type a definition *returns*, with arguments stripped and any
     /// `expr r a` unwrapped to `a`.
     ///

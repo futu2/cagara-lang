@@ -357,7 +357,6 @@ pub(crate) fn ty_to_scalar(t: &Ty) -> ScalarType {
         Ty::Con(name, args) => match (*name, args.len()) {
             ("int", 0) => ScalarType::Int,
             ("float", 0) => ScalarType::Float,
-            ("decimal", 0) => ScalarType::Decimal,
             ("string", 0) => ScalarType::String,
             ("bool", 0) => ScalarType::Bool,
             ("date", 0) => ScalarType::Date,

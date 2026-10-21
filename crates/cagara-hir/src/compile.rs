@@ -7,7 +7,6 @@ use crate::ir::Rel;
 use crate::workspace::{Binding, Diag, LoadedModule, Workspace};
 use cagara_syntax::ast::Module;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 /// Immutable compiler input borrowed from an existing workspace.
@@ -99,23 +98,12 @@ impl<'a> ModuleSnapshot<'a> {
     }
 }
 
-/// The source-based identity of a definition inside a loaded workspace.
-///
-/// `def` in [`DefinitionId`] is a source-order position, so inserting a
-/// definition changes the ids of everything after it. This key is independent
-/// of that position: it fingerprints the definition's source and uses an
-/// occurrence number only to distinguish same-name definitions. The numeric
-/// id remains available for APIs that need to address the AST directly.
-/// Keys are scoped to a workspace, not a persistent cache format. Hashes may
-/// collide; the incremental shell compares exact facts before reusing a query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DefinitionKey {
-    pub module: usize,
-    pub source_hash: u64,
-    pub occurrence: usize,
-}
-
 /// The numeric source location of a definition in a loaded module.
+///
+/// `def` is a source-order position, so inserting a definition changes the ids
+/// of everything after it. Reuse does not key on it: the incremental shell
+/// compares exact per-definition facts, so a moved definition is rebuilt with
+/// its new locations instead of being reused under a stale identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DefinitionId {
     pub module: usize,
@@ -126,7 +114,6 @@ pub struct DefinitionId {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledQuery {
     pub id: DefinitionId,
-    pub key: DefinitionKey,
     pub name: String,
     pub result: Result<Rel, Diag>,
     /// Who is at fault when `result` is an `Err`.
@@ -199,7 +186,6 @@ pub(crate) fn compile_reusing(
 ) -> Compilation {
     let tc = input.type_check();
     let root = input.root();
-    let keys = definition_keys(root);
     let mut out = Compilation {
         queries: Vec::new(),
         diagnostics: input.diagnostics().to_vec(),
@@ -213,7 +199,6 @@ pub(crate) fn compile_reusing(
 
     for (index, definition) in root.source().defs.iter().enumerate() {
         let name = definition.name.clone();
-        let key = keys[index];
         let id = DefinitionId {
             module: root.index(),
             def: index,
@@ -232,7 +217,6 @@ pub(crate) fn compile_reusing(
         }
         out.queries.push(CompiledQuery {
             id,
-            key,
             name,
             result,
             fault,
@@ -299,38 +283,6 @@ fn compile_definition(
             }
         },
     )
-}
-
-fn source_hash(source: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    source.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Build source-based identities before normalization drops non-query
-/// definitions from the result. Occurrences are counted by name, so editing a
-/// definition's body does not renumber a later overload with the same name.
-fn definition_keys(module: ModuleSnapshot<'_>) -> Vec<DefinitionKey> {
-    let mut occurrences = HashMap::<&str, usize>::new();
-    module
-        .source()
-        .defs
-        .iter()
-        .map(|definition| {
-            let occurrence = occurrences.entry(definition.name.as_str()).or_insert(0);
-            let source = module
-                .text()
-                .get(definition.span.start as usize..definition.span.end as usize)
-                .unwrap_or_default();
-            let key = DefinitionKey {
-                module: module.index(),
-                source_hash: source_hash(source),
-                occurrence: *occurrence,
-            };
-            *occurrence += 1;
-            key
-        })
-        .collect()
 }
 
 /// Compile root definitions using a type check the caller already computed.

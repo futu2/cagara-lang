@@ -9,12 +9,16 @@ use crate::ir::{JoinKind, SetKind};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Prim {
     Table,
+    /// No stage spells this: `merge r s` is a row *type* former, and two queries
+    /// are combined by a join or a set operation. The name stays in the table
+    /// because `primitive "__merge"` is writable in a definition body, and the
+    /// normalizer's answer to it is a compiler fault rather than silence.
+    Merge,
     Where,
     Select,
     Update,
     Omit,
     MapValue,
-    Merge,
     Prefix,
     Suffix,
     AggStage,

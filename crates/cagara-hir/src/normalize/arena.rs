@@ -37,10 +37,11 @@
 //!
 //! # Payment for a node
 //!
-//! A builder that runs out of normalization budget between two nodes would leave
-//! an arena that is half a query. [`Builder::charge`] is how the normalizer pays
-//! for a node *before* it builds it, so a refused normalization throws the arena
-//! away whole instead of returning a prefix of one.
+//! The arena does not track cost; the normalizer does. It charges for its work
+//! as it reduces ([`super::budget`]), before it applies the constructor that
+//! builds a node, and each normalization attempt owns its arena. A refused
+//! normalization therefore throws its arena away whole instead of returning a
+//! prefix of one.
 
 use crate::check::NodeRef;
 use crate::checked::CheckedExpr;
@@ -89,18 +90,6 @@ pub(crate) enum QueryNodeKind {
     Set(SetKind),
 }
 
-#[allow(dead_code)] // Introspection retained for arena-focused tests.
-impl QueryNodeKind {
-    /// How many relational children the operation takes.
-    pub(crate) fn arity(self) -> usize {
-        match self {
-            QueryNodeKind::Table => 0,
-            QueryNodeKind::Join(_) | QueryNodeKind::Set(_) => 2,
-            _ => 1,
-        }
-    }
-}
-
 /// What a node owns besides its children.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Payload {
@@ -130,17 +119,6 @@ pub(crate) enum Payload {
     None,
 }
 
-#[allow(dead_code)] // Introspection retained for arena-focused tests.
-impl Payload {
-    /// The prefix/suffix direction, for a consumer that needs it.
-    pub(crate) fn is_prefix(&self) -> Option<bool> {
-        match self {
-            Payload::Affix { prefix, .. } => Some(*prefix),
-            _ => None,
-        }
-    }
-}
-
 /// One node of the arena.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RelNode {
@@ -152,62 +130,25 @@ pub(crate) struct RelNode {
     pub(crate) payload: Payload,
 }
 
-/// A query being built: the arena, and the budget it is built under.
+/// A query being built: the nodes, and nothing else.
 ///
-/// The `budget` field is the normalizer's, threaded here so one object owns both
-/// halves of "construct a node": the cost of doing it and the node. There is no
-/// way to make a [`CompiledQuery`] except [`Builder::finish`], which takes the
-/// root the definition normalized to, so a finished query has at least one node
-/// and a real root.
+/// There is no way to make a [`CompiledQuery`] except [`Builder::finish`], which
+/// takes the root the definition normalized to, so a finished query has at least
+/// one node and a real root. Cost is not tracked here: the normalizer charges
+/// for its work as it reduces ([`super::budget`]), before it applies the
+/// constructor that builds a node.
 #[derive(Debug)]
 pub(crate) struct Builder {
     nodes: Vec<RelNode>,
-    budget: Option<crate::normalize::budget::Budget>,
-}
-
-impl Clone for Builder {
-    fn clone(&self) -> Self {
-        Builder {
-            nodes: self.nodes.clone(),
-            budget: self.budget.clone(),
-        }
-    }
 }
 
 impl Builder {
     pub(crate) fn new() -> Self {
-        Builder {
-            nodes: Vec::new(),
-            budget: None,
-        }
-    }
-
-    /// Build under `budget`; every node construction is charged to it.
-    #[allow(dead_code)] // Direct arena tests can opt into a shared budget.
-    pub(crate) fn with_budget(mut self, budget: crate::normalize::budget::Budget) -> Self {
-        self.budget = Some(budget);
-        self
-    }
-
-    /// Pay for one node before constructing it.
-    ///
-    /// Only the normalizer charges; a test that constructs nodes directly pays
-    /// nothing, which is what makes the constructors usable as plain rules.
-    pub(crate) fn charge(&mut self, origin: Origin) -> Result<(), crate::normalize::Control> {
-        match &mut self.budget {
-            Some(budget) => budget.spend_node(origin),
-            None => Ok(()),
-        }
+        Builder { nodes: Vec::new() }
     }
 
     pub(crate) fn node(&self, id: NodeId) -> &RelNode {
         &self.nodes[id.index()]
-    }
-
-    /// The row a node produces.
-    #[allow(dead_code)] // Used by debug consumers of the arena.
-    pub(crate) fn row(&self, id: NodeId) -> &RowType {
-        &self.node(id).row
     }
 
     fn push(&mut self, node: RelNode) -> NodeId {
@@ -287,9 +228,23 @@ impl Builder {
                 (QueryNodeKind::Omit, Payload::Key(key), row)
             }
             Rewrite::MapValue(wrapper) => {
-                let row = match wrapper.as_str() {
-                    "nullable" => input_row.map_value_nullable(),
-                    "list" => RowType::new(
+                // The wrapper's name is decoded by the checker's one table
+                // (`check::reduce::value_map_of`), which the type-level reducer
+                // reads too. A second match here is what let `mapValue "id"`
+                // type-check as a stage and then fail at lowering.
+                let Some(map) = crate::check::value_map_of(&wrapper) else {
+                    // The checker's `MapValue` constraint reports an unknown
+                    // wrapper at the use site, through this same table. Reaching
+                    // here means the two readings disagreed, which is a
+                    // compiler fault rather than the program's.
+                    return Err(
+                        Error::unsupported(format!("unknown value wrapper `{wrapper}`")).at(origin),
+                    );
+                };
+                let row = match map {
+                    crate::check::ValueMap::Id => input_row.clone(),
+                    crate::check::ValueMap::AsNullable => input_row.map_value_nullable(),
+                    crate::check::ValueMap::AsList => RowType::new(
                         input_row
                             .columns()
                             .iter()
@@ -298,11 +253,6 @@ impl Builder {
                             })
                             .collect(),
                     ),
-                    _ => {
-                        return Err(
-                            Error::new(format!("unknown value wrapper `{wrapper}`")).at(origin)
-                        )
-                    }
                 };
                 (QueryNodeKind::MapValue, Payload::Wrapper(wrapper), row)
             }
@@ -561,95 +511,10 @@ pub(crate) enum Projection {
 }
 
 /// A finished query: the arena and the node the definition normalized to.
-#[allow(dead_code)] // Read by the erase boundary, which lands with the route cut.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompiledQuery {
     nodes: Vec<RelNode>,
     root: NodeId,
-}
-
-/// A read-only view of one node.
-#[allow(dead_code)] // Read by debug consumers of the arena.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct QueryNode<'a> {
-    id: NodeId,
-    node: &'a RelNode,
-}
-
-#[allow(dead_code)] // Read by debug consumers of the arena.
-impl<'a> QueryNode<'a> {
-    pub(crate) fn id(&self) -> NodeId {
-        self.id
-    }
-    pub(crate) fn kind(&self) -> QueryNodeKind {
-        self.node.kind
-    }
-    pub(crate) fn site(&self) -> NodeRef {
-        self.node.site
-    }
-    pub(crate) fn origin(&self) -> Origin {
-        self.node.origin
-    }
-    pub(crate) fn inputs(&self) -> &[NodeId] {
-        &self.node.inputs
-    }
-    pub(crate) fn input(&self) -> Option<NodeId> {
-        self.node.inputs.first().copied()
-    }
-    pub(crate) fn row(&self) -> &RowType {
-        &self.node.row
-    }
-    pub(crate) fn payload(&self) -> &Payload {
-        &self.node.payload
-    }
-}
-
-#[allow(dead_code)] // Read by debug consumers of the arena.
-impl CompiledQuery {
-    /// The node the definition's body produced.
-    pub(crate) fn root(&self) -> NodeId {
-        self.root
-    }
-
-    /// The output row of the definition's query.
-    pub(crate) fn row(&self) -> &RowType {
-        &self.nodes[self.root.index()].row
-    }
-
-    pub(crate) fn node(&self, id: NodeId) -> QueryNode<'_> {
-        QueryNode {
-            id,
-            node: &self.nodes[id.index()],
-        }
-    }
-
-    /// Every node, in construction order.
-    pub(crate) fn nodes(&self) -> impl Iterator<Item = QueryNode<'_>> {
-        self.nodes
-            .iter()
-            .enumerate()
-            .map(move |(index, node)| QueryNode {
-                id: NodeId::at(index),
-                node,
-            })
-    }
-
-    /// The query's own chain, root first: the nodes reached by following the
-    /// first input of each.
-    pub(crate) fn chain(&self) -> Vec<NodeId> {
-        let mut out = Vec::new();
-        let mut next = Some(self.root);
-        while let Some(id) = next {
-            out.push(id);
-            next = self.nodes[id.index()].inputs.first().copied();
-        }
-        out
-    }
-
-    /// The query's output columns, in order.
-    pub(crate) fn names(&self) -> Vec<String> {
-        self.row().names()
-    }
 }
 
 // ── shared rules ───────────────────────────────────────────────────────────

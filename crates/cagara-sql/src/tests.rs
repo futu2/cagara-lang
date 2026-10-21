@@ -927,9 +927,9 @@ fn join_inputs_are_inlined_when_safe() {
          FROM (SELECT id, user_id, amount, status, created_at FROM public.orders WHERE (amount > 10.0)) AS t1 \
          LEFT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id",
     );
-    // The null-extended side of a left join may still keep its filter in ON,
-    // which is what lets `nasc`-style filters stay inline; but only when the
-    // preserved side contributes no filter of its own.
+    // The same holds when only the null-extended side is filtered: its filter
+    // stays in that side's derived table rather than moving into `ON`, because
+    // an `ON` filter would widen the input back to the unfiltered relation.
     let s = sql(
         "q = orders & leftJoin (users & where .active) (.<user_id == .>id)\n",
         "q",

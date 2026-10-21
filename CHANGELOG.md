@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- Remove the `merge` prelude definition. It had no relational lowering, so any
+  well-typed use of it ended in an internal error; `merge r s` is a row *type*
+  former, used by `update` and the joins, and two queries are combined with a
+  join or a set operation. `primitive "__merge"` stays in the primitive table and
+  is still refused as a compiler fault.
+- Remove the unreachable `decimal` scalar type from the checked layer. A name in
+  a type position that is not one of the built-in constructors is a type
+  *parameter* (signatures bind theirs implicitly), so `decimal` never produced a
+  scalar type of its own; `docs/LEARN.md`, `docs/CAGARA.md` and `docs/PLAN.md` now
+  state that behaviour instead of claiming a decimal type exists.
+- Delete code that no pass reached: the arena's introspection surface
+  (`QueryNode`, `CompiledQuery::{root, row, node, nodes, chain, names}`,
+  `QueryNodeKind::arity`, `Payload::is_prefix`, `Builder::{with_budget, row,
+  charge}`), the per-node budget charge (the normalizer charges as it reduces),
+  `Value::is_identity` and `normalize/thunk.rs`, `Verified`,
+  `TemplateNodeKind`/`template_node_kind`, `ScalarType::{is_maybe, pow_name,
+  strip_maybe, elem}`, `Error::is_unsupported`, `core::Diagnostic`,
+  `TypeCheck::result_expr`, `Ops::MIN_LEVEL`, `Budget::{depth, spend_node}`,
+  `Env::is_empty`, and `_frame_of`.
+- Accept every `mapValue` wrapper the type-level table names. The arena decoded
+  the label with its own `match`, which knew `nullable` and `list` but not `id`,
+  so `q & mapValue "id"` type-checked and then failed at lowering; the stage now
+  reads the checker's one table (`check::reduce::value_map_of`).
+- Drop `DefinitionKey` and `CompiledQuery::key`. Reuse is decided by comparing
+  exact per-definition facts, so the source hash the compiler computed for every
+  root definition on every compile had no production reader.
+- Correct documented claims that the compiler contradicted: `%` is `int` only,
+  `as` is optional on `import`, `--dialect` refuses `fullJoin` for MySQL, the
+  nullability and window diagnostics are quoted as emitted, outer-join filters
+  stay in a derived table (only inner-join inputs inline), `omit`'s key may pass
+  through a helper's parameter, name rewrites cannot collide, `mapValue` is a
+  writable stage, `fmt` leaves a `;`-terminated item verbatim, `$` is the loosest
+  operator and `<<<` shares `>>>`'s level, and the date/string intrinsic split.
+
 - Add `nothing` as the typed SQL NULL value; `just` continues to lift a
   non-null value into `maybe`.
 - Allow an optional top-level `;` between items, and treat a column-0

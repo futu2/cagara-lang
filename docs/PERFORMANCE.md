@@ -156,7 +156,9 @@ route, which is exactly what the migration removed.
   updates share unchanged export and scope maps; elaboration borrows scopes.
 - Exact per-definition facts include source, locations, closed types,
   expression ids, overload choices, and bindings. Changes propagate through
-  an iterative dependency graph. Hash-based identities do not authorize reuse.
+  an iterative dependency graph. Reuse is authorized by comparing those facts
+  and nothing else: there is no hash identity, so no collision can stand in for
+  an unchanged definition, and no source hash is computed per compile.
 - Only successful unaffected query results are reused. Moved definitions
   are rebuilt so diagnostic and `Rel::At` locations refer to the current text.
   The one-query edit benchmark deliberately keeps later source positions fixed.

@@ -69,10 +69,13 @@ are helpers that build values for it; use `--only NAME` when you want to
 inspect one of them directly. A file without `main` is still checked, but it
 prints no SQL because it is a library.
 
-Definitions start in column 0; every continuation line is indented. An
-unindented continuation is parsed but reported as a layout error. A top-level
-`;` is an optional item terminator, useful when generated code cannot guarantee
-indentation; the formatter does not print it.
+Definitions start in column 0; every continuation line is indented. A line that
+starts with an *identifier* in column 0 begins a new definition, so an
+unindented continuation that starts with a name is reported as a layout error; a
+line that starts with an operator (`& where …`) is a continuation and is
+accepted. A top-level `;` is an optional item terminator, useful when generated
+code cannot guarantee indentation. The formatter leaves a `;`-terminated item
+exactly as written — terminator included — rather than re-laying it out.
 
 ### Column references start with a dot
 
@@ -113,6 +116,15 @@ The scalar types are:
 There is also `maybe a`, a value that may be SQL `NULL`; see
 [section 8](#8-nulls).
 
+There are no user-declared types, and a name in a type position that is not one
+of the constructors above is not "an unknown type" — it is a **type parameter**,
+the same mechanism as the `a` in `id : a -> a`. The definition becomes
+polymorphic in it and every use instantiates it afresh, so a column written
+`amount = decimal` can be used as a `string` in one query and as an `int` in
+another, and neither is rejected. A typo in a column type is therefore silent;
+use the names in the table verbatim, and treat a type that has to mean something
+specific as one of those six plus `maybe`/`list`.
+
 A column may be declared nullable:
 
 ```haskell
@@ -144,8 +156,8 @@ bad = orders & select { x = .amount + .user_id }   # int and float: type error
 ## 3. Pipelines and the `&` operator
 
 `&` applies the stage on its right to the query on its left. It is
-left-associative and has the lowest precedence, so a pipeline reads top to
-bottom:
+left-associative and sits just above `$` — the loosest operator — so a pipeline
+reads top to bottom:
 
 ```haskell
 revenue = orders
@@ -324,7 +336,7 @@ file cannot declare an operator or change one's level.
 | Level | Operators | Associativity |
 |---|---|---|
 | — | application (`f x y`) | left |
-| 23 | `>>>` (composition) | right |
+| 23 | `>>>` `<<<` (composition) | right |
 | 21 | `??` | right |
 | 19 | `*` `/` `%` | left |
 | 17 | `+` `-` | left |
@@ -348,8 +360,9 @@ b = t & select { l = .first <> " " <> .last }
 
 This table is a summary, not the definition: an operator's precedence is what
 the compiler's fixed table says. Every operator is fixed there — arithmetic,
-comparison, logic and concatenation, the pipeline, the joins, and the three
-combinators alike — and the prelude supplies their meanings (see
+comparison, logic and concatenation, the pipeline, the joins, and all four
+combinators (`&`, `$`, `>>>`, `<<<`) alike — and the prelude supplies their
+meanings (see
 [Shorthands](#shorthands)). The gaps in the numbering leave room for the
 operators Cagara has that Haskell does not. The words `infixl` and `infixr`
 below are Haskell's names for associativity, used only to compare the two
@@ -368,8 +381,11 @@ relying on whatever `/` means locally.
 
 ### Arithmetic is not overloaded across types
 
-`+ - * / %` work on `int` with `int`, or `float` with `float`. Mixing is an
+`+ - * /` work on `int` with `int`, or `float` with `float`. Mixing is an
 error, and the fix is an explicit cast: `toFloat .user_id`, `toInt .amount`.
+`%` is the exception: the prelude defines it for `int` only, so there is no
+float remainder — convert with `toInt` first, or write the remainder you need as
+a `sql` template.
 
 ### Conditionals
 
@@ -475,7 +491,7 @@ A column name that is not a lowercase word, or that collides with a reserved
 word, is quoted in the generated SQL using the dialect's quotes:
 
 ```sql
-SELECT id, amount > 100.0 AND status = 'paid' AS "both" FROM public.orders;
+SELECT id, (amount > 100.0) AND (status = 'paid') AS "both" FROM public.orders;
 ```
 
 That is automatic; you never quote a name yourself.
@@ -585,9 +601,16 @@ a = users & no_id      # ...used on different tables
 b = orders & no_id
 ```
 
-`a` is `users` without `id`; `b` is `orders` without `id`. The key is a literal
-so that the column can be identified when the query is compiled, which also
-means a key cannot be passed in as a parameter.
+`a` is `users` without `id`; `b` is `orders` without `id`. The key must be a
+*literal* where the stage is applied — the column has to be known when the query
+is checked — so a computed name is refused:
+
+```
+error: `omit` needs a literal column name, such as `omit "password_hash"`: the column must be known when the query is checked
+```
+
+It may still reach the stage through a helper's parameter, because the label is
+bound at the call site: `no_id = k => q => omit k q` then `users & no_id "id"`.
 
 ### Rewriting names: `prefix` and `suffix`
 
@@ -602,13 +625,11 @@ suffixed = users & suffix "_v2"              # id -> id_v2, ...
 SELECT id AS u_id, name AS u_name, age AS u_age, active AS u_active FROM public.users;
 ```
 
-A name rewrite keeps field order and types; only labels change.
-
-Two names colliding is an error. Dropping is `omit`'s job:
-
-```
-error: the key map would produce column `name` twice
-```
+A name rewrite keeps field order and types; only labels change, and the rewrite
+is injective (`suffix "_2"` takes `a_2` to `a_2_2`), so a rewrite cannot make two
+columns collide. Removing a column is `omit`'s job; the error it raises for a
+column that is not there is the one to expect from this family of stages
+(`no column 'salary'; available: id, name, age`).
 
 There is no `pick`, `mapKeys`, or `Labels` type. Row maps keep names in the
 row algebra while preserving ordinary type unification. See the
@@ -906,8 +927,8 @@ t = u & leftJoin o (.<id == .>user_id) & select {.id, amt = .amount + 1.0}
 ```
 
 ```
-error: field `amount`: type mismatch: expected maybe float, found float;
-       only one side is nullable: `coalesce default x` takes a `maybe`, ...
+error: field `amt`: field `amount`: type mismatch: expected float, found maybe float;
+       only one side is nullable: `coalesce default x` takes a `maybe`, `just x` makes one
 ```
 
 The fix is to say what a missing amount means:
@@ -1098,7 +1119,8 @@ normalized before rows exist. These are rejected, each with a targeted message:
 
 ```haskell
 bad1 = orders & where ((rowNumber {order = [desc .amount]}) <= 3)
-# `where` cannot filter on a window function; `select` it first, then filter the new column
+# this argument contains a window function; windows cannot nest
+# (compute it in an earlier `select` stage)
 
 bad2 = orders & order [rowNumber {}]
 # sort and partition keys must be plain column expressions;
@@ -1185,7 +1207,7 @@ t = users & where (inList [1, 2, 3] .id)
 ```
 
 ```sql
-SELECT id, name, active FROM public.users WHERE (id IN (1, 2, 3));
+SELECT id, name, age, active FROM public.users WHERE (id IN (1, 2, 3));
 ```
 
 This is the one place a bracket is a genuine value list: `inList` takes a list of
@@ -1270,9 +1292,9 @@ Composition with `>>>` is why subject-last matters:
 clean = users & select {.id, e = .email & trim >>> lower}
 ```
 
-Because `&` is the pipeline it is the loosest operator, so its right operand is
-a whole expression — the same as in Haskell, where `&` is `infixl 1` and `==` is
-`infix 4`. Compare after applying by parenthesising:
+Because `&` is the pipeline it sits at level 1, one above `$`, so its right
+operand is a whole expression — the same as in Haskell, where `&` is `infixl 1`
+and `==` is `infix 4`. Compare after applying by parenthesising:
 
 ```haskell
 # `.a & toInt` is the applied value; without the parens `&` would swallow the
@@ -1344,7 +1366,7 @@ byId : expr { id = int | r } int -> query { id = int | r } -> query { id = int |
 
 **Comparison and logic:** `==` `!=` `<` `<=` `>` `>=` `&&` `||` `not`
 
-**Arithmetic:** `+` `-` `*` `/` `%` `negate` (int and float), `<>` / `concat`
+**Arithmetic:** `+` `-` `*` `/` `negate` (int and float), `%` (int only), `<>` / `concat`
 
 **Strings:** `upper` `lower` `trim` `ltrim` `rtrim` `length` `like` `ilike`
 `substring start len s` `left n s` `right n s` `lpad n fill s` `rpad n fill s`
@@ -1376,7 +1398,10 @@ byId : expr { id = int | r } int -> query { id = int | r } -> query { id = int |
 **Conditionals:** `ifThenElse` (alias `caseWhen`), `case { cond => value; ...; true => default }`
 
 Positions are 1-based, as in SQL. `addWeeks` and `addQuarters` are defined in
-Cagara as 7 days and 3 months, so only `DAY` and `MONTH` need dialect support.
+Cagara as 7 days and 3 months, so the date units the prelude spells are `DAY`,
+`MONTH` and `YEAR` (with `HOUR`/`MINUTE`/`SECOND` for timestamps), plus
+`WEEK`/`QUARTER` for the `trunc*` helpers; every one of them is a `CAGARA_*`
+intrinsic, not raw SQL.
 String literals widen to `date` and `timestamp`, so comparisons read naturally:
 
 ```haskell
@@ -1717,8 +1742,11 @@ to a helper — it is an ordinary value, so nothing special applies to it.
 
 ### Why these are not plain SQL
 
-Every date and string operation above calls a `CAGARA_*` intrinsic rather than
-spelling ANSI SQL directly, so that
+Every date operation above, and the string operations whose spelling differs
+across engines (`length`, `left`/`right`, `strpos`, `contains`, `startsWith`,
+`endsWith`), call a `CAGARA_*` intrinsic rather than spelling ANSI SQL directly —
+`upper`, `lower`, `trim`, `ltrim`, `rtrim`, `lpad`, `rpad`, `substring`,
+`replaceAll`, `like` and `ilike` are ordinary SQL templates — so that
 [`crates/cagara-sql/src/intrinsics.rs`](../crates/cagara-sql/src/intrinsics.rs)
 can emit the right thing per dialect. The same expression therefore lowers
 differently depending on `--dialect`:
@@ -1783,13 +1811,20 @@ import "schema.cagara" as schema
 public_users = schema.users & select {.id, .name}
 ```
 
-Use an alias to make a module's definitions explicit: **`as` is not optional**,
-and imported names are reachable only through the alias:
+`as` is optional and decides how the module's definitions are reached. With an
+alias they stay behind it, and the bare name is not in scope:
 
 ```haskell
 import "sch.cagara" as s
 x = users & select {.id}     # error: unknown name `users`
+y = s.users & select {.id}   # the aliased spelling
 ```
+
+Without one, the module's definitions join the importing module's scope
+directly, so `import "sch.cagara"` also lets you write `users`. That is
+convenient and easy to misread: a later import with a colliding name shadows an
+earlier one, and the module's own definitions shadow both. Prefer the alias when
+a module contributes more than one name.
 
 Relative paths resolve against the importing file, so a module can be imported
 from anywhere. Cycles and duplicate definitions are reported.
@@ -1798,7 +1833,8 @@ Modules are also how you share table declarations:
 
 ```haskell
 # schema.cagara
-users : query { id = int, name = string, password_hash = string } = table "public" "users"
+users : query { id = int, name = string, age = int, active = bool, password_hash = string } =
+  table "public" "users"
 
 # public.cagara
 import "schema.cagara" as s
@@ -1861,9 +1897,13 @@ table's order, so when a stage is wrapped the `ORDER BY` moves to the outer
 query (the inner one keeps it only if a `LIMIT` needs it). A sort key that is
 not an output column is carried out as a hidden column.
 
-**Join inputs are inlined** when they only project or filter a table. A filter
-on a preserved side moves to `WHERE`; a filter on a left join's right side moves
-into the `ON` clause.
+**Join inputs are inlined** when they only project or filter a table, and only
+for `innerJoin`: a filter under an inner join is hoisted into the query's `WHERE`
+(`... INNER JOIN public.orders AS t2 ON t1.id = t2.user_id WHERE (t2.status =
+'paid')`). An outer join's inputs are never inlined — the nullable side keeps a
+derived table (`LEFT JOIN (SELECT … WHERE …) AS t2 ON …`), because moving that
+filter into `ON` or into the outer `WHERE` would change which rows are
+null-extended.
 
 **Repeated relational subtrees become CTEs** automatically.
 

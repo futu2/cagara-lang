@@ -12,10 +12,19 @@ this page tracks the remaining boundaries and language work.
 - Some joins need derived tables because parenthesized joins are not yet a
   first-class `Rel` shape.
 - A filter after an aggregate currently becomes an outer `WHERE` over a derived
-  table. Add explicit phase metadata before considering a `HAVING` rewrite.
+  table. The phase metadata a `HAVING` rewrite needs is already there (`ir::Phase`
+  with `rules::{mix, nested, place}`, and a per-stage record of the input and
+  output rows in `check/stage.rs`); what is missing is the backend rule that
+  recognises an `Agg`-phase predicate over the stage that produced it.
 - Filtered aggregates are prelude templates over `CASE`, not a relational node.
   They cover every built-in aggregate without a dialect-specific `FILTER`
   lowering; a first-class `FILTER` would need an IR field and a backend rule.
+- A name in a type position that is not one of `CONS` (`check/reduce.rs`) is a
+  type *parameter*, because signatures carry their parameters implicitly. That
+  is what makes `id : a -> a` work, and it also means a mistyped type
+  (`amount = decimal`) silently makes the definition polymorphic instead of
+  being reported. Distinguishing a parameter from a typo needs an explicit
+  binder for type parameters — the fix is a language change, not a check.
 - SQL optimization remains opt-in and runs after Cagara lowering.
 
 ## Next steps
@@ -29,7 +38,8 @@ this page tracks the remaining boundaries and language work.
 ## Deferred language work
 
 Catalog declarations, typed bind parameters, a decimal/numeric scalar type for
-exact money, name-aligned set operations, first-class aggregate `FILTER`
+exact money (`toDecimal` is a SQL cast today; the Cagara type stays `float`, and
+no `decimal` constructor exists to inhabit), name-aligned set operations, first-class aggregate `FILTER`
 emission (the prelude's `*Filter` helpers already cover the built-in aggregates
 portably), `qualify`, grouping sets, lateral or correlated subqueries, and
 richer window frames remain future work. The remaining features should extend

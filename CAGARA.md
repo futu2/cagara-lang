@@ -111,8 +111,9 @@ main = users
 next = ...
 ```
 
-The formatter does not print the terminator. This applies inside brackets too. Indent record fields,
-list elements, `case` arms, and type fields:
+The formatter never rewrites an item that ends with `;` — it re-emits that item verbatim, so the
+terminator stays exactly as written and the item is not re-laid-out. Leave the `;` off a line whose
+formatting you want normalized. Indent record fields, list elements, `case` arms, and type fields:
 
 ```cagara
 users : query { id = int, name = string, age = int } =
@@ -150,7 +151,7 @@ main = users & select { .id, next = addOne .age }
 
 ```text
 byId : expr r int -> query r -> query r = i => q => where (.id == i) q
-# error: `byId` does not match its signature; `r`'s fields are unknown
+# error: `byId` does not match its signature: kind mismatch: cannot unify Row with Type
 ```
 
 Use a field tail instead:
@@ -169,8 +170,9 @@ instantiate `r` with the rest of the caller's row.
 
 ### 1.3 Imports
 
-- `import "schema.cagara" as s` makes names reachable as `s.users`, `s.shout`, and operators as
-  `s._+_`.
+- `import "schema.cagara" as s` makes names reachable as `s.users` and `s.shout`. Operators are
+  reachable the same way — `s._+_` — but only when that module *defines* the operator: an alias
+  does not re-export the prelude's `_+_`, so `s._+_` fails unless `schema.cagara` declares it.
 - `import "schema.cagara"` (no `as`) brings the names into scope **unqualified** in the current
   compiler. Use `as` in generated code: it is unambiguous and stable.
 - Paths resolve relative to the importing file. The prelude is imported automatically.
@@ -288,6 +290,12 @@ parentheses: write `coalesce 0 .x`, never `coalesce(0, .x)`.
 
 There is no `decimal`, `uuid`, `json`, `array`, or user-declared type. `toDecimal` changes the SQL
 type while the language type stays `float`.
+
+A name in a type position that is not one of the constructors above — `decimal`, `uuid`, or a typo
+— is a **type parameter**, not a type. Signatures carry their parameters implicitly, so the
+definition becomes polymorphic in that name and each use instantiates it: a column annotated
+`amount = decimal` is a `string` where the use site says `string` and an `int` where it says `int`,
+and nothing is checked. Spell every type with a name from the table; a typo is not diagnosed.
 
 ### 3.2 Row and query types
 
@@ -811,6 +819,11 @@ Only `except` and `intersect` make operand order observable. There is no `INTERS
 The table is complete. There is no shorthand for `offset`, `distinct`, `omit`, `prefix`, or `suffix`.
 `&^` is intersect, not offset. Long names are clearer for a first attempt; shorthands are optional.
 
+A shorthand *is* the stage, so it takes the stage's own arguments: `users &? (.age > 1)`, not
+`users &? where (.age > 1)` — the second form passes the partial application `where (.age > 1)`,
+which is a `query -> query`, where the shorthand wants the predicate (a type error). The
+set-operation rows take a whole query on each side: `a &| b`.
+
 ---
 
 ## 6. Semantics: rows, phases, nulls
@@ -960,6 +973,9 @@ id     : a -> a
 not                    : expr r bool -> expr r bool
 negate                 : expr r int|float -> same
 
+ifThenElse             : expr r bool -> expr r a -> expr r a -> expr r a  (searched CASE)
+caseWhen               : the same function under an alias
+
 + - *                  : expr r int -> expr r int -> expr r int        (also float overloads)
 /                      : expr r int -> expr r int -> expr r int        (truncates toward zero)
 /                      : expr r float -> expr r float -> expr r float
@@ -1001,7 +1017,7 @@ Argument order is subject-last, which is the reverse of the SQL spelling:
 | `like pattern s` | SQL `LIKE` | `s LIKE pattern` |
 | `concat a b` / `a <> b` | concatenation | `a \|\| b` |
 | `roundTo digits x` | round to `digits` places | `ROUND(x, digits)` |
-| `power exponent base` | `base` raised to `exponent` | `POW(base, exponent)` (`POWER` where the dialect needs it) |
+| `power exponent base` | `base` raised to `exponent` | `POWER(base, exponent)` |
 
 Positions and lengths are 1-based. `contains`/`startsWith`/`endsWith` treat `%` and `_` literally;
 `like` does not. `length` counts characters, including trailing spaces.
@@ -1237,7 +1253,8 @@ main = public_users
 
 - `as` is optional: with it, names are qualified; without it, names are unqualified.
 - Imports are relative to the importing file. Cycles and duplicate definitions are errors.
-- Imported operators are reachable as `s._+_`.
+- Imported operators are reachable as `s._+_` when that module defines the operator; an alias does
+  not re-export the prelude's operators.
 
 ### 8.4 Custom SQL templates
 
@@ -1260,11 +1277,18 @@ no gaps. The SQL body itself is not type checked. Avoid dialect-specific spellin
 parsed and rewritten for the target dialect. Prefer naming a `CAGARA_*` intrinsic only in the
 prelude, not in user code.
 
-### 8.5 Internal forms (do not use)
+### 8.5 Internal forms, and `mapValue`
 
-`primitive "..."`, `mapValue`, and `merge` are type-level/internal. `merge` has no relational
-lowering; using it is an internal error. `# no prelude` on the first line disables the prelude and
-requires redefining `table` with `primitive "__table"`; do not use it unless the task asks.
+`primitive "..."` is internal: it names a built-in operation, and it is how the prelude defines its
+own stages. Writing `primitive "__merge"` yourself is an internal error, because there is no
+query-level `merge` — two queries are combined with a join or a set operation, and `merge r s` is
+only a row *type* former in signatures (`update` and the joins use it). `# no prelude` on the first
+line disables the prelude and requires redefining `table` with `primitive "__table"`; do not use it
+unless the task asks.
+
+`mapValue` is a real stage (`q & mapValue "nullable"`, `"list"`, `"id"`), but it is not the way to
+handle nulls: it only rewraps the row's types, and the wrapped value has no operators to use.
+Nullability comes from an outer join or from a `maybe` annotation.
 
 ### 8.6 Tooling
 
@@ -1272,12 +1296,16 @@ requires redefining `table` with `primitive "__table"`; do not use it unless the
 cagara file.cagara [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
 cagara -                         # read source from stdin
 cagara fmt [--check] <files...>  # format in place; `-` for stdin
+cagara lsp                       # language server over stdio
+cagara --version                 # also -V; exit 0
 ```
 
-- `--dialect` is an output concern only; it never changes Cagara semantics. Default `ansi`; common
-  targets include `postgres`, `mysql`, `sqlite`, `duckdb`, `tsql`, `bigquery`, `snowflake`, `trino`,
-  `spark`. SQLite and DuckDB are executed in CI; other dialects use the ANSI/Postgres fallback for
-  some intrinsics.
+- `--dialect` changes only the SQL that is emitted, with one exception: `fullJoin` is a compile
+  error for the MySQL family (`mysql`, `doris`, `singlestore`, `starrocks`), which has no
+  `FULL [OUTER] JOIN` — write `leftJoin`/`rightJoin` plus `unionAll` instead. Default `ansi`;
+  common targets include `postgres`, `mysql`, `sqlite`, `duckdb`, `tsql`, `bigquery`, `snowflake`,
+  `trino`, `spark`. SQLite and DuckDB are executed in CI; other dialects use the ANSI/Postgres
+  fallback for some intrinsics.
 - `--only DEF` compiles one definition instead of `main`.
 - `--types` prints inferred `name : type` lines; useful for checking a row after a stage, but do not
   depend on the printed field order.

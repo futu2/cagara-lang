@@ -15,8 +15,10 @@
 //! | `CAGARA_NOW()`                      | current timestamp                         |
 //! | `CAGARA_TO_DATE(x)` / `CAGARA_TO_TIMESTAMP(x)` / `CAGARA_TO_STRING(x)` | casts |
 //! | `CAGARA_TO_INT(x)` / `CAGARA_TO_FLOAT(x)` | width-correct casts (64-bit) |
+//! | `CAGARA_TO_DECIMAL(p, s, x)`        | exact `DECIMAL(p, s)` cast             |
 //! | `CAGARA_TRUNC_INT(x)`              | truncate toward zero, then 64-bit int  |
 //! | `CAGARA_TRY_INT(x)` / `CAGARA_TRY_FLOAT(x)` | casts that yield NULL on failure |
+//! | `CAGARA_TRY_DATE(x)` / `CAGARA_TRY_TIMESTAMP(x)` / `CAGARA_TRY_DECIMAL(p, s, x)` | try-casts |
 //! | `CAGARA_LEFT(s, n)` / `CAGARA_RIGHT(s, n)` | first / last `n` characters        |
 //! | `CAGARA_STRPOS(s, sub)`             | 1-based position of `sub` in `s`, 0 if absent |
 //! | `CAGARA_LENGTH(s)`                  | length in characters (trailing spaces count) |

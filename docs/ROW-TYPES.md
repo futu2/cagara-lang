@@ -60,7 +60,7 @@ each stage primitive's definition records its operation in the scheme it
 publishes (`Scheme::stage`), so a use site names the operation it applied
 without inspecting the type it produced. Recovering the stage from the result
 is what used to break a body with two key stages; see
-[`PLAN.md`](PLAN.md) under *Current behavior*.
+[`PLAN.md`](PLAN.md) under *Current boundaries*.
 
 `Cons::Omit` is the source of the missing-column error: it is the `omit`
 definition's own obligation, instantiated per use, and the reducer tells it
@@ -94,16 +94,24 @@ higher-kinded type-level functions.
 right row's types, and appends right-only fields. This is the row rule used by
 `update` and joins.
 
-**None of these three is a query stage you can write.** They are *type-level*
-row operations: the checker reduces them during inference, and the row they build
-is what the enclosing stage's own constructors read. Writing one as a query body
-type-checks and then fails at lowering with
-``the relational primitive `__mapValue` is not lowered yet``, because there is no
-relational operator for "change every column's type" — the type change is carried
-by the checked row, not by a stage.
+These are *type-level* row operations: the checker reduces them during
+inference, and the row they build is what the enclosing stage's own constructors
+read.
 
-The user-facing spelling of `keyMap` is `prefix` / `suffix` and of `merge` is
-`update`, which is why those are stages and these are not.
+`keyMap` and `merge` have no stage spelling at all. `merge r s` is the row former
+that `update` and the joins use in their signatures; two *queries* are combined
+with a join or a set operation, which is why `primitive "__merge"`
+(`Prim::Merge`) has no constructor and is refused as a compiler fault.
+
+`mapValue` is the exception: the prelude exposes it as a stage, so
+`q & mapValue "nullable"` and `q & mapValue "list"` are writable and lower
+through `Builder::rewrite` like `prefix` and `omit`. It changes the row's types
+and emits the same SQL, because the wrapped types are carried by the checked row
+and no operator reads them at runtime.
+
+The user-facing spelling of `keyMap` is `prefix` / `suffix`, and the spelling of
+the *row former* `merge` is `update` — both are stages; `keyMap` and `merge`
+themselves are not.
 
 ## Constraints
 
@@ -114,12 +122,14 @@ functions as IR validation, so type checking and SQL lowering cannot disagree
 about names, order, or value wrappers.
 
 Key and mapper arguments must be literals when the operation needs a concrete
-witness. A collision or empty mapped name is an error. Open rows defer the
+witness. Name rewrites are injective, so a mapped row cannot collide with
+itself, and an empty affix renames nothing rather than failing; the name error
+to expect from these stages is `omit`'s missing column. Open rows defer the
 operation until their tail is known; no guessed columns are introduced.
 
 The user-facing row operations are documented in [`LEARN.md`](LEARN.md) —
-`prefix`, `suffix` and `update` cover what `keyMap` and `merge` do. `mapValue`
-has no surface spelling outside the prelude's own use of it. The type
+`prefix`, `suffix` and `update` cover what `keyMap` and `merge` do, and
+`mapValue` is written as itself (`mapValue "nullable"`). The type
 implementation lives in `crates/cagara-hir/src/check/`: `row.rs` owns the row
 algebra and its single reducer, `stage.rs` the typed stage nodes, `infer.rs` the
 operations, `reduce.rs` the kind rules and the first-order reducers, and `ty.rs`

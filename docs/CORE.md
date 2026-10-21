@@ -127,11 +127,12 @@ arguments, a join or set accumulating its operands, a template accumulating its
 expressions. When the last argument arrives, `apply` calls the arena
 constructor, and that is the only place a relational node is made.
 
-**Identity.** `id : a -> a = x => x` is removed by β-reduction where it is
-applied. Where it is a value — the right operand of a composition — it is
-recognised by one syntactic clause (`Value::is_identity`): a one-parameter lambda
-whose body is its parameter, closing over no environment. The notes are in
-`normalize/thunk.rs`.
+**Identity.** `id : a -> a = x => x` needs no rule of its own. Where it is
+applied, β-reduction removes it. Where it is a *value* — the right operand of a
+composition — the composition is itself an ordinary lambda: `_>>>_` is
+`f => g => x => g (f x)` (`prelude.cagara`), so `trim >>> id` reduces to a
+closure that applies `id`, and applying it is the same β-reduction. There is no
+syntactic identity clause to keep in step with that definition.
 
 ## 3. The relational arena
 
@@ -152,6 +153,10 @@ The constructors are the single statement of relational validity:
 | `Builder::project` (`select`, `update`, `agg`) | fields placed by phase (`rules::Place`); `update` merges over the input row (right-wins); `agg` rejects `win`-phase fields | computed from the fields |
 | `Builder::join` | side-qualified columns only (`rules::needs_side`), each present on its side; the predicate is row-phase `bool` | left columns, then the right's that the left lacks; nullable sides wrapped in `maybe` |
 | `Builder::set` | both inputs expose the same columns, in the same order, with the same types | the left input's row |
+
+These are every constructor there is. A primitive with no rule — `primitive "__merge"`, which no
+prelude name spells — reaches `apply` and is refused as `Control::Unsupported`, because `merge r s`
+is a row *type* former and two queries are combined by a join or a set operation.
 
 Row formers are `core.rs::RowType` (`rename_all`, `omit`,
 `map_value_nullable`, `overwrite`, `merge`); phase and side rules come from `rules.rs`, which the
@@ -246,8 +251,9 @@ compiler does not construct. What is checked
 - placeholders are 1-based and stand alone (not inside a name or a string
   literal), are neither missing nor past the declared arity;
 - the declared signature fixes the arity and the result kind
-  (`normalize::declared_template_kind` → `check::core_facts`), which decides
-  whether the template becomes a scalar, aggregate, or window expression.
+  (`check::core_facts::declared_template_kind`, re-exported as
+  `check::declared_template_kind`), which decides whether the template becomes a
+  scalar, aggregate, or window expression.
 
 What is **not** checked is the SQL body: no parsing, no type inference, no
 dialect check beyond the rewrite the backend performs. A template is trusted
@@ -269,9 +275,17 @@ what a caller reports:
   That is a *program* diagnostic, blamed on the expression.
 
 `normalize/budget.rs` bounds two shapes: `MAX_DEPTH = 200` definitions on one
-normalization path (which also catches a cycle, reported as "definition refers to
-itself"), and `MAX_WORK = 200_000` visited or constructed nodes. The work is
-charged *before* the node is built (`Builder::charge`), so a refused normalization
-discards its arena whole instead of returning a prefix of one. Exceeding either
-is `Control::Unsupported`: the program is well-typed and the compiler could not
+normalization path, and `MAX_WORK = 200_000` visited nodes. Exceeding either is
+`Control::Unsupported`: the program is well-typed and the compiler could not
 build it within its limits.
+
+A cycle is a different verdict, and a cheaper one: the active-definition path is
+checked when a definition is entered, so `a = b b = a` is refused before the
+depth bound can be reached, as `Control::Program` — "`a` refers to itself;
+recursion is not supported" (`check/infer.rs` catches it at the type level too).
+The depth bound's own message is "this definition expands more than 200
+definitions deep; recursion is not supported".
+
+Work is charged for each node the reduction enters, before the operation that
+node heads is applied, and each normalization owns its arena, so a refused
+normalization discards that arena whole instead of returning a prefix of one.

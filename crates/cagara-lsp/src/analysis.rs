@@ -241,7 +241,10 @@ fn root_range(p: &Positions, start: usize, end: usize) -> Range {
 /// Markdown for the name under the cursor. At a use, its type there (the
 /// definition's scheme instantiated, as far as the checker got), followed
 /// by the definition's general type (every candidate for an overload set)
-/// when that differs.
+/// when that differs, and by the definition's own `##` documentation.
+///
+/// The doc text is the same text `cagara doc` prints — one source for both, so
+/// a reader in the editor and a reader of the reference see the same words.
 pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
     let text = &ws.modules[ws.root].text;
     let p = Positions::new(text);
@@ -257,12 +260,17 @@ pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
         let head = here.map_or_else(|| name.to_string(), |t| sig(name, t));
         return Some(format!("```cagara\n{head}\n```\nlocal binding"));
     };
-    // (name, type) of the definition, or of every candidate.
+    // (name, type, docs) of the definition, or of every candidate.
     let def_ty = |m: usize, i: usize| {
-        let d = &ws.modules[m].module.defs[i];
-        (d.name.as_str(), tc.type_of(m, i).unwrap_or("(type error)"))
+        let md = &ws.modules[m];
+        let d = &md.module.defs[i];
+        (
+            d.name.as_str(),
+            tc.type_of(m, i).unwrap_or("(type error)"),
+            cagara_syntax::docs::item_doc(&md.text, d.span.start as usize),
+        )
     };
-    let defs: Vec<(&str, &str)> = match b {
+    let defs: Vec<(&str, &str, Option<String>)> = match b {
         Binding::Def(m, i) => vec![def_ty(*m, *i)],
         Binding::Overloads(m, is) => is.iter().map(|&i| def_ty(*m, i)).collect(),
         Binding::Module(t) => {
@@ -274,17 +282,24 @@ pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
     };
     let general = defs
         .iter()
-        .map(|(n, t)| sig(n, t))
+        .map(|(n, t, _)| sig(n, t))
         .collect::<Vec<_>>()
         .join("\n");
     let general = format!("```cagara\n{general}\n```");
-    match (here, defs.first()) {
-        (Some(t), Some((n0, t0))) if !(defs.len() == 1 && *t0 == t) => Some(format!(
-            "```cagara\n{}\n```\n---\ndefined as\n{general}",
-            sig(n0, t)
-        )),
-        _ => Some(general),
+    let mut md = match (here, defs.first()) {
+        (Some(t), Some((n0, t0, _))) if !(defs.len() == 1 && *t0 == t) => {
+            format!("```cagara\n{}\n```\n---\ndefined as\n{general}", sig(n0, t))
+        }
+        _ => general,
+    };
+    // One overload documented and another not is still the best text there is
+    // for the name: the first non-empty doc describes what every candidate
+    // does, and the signatures above already say how they differ.
+    if let Some(doc) = defs.iter().find_map(|(_, _, d)| d.as_deref()) {
+        md.push_str("\n\n---\n\n");
+        md.push_str(doc);
     }
+    Some(md)
 }
 
 /// Width hover signatures are laid out in; popups are narrower than files.
@@ -985,6 +1000,28 @@ mod tests {
         // A lambda parameter shadows the table.
         let h = hover(&ws, at("shadow = users", 10)).unwrap();
         assert!(h.contains("local binding"), "{h}");
+    }
+
+    /// Hover carries the definition's own `##` text, from whichever module the
+    /// definition lives in: the prelude's documentation is what a reader needs
+    /// at `where`, and a local definition's is what they wrote themselves.
+    ///
+    /// The text is the same string `cagara doc` prints, so the editor and the
+    /// reference cannot drift apart.
+    #[test]
+    fn hover_shows_the_definition_documentation() {
+        let ws = ws();
+        // A prelude definition, documented in prelude.cagara.
+        let h = hover(&ws, at("sum .age", 1)).unwrap();
+        assert!(h.contains("Sum of a column"), "{h}");
+        // The doc comes after the types, so the signature stays the first thing
+        // read.
+        let types = h.find("sum : ").expect("a signature");
+        let doc = h.find("Sum of a column").expect("the doc");
+        assert!(types < doc, "{h}");
+        // An undocumented definition says nothing extra.
+        let h = hover(&ws, at("adult = .age", 9)).unwrap();
+        assert!(!h.contains("---\n\n"), "no doc for a column: {h}");
     }
 
     #[test]

@@ -214,6 +214,18 @@ impl Workspace {
         ws
     }
 
+    /// Workspace whose only module is the built-in prelude, which is its root.
+    ///
+    /// Nothing imports it from here: `empty` loads the prelude first and it is
+    /// self-contained, so a tool that documents or audits the prelude itself
+    /// (`cagara doc --prelude`) reads it exactly as the compiler does rather
+    /// than as a file that happens to be on disk.
+    pub fn prelude() -> Self {
+        let mut ws = Self::empty();
+        ws.rebuild_diags();
+        ws
+    }
+
     pub fn open(path: &Path) -> Self {
         let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         match std::fs::read_to_string(&p) {

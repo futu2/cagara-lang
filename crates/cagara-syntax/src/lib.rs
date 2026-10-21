@@ -13,6 +13,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 pub mod ast;
+pub mod docs;
 pub mod lexer;
 pub mod ops;
 pub mod parser;

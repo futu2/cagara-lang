@@ -53,6 +53,7 @@ example, `cagara examples/report.cagara --only adults`.
 - ANSI SQL by default, with dialect support and test coverage described in [`docs/SQL-DIALECTS.md`](docs/SQL-DIALECTS.md).
 - A file's entry point is the definition named `main`, which must be a query and is the one statement `cagara` prints; a file without one is a library and prints nothing.
 - A formatter (`cagara fmt`) and a language server (`cagara lsp`) with diagnostics, hover, go-to-definition and completion.
+- Documentation carried by the source: `##` above a definition and `#!` above the file, printed by `cagara doc` as markdown or JSON — and shown on hover, so the words are written once. `cagara doc --prelude` prints the whole prelude reference, and `cagara doc --check` lists what is not documented yet.
 
 Cagara is intentionally a query language rather than a general-purpose
 language: its types are built in, and users cannot declare new types.

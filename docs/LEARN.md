@@ -35,7 +35,9 @@ output you can reproduce with the `cagara` binary.
 ## 1. The shape of a program
 
 A Cagara file is a sequence of top-level definitions. Comments start with `#`
-and run to the end of the line.
+and run to the end of the line. A `##` line documents the definition below it
+and a `#!` block documents the file; `cagara doc` turns them into a reference,
+and `cagara doc --prelude` prints the prelude's own (see §17).
 
 ```haskell
 # A definition is `name = expression`, optionally with a type annotation.
@@ -1918,6 +1920,7 @@ and `LIMIT` boundaries.
 ```
 cagara <file.cagara> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
 cagara fmt [--check] <files...>
+cagara doc [<files...|->] [--json] | --prelude | --check
 cagara lsp
 ```
 
@@ -1968,6 +1971,38 @@ ordering.
 `cagara fmt` formats source in place (`-` reads stdin and writes stdout).
 `--check` reports whether files are already formatted without rewriting them,
 and an unparseable file is left alone.
+
+`cagara doc` prints the documentation a file carries. Given a file whose
+definitions are documented like this:
+
+    #! The reporting file.
+    ## Adults only, with `name` relabelled for display.
+    adults = users & where (.age >= 18) & select { id = .id, label = upper .name }
+
+`cagara doc q.cagara` prints:
+
+    # q.cagara
+
+    The reporting file.
+
+    ## `adults`
+
+    ```text
+    adults : query { id = int, label = string }
+    ```
+
+    Adults only, with `name` relabelled for display.
+
+The signature is the inferred one, so documenting a definition cannot disagree
+with the checker, and an undocumented one still shows its type. A file's
+definitions are grouped by name, so an overload set is one section with one
+explanation and every signature.
+
+`cagara doc --check` lists the top-level definitions that have no `##` block and
+exits **0** — a missing doc comment is not a compile error, and this is the
+report that says what is left to write rather than a gate that stops a build.
+`--json` prints the same content for a tool, `--prelude` documents the built-in
+prelude, and `-` reads stdin.
 
 The language server, `cagara lsp`, provides diagnostics, hover with inferred
 types, go-to-definition, find-references, document symbols, and completion

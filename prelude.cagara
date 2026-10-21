@@ -1,18 +1,22 @@
-# Cagara prelude — imported into every module automatically.
-#
-# The Rust core provides only the `__` primitives (relational operators,
-# window frames) and the `sql "..."` template mechanism. Everything
-# below is ordinary Cagara. Type signatures on `sql` templates are required:
-# they give the arity and whether the result is a scalar (`expr r a`), an
-# aggregate (`agg (expr r a)`), or a window function (`win (expr r a)`).
-# All signatures are checked by the type checker.
-#
-# A name defined more than once (each with a signature) is overloaded: the
-# type checker picks the definition whose signature fits each use.
-#
-# Functions take the value they operate on last, so a partial application is
-# a reusable transformation: `addDays 7`, `coalesce 0`, `contains "@"`,
-# `.name & trim >>> lower`.
+#! Cagara prelude — imported into every module automatically.
+#!
+#! The Rust core provides only the `__` primitives (relational operators,
+#! window frames) and the `sql "..."` template mechanism. Everything below is
+#! ordinary Cagara. Type signatures on `sql` templates are required: they give
+#! the arity and whether the result is a scalar (`expr r a`), an aggregate
+#! (`agg (expr r a)`), or a window function (`win (expr r a)`). All signatures
+#! are checked by the type checker.
+#!
+#! A name defined more than once (each with a signature) is overloaded: the
+#! type checker picks the definition whose signature fits each use.
+#!
+#! Functions take the value they operate on last, so a partial application is a
+#! reusable transformation: `addDays 7`, `coalesce 0`, `contains "@"`,
+#! `.name & trim >>> lower`.
+#!
+#! Each definition carries its own documentation below. `cagara doc --prelude`
+#! prints this file as a reference, and `cagara doc <file>` does the same for
+#! any other file that documents its definitions the same way.
 
 # ── combinators ────────────────────────────────────────────────────────────
 
@@ -22,31 +26,48 @@
 # directions of composition (`Control.Category`), which bind tighter than every
 # other operator so `f >>> g $ x` is `(f >>> g) $ x`.
 #
-# `f >>> g` is `f` then `g`; `f <<< g` is `g` then `f`. A pipeline read left to
-# right uses `>>>` (`.name & trim >>> lower`), and `<<<` is the mirror for a
-# composition written the other way round — the same pair as `&` and `$`.
-#
-# `&` doubles as the query pipeline, so its level is also the level the stage
-# shorthands sit at — see below.
-#
 # The fixities themselves live in the core (`cagara-syntax`'s `ops`), not here:
 # precedence is a parsing fact and has to be known before a file is read, so it
 # is not something a module — this one included — can declare. What this file
 # provides is each operator's *meaning*, as the `_&_` / `_$_` definitions below.
 
+## Reverse application, `Data.Function.(&)`: `x & f` is `f x`.
+##
+## This is also the query pipeline. A stage is an operator at this same level
+## (see the stage shorthands below), so `q & where p & select {.a}` is ordinary
+## application written left to right: the query first, then what to do with it.
 _&_ : a -> (a -> b) -> b = x => f => f x
+
+## Application, `($)`: `f $ x` is `f x`, at the lowest precedence, so
+## `coalesce 0 $ sum .x` needs no parentheses around the argument.
 _$_ : (a -> b) -> a -> b = f => x => f x
+
+## Forward composition: `f >>> g` is `g` after `f`.
+##
+## The natural spelling in a left-to-right pipeline — `.name & trim >>> lower` —
+## and it binds tighter than every other operator, so `f >>> g $ x` parses as
+## `(f >>> g) $ x`.
 _>>>_ : (a -> b) -> (b -> c) -> a -> c = f => g => x => g (f x)
+
+## Backward composition: `f <<< g` is `f` after `g`, the mirror of `>>>` — the
+## same pair as `&` and `$`, for a composition written the other way round.
 _<<<_ : (b -> c) -> (a -> b) -> a -> c = f => g => x => f (g x)
+
+## The identity function: `id x` is `x`. Useful where a function is expected
+## and there is nothing to do, such as a fold's initial value.
 id : a -> a = x => x
 
 # ── scalar SQL expressions ─────────────────────────────────────────────────
 
-# Typed conditionals lower to a searched SQL CASE expression. Both branches
-# are checked at the same expression phase, so this also works after agg or
-# select when the surrounding stage permits that phase.
+## Typed conditional: `ifThenElse p a b` is a searched `CASE WHEN p THEN a ELSE b`.
+##
+## Both branches are checked at the same expression phase, so it also works
+## after `agg` or `select` when the surrounding stage permits that phase.
 ifThenElse : expr r bool -> expr r a -> expr r a -> expr r a =
   sql "CASE WHEN $1 THEN $2 ELSE $3 END"
+
+## Case-style alias of `ifThenElse`, for reading a chain as if/else. Multi-way
+## conditionals are written with the `case { p => a; ... }` form instead.
 caseWhen : expr r bool -> expr r a -> expr r a -> expr r a = ifThenElse
 
 # Explicit casts are deliberately named by their result type. There is no
@@ -54,88 +75,116 @@ caseWhen : expr r bool -> expr r a -> expr r a -> expr r a = ifThenElse
 
 # ── query pipeline ─────────────────────────────────────────────────────────
 
+## A table: `table "schema" "name"` (the schema may be `""`). The row type is
+## inferred from use — the projection stages decide the columns — so a
+## definition of a table usually carries a signature naming them.
 table : string -> string -> query r = primitive "__table"
 
+## Filter rows: `where (.age >= 18)`. The predicate is non-null `bool`; SQL's
+## three-valued logic never reaches it, because a nullable predicate must be
+## handled first (`whereTrue`, `isTrue`, `coalesce`).
 where : expr r bool -> query r -> query r = primitive "__where"
+
+## Project a result row: `select { id = .id, label = upper .name }`, or
+## `select {.a, .b}` for the plain projection. Columns not listed are dropped;
+## `update` keeps them.
 select : expr r (row s) -> query r -> query s = primitive "__select"
 
-# `update {..}` is `select` merged over the input row: a name the input
-# already has keeps its position and takes the new expression, and a name it
-# does not have is appended. Columns not listed are passed through.
+## `update {..}` is `select` merged over the input row: a name the input
+## already has keeps its position and takes the new expression, and a name it
+## does not have is appended. Columns not listed are passed through.
 update : expr r (row s) -> query r -> query (merge r s) = primitive "__update"
 
-# `omit "k"` drops one column: the row equation `input ~ { k : t | output }`,
-# solved by the unifier's generic leftover rule rather than by a rule of its
-# own.
-#
-# The two rows are spelled `r` and `s` — seemingly unrelated — because the
-# relation between them *cannot* be written in a type. Which column is dropped
-# is read from the application (`omit "a"` vs `omit "b"`), so both calls have
-# the same type and no type-level former could tell them apart. Compare
-# `prefix`, which can say `keyMap m r` precisely because its affix is carried
-# in the type. `select` and `agg` are spelled the same way for the same
-# reason: their result row is built from an expression, not from the input.
-#
-# The relation is enforced, not assumed — `t & omit "a" & select { .a }` is
-# rejected with `no column `a`; available: b`.
-#
-# Unlike the projection stages, this signature is *not* compared against the
-# primitive's internal type: `omit` is not a projection, so the annotation is
-# descriptive. The constraint above is what actually types the stage, which is
-# why writing something weaker here (or even wrong) changes no result.
+## `omit "k"` drops one column: the row equation `input ~ { k : t | output }`,
+## solved by the unifier's generic leftover rule rather than by a rule of its
+## own.
+##
+## The two rows are spelled `r` and `s` — seemingly unrelated — because the
+## relation between them *cannot* be written in a type. Which column is dropped
+## is read from the application (`omit "a"` vs `omit "b"`), so both calls have
+## the same type and no type-level former could tell them apart. Compare
+## `prefix`, which can say `keyMap m r` precisely because its affix is carried
+## in the type. `select` and `agg` are spelled the same way for the same
+## reason: their result row is built from an expression, not from the input.
+##
+## The relation is enforced, not assumed — `t & omit "a" & select { .a }` is
+## rejected with `no column `a`; available: b`.
+##
+## Unlike the projection stages, this signature is *not* compared against the
+## primitive's internal type: `omit` is not a projection, so the annotation is
+## descriptive. The constraint above is what actually types the stage, which is
+## why writing something weaker here (or even wrong) changes no result.
 omit : symbol k -> query r -> query (removeKey k r) = primitive "__omit"
 
-# `mapValue "w"` transforms all field types using a wrapper: `"nullable"`
-# wraps each in `maybe`, `"list"` wraps each in `list`.
-#
-# The wrapper is a label, like `omit`'s column name: `valueLabel w` is the
-# parameter, the literal at the application binds `w`, and the result names the
-# type-level term `mapValue w r` — the same binding on both sides, so the
-# operation travels in the type and a stage's output row cannot come from an
-# unrelated wrapper.
+## `mapValue "w"` transforms all field types using a wrapper:
+## `"nullable"` wraps each in `maybe`, `"list"` wraps each in `list`.
+##
+## The wrapper is a label, like `omit`'s column name: `valueLabel w` is the
+## parameter, the literal at the application binds `w`, and the result names the
+## type-level term `mapValue w r` — the same binding on both sides, so the
+## operation travels in the type and a stage's output row cannot come from an
+## unrelated wrapper.
 mapValue : valueLabel w -> query r -> query (mapValue w r) = primitive "__mapValue"
 
-# `prefix "s"` prepends a literal string to every column name.
-#
-# The affix is a label, not an ordinary expression: `symbol k` is the same
-# parameter `omit` takes, and the literal at the application is what binds `k`.
-# That one binding reaches both sides of the signature — `removeKey k r` here,
-# and the label-driven mapper `prependSym k` in the result. The checker decodes
-# that mapper into the type-level witness `keyMap (prefix "s") r` and reduces it
-# against the input row: `users & prefix "u_"` gives
-#
-#     query (keyMap (prefix "u_") { id = int, name = string })
-#   ⟹ query { u_id = int, u_name = string }
-#
-# The witness in the result is the same label the argument named, so a stage's
-# output row cannot come from an unrelated mapping. When the input row is still
-# open — or the affix is a lambda parameter, as in `addPrefix = p => q => q &
-# prefix p` — the term is *retained* rather than rejected, and reduces once the
-# row and the label are known.
+## `prefix "s"` prepends a literal string to every column name.
+##
+## The affix is a label, not an ordinary expression: `symbol k` is the same
+## parameter `omit` takes, and the literal at the application is what binds `k`.
+## That one binding reaches both sides of the signature — `removeKey k r` here,
+## and the label-driven mapper `prependSym k` in the result. The checker decodes
+## that mapper into the type-level witness `keyMap (prefix "s") r` and reduces it
+## against the input row: `users & prefix "u_"` gives
+##
+##     query (keyMap (prefix "u_") { id = int, name = string })
+##   ⟹ query { u_id = int, u_name = string }
+##
+## The witness in the result is the same label the argument named, so a stage's
+## output row cannot come from an unrelated mapping. When the input row is still
+## open — or the affix is a lambda parameter, as in `addPrefix = p => q => q &
+## prefix p` — the term is *retained* rather than rejected, and reduces once the
+## row and the label are known.
 prefix : symbol k -> query r -> query (keyMap (prependSym k) r) = primitive "__prefix"
 
-# `suffix "s"` appends a literal string to every column name. It shares the
-# label-driven witness with its result in the same way as `prefix`.
+## `suffix "s"` appends a literal string to every column name. It shares the
+## label-driven witness with its result in the same way as `prefix`.
 suffix : symbol k -> query r -> query (keyMap (appendSym k) r) = primitive "__suffix"
 
+## Group and aggregate: `agg { n = count, total = sum .amount }`. Inside an
+## `agg` the argument is at depth 1 — a row expression, not a scalar — which is
+## where the aggregate functions in this file apply.
 agg : agg (expr r (row s)) -> query r -> query s = primitive "__agg"
 
-# `order [asc .x, desc .y]`; NULLs sort last in either direction.
+## Sort: `order [asc .x, desc .y]`. NULLs sort last in either direction.
+## Ties on the listed keys keep no particular order, since SQL does not promise
+## one.
 order : list (sortkey r) -> query r -> query r = primitive "__order"
 
+## Keep the first `n` rows: `limit 10`. Applied to an unordered query the rows
+## are whichever the engine returns first; order first if it matters.
 limit : expr r int -> query r -> query r = primitive "__limit"
 
+## Skip the first `n` rows: `q & offset 20 & limit 10`.
 offset : expr r int -> query r -> query r = primitive "__offset"
 
+## Drop duplicate rows: `SELECT DISTINCT`.
 distinct : query r -> query r = primitive "__distinct"
 
+## Membership: `inList [1, 2, 3] .id` is `id IN (1, 2, 3)`. The list comes
+## first and the subject last, like every other predicate here.
 inList : list a -> expr r a -> expr r bool = primitive "__in"
+
+## `in` is `inList`, under the name a use site reads better with:
+## `in [1, 2, 3] .status`.
 in : list a -> expr r a -> expr r bool = inList
 
+## Sort key, ascending — `asc .name` inside an `order` list.
 asc : expr r a -> sortkey r = primitive "__asc"
 
+## Sort key, descending — `desc .created_at` inside an `order` list.
 desc : expr r a -> sortkey r = primitive "__desc"
 
+## The grouping key: `agg { user_id = group .user_id, n = count }`. Every
+## non-aggregate expression in the same `agg` is grouped by it.
 group : expr r a -> agg (expr r a) = primitive "__group"
 
 # Stage shorthands. Each is one definition, and that is the whole cost of a
@@ -152,59 +201,102 @@ group : expr r a -> agg (expr r a) = primitive "__group"
 # special class of operator, it is `&`'s precedence, and anything at that level
 # chains like `&` and binds looser than every expression operator.
 
+## `q &? pred` is `where pred q`.
 _&?_ : query r -> expr r bool -> query r = q => pred => where pred q
+
+## `q &= fields` is `select fields q`.
 _&=_ : query r -> expr r (row s) -> query s = q => fields => select fields q
+
+## `q &+ fields` is `update fields q`.
 _&+_ : query r -> expr r (row s) -> query (merge r s) = q => fields => update fields q
+
+## `q &* fields` is `agg fields q`.
 _&*_ : query r -> agg (expr r (row s)) -> query s = q => fields => agg fields q
+
+## `q &. keys` is `order keys q`.
 _&._ : query r -> list (sortkey r) -> query r = q => keys => order keys q
+
+## `q &- n` is `limit n q`.
 _&-_ : query r -> expr r int -> query r = q => n => limit n q
 
 # Set-operation stages: `union`, `unionAll`, `intersect`, `except`. Each puts
 # the query it is piped into on the *left*, so the stage and the direct call
 # agree — `users &~ vips` and `except users vips` are the same query. See the
 # note on `union` for why the bare `&` cannot do this on its own.
+
+## `q &| r` is `union q r`.
 _&|_ : query r -> query r -> query r = q => r => union q r
+
+## `q &! r` is `unionAll q r`: keep duplicates.
 _&!_ : query r -> query r -> query r = q => r => unionAll q r
+
+## `q &^ r` is `intersect q r`.
 _&^_ : query r -> query r -> query r = q => r => intersect q r
+
+## `q &~ r` is `except q r`: the rows of `q` that are not in `r`.
 _&~_ : query r -> query r -> query r = q => r => except q r
 
-# `left & innerJoin right (.<k == .>k)`
-# Outer joins make the columns of the side that may be missing `maybe`.
-# The output has the left input's columns, then the right input's that the
-# left does not have: on a shared name the left column wins. To keep both,
-# rename one side in a `select` before the join (a field list is written by
-# hand, so the new name is just the name you write).
+## Inner join: `users & innerJoin orders (.<id == .>user_id)`.
+##
+## The left side is the piped query. The predicate is a `bool` over the joined
+## row, whose columns are `.x` for the left side and `.>x` for the right.
+##
+## The output has the left input's columns, then the right input's that the
+## left does not have: on a shared name the left column wins. To keep both,
+## rename one side in a `select` before the join (a field list is written by
+## hand, so the new name is just the name you write).
 innerJoin : query s -> expr (join r s) bool -> query r -> query (merge r s) =
   primitive "__innerJoin"
 
+## Left outer join: every left row survives, and the right side's columns
+## become `maybe` — they are NULL for the unmatched rows.
+##
+## The predicate is a join condition, not a `where`: a condition on the right
+## side written after the join would drop the unmatched rows and turn the outer
+## join back into an inner one.
 leftJoin : query s -> expr (join r s) bool -> query r -> query (merge r (mapValue (AsNullable) s)) =
   primitive "__leftJoin"
 
+## Right outer join: the mirror of `leftJoin`, with the left side's columns
+## nullable instead.
 rightJoin : query s -> expr (join r s) bool ->
   query r -> query (merge (mapValue (AsNullable) r) s) =
   primitive "__rightJoin"
 
+## Full outer join: both sides survive, so both sides' columns become `maybe`.
 fullJoin : query s -> expr (join r s) bool ->
   query r -> query (merge (mapValue (AsNullable) r) (mapValue (AsNullable) s)) =
   primitive "__fullJoin"
+
+## Semi join: the left rows that have a match on the right, with the left row
+## unchanged. `EXISTS` rather than a join, so a right row can never duplicate a
+## left one.
 semiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__semiJoin"
+
+## Anti join: the left rows that have *no* match on the right — `semiJoin`
+## negated, and the idiomatic "rows without children".
 antiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__antiJoin"
 
-# Set operations require both queries to have the same row. They preserve the
-# columns and order of the left input; SQL uses the corresponding set operator.
-#
-# Callable directly — `except users vips` is `users EXCEPT vips` — or through
-# the `&|` / `&!` / `&^` / `&~` stage operators below, which read the same way:
-# `users &~ vips` is also `users EXCEPT vips`.
-#
-# The bare `&` cannot express that. `users & except vips` desugars to
-# `_&_ users (except vips)`, and `except vips` is already a partial application,
-# so the pipe would supply `users` as its *second* argument, giving the primitive
-# `[vips, users]`. `union`, `unionAll`, and `intersect` do not care (they are
-# commutative); `except` does, and it returned the complement of what was asked.
+## Union, deduplicated: `users &| vips`, or `union users vips`. Both queries
+## must have the same row; the columns and their order come from the left input.
+##
+## It is callable directly or through the stage operator, and the two agree.
+## The bare `&` cannot express it: `users & union vips` desugars to
+## `_&_ users (union vips)`, and `union vips` is already a partial application,
+## so the pipe would supply `users` as its *second* argument. `union`,
+## `unionAll` and `intersect` do not care (they are commutative); `except` does,
+## which is why the stage operators exist.
 union : query r -> query r -> query r = primitive "__union"
+
+## Union keeping duplicates: `users &! vips`, SQL `UNION ALL`.
 unionAll : query r -> query r -> query r = primitive "__unionAll"
+
+## Rows in both queries: `users &^ vips`, SQL `INTERSECT`.
 intersect : query r -> query r -> query r = primitive "__intersect"
+
+## Rows in the first query and not the second: `users &~ vips`, SQL `EXCEPT`.
+## Not commutative, so prefer the stage operator or the direct call over
+## `q & except r`.
 except : query r -> query r -> query r = primitive "__except"
 
 # Join operators, between `&` and every expression operator:
@@ -214,11 +306,19 @@ except : query r -> query r -> query r = primitive "__except"
 # rather than `&`'s level 1 is what makes them ordinary operators that build a
 # query rather than stages.
 
+## Join operator spelling of `innerJoin`:
+## `users ? .<id == .>user_id` is `innerJoin` at operator precedence.
 _?_ : query s -> expr (join r s) bool -> query r -> query (merge r s) = innerJoin
+
+## Join operator spelling of `leftJoin`: the `<` marks the side kept whole.
 _<?_ : query s -> expr (join r s) bool -> query r -> query (merge r (mapValue (AsNullable) s)) =
   leftJoin
+
+## Join operator spelling of `rightJoin`: the `>` marks the side kept whole.
 _?>_ : query s -> expr (join r s) bool -> query r -> query (merge (mapValue (AsNullable) r) s) =
   rightJoin
+
+## Join operator spelling of `fullJoin`: both markers, both sides kept.
 _<?>_ : query s
     -> expr (join r s) bool
     -> query r
@@ -238,23 +338,56 @@ _<?>_ : query s
 # `sum` / `avg` / `min` / `max` are NULL for an all-NULL or empty input, so
 # they return `maybe`: write `coalesce 0 (sum .x)` for a number.
 
+## `count` counts the rows of the group, NULLs included (`COUNT(*)`). A count
+## is never NULL: an empty group counts 0.
 count : agg (expr r int) = sql "COUNT(*)"
+
+## `countOf .x` counts the rows where `x` is not NULL (`COUNT(x)`) — the
+## difference from `count` is exactly the NULLs.
 countOf : expr r a -> agg (expr r int) = sql "COUNT($1)"
+
+## `countDistinct .x` counts the distinct non-NULL values of `x`.
 countDistinct : expr r a -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
+
+## Sum of a column, overloading `int` and `float`. NULL for an all-NULL or
+## empty group, so the result is `maybe`: `coalesce 0 (sum .amount)`.
 sum : expr r int -> agg (expr r (maybe int)) = sql "SUM($1)"
 sum : expr r float -> agg (expr r (maybe float)) = sql "SUM($1)"
+
+## Arithmetic mean, overloading `int` and `float`; always a `float`, NULL for
+## an empty group.
 avg : expr r int -> agg (expr r (maybe float)) = sql "AVG($1)"
 avg : expr r float -> agg (expr r (maybe float)) = sql "AVG($1)"
+
+## Smallest value in the group; NULL for an empty group.
 min : expr r a -> agg (expr r (maybe a)) = sql "MIN($1)"
+
+## Largest value in the group; NULL for an empty group.
 max : expr r a -> agg (expr r (maybe a)) = sql "MAX($1)"
 
+## `sum` for a column that is already `maybe`: SQL skips the NULLs itself, so
+## this is one `SUM` rather than a coalesce followed by a sum.
 sumMaybe : expr r (maybe int) -> agg (expr r (maybe int)) = sql "SUM($1)"
 sumMaybe : expr r (maybe float) -> agg (expr r (maybe float)) = sql "SUM($1)"
+
+## `avg` for a column that is already `maybe`. It ignores NULLs — over
+## `[NULL, 5]` this is 5, where `avg (coalesce 0 .x)` would be 2.5.
 avgMaybe : expr r (maybe int) -> agg (expr r (maybe float)) = sql "AVG($1)"
 avgMaybe : expr r (maybe float) -> agg (expr r (maybe float)) = sql "AVG($1)"
+
+## `min` for a column that is already `maybe`; NULLs are ignored, and the
+## result is NULL when nothing is left.
 minMaybe : expr r (maybe a) -> agg (expr r (maybe a)) = sql "MIN($1)"
+
+## `max` for a column that is already `maybe`; NULLs are ignored, and the
+## result is NULL when nothing is left.
 maxMaybe : expr r (maybe a) -> agg (expr r (maybe a)) = sql "MAX($1)"
+
+## `countOf` for a nullable column: `COUNT(x)` already skips NULLs, so this is
+## the same aggregate with a signature that accepts `maybe a`.
 countOfMaybe : expr r (maybe a) -> agg (expr r int) = sql "COUNT($1)"
+
+## `countDistinct` for a nullable column; NULLs are skipped by SQL.
 countDistinctMaybe : expr r (maybe a) -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
 
 # Filtered aggregates apply a predicate to the aggregate's *input* rows, the
@@ -267,150 +400,325 @@ countDistinctMaybe : expr r (maybe a) -> agg (expr r int) = sql "COUNT(DISTINCT 
 #
 # The count forms use `COUNT(...)`, not `SUM(1)`: `SUM` is NULL when nothing
 # matches, while `COUNT(*) FILTER` is 0.
+
+## `sumFilter p .x` sums `x` over the group's rows that satisfy `p` — SQL's
+## `SUM(x) FILTER (WHERE p)`. NULL when no row matches; use
+## `coalesce 0 (sumFilter p .x)` for a number.
 sumFilter : expr r bool -> expr r int -> agg (expr r (maybe int)) =
   sql "SUM(CASE WHEN $1 THEN $2 END)"
 sumFilter : expr r bool -> expr r float -> agg (expr r (maybe float)) =
   sql "SUM(CASE WHEN $1 THEN $2 END)"
+
+## `avgFilter p .x` averages `x` over the rows that satisfy `p`. NULL when no
+## row matches.
 avgFilter : expr r bool -> expr r int -> agg (expr r (maybe float)) =
   sql "AVG(CASE WHEN $1 THEN $2 END)"
 avgFilter : expr r bool -> expr r float -> agg (expr r (maybe float)) =
   sql "AVG(CASE WHEN $1 THEN $2 END)"
+
+## `minFilter p .x`: the smallest `x` among the rows satisfying `p`.
 minFilter : expr r bool -> expr r a -> agg (expr r (maybe a)) = sql "MIN(CASE WHEN $1 THEN $2 END)"
+
+## `maxFilter p .x`: the largest `x` among the rows satisfying `p`.
 maxFilter : expr r bool -> expr r a -> agg (expr r (maybe a)) = sql "MAX(CASE WHEN $1 THEN $2 END)"
+
+## `countFilter p` counts the rows satisfying `p`, NULLs and all — 0 when none
+## match, rather than NULL.
 countFilter : expr r bool -> agg (expr r int) = sql "COUNT(CASE WHEN $1 THEN 1 END)"
+
+## `countOfFilter p .x` counts the rows satisfying `p` where `x` is not NULL.
 countOfFilter : expr r bool -> expr r a -> agg (expr r int) = sql "COUNT(CASE WHEN $1 THEN $2 END)"
+
+## `countDistinctFilter p .x` counts the distinct non-NULL `x` among the rows
+## satisfying `p`.
 countDistinctFilter : expr r bool -> expr r a -> agg (expr r int) =
   sql "COUNT(DISTINCT CASE WHEN $1 THEN $2 END)"
 
 # ── window functions (depth 1) ────────────────────────────────────────────
 # spec = { partition = [..], order = [asc .x, desc .y], frame = .. }
 
+## Row number within the partition, 1-based, in the `order` the spec gives.
+## Distinct rows get distinct numbers even when the sort keys tie.
 rowNumber : winspec r -> win (expr r int) = sql "ROW_NUMBER()"
+
+## Rank within the partition: tied rows share a rank, and the next rank skips
+## the tie (1, 2, 2, 4).
 rank : winspec r -> win (expr r int) = sql "RANK()"
+
+## Dense rank: tied rows share a rank and the next rank does not skip
+## (1, 2, 2, 3).
 denseRank : winspec r -> win (expr r int) = sql "DENSE_RANK()"
-# `lag` / `lead` are NULL at the partition edge; frames may be empty.
+
+## The value of `x` on the row `n` rows before this one in the partition —
+## `lag spec 1 .x` for the previous row. NULL at the partition edge.
 lag : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LAG($1)"
+
+## The value of `x` on the row `n` rows after this one. NULL at the partition
+## edge.
 lead : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LEAD($1)"
+
+## Running (or framed) sum of `x` over the window. `wholePartition` sums the
+## partition; `runningFrame` accumulates up to the current row. NULL when the
+## frame is empty.
 sumOver : winspec r -> expr r int -> win (expr r (maybe int)) = sql "SUM($1)"
 sumOver : winspec r -> expr r float -> win (expr r (maybe float)) = sql "SUM($1)"
+
+## Running (or framed) average of `x` over the window; NULL when the frame is
+## empty.
 avgOver : winspec r -> expr r int -> win (expr r (maybe float)) = sql "AVG($1)"
 avgOver : winspec r -> expr r float -> win (expr r (maybe float)) = sql "AVG($1)"
+
+## The number of rows in the window frame, NULLs included.
 countOver : winspec r -> win (expr r int) = sql "COUNT(*)"
-# `firstValue` / `lastValue` can be NULL when the frame is empty, so they
-# return `maybe`. `ntile spec buckets` numbers the partition's rows 1..n;
-# `percentRank` and `cumeDist` return a fraction in `float`.
+
+## The first value of `x` in the window's frame. With the default frame this is
+## the partition's first row; with a moving frame it is the frame's first row —
+## which is why a `lastValue` of a running frame is not the partition's last
+## value unless the frame is `wholePartition`.
 firstValue : winspec r -> expr r a -> win (expr r (maybe a)) = sql "FIRST_VALUE($1)"
+
+## The last value of `x` in the window's frame; NULL when the frame is empty.
+## See `firstValue` about the frame's effect.
 lastValue : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LAST_VALUE($1)"
+
+## `ntile spec 4` numbers the partition's rows 1..4, as evenly as the row count
+## allows — a quartile bucket per row.
 ntile : winspec r -> expr r int -> win (expr r int) = sql "NTILE($1)"
+
+## The relative rank of the row as a fraction strictly below 1: 0 for the first
+## row.
 percentRank : winspec r -> win (expr r float) = sql "PERCENT_RANK()"
+
+## The cumulative distribution: the proportion of the partition's rows at or
+## before this one, in (0, 1].
 cumeDist : winspec r -> win (expr r float) = sql "CUME_DIST()"
 
-# ── window functions (depth 1) ────────────────────────────────────────────
-# spec = { partition = [..], order = [asc .x, desc .y], frame = .. }
+# ── window frames ─────────────────────────────────────────────────────────
 
-# `lag` / `lead` are NULL at the partition edge; frames may be empty.
-
+## `rows start end`: a frame counted in rows rather than in peer groups —
+## `rows unboundedPreceding currentRow` is the running total. The spec's
+## `frame` field is where the two bounds go.
 rows : bound -> bound -> frame = primitive "__rows"
+
+## Frame bound: the start of the partition, with no limit.
 unboundedPreceding : bound = primitive "__unboundedPreceding"
+
+## Frame bound: the end of the partition, with no limit.
 unboundedFollowing : bound = primitive "__unboundedFollowing"
+
+## Frame bound: the current row.
 currentRow : bound = primitive "__currentRow"
+
+## Frame bound `n` rows before the current row: `rows (preceding 7) currentRow`
+## is a seven-row trailing window.
 preceding : expr r int -> bound = primitive "__preceding"
+
+## Frame bound `n` rows after the current row, for a centred window.
 following : expr r int -> bound = primitive "__following"
+
+## The whole partition as a frame. Needed when a window aggregate should cover
+## the partition rather than accumulate over it.
 wholePartition : frame = rows unboundedPreceding unboundedFollowing
+
+## The frame from the partition's start to the current row: the running total,
+## spelled out because writing it is how a running aggregate is meant.
 runningFrame : frame = rows unboundedPreceding currentRow
 
 # ── scalar operators and functions ────────────────────────────────────────
 
+## `a == b`, SQL `=`. NULL if either side is NULL: a comparison with NULL is
+## never true, which is what `isNull` and `eqMaybe` are for.
 _==_ : expr r a -> expr r a -> expr r bool = sql "$1 = $2"
+
+## `a != b`, SQL `<>`.
 _!=_ : expr r a -> expr r a -> expr r bool = sql "$1 <> $2"
+
+## `a < b`. NULL if either side is NULL.
 _<_ : expr r a -> expr r a -> expr r bool = sql "$1 < $2"
+
+## `a <= b`. NULL if either side is NULL.
 _<=_ : expr r a -> expr r a -> expr r bool = sql "$1 <= $2"
+
+## `a > b`. NULL if either side is NULL.
 _>_ : expr r a -> expr r a -> expr r bool = sql "$1 > $2"
+
+## `a >= b`. NULL if either side is NULL.
 _>=_ : expr r a -> expr r a -> expr r bool = sql "$1 >= $2"
+
+## Boolean AND. Both sides are non-null `bool`, so SQL's three-valued logic
+## does not apply here; a nullable predicate is made non-null first
+## (`isTrue`, `coalesce`).
 _&&_ : expr r bool -> expr r bool -> expr r bool = sql "$1 AND $2"
+
+## Boolean OR. Non-null `bool` on both sides, like `&&`.
 _||_ : expr r bool -> expr r bool -> expr r bool = sql "$1 OR $2"
 
 # Arithmetic is overloaded on int and float (no implicit conversions). On
 # ints, `/` truncates toward zero and `%` keeps the dividend's sign, in every
 # dialect.
+
+## Addition, overloaded on `int` and `float`.
 _+_ : expr r int -> expr r int -> expr r int = sql "$1 + $2"
 _+_ : expr r float -> expr r float -> expr r float = sql "$1 + $2"
+
+## Subtraction, overloaded on `int` and `float`.
 _-_ : expr r int -> expr r int -> expr r int = sql "$1 - $2"
 _-_ : expr r float -> expr r float -> expr r float = sql "$1 - $2"
+
+## Multiplication, overloaded on `int` and `float`.
 _*_ : expr r int -> expr r int -> expr r int = sql "$1 * $2"
 _*_ : expr r float -> expr r float -> expr r float = sql "$1 * $2"
+
+## Division, overloaded on `int` and `float`.
+##
+## Integer division truncates toward zero in every dialect — `7 / 2` is 3 and
+## `-7 / 2` is -3. The `CAGARA_IDIV` rewrite is what makes that uniform: SQL
+## engines disagree about integer division, and SQLite returns a float.
 _/_ : expr r int -> expr r int -> expr r int = sql "CAGARA_IDIV($1, $2)"
 _/_ : expr r float -> expr r float -> expr r float = sql "$1 / $2"
+
+## Remainder, `int` only. The result keeps the dividend's sign — `-7 % 2` is
+## -1 — in every dialect, which `CAGARA_MOD` guarantees.
 _%_ : expr r int -> expr r int -> expr r int = sql "CAGARA_MOD($1, $2)"
 
-# String concatenation, right-assoc and looser than arithmetic:
+## String concatenation, right-associative and looser than arithmetic, so
+## `"a" <> .b <> "c"` groups as `"a" <> (.b <> "c")` and `x + 1 <> "!"` needs
+## no parentheses. NULL if either side is NULL.
 _<>_ : expr r string -> expr r string -> expr r string = sql "$1 || $2"
+
+## `concat a b` is `a <> b`, for a call site where an operator reads worse.
 concat : expr r string -> expr r string -> expr r string = _<>_
+
+## Boolean negation.
 not : expr r bool -> expr r bool = sql "NOT $1"
+
+## Arithmetic negation, overloaded on `int` and `float`.
 negate : expr r int -> expr r int = sql "-$1"
 negate : expr r float -> expr r float = sql "-$1"
+
+## Uppercase a string, in the database's collation.
 upper : expr r string -> expr r string = sql "UPPER($1)"
+
+## Lowercase a string, in the database's collation.
 lower : expr r string -> expr r string = sql "LOWER($1)"
+
+## Strip leading and trailing whitespace.
 trim : expr r string -> expr r string = sql "TRIM($1)"
+
+## Strip leading whitespace.
 ltrim : expr r string -> expr r string = sql "LTRIM($1)"
+
+## Strip trailing whitespace.
 rtrim : expr r string -> expr r string = sql "RTRIM($1)"
-# `lpad 12 "0" s`: `s` padded on the left to width 12 with copies of `"0"`.
-#
-# The width comes first, then what to pad with, then the string — the same
-# argument order as `left` / `right` / `substring`, which take their position
-# or length before the string, so `lpad 12 "0"` is a reusable "pad to twelve".
-# It is the reverse of SQL's own `LPAD(s, 12, '0')`, which is what the
-# template below rearranges.
-#
-# A value already at least `n` wide is returned whole, not truncated.
-#
-# Unlike `length`, this needs no `CAGARA_*` rewrite: sqlglot passes `LPAD`
-# through unchanged for every dialect. SQLite has no `LPAD` and will reject it
-# at run time, which is the same gap `try*` has there — emitting the call is
-# more honest than guessing at a `substr`/`printf` spelling, and the engine
-# says so loudly.
+
+## `lpad 12 "0" s`: `s` padded on the left to width 12 with copies of `"0"`.
+##
+## The width comes first, then what to pad with, then the string — the same
+## argument order as `left` / `right` / `substring`, which take their position
+## or length before the string, so `lpad 12 "0"` is a reusable "pad to twelve".
+## It is the reverse of SQL's own `LPAD(s, 12, '0')`, which is what the
+## template below rearranges.
+##
+## A value already at least `n` wide is returned whole, not truncated.
+##
+## Unlike `length`, this needs no `CAGARA_*` rewrite: sqlglot passes `LPAD`
+## through unchanged for every dialect. SQLite has no `LPAD` and will reject it
+## at run time, which is the same gap `try*` has there — emitting the call is
+## more honest than guessing at a `substr`/`printf` spelling, and the engine
+## says so loudly.
 lpad : expr r int -> expr r string -> expr r string -> expr r string = sql "LPAD($2, $1, $3)"
+
+## `rpad 12 "0" s`: `s` padded on the right, the mirror of `lpad`.
 rpad : expr r int -> expr r string -> expr r string -> expr r string = sql "RPAD($2, $1, $3)"
+
+## The number of characters in a string — characters, not bytes, in every
+## dialect (`CAGARA_LENGTH`).
 length : expr r string -> expr r int = sql "CAGARA_LENGTH($1)"
+
+## `like "%foo%" .name`: SQL `LIKE`, so `%` and `_` are wildcards. The pattern
+## comes first to keep the subject last; for a plain substring test use
+## `contains`.
 like : expr r string -> expr r string -> expr r bool = sql "$2 LIKE $1"
+
+## Case-insensitive `like`. Not every engine has `ILIKE`; sqlglot rewrites it
+## where it can.
 ilike : expr r string -> expr r string -> expr r bool = sql "$2 ILIKE $1"
 
-# Positions are 1-based, as in SQL. `substring start len s`.
+## `substring start len s`, 1-based as in SQL and `len` characters long.
 substring : expr r int -> expr r int -> expr r string -> expr r string = sql "SUBSTRING($3, $1, $2)"
+
+## `left n s`: the first `n` characters.
 left : expr r int -> expr r string -> expr r string = sql "CAGARA_LEFT($2, $1)"
+
+## `right n s`: the last `n` characters.
 right : expr r int -> expr r string -> expr r string = sql "CAGARA_RIGHT($2, $1)"
-# `replaceAll from to s`: every occurrence. (SQL's REPLACE, not column renaming
-# — use `update` for that.)
+
+## `replaceAll from to s`: every occurrence of `from` in `s` replaced by `to`.
+## (SQL's `REPLACE`, not column renaming — use `update` for that.)
 replaceAll : expr r string -> expr r string -> expr r string -> expr r string =
   sql "REPLACE($3, $1, $2)"
-# `strpos sub s`: position of the first `sub` in `s`; 0 if absent.
+
+## `strpos sub s`: the 1-based position of the first `sub` in `s`, or 0 when it
+## is absent.
 strpos : expr r string -> expr r string -> expr r int = sql "CAGARA_STRPOS($2, $1)"
-# Plain substring tests (`contains "@" .email`): `%` and `_` are not wildcards.
+
+## `contains "@" .email`: whether `s` contains `sub`. A plain substring test —
+## `%` and `_` are not wildcards here, which is the difference from `like`.
 contains : expr r string -> expr r string -> expr r bool = sql "CAGARA_STRPOS($2, $1) > 0"
+
+## `startsWith "@" .domain`: whether `s` begins with `prefix`.
 startsWith : expr r string -> expr r string -> expr r bool =
   sql "CAGARA_LEFT($2, CAGARA_LENGTH($1)) = $1"
+
+## `endsWith ".com" .domain`: whether `s` ends with `suffix`.
 endsWith : expr r string -> expr r string -> expr r bool =
   sql "CAGARA_RIGHT($2, CAGARA_LENGTH($1)) = $1"
 
-# Math is scalar and non-null. `roundTo digits x` follows the subject-last
-# order: `roundTo 2 .amount`. `power exponent base` is the same order, so
-# `power 2` squares its argument. Engines round ties differently; `round`
-# leaves that to the target rather than pretending one rule is universal.
+# Math is scalar and non-null.
+
+## Absolute value, overloaded on `int` and `float`.
 abs : expr r int -> expr r int = sql "ABS($1)"
 abs : expr r float -> expr r float = sql "ABS($1)"
+
+## Round to the nearest integer, keeping the `float` type. Engines round ties
+## differently; this leaves that to the target rather than pretending one rule
+## is universal.
 round : expr r float -> expr r float = sql "ROUND($1)"
+
+## `roundTo 2 .amount`: round to `digits` decimal places. Digits first, subject
+## last, so `roundTo 2` is a reusable transformation.
 roundTo : expr r int -> expr r float -> expr r float = sql "ROUND($2, $1)"
+
+## Round down to the nearest integer, as a `float`.
 floor : expr r float -> expr r float = sql "FLOOR($1)"
+
+## Round up to the nearest integer, as a `float`.
 ceil : expr r float -> expr r float = sql "CEILING($1)"
+
+## Square root. A negative input is the engine's error or NULL, not a
+## documented value of this function.
 sqrt : expr r float -> expr r float = sql "SQRT($1)"
+
+## `power exponent base`: `base` raised to `exponent`. Subject last, so
+## `power 2` squares its argument.
 power : expr r float -> expr r float -> expr r float = sql "POWER($2, $1)"
+
+## Sign of a number: -1, 0 or 1. Overloaded on `int` and `float`.
 sign : expr r int -> expr r int = sql "SIGN($1)"
 sign : expr r float -> expr r float = sql "SIGN($1)"
-# Two-argument forms; SQLite has no GREATEST/LEAST, so the CASE spelling is
-# the portable one. Arguments are non-null, so no NULL has to be resolved.
+
+## `greatest a b`: the larger of two non-null values, of any ordered type.
+## SQLite has no `GREATEST`, so the `CASE` spelling is the portable one; with
+## non-null arguments no NULL has to be resolved.
 greatest : expr r a -> expr r a -> expr r a = sql "CASE WHEN $1 >= $2 THEN $1 ELSE $2 END"
+
+## `least a b`: the smaller of two non-null values. Portable for the same
+## reason as `greatest`.
 least : expr r a -> expr r a -> expr r a = sql "CASE WHEN $1 <= $2 THEN $1 ELSE $2 END"
 
+## Render a value as a string, overloading `int`, `float`, `date`, `timestamp`
+## and `bool`. The bool form is a `CASE` giving `'true'` / `'false'`, because
+## engines disagree about how they print a boolean.
 toString : expr r int -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r float -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r date -> expr r string = sql "CAGARA_TO_STRING($1)"
@@ -420,22 +728,27 @@ toString : expr r bool -> expr r string = sql "CASE WHEN $1 THEN 'true' ELSE 'fa
 # Casts are named for the type they produce. Overloading picks the one that
 # fits, so `toInt` applied to a `float` is a narrowing and `toInt` applied to a
 # `string` is a parse -- the same destination reached from different sources.
-#
-# `toInt` of a float truncates toward zero, in every dialect; of a string it
-# parses an integer. `toFloat` produces a 64-bit IEEE double. The language's
-# `int` is 64-bit, so the backend casts to `BIGINT` rather than the 32-bit
-# `INT` some engines use for `CAST`.
+
+## Convert to `int`: from a `float` it truncates toward zero, in every dialect
+## (`CAGARA_TRUNC_INT`); from a `string` it parses an integer and fails on a
+## value that is not one (`tryInt` yields NULL instead).
 toInt : expr r float -> expr r int = sql "CAGARA_TRUNC_INT($1)"
 toInt : expr r string -> expr r int = sql "CAGARA_TO_INT($1)"
+
+## Convert to `float`, a 64-bit IEEE double: from an `int` exactly, from a
+## `string` by parsing.
 toFloat : expr r int -> expr r float = sql "CAGARA_TO_FLOAT($1)"
 toFloat : expr r string -> expr r float = sql "CAGARA_TO_FLOAT($1)"
+
+## Convert to `bool` from a number: zero is false, everything else true.
 toBool : expr r int -> expr r bool = sql "CAST($1 AS BOOLEAN)"
 toBool : expr r float -> expr r bool = sql "CAST($1 AS BOOLEAN)"
 
-# `toDecimal precision scale x` gives a value an exact SQL type. Money is the
-# reason: plain `FLOAT` is binary floating point, so sums of it drift, while
-# `DECIMAL(18, 2)` is exact. The *language* type stays `float` -- there is no
-# separate decimal scalar -- so this changes the SQL type without adding one.
+## `toDecimal precision scale x` gives a value an exact SQL type. Money is the
+## reason: plain `FLOAT` is binary floating point, so sums of it drift, while
+## `DECIMAL(18, 2)` is exact. The *language* type stays `float` — there is no
+## separate decimal scalar — so this changes the SQL type without adding one.
+## Usable from `string`, `int` and `float` sources.
 toDecimal : expr r int -> expr r int -> expr r string -> expr r float =
   sql "CAGARA_TO_DECIMAL($3, $1, $2)"
 toDecimal : expr r int -> expr r int -> expr r int -> expr r float =
@@ -447,10 +760,18 @@ toDecimal : expr r int -> expr r int -> expr r float -> expr r float =
 # which is the more useful reading at a call site: `fromString .man_grade` says
 # the column is text and is being read as a number. Each is the `to*` above,
 # so there is one implementation and two ways to name it.
+
+## `fromString` reads a `string` as the type the context asks for — `int`,
+## `float` or `date`. The `to*` cast with the direction named from the source.
 fromString : expr r string -> expr r int = toInt
 fromString : expr r string -> expr r float = toFloat
 fromString : expr r string -> expr r date = toDate
+
+## `fromInt` reads an `int` as a `float`: `toFloat` with the direction named
+## from the source.
 fromInt : expr r int -> expr r float = toFloat
+
+## `fromFloat` reads a `float` as an `int`, truncating toward zero.
 fromFloat : expr r float -> expr r int = toInt
 
 # The casts above fail on a value they cannot convert. For a column typed
@@ -458,10 +779,22 @@ fromFloat : expr r float -> expr r int = toInt
 # one bad row would otherwise fail the whole query, so the `try*` forms yield
 # NULL instead. They return `maybe`, because that NULL has to be handled
 # somewhere: `coalesce 0 (tryInt .x)`.
+
+## `tryInt` parses a `string` as an `int`, giving NULL where `toInt` would
+## fail. Always `maybe`, so the caller decides what a bad row means.
 tryInt : expr r string -> expr r (maybe int) = sql "CAGARA_TRY_INT($1)"
+
+## `tryFloat` parses a `string` as a `float`, NULL on failure.
 tryFloat : expr r string -> expr r (maybe float) = sql "CAGARA_TRY_FLOAT($1)"
+
+## `tryDate` parses a `string` as a `date`, NULL on failure.
 tryDate : expr r string -> expr r (maybe date) = sql "CAGARA_TRY_DATE($1)"
+
+## `tryTimestamp` parses a `string` as a `timestamp`, NULL on failure.
 tryTimestamp : expr r string -> expr r (maybe timestamp) = sql "CAGARA_TRY_TIMESTAMP($1)"
+
+## `tryDecimal precision scale x`: `toDecimal` for a `string` that may not be a
+## number, NULL on failure.
 tryDecimal : expr r int -> expr r int -> expr r string -> expr r (maybe float) =
   sql "CAGARA_TRY_DECIMAL($3, $1, $2)"
 
@@ -469,100 +802,188 @@ tryDecimal : expr r int -> expr r int -> expr r string -> expr r (maybe float) =
 # String literals widen to `date` / `timestamp`: `.created_at >= "2024-01-01"`.
 # Weeks start on Monday (ISO). `dayOfWeek` is 0 for Sunday.
 
+## Today, as a `date`.
 currentDate : expr r date = sql "CURRENT_DATE"
+
+## The current instant, to the engine's precision.
 currentTimestamp : expr r timestamp = sql "CAGARA_NOW()"
+
+## Alias of `currentTimestamp`, under the shorter name.
 now : expr r timestamp = currentTimestamp
 
-# The day before today. The most common partition date there is: a table
-# partitioned by day is read for the day that has finished, and `yesterday`
-# says that in one word at a use site where `addDays (-1) currentDate` is a
-# parenthesised expression in the middle of a pipeline.
+## The day before today. The most common partition date there is: a table
+## partitioned by day is read for the day that has finished, and `yesterday`
+## says that in one word at a use site where `addDays (-1) currentDate` is a
+## parenthesised expression in the middle of a pipeline.
 yesterday : expr r date = addDays (-1) currentDate
 
+## Convert to `date`: from a `timestamp` it truncates to the day, from a
+## `string` it parses one.
 toDate : expr r timestamp -> expr r date = sql "CAGARA_TO_DATE($1)"
 toDate : expr r string -> expr r date = sql "CAGARA_TO_DATE($1)"
+
+## Convert to `timestamp`: from a `date` (midnight) or from a `string`.
 toTimestamp : expr r date -> expr r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
 toTimestamp : expr r string -> expr r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
 
-# `addDays 7 .created_at`; negative counts go back. Weeks and quarters are
-# defined here as 7 days and 3 months, so the core needs only DAY and MONTH.
+## `addDays 7 .created_at`: move a date or timestamp by whole days; negative
+## counts go back. Overloaded on `date` and `timestamp`, returning the type it
+## was given.
+##
+## The week, quarter and year shifts below are defined from this one: 7 days,
+## 3 months, 1 year. So the core needs only `DAY` and `MONTH`.
 addDays : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'DAY', $2, $1)"
 addDays : expr r int -> expr r timestamp -> expr r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'DAY', $2, $1)"
+
+## `addWeeks 2 .d`: move by whole weeks, spelled as `addDays` of `n * 7`.
 addWeeks : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'DAY', $2, $1 * 7)"
 addWeeks : expr r int -> expr r timestamp -> expr r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'DAY', $2, $1 * 7)"
+
+## `addMonths 1 .d`: move by calendar months. The engine decides what the 31st
+## of a month without a 31st becomes.
 addMonths : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'MONTH', $2, $1)"
 addMonths : expr r int -> expr r timestamp -> expr r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'MONTH', $2, $1)"
+
+## `addQuarters 1 .d`: move by quarters, spelled as `addMonths` of `n * 3`.
 addQuarters : expr r int -> expr r date -> expr r date =
   sql "CAGARA_ADD('DATE', 'MONTH', $2, $1 * 3)"
 addQuarters : expr r int -> expr r timestamp -> expr r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'MONTH', $2, $1 * 3)"
+
+## `addYears 1 .d`: move by calendar years.
 addYears : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'YEAR', $2, $1)"
 addYears : expr r int -> expr r timestamp -> expr r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'YEAR', $2, $1)"
+
+## `addHours 2 .t`: move a timestamp by whole hours. Timestamps only — a `date`
+## has no hour to move.
 addHours : expr r int -> expr r timestamp -> expr r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'HOUR', $2, $1)"
+
+## `addMinutes 30 .t`: move a timestamp by whole minutes.
 addMinutes : expr r int -> expr r timestamp -> expr r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'MINUTE', $2, $1)"
+
+## `addSeconds 30 .t`: move a timestamp by whole seconds.
 addSeconds : expr r int -> expr r timestamp -> expr r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'SECOND', $2, $1)"
 
 # date_trunc: the start of the period containing the value, same type.
+
+## `truncYear .d`: the first instant of the containing year, in the input's own
+## type.
 truncYear : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'YEAR', $1)"
 truncYear : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'YEAR', $1)"
+
+## `truncQuarter .d`: the first day of the containing quarter.
 truncQuarter : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'QUARTER', $1)"
 truncQuarter : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'QUARTER', $1)"
+
+## `truncMonth .d`: the first day of the containing month — the usual spelling
+## of a monthly bucket.
 truncMonth : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'MONTH', $1)"
 truncMonth : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'MONTH', $1)"
+
+## `truncWeek .d`: the Monday of the containing week.
 truncWeek : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'WEEK', $1)"
 truncWeek : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'WEEK', $1)"
+
+## `truncDay .t`: midnight of the containing day, as a timestamp.
 truncDay : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'DAY', $1)"
+
+## `truncHour .t`: the start of the containing hour.
 truncHour : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'HOUR', $1)"
+
+## `truncMinute .t`: the start of the containing minute.
 truncMinute : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'MINUTE', $1)"
 
 # Fields as integers.
+
+## The year of a date or timestamp: `year .created_at`.
 year : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'YEAR', $1)"
 year : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'YEAR', $1)"
+
+## The quarter, 1–4.
 quarter : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'QUARTER', $1)"
 quarter : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'QUARTER', $1)"
+
+## The month, 1–12.
 month : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'MONTH', $1)"
 month : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'MONTH', $1)"
+
+## The day of the month, 1–31.
 day : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'DAY', $1)"
 day : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'DAY', $1)"
+
+## The day of the week, 0 for Sunday — the numbering SQL engines use, not
+## ISO's.
 dayOfWeek : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'DOW', $1)"
 dayOfWeek : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'DOW', $1)"
+
+## The day of the year, 1–366.
 dayOfYear : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'DOY', $1)"
 dayOfYear : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'DOY', $1)"
+
+## The hour, 0–23, of a timestamp.
 hour : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'HOUR', $1)"
+
+## The minute, 0–59, of a timestamp.
 minute : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'MINUTE', $1)"
 
-# `daysBetween start end`: whole days from `start` to `end` (negative if
-# `end` is earlier), so `daysBetween .created_at` is a function of the end.
+## `daysBetween start end`: whole days from `start` to `end`, negative if `end`
+## is earlier. Subject last, so `daysBetween .created_at` is a function of the
+## end — an age in days.
 daysBetween : expr r date -> expr r date -> expr r int = sql "CAGARA_DAYS_BETWEEN($1, $2)"
 
 # ── nulls: operators need non-null arguments, so nulls are handled here ────
 
-# `coalesce default x`, like Haskell's `fromMaybe`; infix `x ?? default`
-# (right-assoc, tighter than arithmetic: `.a ?? .b ?? 0`, `.n ?? 0 + 1`).
+## `coalesce default x`, like Haskell's `fromMaybe`: `x` if it is not NULL, the
+## default otherwise. Default first and subject last, so `coalesce 0` is a
+## reusable "or zero".
+##
+## The infix form is `x ?? default` (right-associative, tighter than arithmetic:
+## `.a ?? .b ?? 0`, `.n ?? 0 + 1`).
 coalesce : expr r a -> expr r (maybe a) -> expr r a = sql "COALESCE($2, $1)"
+
+## `x ?? default` is `coalesce default x`, written with the nullable value
+## first. Right-associative, so `.a ?? .b ?? 0` chains.
 _??_ : expr r (maybe a) -> expr r a -> expr r a = sql "COALESCE($1, $2)"
+
+## Lift a non-null value into `maybe`. It does not create NULL — that is
+## `nothing` — so `just x` is the "this one is present" spelling in a record of
+## optional fields.
 just : expr r a -> expr r (maybe a) = sql "$1"
-# `nothing` is a SQL NULL at any nullable type. `just x` lifts a non-null
-# value; it does not create NULL.
+
+## A SQL NULL at any nullable type, in any phase. The only way to write NULL:
+## every other expression is non-null by its signature.
 nothing : expr r (maybe a) = sql "NULL"
+
+## `nullIf a b`: NULL when `a` equals `b`, `a` otherwise — how a sentinel value
+## is turned into a real NULL.
 nullIf : expr r a -> expr r a -> expr r (maybe a) = sql "NULLIF($1, $2)"
+
+## Whether a nullable value is NULL. The result is non-null `bool`, which is
+## what makes it usable in `where`.
 isNull : expr r (maybe a) -> expr r bool = sql "$1 IS NULL"
+
+## Whether a nullable value is not NULL; non-null `bool`.
 isNotNull : expr r (maybe a) -> expr r bool = sql "$1 IS NOT NULL"
-# NULL counts as false, as in `where`.
+
+## A nullable `bool` as a plain one, with NULL read as false — the same choice
+## `where` makes, stated where the value is used rather than where it is
+## filtered.
 isTrue : expr r (maybe bool) -> expr r bool = sql "COALESCE($1, FALSE)"
 
-# A nullable predicate has SQL's three-valued result. `whereTrue` makes the
-# usual filtering choice explicit: NULL is treated as false.
+## `whereTrue pred q`: `where` for a nullable predicate, with NULL treated as
+## false. A nullable predicate has SQL's three-valued result, so this makes the
+## usual filtering choice explicit instead of surprising.
 whereTrue : expr r (maybe bool) -> query r -> query r = pred => q => where (isTrue pred) q
 
-# Equality that treats two NULL values as equal. The COALESCE keeps the result
-# non-null, so it can be used directly in `where` and join predicates.
+## Equality that treats two NULL values as equal, and never returns NULL — so
+## it can be used directly in `where` and in join predicates, where a plain
+## `==` between two nullables would filter everything out.
 eqMaybe : expr r (maybe a) -> expr r (maybe a) -> expr r bool =
   sql "COALESCE(($1 = $2) OR ($1 IS NULL AND $2 IS NULL), FALSE)"

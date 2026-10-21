@@ -1,34 +1,52 @@
-# Filtering, projection, ordering and paging.
-# The prelude is imported automatically.
+#! One report per feature: filtering, projection, aggregation, windows, joins,
+#! nulls, and the operator shorthands.
+#!
+#! The prelude is imported automatically. Run it to see the SQL `main` compiles
+#! to (`cagara examples/report.cagara`), and read the file as a tour.
 
+## The user table, with its columns named by hand: a table's row type comes from
+## its signature, so `users` is what every `.name` below is checked against.
 users : query { id = int, name = string, age = int, active = bool } = table "public" "users"
 
+## The order table: one row per order, `created_at` a `date`.
 orders : query { id = int, user_id = int, amount = float, status = string, created_at = date } =
   table "public" "orders"
 
+## Filtering, projection, ordering and paging in one pipeline. `select` renames
+## (`label`) and recomputes (`next_age`) as it projects; columns not listed are
+## dropped, which is why `select` is the projection and `update` is the merge.
 adults = users
   & where (.age >= 18 && .active)
   & select { id = .id, label = upper .name, next_age = .age + 1 }
   & order [asc .label]
   & limit 10
 
-# Aggregation: a filter after an aggregate wraps a derived table, since SQL
-# cannot filter an aggregate's own result in the same SELECT. Folding it into a
-# `HAVING` is a query-shape optimization this compiler does not perform; see
-# "Current boundaries" in docs/PLAN.md.
+## Aggregation, then a filter on the aggregate's own result. A filter after an
+## aggregate wraps a derived table, since SQL cannot filter an aggregate in the
+## same SELECT. Folding it into a `HAVING` is a query-shape optimization this
+## compiler does not perform; see "Current boundaries" in docs/PLAN.md.
+##
+## `coalesce 0.0 .revenue` is there because `sum` is `maybe`: every aggregate
+## that can be NULL says so in its type.
 revenue = orders
   & where (.status == "paid")
   & agg { user_id = group .user_id, revenue = sum .amount, n = count }
   & where (.n >= 5)
   & order [desc (coalesce 0.0 .revenue)]
 
-# Window functions: latest three orders per user.
+## A window spec, shared by the definitions below: partition by user, newest
+## first. Written once because two windows want the same ordering.
 spec = { partition = [.user_id], order = [desc .created_at] }
 
+## The latest three orders per user: number the rows within each partition, then
+## filter on the number. The filter cannot be in the same `select` — a window
+## function is evaluated after filtering — so it is the next stage.
 latest = orders
   & select { id = .id, user_id = .user_id, rn = rowNumber spec }
   & where (.rn <= 3)
 
+## A running total per user: `sumOver` with `runningFrame`, which is the frame
+## from the partition's start to the current row.
 running = orders
   & select {
     id = .id,
@@ -36,15 +54,18 @@ running = orders
       sumOver { partition = [.user_id], order = [asc .created_at], frame = runningFrame } .amount
   }
 
-# Joins name the side each column comes from. `select {.a, .b}` keeps the
-# names as they are; `update` recomputes or renames a column in place.
+## A join, read in stages: the names are made unique before the join (both
+## tables have an `id`), then the joined row is projected. `.<x` is the left
+## side of the join, `.>x` the right.
 order_names = orders
   & select { .user_id, .amount, order_id = .id }
   & innerJoin users (.<user_id == .>id)
   & select { order_id = .order_id, name = .name, amount = .amount }
 
-# Nulls are explicit: the right side of a left join is `maybe`, and so are
-# `sum` / `avg` / `min` / `max`. Operators need non-null values.
+## Nulls are explicit: the right side of a left join is `maybe`, and so are
+## `sum` / `avg` / `min` / `max`. Operators take non-null values, so each one is
+## `coalesce`d — `0.0` for money, and a count built from a test rather than
+## `count`, so that a user with no orders is 0 and not NULL.
 user_totals = users
   & leftJoin orders (.<id == .>user_id)
   & agg {
@@ -53,9 +74,9 @@ user_totals = users
     orders = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0))
   }
 
-# Operator shorthands: `&?` where, `&=` select, `&+` update, `&*` agg,
-# `&.` order, `&-` limit; joins `?` innerJoin, `<?` left, `?>` right, `<?>` full;
-# `??` coalesce. The same report as `user_totals`, for active users:
+## The same report as `user_totals`, for active users, written with the operator
+## shorthands: `&?` where, `&=` select, `&+` update, `&*` agg, `&.` order, `&-`
+## limit; joins `?` innerJoin, `<?` left, `?>` right, `<?>` full; `??` coalesce.
 active_totals = users
   &? .active
   & (orders & select { .user_id, .amount, .status, .created_at }) <? .<id == .>user_id
@@ -63,5 +84,6 @@ active_totals = users
   &. [desc .total]
   &- 20
 
-# The aggregate report is the default command-line entry point.
+## The aggregate report is what `cagara report.cagara` prints: a file runs one
+## query, and `main` is how it says which.
 main = revenue

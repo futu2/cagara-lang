@@ -1,11 +1,15 @@
 //! `cagara <file.cagara|-> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]`
 //! `cagara fmt [--check] <files...|->`
+//! `cagara doc <files...|-> [--json] | --prelude | --check`
 //! `cagara lsp`
 //!
 //! Prints the SQL for the root file's `main` definition, or with `--only`
 //! another definition; `--types` prints inferred types instead. A file without
 //! `main` is a library and prints nothing. `cagara fmt` formats files in place.
-//! `cagara lsp` runs the language server over stdio.
+//! `cagara doc` prints the reference a file carries in its `##` and `#!`
+//! comments. `cagara lsp` runs the language server over stdio.
+
+mod doc;
 
 use cagara_hir::check::SchemeView;
 use cagara_hir::{check, compile_checked, TypeCheck, Workspace};
@@ -25,13 +29,16 @@ const NAME: &str = "cagara";
 const USAGE: &str =
     "usage: cagara <file.cagara|-> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
        cagara fmt [--check] <files...>   format files in place (`-` for stdin to stdout)
+       cagara doc <files...|-> [--json]  the reference a file carries in `##` comments
+       cagara doc --prelude              the built-in prelude, documented
+       cagara doc <files...> --check     list definitions with no doc comment (warns only)
        cagara lsp    run the language server over stdio
        cagara --version";
 
 /// The path a source read from stdin is reported as, so a diagnostic still
 /// names a file. A real file of that name is not consulted: `open_source`
 /// takes the text directly.
-const STDIN_PATH: &str = "<stdin>";
+pub(crate) const STDIN_PATH: &str = "<stdin>";
 
 /// The definition a file is compiled for, unless `--only` names another.
 ///
@@ -64,6 +71,9 @@ fn main_inner() -> std::io::Result<ExitCode> {
     let first = rest.next();
     if first.as_deref() == Some(OsStr::new("fmt")) {
         return fmt(rest);
+    }
+    if first.as_deref() == Some(OsStr::new("doc")) {
+        return doc::run(rest);
     }
     if first.as_deref() == Some(OsStr::new("lsp")) {
         let rest: Vec<OsString> = rest.collect();
@@ -231,7 +241,7 @@ fn compile(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
 /// `Workspace::open` reads from disk, so stdin is read here and handed to
 /// `open_with` — which keeps imports resolving relative to the current
 /// directory, exactly as `from_source` does.
-fn open_source(path: &Path) -> std::io::Result<Workspace> {
+pub(crate) fn open_source(path: &Path) -> std::io::Result<Workspace> {
     if path != Path::new(STDIN_PATH) {
         return Ok(Workspace::open(path));
     }
@@ -581,13 +591,13 @@ fn display(s: &OsStr) -> String {
 
 /// One line to stdout. Errors — a closed reader (`| head`) included —
 /// propagate to `main`, which turns `BrokenPipe` into a clean exit.
-fn out(s: &str) -> std::io::Result<()> {
+pub(crate) fn out(s: &str) -> std::io::Result<()> {
     let mut o = std::io::stdout().lock();
     o.write_all(s.as_bytes())?;
     o.write_all(b"\n")
 }
 
-fn done(failed: bool) -> ExitCode {
+pub(crate) fn done(failed: bool) -> ExitCode {
     if failed {
         ExitCode::FAILURE
     } else {

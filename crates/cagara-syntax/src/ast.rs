@@ -530,6 +530,17 @@ mod tests {
         m.defs.into_iter().next().unwrap().body.kind
     }
 
+    /// A definition's span still starts at its name, not at the doc block:
+    /// diagnostics, hover, and go-to-definition all point at `name`, and a
+    /// commented definition would otherwise get a stray leading position.
+    #[test]
+    fn a_doc_block_does_not_move_the_definition_span() {
+        let src = "## Docs.\nmain = 1\n";
+        let (m, _) = lower_source(src);
+        let start = m.defs[0].span.start as usize;
+        assert_eq!(&src[start..start + 4], "main");
+    }
+
     fn name(e: &Expr) -> &str {
         match &e.kind {
             ExprKind::Name(n) => n,

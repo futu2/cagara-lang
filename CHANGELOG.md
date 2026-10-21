@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- Documentation that lives with the definition it describes: `##` above a
+  definition documents it, `#!` above the first item documents the file, and
+  both are ordinary comments to the compiler — a file without them means exactly
+  what it meant before. `cagara doc <file>` prints the reference (a section per
+  name, with the inferred signature and the `##` text), `--json` prints it for a
+  tool, and `cagara doc --prelude` prints the built-in prelude's own. Hover now
+  appends the same text, so a definition is written once and read in the editor,
+  in the reference, and in the generated JSON.
+- `cagara doc --check` lists the top-level definitions that have no `##` block.
+  It **warns and exits 0**: a missing doc comment is a writing task, not a
+  compile error, and a project should be able to grow documentation without its
+  build turning red over what is not written yet. Adjacent definitions of one
+  name are reported and printed as one entry, because an overload set is one
+  thing to document.
+- The prelude is now documented definition by definition, which is what
+  `cagara doc --prelude` prints: 156 entries covering every name in §7 of
+  `CAGARA.md`, with the reasoning that used to live in section headers next to
+  the definition it explains. The examples document their definitions too, and a
+  test keeps both that way.
+- `crates/cagara-hir/tests/snapshots/pipeline_golden.txt` is re-recorded. The
+  pipeline output is unchanged; what moved is the positions. Prelude byte spans
+  (module 0) follow the new comment lines, and the diagnostics for
+  `examples/errors.cagara` and `examples/public.cagara` name the new line
+  numbers, since documenting those files added lines above the code. The
+  re-record was checked by normalizing `start:`/`end:` away and diffing: the
+  only remaining differences are those line and column numbers.
+
 - Hover a column as the expression type it has (`expr r string`, or
   `expr (join r s) int` for a side-qualified column) instead of the bare value
   type. A column is row-phase, which is what an `expr r a` parameter accepts, and

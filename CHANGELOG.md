@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Hover a column as the expression type it has (`expr r string`, or
+  `expr (join r s) int` for a side-qualified column) instead of the bare value
+  type. A column is row-phase, which is what an `expr r a` parameter accepts, and
+  `string` hid both the phase and the row: a reader copying it into a helper's
+  signature wrote `string -> string`, which the checker refused. A literal keeps
+  the type it was lifted to, because it may be a label (`limit 2`) rather than an
+  expression.
 - Remove the `merge` prelude definition. It had no relational lowering, so any
   well-typed use of it ended in an internal error; `merge r s` is a row *type*
   former, used by `update` and the joins, and two queries are combined with a

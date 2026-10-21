@@ -1971,8 +1971,12 @@ and an unparseable file is left alone.
 
 The language server, `cagara lsp`, provides diagnostics, hover with inferred
 types, go-to-definition, find-references, document symbols, and completion
-(including column completion after `.`, `.<`, and `.>`). Editor integrations are
-in [`editors/vscode`](../editors/vscode) and [`editors/nvim`](../editors/nvim).
+(including column completion after `.`, `.<`, and `.>`). Hovering a column shows
+the expression type it has there — `expr r string`, or `expr (join r s) int` for
+a side-qualified one — because that is the shape a parameter of type `expr r a`
+accepts; `r` stands for the input row of the enclosing stage. Editor
+integrations are in [`editors/vscode`](../editors/vscode) and
+[`editors/nvim`](../editors/nvim).
 
 ---
 
@@ -1987,7 +1991,7 @@ common ones, with the fix:
 | `uses a column that is not grouped` | add `group` or aggregate it |
 | `aggregates cannot nest` | use an earlier `agg` stage |
 | `is an aggregate; aggregates belong in \`agg\`, not \`select\`` | move it into `agg` |
-| `` `where` cannot filter on a window function `` | `select` the window, then filter the new column |
+| `this argument contains a window function; windows cannot nest` | `select` the window, then filter the new column |
 | `type mismatch: expected int, found float` | convert explicitly with `toFloat` / `toInt` |
 | `only one side is nullable` | wrap with `coalesce`, or use `just` |
 | `expected a non-null value, found a \`maybe\`` | handle it; for an aggregate input use the `*Maybe` helper |

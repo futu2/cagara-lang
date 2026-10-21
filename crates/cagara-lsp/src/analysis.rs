@@ -6,7 +6,7 @@
 use cagara_hir::check::{check, TypeCheck, PROBE_FIELD};
 use cagara_hir::compile_diagnostics;
 use cagara_hir::workspace::{Binding, Diag, Workspace};
-use cagara_syntax::ast::{Expr, ExprKind, Span};
+use cagara_syntax::ast::{Expr, ExprKind, Side, Span};
 use line_index::{LineIndex, TextRange, TextSize, WideEncoding};
 use lsp_types::{
     CompletionItem, CompletionItemKind, DocumentHighlightKind, DocumentSymbol, Position, Range,
@@ -295,32 +295,79 @@ fn sig(name: &str, ty: &str) -> String {
     cagara_fmt::format_type(name, ty, HOVER_WIDTH)
 }
 
-/// Hover for a column reference (`.age`, `.<id`) or a literal under the
-/// cursor: its type there. A column shows its value type; a literal, the
-/// type it was lifted to (`18` against a `float` column is `float`).
+/// What the atom under the cursor is, which decides how its type is spelled.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Atom {
+    /// A column reference, whose type is an expression over the row.
+    Column(Side),
+    /// A literal, whose recorded type is the value type it was lifted to.
+    Literal,
+}
+
+/// Hover for a column reference (`.age`, `.<id`) or a literal under the cursor.
+///
+/// A column is spelled as the expression type it has — `expr r string`, or
+/// `expr (join r s) int` for a side-qualified one — because a column is not a
+/// bare value: it is row-phase, it is what every `expr r a` parameter accepts,
+/// and the bare value type hides both. `r` is the input row of the enclosing
+/// stage, the same name a signature gives it; printing the concrete row instead
+/// would repeat the whole table for every column and put the column first,
+/// which is not the row's order.
+///
+/// A literal keeps the type it was lifted to (`18` against a `float` column is
+/// `float`) and is not wrapped: a literal may be a *label* rather than an
+/// expression (`limit 2`, `prefix "u_"`), where `expr r …` would be wrong.
 fn atom_hover(ws: &Workspace, offset: usize) -> Option<String> {
     let md = &ws.modules[ws.root];
     let mut found = None;
     for d in &md.module.defs {
         atom_at(&md.text, &d.body, offset, &mut found);
     }
-    let (span, (start, end)) = found?;
+    let (span, (start, end), atom) = found?;
     let ty = check(ws).use_type(ws.root, span)?.to_string();
+    let shown = match atom {
+        Atom::Column(side) => format!("expr {} {}", row_of(side), value_arg(&ty)),
+        Atom::Literal => ty,
+    };
     Some(format!(
         "```cagara\n{}\n```",
-        sig(&md.text[start..end], &ty)
+        sig(&md.text[start..end], &shown)
     ))
+}
+
+/// The row a column reference is an expression over: the input row, or the
+/// joined row for the side-qualified form.
+fn row_of(side: Side) -> &'static str {
+    match side {
+        Side::Single => "r",
+        Side::Left | Side::Right => "(join r s)",
+    }
+}
+
+/// `expr`'s value argument, parenthesised when it is compound — the same
+/// parenthesisation the checker's printer applies, so `expr r (maybe float)`
+/// parses as the type it means.
+fn value_arg(ty: &str) -> String {
+    if ty.contains(' ') {
+        format!("({ty})")
+    } else {
+        ty.to_string()
+    }
 }
 
 /// The column reference or literal whose trimmed range contains `offset`
 /// (or ends at it, as for names).
-fn atom_at(text: &str, e: &Expr, offset: usize, found: &mut Option<(Span, (usize, usize))>) {
+fn atom_at(text: &str, e: &Expr, offset: usize, found: &mut Option<(Span, (usize, usize), Atom)>) {
     match &e.kind {
         ExprKind::Lit(_) | ExprKind::Field(..) => {
             if let Some((s, t)) = trimmed(text, e.span) {
                 let inside = s <= offset && offset < t;
                 if inside || (offset == t && found.is_none()) {
-                    *found = Some((e.span, (s, t)));
+                    let atom = match &e.kind {
+                        ExprKind::Field(side, _) => Atom::Column(*side),
+                        _ => Atom::Literal,
+                    };
+                    *found = Some((e.span, (s, t), atom));
                 }
             }
         }
@@ -981,19 +1028,67 @@ mod tests {
         let at = |needle: &str, within: usize| {
             hover(&ws, at_in(src, needle, within)).unwrap_or_default()
         };
-        // `.score` and its value type from the table.
+        // `.score` as the expression type it has: a column is row-phase, so it
+        // is `expr r float`, not the bare value type.
         let h = at("where (.score", 8);
-        assert!(h.contains(".score : float"), "{h}");
+        assert!(h.contains(".score : expr r float"), "{h}");
         // `18` lifted to the column's type.
         let h = at(">= 18", 3);
         assert!(h.contains("18 : float"), "{h}");
         let h = at("&& .name", 3);
-        assert!(h.contains(".name : string"), "{h}");
+        assert!(h.contains(".name : expr r string"), "{h}");
         let h = at("== \"a\"", 3);
         assert!(h.contains("\"a\" : string"), "{h}");
         // A literal in a record keeps its own type.
         let h = at("k = 1", 4);
         assert!(h.contains("1 : int"), "{h}");
+    }
+
+    /// A column hovers as the expression type it has, not as its value type.
+    ///
+    /// A column is not a bare value: it is row-phase, which is what every
+    /// `expr r a` parameter accepts, and writing `string` for it hides both the
+    /// phase and the row — a reader copying the hover into a helper's signature
+    /// wrote `string -> string`, which the checker then refused. `r` is the row
+    /// variable a signature would name, so the hover is the shape the reader has
+    /// to write; the concrete row is deliberately elided, because printing it
+    /// repeats the whole table for every column and puts the column first,
+    /// which is not the row's order.
+    ///
+    /// A literal is *not* wrapped: it may be a label rather than an expression
+    /// (`limit 2`, `prefix "u_"`), where `expr r …` would be wrong.
+    #[test]
+    fn a_column_hovers_as_an_expression_over_the_row() {
+        let src = "users : query { id = int, name = string, score = maybe float } = table \"p\" \"users\"\n\
+                   o : query { user_id = int } = table \"p\" \"o\"\n\
+                   q = users & select { n = upper .name, v = coalesce 0.0 .score } & limit 2\n\
+                   j = users & innerJoin o (.<id + 1 == .>user_id + 1)\n\
+                   p = users & prefix \"u_\"\n";
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        // The signature inside the popup, with its fences and the line breaks
+        // the width-driven layout adds taken out.
+        let at = |needle: &str, within: usize| {
+            one_line(hover(&ws, at_in(src, needle, within)).unwrap_or_default())
+                .replace("```cagara", "")
+                .replace("```", "")
+                .trim()
+                .to_string()
+        };
+
+        assert_eq!(at("upper .name", 8), ".name : expr r string");
+        // A compound value type is parenthesised, as the printer spells it, so
+        // the hover parses as the type it means.
+        assert_eq!(
+            at("coalesce 0.0 .score", 15),
+            ".score : expr r (maybe float)"
+        );
+        // A side-qualified column is an expression over the joined row.
+        assert_eq!(at(".<id + 1", 2), ".<id : expr (join r s) int");
+        // A literal stays the type it was lifted to, and so does a label: the
+        // `2` here is `limit`'s count, not an expression over the row.
+        assert_eq!(at("limit 2", 6), "2 : int");
+        // The `"u_"` affix has no hover to give: it is a label, not a value.
+        assert!(hover(&ws, at_in(src, "prefix \"u_\"", 8)).is_none());
     }
 
     /// A literal body is shown at the type its definition's signature gives it,
@@ -1034,7 +1129,7 @@ mod tests {
         assert_eq!(d.len(), 1, "{d:?}");
         // The value half is an expression over the row, so its column hovers.
         let h = hover(&ws, at_in(src, "=> .score", 4)).unwrap_or_default();
-        assert!(h.contains(".score : float"), "{h}");
+        assert!(h.contains(".score : expr r float"), "{h}");
         // Both halves are recorded as references to what they name.
         let rs = references(&ws, at_in(src, "adult =>", 2), false);
         assert!(!rs.is_empty(), "the condition is a use of `adult`");

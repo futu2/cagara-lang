@@ -27,6 +27,27 @@
   (`ast::RecordField`), which is what attaches a doc block to a field. Nothing
   else about the AST changes, and the two places that convert a record
   annotation to a type read the field through the struct.
+- Hover a column's documentation. A column is a field of a record type, so the
+  type checker has nothing to point at — unification matches shapes, not
+  declarations, and the table a use came from is gone by the time the use is
+  typed. What survives is the program's shape: the row a column is read from is
+  the *input row* of the stage it sits in, and that input is the query the stage
+  is piped from. The language server follows that chain down through the steps
+  that keep their columns (`where`, `order`, `limit`, `offset`, `distinct`),
+  reads the column's block from the declared record type of the definition it
+  reaches, and appends it to the type it already showed. `.>x` in a join
+  predicate follows the join's own query, `.<x` the one piped into it, and a
+  column inside a `select`/`update`/`agg` argument is read from that stage's
+  input row — which is where those dots actually point.
+- Hovering a field where it is *declared* — `age` in
+  `users : query { age = int }` — shows its block as the whole tooltip. A field
+  has no type of its own to report, and the line beside the cursor already says
+  it, so the documentation is what the reader is asking for.
+- Nothing is shown when the walk reaches no declaration: a column a `select`
+  computed, one `prefix` or `agg` named, or one a join merged has no single
+  place that named it, and attributing it to another table's identically named
+  column would put the wrong words on the screen. The hover is then exactly what
+  it was: the type.
 - The examples document their columns (`schema.cagara`'s one table,
   `report.cagara`'s two), and `tests/snapshots/pipeline_golden.txt` is
   re-recorded for it: the emitted SQL and the pipeline output are unchanged, and

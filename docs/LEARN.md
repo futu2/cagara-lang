@@ -2013,6 +2013,11 @@ field has to be on a line of its own to carry a block, so a record type written
 on one line documents no fields; `cagara doc --check` points at the ones a
 partly documented record leaves out.
 
+Hovering a column (`age` in `.age >= 18`, `.<id` in a join predicate) shows that
+text as well: the language server follows the row back to the signature that
+named it, through the stages that keep their columns. A column that a `select`
+computed, that `prefix` renamed, or that a join merged has no declaration to
+point at, and the hover shows only the type.
 
 `cagara doc --check` lists the top-level definitions that have no `##` block and
 exits **0** — a missing doc comment is not a compile error, and this is the

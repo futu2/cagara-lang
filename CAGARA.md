@@ -235,7 +235,10 @@ end of a line of code is a trailing comment and attaches to nothing.
 A **column** is a field of a record type, not an item of its own, so it is documented the same way
 one level down: a `##` block above the field, inside the signature that names it. A record written on
 one line has no such line, so it documents nothing; break the type over several lines to document
-its fields, and `cagara fmt` will lay the record out as §1.2 shows. The two levels are independent — the block above `users` is the table's, the block above
+its fields, and `cagara fmt` will lay the record out as §1.2 shows. Hovering a column in the editor
+shows that text too, as long as the row it is read from still comes from the declaration: a column a
+`select` computed or a join merged has no single declaration, and there the hover shows only its
+type. The two levels are independent — the block above `users` is the table's, the block above
 `id` is that column's — and a record with some fields documented and others not is reported by
 `cagara doc --check`, since that is almost always an oversight.
 

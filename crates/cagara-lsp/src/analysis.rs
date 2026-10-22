@@ -7,6 +7,7 @@ use cagara_hir::check::{check, TypeCheck, PROBE_FIELD};
 use cagara_hir::compile_diagnostics;
 use cagara_hir::workspace::{Binding, Diag, Workspace};
 use cagara_syntax::ast::{Expr, ExprKind, Side, Span};
+use cagara_syntax::docs::Docs;
 use line_index::{LineIndex, TextRange, TextSize, WideEncoding};
 use lsp_types::{
     CompletionItem, CompletionItemKind, DocumentHighlightKind, DocumentSymbol, Position, Range,
@@ -236,6 +237,264 @@ fn root_range(p: &Positions, start: usize, end: usize) -> Range {
     }
 }
 
+/// Hover for a record field where it is *declared*: `age` in
+/// `users : query { age = int }`.
+///
+/// A field is not an item, so it has no type of its own to show — the
+/// declaration line beside the cursor already says that. What it does have is
+/// the `##` block above it, which is the column's documentation, and asking for
+/// it while editing the table is the point of writing it down.
+fn declared_field_hover(ws: &Workspace, offset: usize) -> Option<String> {
+    let md = &ws.modules[ws.root];
+    let docs = Docs::new(&md.text);
+    for def in &md.module.defs {
+        let Some(ty) = def.ty.as_ref() else {
+            continue;
+        };
+        for record in docs.record_fields(ty) {
+            let Some(field) = record.iter().find(|f| contains(f.span, offset)) else {
+                continue;
+            };
+            if let Some(doc) = &field.doc {
+                return Some(doc.clone());
+            }
+        }
+    }
+    None
+}
+
+// ── column provenance ───────────────────────────────────────
+
+/// The documentation of the column at `offset`, from the declaration that named
+/// it.
+///
+/// A column is not a definition. `.age` is a field of a row, and a row is a
+/// structural type, so the checker has nothing to point at: unification matches
+/// shapes, not declarations, and by the time a use is typed the name of the
+/// table it came from is gone. What survives is the *program's* shape — the row
+/// a column is read from is the input row of the stage it sits in, and that
+/// input is the query the stage is piped from — so this walks that chain down
+/// through the steps that keep their columns and stops at the expression whose
+/// row a signature fixed. That definition's declared record type is where the
+/// column's `##` block is.
+///
+/// Nothing is shown when the walk reaches no declaration: a column a `select`
+/// computed, one that arrived through a join, or one an `agg` named has no
+/// single place that named it. Guessing from another table's identically named
+/// column would put the wrong words on the screen, which is worse than the type
+/// alone.
+fn column_doc(
+    ws: &Workspace,
+    occs: &[Occ],
+    offset: usize,
+    side: Side,
+    field: &str,
+) -> Option<String> {
+    let md = &ws.modules[ws.root];
+    let def = md
+        .module
+        .defs
+        .iter()
+        .position(|d| contains(d.span, offset))?;
+    let owner = (ws.root, def);
+    let body = &md.module.defs.get(def)?.body;
+    let At::Here(Some((m, i))) = row_at(ws, occs, body, offset, None, owner, side) else {
+        return None;
+    };
+    let decl = ws.modules.get(m)?;
+    let ty = decl.module.defs.get(i)?.ty.as_ref()?;
+    Docs::new(&decl.text)
+        .record_fields(ty)
+        .into_iter()
+        .flatten()
+        .find(|f| f.name == field)?
+        .doc
+}
+
+/// What the descent found at the cursor.
+enum At {
+    /// The cursor is in this expression; this is the row in effect there.
+    Here(Option<(usize, usize)>),
+    /// The cursor is in some other expression.
+    Elsewhere,
+}
+
+/// Descend to the cursor, carrying the definition whose declared record type
+/// fixed the row the sub-expression reads.
+fn row_at(
+    ws: &Workspace,
+    occs: &[Occ],
+    e: &Expr,
+    offset: usize,
+    input: Option<(usize, usize)>,
+    owner: (usize, usize),
+    side: Side,
+) -> At {
+    if !contains(e.span, offset) {
+        return At::Elsewhere;
+    }
+    let Some((callee, args)) = spine(e) else {
+        return At::Here(input);
+    };
+    let name = head_name(callee);
+    // `q & st`: the stage's arguments read `q`'s row, and `q` is a pipeline of
+    // its own.
+    if name == Some("_&_") {
+        let (Some(q), Some(st)) = (args.first(), args.get(1)) else {
+            return At::Here(input);
+        };
+        return if contains(st.span, offset) {
+            row_at(
+                ws,
+                occs,
+                st,
+                offset,
+                row_source(ws, occs, q, owner),
+                owner,
+                side,
+            )
+        } else {
+            row_at(ws, occs, q, offset, input, owner, side)
+        };
+    }
+    // A join's predicate reads the joined row: `.>x` is the query the join
+    // names, `.<x` the query piped into it.
+    if is_join(name) {
+        let row = if side == Side::Right {
+            args.first().and_then(|q| row_source(ws, occs, q, owner))
+        } else {
+            input
+        };
+        return args
+            .iter()
+            .skip(1)
+            .find(|a| contains(a.span, offset))
+            .map_or(At::Elsewhere, |a| {
+                row_at(ws, occs, a, offset, row, owner, side)
+            });
+    }
+    // Everything else — a stage applied as a function value (`where p`,
+    // `select {..}`), a record, a lambda body — is an expression over whatever
+    // row the caller established.
+    args.iter()
+        .find(|a| contains(a.span, offset))
+        .map_or(At::Here(input), |a| {
+            row_at(ws, occs, a, offset, input, owner, side)
+        })
+}
+
+/// The definition whose declared record type fixed the row of `e`, if one did.
+fn row_source(
+    ws: &Workspace,
+    occs: &[Occ],
+    e: &Expr,
+    owner: (usize, usize),
+) -> Option<(usize, usize)> {
+    match &e.kind {
+        // A named query: its own signature names its columns.
+        ExprKind::Name(_) | ExprKind::Proj(..) => {
+            let Binding::Def(m, i) = binding_of(occs, e)? else {
+                return None;
+            };
+            let (m, i) = (*m, *i);
+            ws.modules.get(m)?.module.defs.get(i)?.ty.as_ref()?;
+            Some((m, i))
+        }
+        ExprKind::App(..) => {
+            let (callee, args) = spine(e)?;
+            match head_name(callee) {
+                // `q & st`: the row is `q`'s unless `st` rebuilds the columns.
+                Some("_&_") => {
+                    let q = args.first()?;
+                    keeps_columns(args.get(1)?).then(|| row_source(ws, occs, q, owner))?
+                }
+                // The shorthands that only read their input.
+                Some("_&?_" | "_&._" | "_&-_") => row_source(ws, occs, args.first()?, owner),
+                // A table's row is fixed by the signature of the definition
+                // that writes it.
+                Some("table") => Some(owner),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether a stage expression (`where p`, `order keys`, …) leaves every column
+/// of its input row in place.
+///
+/// `select`, `update`, `agg`, `omit`, `prefix`, `suffix` and `mapValue` build a
+/// new row, and the joins and set operations combine two: after any of those,
+/// the columns at the cursor are no longer the ones a declaration named.
+fn keeps_columns(st: &Expr) -> bool {
+    let Some((callee, _)) = spine(st) else {
+        return false;
+    };
+    matches!(
+        head_name(callee),
+        Some("where" | "whereTrue" | "order" | "limit" | "offset" | "distinct")
+    )
+}
+
+/// The join spellings: two queries in, a merged row for the predicate.
+fn is_join(name: Option<&str>) -> bool {
+    matches!(
+        name,
+        Some(
+            "innerJoin"
+                | "leftJoin"
+                | "rightJoin"
+                | "fullJoin"
+                | "semiJoin"
+                | "antiJoin"
+                | "_?_"
+                | "_<?_"
+                | "_?>_"
+                | "_<?>_"
+        )
+    )
+}
+
+/// An application's callee and arguments, flattening the curried nesting
+/// (`innerJoin q pred` is `App(App(innerJoin, [q]), [pred])`).
+fn spine(e: &Expr) -> Option<(&Expr, Vec<&Expr>)> {
+    let ExprKind::App(head, args) = &e.kind else {
+        return None;
+    };
+    let mut callee = head.as_ref();
+    let mut args: Vec<&Expr> = args.iter().collect();
+    while let ExprKind::App(inner, more) = &callee.kind {
+        let mut all: Vec<&Expr> = more.iter().collect();
+        all.append(&mut args);
+        args = all;
+        callee = inner.as_ref();
+    }
+    Some((callee, args))
+}
+
+/// The name an expression applies, when it is spelled as one.
+fn head_name(e: &Expr) -> Option<&str> {
+    match &e.kind {
+        ExprKind::Name(n) => Some(n),
+        _ => None,
+    }
+}
+
+/// The binding a name expression resolved to, from the occurrence list — which
+/// already knows which names a lambda parameter shadows.
+fn binding_of<'a>(occs: &'a [Occ], e: &Expr) -> Option<&'a Binding> {
+    let o = occs.iter().find(|o| o.site == Some(e.span))?;
+    match &o.target {
+        Target::Global(b) => Some(b),
+        Target::Local(_) => None,
+    }
+}
+
+fn contains(span: Span, offset: usize) -> bool {
+    let (start, end) = (span.start as usize, span.end as usize);
+    start <= offset && offset < end
+}
+
 // ── requests ─────────────────────────────────────────────────
 
 /// Markdown for the name under the cursor. At a use, its type there (the
@@ -251,7 +510,7 @@ pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
     let offset = p.offset(pos)?;
     let occs = occurrences(ws);
     let Some(o) = occ_at(&occs, offset) else {
-        return atom_hover(ws, offset);
+        return declared_field_hover(ws, offset).or_else(|| atom_hover(ws, &occs, offset));
     };
     let name = &text[o.start..o.end];
     let tc = check(ws);
@@ -332,7 +591,11 @@ enum Atom {
 /// A literal keeps the type it was lifted to (`18` against a `float` column is
 /// `float`) and is not wrapped: a literal may be a *label* rather than an
 /// expression (`limit 2`, `prefix "u_"`), where `expr r …` would be wrong.
-fn atom_hover(ws: &Workspace, offset: usize) -> Option<String> {
+///
+/// A column also carries its own documentation, when [`column_doc`] can follow
+/// the row back to the declaration that named it: the type says what the column
+/// *is* at this use, and the `##` block says what the column *means*.
+fn atom_hover(ws: &Workspace, occs: &[Occ], offset: usize) -> Option<String> {
     let md = &ws.modules[ws.root];
     let mut found = None;
     for d in &md.module.defs {
@@ -344,10 +607,17 @@ fn atom_hover(ws: &Workspace, offset: usize) -> Option<String> {
         Atom::Column(side) => format!("expr {} {}", row_of(side), value_arg(&ty)),
         Atom::Literal => ty,
     };
-    Some(format!(
-        "```cagara\n{}\n```",
-        sig(&md.text[start..end], &shown)
-    ))
+    let mut out = format!("```cagara\n{}\n```", sig(md.text.get(start..end)?, &shown));
+    if let Atom::Column(side) = atom {
+        // `.age` / `.<id` / `.>id`: the name is the token after the dots.
+        let token = md.text.get(start..end)?;
+        let field = token.trim_start_matches('.').trim_start_matches(['<', '>']);
+        if let Some(doc) = column_doc(ws, occs, offset, side, field) {
+            out.push_str("\n\n---\n\n");
+            out.push_str(&doc);
+        }
+    }
+    Some(out)
 }
 
 /// The row a column reference is an expression over: the input row, or the
@@ -1022,6 +1292,103 @@ mod tests {
         // An undocumented definition says nothing extra.
         let h = hover(&ws, at("adult = .age", 9)).unwrap();
         assert!(!h.contains("---\n\n"), "no doc for a column: {h}");
+    }
+
+    /// A column is a field of a record type, so its documentation is the `##`
+    /// block above the field in the signature that named it — one level below
+    /// the definition that carries the table.
+    const COLUMNS: &str = "## The user table.\n\
+                           users : query {\n\
+                           \x20   ## The primary key.\n\
+                           \x20   id = int,\n\
+                           \x20   ## Age in years.\n\
+                           \x20   age = int\n\
+                           \x20 } = table \"p\" \"users\"\n\
+                           \n\
+                           ## The order table.\n\
+                           orders : query {\n\
+                           \x20   ## The amount charged.\n\
+                           \x20   amount = float,\n\
+                           \x20   ## The user who placed it.\n\
+                           \x20   user_id = int\n\
+                           \x20 } = table \"p\" \"orders\"\n\
+                           \n\
+                           filtered = users & where (.age >= 18)\n\
+                           renamed = users & select { a = .id } & where (.a > 0)\n\
+                           joined = users & innerJoin orders (.<id == .>user_id)\n\
+                           totals = orders & agg { s = sum .amount }\n";
+
+    fn column_ws() -> Workspace {
+        Workspace::open_with(
+            Path::new("/nonexistent/columns.cagara"),
+            COLUMNS.to_string(),
+        )
+    }
+
+    /// The doc a cursor on a column shows, or `""` for "type only".
+    fn column_hover(ws: &Workspace, needle: &str, within: usize) -> String {
+        let h = hover(ws, at_in(COLUMNS, needle, within)).unwrap_or_default();
+        h.rsplit_once("```\n\n---\n\n")
+            .map_or(String::new(), |(_, doc)| doc.to_string())
+    }
+
+    /// A column's hover follows the row back to the declaration that named it:
+    /// through `where`, out of a `select` argument, into an `agg`, and to the
+    /// right-hand side of a join for `.>x`.
+    #[test]
+    fn hover_shows_a_columns_documentation_from_its_declaration() {
+        let ws = column_ws();
+        assert_eq!(column_hover(&ws, "where (.age", 9), "Age in years.");
+        // Inside a `select`, the columns are read from the *input* row.
+        assert_eq!(
+            column_hover(&ws, "select { a = .id }", 13),
+            "The primary key."
+        );
+        // `.>x` is the query the join names, `.<x` the one piped into it.
+        assert_eq!(column_hover(&ws, ".>user_id", 4), "The user who placed it.");
+        assert_eq!(column_hover(&ws, ".<id ==", 3), "The primary key.");
+        assert_eq!(column_hover(&ws, "sum .amount", 5), "The amount charged.");
+    }
+
+    /// Hovering the field where it is declared shows its block: a field has no
+    /// type of its own to report (the line beside the cursor says it), so the
+    /// documentation is the whole answer.
+    #[test]
+    fn hover_at_a_field_declaration_shows_its_documentation() {
+        let ws = column_ws();
+        let h = hover(&ws, at_in(COLUMNS, "id = int", 1)).expect("a hover");
+        assert_eq!(h, "The primary key.");
+        // A field with no block says nothing, rather than an empty tooltip.
+        let src = "users : query {\n    ## Key.\n    id = int,\n    name = string\n  } = table \"p\" \"t\"\n\n\
+                   q = users\n";
+        let ws = Workspace::open_with(
+            Path::new("/nonexistent/plain-fields.cagara"),
+            src.to_string(),
+        );
+        assert_eq!(hover(&ws, at_in(src, "name = string", 1)), None);
+    }
+
+    /// A column with no declaration behind it shows its type and nothing else:
+    /// `select { a = .id }` computed `a`, so no block describes it, and saying
+    /// something would mean guessing which table's `id` it resembles.
+    #[test]
+    fn a_computed_column_has_no_documentation() {
+        let ws = column_ws();
+        assert_eq!(column_hover(&ws, "where (.a >", 9), "");
+        // The type is still there, which is what the hover is for.
+        let h = hover(&ws, at_in(COLUMNS, "where (.a >", 9)).unwrap();
+        assert!(h.contains(".a : expr r int"), "{h}");
+    }
+
+    /// A column that `prefix` renamed is no longer the declared one: the doc
+    /// would be about a name that the record does not have.
+    #[test]
+    fn a_renamed_column_has_no_documentation() {
+        let src = "## T.\nusers : query {\n    ## Key.\n    id = int\n  } = table \"p\" \"t\"\n\n\
+                   q = users & prefix \"u_\" & where (.u_id > 0)\n";
+        let ws = Workspace::open_with(Path::new("/nonexistent/prefixed.cagara"), src.to_string());
+        let h = hover(&ws, at_in(src, "where (.u_id", 9)).unwrap();
+        assert!(!h.contains("Key."), "{h}");
     }
 
     #[test]

@@ -78,6 +78,9 @@ pub fn module_doc(src: &str, module: &Module) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldDoc {
     pub name: String,
+    /// The field's own span: where its name is written. A cursor inside it is a
+    /// cursor on the declaration, which is how a hover finds the block above it.
+    pub span: crate::ast::Span,
     /// 1-based line of the field name, for a report that names a place.
     pub line: usize,
     pub doc: Option<String>,
@@ -164,6 +167,7 @@ impl<'a> Docs<'a> {
                             let at = f.span.start as usize;
                             FieldDoc {
                                 name: f.name.clone(),
+                                span: f.span,
                                 line: self.line(at),
                                 doc: item_doc(self.src, at),
                             }

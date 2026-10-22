@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- `cagara fmt` lays a multi-line `case` out the way §4.5 of `CAGARA.md` writes
+  one: `case {` ends its line, every arm and its `;` gets a line of its own,
+  and `}` closes the last one. It used to hang the first arm off the `case {`
+  line and leave `}` on the last arm's, so the reference's own example came back
+  reformatted into a shape the reference does not show, and a `case` written one
+  arm per line was not stable. A `case` that fits still stays on one line.
+- A `case` inside a record is no longer folded into `{ a = 1, b = case { arm;`
+  on one line: a record whose field value is a `case` written over several lines
+  (or holding a comment) breaks one field per line, so the layout survives a
+  format. The `case` itself is kept on its field's line and indents its arms
+  from there.
+- An application's last argument no longer gives up being hugged because of a
+  comment *inside* it: only a comment between the argument's own braces breaks
+  the call, which is what that comment is about. `select { ... }` with a comment
+  in a field keeps `select {`.
+- A `case` arm's value is indented from the arm, so a nested `case`'s or
+  record's `}` can never land at the outer arm's level, where it would read as
+  the outer `case`'s own brace.
+- A lambda's layout is decided by width alone, and now has tests saying so:
+  `f = a => body` is one line while it fits, whether or not it has a signature
+  and whether the source put the body on the `=>` line or the next one. When it
+  does not fit, the parameters stay on the `=` line and the body moves to an
+  indented line; a body that brings its own lines (`case`, a record, a
+  pipeline) is hugged and breaks itself, so `a =>` is never left alone.
+
 - Documentation that lives with the definition it describes: `##` above a
   definition documents it, `#!` above the first item documents the file, and
   both are ordinary comments to the compiler — a file without them means exactly

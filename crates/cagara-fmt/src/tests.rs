@@ -22,6 +22,22 @@ const SOURCES: &[(&str, &str)] = &[
     ("public", include_str!("../../../examples/public.cagara")),
     ("schema", include_str!("../../../examples/schema.cagara")),
     ("errors", include_str!("../../../examples/errors.cagara")),
+    // The reference's own `case` example, written the way it documents.
+    (
+        "reference",
+        "orders : query { id = int, amount = float, status = string } = table \"public\" \"orders\"
+
+main = orders
+  & select {
+    .id,
+    bucket = case {
+      .amount > 1000.0 => \"huge\";
+      .amount > 100.0 => \"big\";
+      true => \"small\"
+    }
+  }
+",
+    ),
 ];
 
 /// A definition the formatter cannot lay out is printed verbatim, so a
@@ -167,15 +183,18 @@ fn long_records_break_one_field_per_line() {
 #[test]
 fn long_cases_break_one_arm_per_line() {
     // A `case` that does not fit breaks after each `;`, the way a record
-    // breaks after each `,`. The arms stay indented under the `case`, and the
-    // last one keeps its closing brace on the same line.
+    // breaks after each `,`. Each arm gets a line of its own indented under
+    // the `case`, `}` closes the last one, and no arm is left hanging off the
+    // `case {` line.
     check(
         "q = t & select { b = case { a_very_long_condition_name_here > 1 => \"first_result\"; another_long_condition > 2 => \"second_result\"; true => \"fallback\" } }\n",
         "q = t
   & select {
-    b = case { a_very_long_condition_name_here > 1 => \"first_result\";
+    b = case {
+      a_very_long_condition_name_here > 1 => \"first_result\";
       another_long_condition > 2 => \"second_result\";
-      true => \"fallback\" }
+      true => \"fallback\"
+    }
   }
 ",
     );
@@ -195,6 +214,156 @@ fn long_cases_break_one_arm_per_line() {
         "q = t & select { b = case { .a_very_long_column_name > 1 => upper (concat \"a\" (concat \"b\" .name)); true => \"y\" } }\n",
     );
     assert!(out.contains("=> upper"), "{out}");
+}
+
+/// A `case` written one arm per line — the form the language reference and
+/// `LEARN.md` use — is already canonical, and must not be folded back onto one
+/// line or have its first arm left on the `case {` line.
+#[test]
+fn a_case_written_one_arm_per_line_is_canonical() {
+    let want = "q = t
+  & select {
+    b = case {
+      .amount > 1000.0 => \"huge\";
+      .amount > 100.0 => \"big\";
+      true => \"small\"
+    }
+  }
+";
+    // Already laid out this way: stays byte-identical.
+    check(want, want);
+    // Written flat, but too long for one line: the whole case breaks, arms
+    // indented under `case` and `}` closing the last arm, not hanging off it.
+    check(
+        "q = t & select { b = case { .amount_in_cents >= 1000000 => \"huge\"; .amount_in_cents >= 100000 => \"big\"; true => \"small\" } }\n",
+        "q = t
+  & select {
+    b = case {
+      .amount_in_cents >= 1000000 => \"huge\";
+      .amount_in_cents >= 100000 => \"big\";
+      true => \"small\"
+    }
+  }
+",
+    );
+    // Broken, an over-long arm is laid out on its own line; its `&&` chain
+    // stays on that line, since an arm belongs together.
+    let out = fmt(
+        "v = case { .a_very_long_condition_name_here > 1 => 2; .b_very_long_column_name_x > 2 && .c_also_long > 3 => 4; true => 5 }\n",
+    );
+    assert_eq!(
+        out,
+        "v = case {
+  .a_very_long_condition_name_here > 1 => 2;
+  .b_very_long_column_name_x > 2 && .c_also_long > 3 => 4;
+  true => 5
+}
+"
+    );
+    // An arm's own `&&` chain is part of the arm: it stays on the arm's line
+    // and does not open lines of its own at the arms' level.
+    let out = fmt(
+        "v = case { .a_very_long_condition_name_here > 1 => .some_long_name && .another_long_name && .third_long_name; true => 5 }\n",
+    );
+    assert!(out.contains("=> .some_long_name"), "{out}");
+    assert!(out.trim_end().ends_with("\n}"), "{out}");
+}
+
+/// The trailing `;` and comments around arms keep their place when the case
+/// breaks: a comment after an arm's `;` stays that arm's comment, an own-line
+/// comment keeps its line, and no `}` opens a line at the arms' own level.
+#[test]
+fn case_comments_and_trailing_semicolons_keep_their_place() {
+    // Indentation follows the layout, not the input: a `case` over several
+    // lines is laid out over them, here inside a two-stage pipeline.
+    check(
+        "q = t & select {\n    b = case {\n        .a > 1 => 1;  # low\n        .a > 10 => 10; # high\n        true => 0\n    }\n}\n",
+        "q = t
+  & select {
+    b = case {
+      .a > 1 => 1; # low
+      .a > 10 => 10; # high
+      true => 0
+    }
+  }
+",
+    );
+    check(
+        "q = case {\n  # why\n  .a => 1; true => 2 }\n",
+        "q = case {\n  # why\n  .a => 1;\n  true => 2\n}\n",
+    );
+    // A trailing `;` on a flat case is kept, and never left to open a line
+    // when the case breaks.
+    check("q = case { .a => 1; }\n", "q = case { .a => 1; }\n");
+    check(
+        "q = case { a_very_long_condition_name_here > 1 => \"first\"; another_long_condition_name > 2 => \"second\"; }\n",
+        "q = case {\n  a_very_long_condition_name_here > 1 => \"first\";\n  another_long_condition_name > 2 => \"second\";\n}\n",
+    );
+    // Blank lines inside a case do not survive, but no arm is lost: the
+    // arms that fit on one line do.
+    let out = fmt("q = case {\n  .a => 1;\n\n\n  true => 2\n}\n");
+    assert_eq!(out, "q = case { .a => 1; true => 2 }\n");
+}
+
+/// `name = a => body` is on one line when it fits, however it was written:
+/// with or without a signature, with the body on the `=>` line or on the next
+/// one. Only width decides, so the spellings of one definition all format to
+/// the same text.
+#[test]
+fn a_lambda_body_stays_on_the_arrow_line_while_it_fits() {
+    // Without a signature, the body rejoins the arrow line.
+    check("f = a => a + 1\n", "f = a => a + 1\n");
+    check("f = a =>\n  a + 1\n", "f = a => a + 1\n");
+    // With a signature the definition stays one line, as §1.1's `addOne`
+    // does, whether the source moved the body or not.
+    for src in [
+        "f : expr r int -> expr r int = a => a + 1\n",
+        "f : expr r int -> expr r int = a =>\n  a + 1\n",
+    ] {
+        check(src, "f : expr r int -> expr r int = a => a + 1\n");
+    }
+    // A record body is hugged to the arrow; it folds like any record that
+    // fits and breaks on its own when it does not (see the long-lambda test).
+    check("f = a => {\n  x = a\n}\n", "f = a => { x = a }\n");
+}
+
+/// A lambda that does not fit keeps its parameters on the `=` line and moves
+/// the body to an indented line, the shape §1.1 shows. A body that brings its
+/// own lines (`case`, a record, a pipeline) is hugged instead and breaks
+/// itself, so `a =>` is never left alone on a line.
+#[test]
+fn a_long_lambda_moves_its_body_to_an_indented_line() {
+    check(
+        "f = a => b => where (.id == a && .name == b && .status == \"paid\" && .region == \"eu\" && .tier == \"gold\") q\n",
+        "f = a => b =>\n  where (.id == a && .name == b && .status == \"paid\" && .region == \"eu\" && .tier == \"gold\") q\n",
+    );
+    // The body's own braces break, and the parameters stay with the arrow.
+    check(
+        "f = a => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]\n",
+        "f = a => [\n  1,\n  2,\n  3,\n  4,\n  5,\n  6,\n  7,\n  8,\n  9,\n  10,\n  11,\n  12,\n  13,\n  14,\n  15,\n  16,\n  17,\n  18,\n  19,\n  20,\n  21,\n  22,\n  23,\n  24,\n  25,\n  26,\n  27,\n  28,\n  29,\n  30,\n  31\n]\n",
+    );
+}
+
+/// A `case` used as a value (an argument, an arm of another `case`) is
+/// huggable like any braced expression, and a nested one indents under its
+/// arm rather than closing at the outer arm's level.
+#[test]
+fn a_case_nests_like_any_braced_expression() {
+    check(
+        "u = f case { .a => 1; true => 2 }\n",
+        "u = f case { .a => 1; true => 2 }\n",
+    );
+    // The nested `case` is an expression like any other, so it keeps its own
+    // one-line shape here: an arm does not break because the arm it is in
+    // does, and it never puts its `}` on the outer arm's line.
+    check(
+        "v = case { .a => case { .b_very_long_name_one > 1 => \"x\"; .b_very_long_name_two > 2 => \"y\"; true => \"z\" }; true => \"fallback value here\" }\n",
+        "v = case {
+  .a => case { .b_very_long_name_one > 1 => \"x\"; .b_very_long_name_two > 2 => \"y\"; true => \"z\" };
+  true => \"fallback value here\"
+}
+",
+    );
 }
 
 #[test]

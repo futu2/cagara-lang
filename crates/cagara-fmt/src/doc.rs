@@ -1,9 +1,10 @@
 //! A small Wadler-style document model and printer.
 //!
 //! A `Group` is printed flat (every `Line` a space, every `SoftLine`
-//! nothing) if it fits in the remaining width, otherwise broken (every
-//! direct `Line` / `SoftLine` a newline at the current indent). A group that
-//! contains a `HardLine` or multi-line text is always broken.
+//! nothing, every `LineThenSpace` a space) if it fits in the remaining width,
+//! otherwise broken (every direct `Line` / `SoftLine` / `LineThenSpace` a
+//! newline at the current indent). A group that contains a `HardLine` or
+//! multi-line text is always broken.
 
 use std::rc::Rc;
 
@@ -24,6 +25,10 @@ pub enum Doc {
     HardLine,
     /// Always an empty line (at most one in a row, never at the start).
     BlankLine,
+    /// Space when flat, and when broken the whole line it starts becomes a
+    /// newline: the pad before a closing bracket goes away at a line break,
+    /// but still counts towards the width the group is measured against.
+    LineThenSpace,
     /// Text deferred to the end of the current line (trailing comments).
     LineSuffix(Rc<str>),
 }
@@ -59,14 +64,14 @@ pub fn broken_group(d: Doc) -> Doc {
 impl Doc {
     /// Whether this doc can never print on one line. Groups cache the answer,
     /// so this is linear in the doc built since the enclosing group.
-    fn forces_break(&self) -> bool {
+    pub(super) fn forces_break(&self) -> bool {
         match self {
             Doc::Text(s) => s.contains('\n'),
             Doc::Concat(ds) => ds.iter().any(Doc::forces_break),
             Doc::Indent(d) => d.forces_break(),
             Doc::Group { broken, .. } => *broken,
             Doc::HardLine | Doc::BlankLine => true,
-            Doc::Line | Doc::SoftLine | Doc::LineSuffix(_) => false,
+            Doc::Line | Doc::SoftLine | Doc::LineThenSpace | Doc::LineSuffix(_) => false,
         }
     }
 }
@@ -107,6 +112,8 @@ pub fn print(doc: &Doc, width: usize) -> String {
             Doc::Line if mode == Mode::Flat => p.text(ind, " "),
             Doc::SoftLine if mode == Mode::Flat => {}
             Doc::Line | Doc::SoftLine | Doc::HardLine => p.newline(),
+            Doc::LineThenSpace if mode == Mode::Flat => p.text(ind, " "),
+            Doc::LineThenSpace => p.newline(),
             Doc::BlankLine => p.blank_line(),
             Doc::LineSuffix(s) => p.suffix.push(s.clone()),
         }
@@ -202,9 +209,11 @@ impl Printer {
                 Doc::Group { doc, broken } => {
                     todo.push((if *broken { Mode::Break } else { mode }, doc))
                 }
-                Doc::Line if mode == Mode::Flat => left -= 1,
+                Doc::Line | Doc::LineThenSpace if mode == Mode::Flat => left -= 1,
                 Doc::SoftLine if mode == Mode::Flat => {}
-                Doc::Line | Doc::SoftLine | Doc::HardLine | Doc::BlankLine => return left >= 0,
+                Doc::Line | Doc::SoftLine | Doc::LineThenSpace | Doc::HardLine | Doc::BlankLine => {
+                    return left >= 0
+                }
                 Doc::LineSuffix(_) => {}
             }
             if left < 0 {

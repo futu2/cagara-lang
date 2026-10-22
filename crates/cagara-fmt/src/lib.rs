@@ -260,6 +260,42 @@ fn has_inner_comment(n: &SyntaxNode) -> bool {
     n.descendants_with_tokens().any(|e| e.kind() == K::Comment)
 }
 
+/// Does `field`'s value bring its own lines, so that its record should break
+/// one field per line around it?
+///
+/// True for a `case` holding a comment, and for one written over several
+/// lines in the source: the language reference writes such a `case` starting
+/// on the line after `case {`, and a record in that shape keeps the shape
+/// rather than inlining the first arm into `{ a = 1, b = case { ...;` on one
+/// line. Only records ask; a `case` in an argument list is laid out like any
+/// other argument.
+fn multiline_value(field: &SyntaxNode) -> bool {
+    let els = sig(field);
+    let [_, _, value] = els.as_slice() else {
+        return false;
+    };
+    match value.as_node() {
+        Some(v) if v.kind() == K::CaseExpr => has_inner_comment(v) || spelled_over_lines(v),
+        _ => false,
+    }
+}
+
+/// Whether the whitespace between the braces of a `case` holds a line break.
+/// Only trivia separates the first brace from the last, so the slice between
+/// them is exactly the text between them.
+fn spelled_over_lines(n: &SyntaxNode) -> bool {
+    let mut braces = n
+        .children_with_tokens()
+        .filter(|e| matches!(e.kind(), K::LBrace | K::RBrace));
+    let (Some(open), Some(close)) = (braces.next(), braces.last()) else {
+        return false;
+    };
+    let base = n.text_range().start();
+    let start = open.text_range().end() - base;
+    let end = close.text_range().start() - base;
+    n.text().slice(start..end).to_string().contains('\n')
+}
+
 fn comment_text(t: &SyntaxToken) -> Doc {
     text(t.text().trim_end())
 }
@@ -474,8 +510,18 @@ impl Fmt<'_> {
     }
 
     /// What follows `=` or `=>`: on the same line if the body brings its own
-    /// line breaks (record, list, parens, lambda, pipeline), otherwise moved
-    /// to an indented line when it does not fit.
+    /// line breaks (record, list, parens, case, lambda, pipeline), otherwise
+    /// moved to an indented line when it does not fit.
+    ///
+    /// When the body moves, whether it is grouped decides which brace of a
+    /// `}` its line break lands on, so it is chosen here rather than taken
+    /// from the body: an ungrouped `Line` ends at the first direct one, which
+    /// would put a record field's `case {` down on the next line while the
+    /// record waits for that line to end. A body that brings its own lines
+    /// breaks the group, so a long `case` is laid out over its arms and not
+    /// by moving whole. A comment before the body breaks it for the same
+    /// reason: a `Line` in unbroken mode is a space, which is no place for a
+    /// comment.
     fn rhs(&self, body: &SyntaxNode, top: bool) -> R {
         let first = sig_tokens(body).next().ok_or(Bail)?;
         let gap = has_comment_before(&first);
@@ -484,14 +530,21 @@ impl Fmt<'_> {
             return Ok(concat(vec![text(" "), doc]));
         }
         let d = indent(concat(vec![Doc::Line, doc]));
-        Ok(if gap { broken_group(d) } else { group(d) })
+        Ok(if gap || d.forces_break() {
+            broken_group(d)
+        } else {
+            group(d)
+        })
     }
 
     fn huggable(&self, n: &SyntaxNode, top: bool) -> bool {
         match n.kind() {
-            K::RecordExpr | K::ListExpr | K::ParenExpr | K::Lambda | K::CaseExpr | K::LetExpr => {
-                true
-            }
+            K::RecordExpr | K::ListExpr | K::ParenExpr | K::Lambda | K::LetExpr => true,
+            // A `case` breaks between its arms, never after `case`, so it is
+            // kept on the `=` line and breaks itself when it does not fit;
+            // moving it whole would leave `case` alone on a line whose arms
+            // then start at the `case`'s level.
+            K::CaseExpr => true,
             K::BinExpr => top && bin_parts(n).is_ok_and(|(_, op, _, _)| is_pipe(&op)),
             K::App => self.hugs_last_arg(n),
             _ => false,
@@ -499,12 +552,15 @@ impl Fmt<'_> {
     }
 
     /// `f a { ... }`: an application whose last argument is bracketed keeps
-    /// its arguments on one line and lets the bracket break.
+    /// its arguments on one line and lets the bracket break. A comment on the
+    /// argument's own line (after its `{`, before its `}`) is left to the
+    /// bracket, which breaks; one deeper inside belongs to an element of it
+    /// and breaks that element, not the call.
     fn hugs_last_arg(&self, n: &SyntaxNode) -> bool {
-        n.children()
-            .last()
-            .is_some_and(|l| matches!(l.kind(), K::RecordExpr | K::ListExpr | K::ParenExpr))
-            && !has_inner_comment(n)
+        n.children().last().is_some_and(|l| {
+            matches!(l.kind(), K::RecordExpr | K::ListExpr | K::ParenExpr)
+                && !l.children_with_tokens().any(|e| e.kind() == K::Comment)
+        })
     }
 
     // ── expressions ──────────────────────────────────────────
@@ -589,11 +645,22 @@ impl Fmt<'_> {
 
     /// `case { c1 => v1; c2 => v2 }`: flat if it fits, else one arm per line.
     ///
+    /// The arms break as a unit inside the braces, the way a record's fields
+    /// and a type's arrows do: `case {` closes the first line, every arm and
+    /// its `;` gets a line of its own, and `}` closes the last one. Nothing is
+    /// hung off the opening line, so a `case` laid out over several lines is
+    /// stable: written that way in the source, it comes back that way, and a
+    /// long one is still broken only at its `;`s rather than mid-arm.
+    ///
     /// The node's first element is the `case` keyword, so the braces are found
-    /// by kind rather than by position: `signature` is `case`, `{`, arms and
-    /// `;`s, `}`. The arms are separated by `;` and there is no trailing
-    /// separator to preserve (unlike a record's comma).
+    /// by kind rather than by position: `sig` is `case`, `{`, arms and `;`s,
+    /// `}`. An optional trailing `;` before `}` is kept as written.
     fn case(&self, n: &SyntaxNode) -> R {
+        // A `case` written over several lines keeps that layout when it is a
+        // record field, which is where the reference lays it out that way.
+        let keep_layout = n
+            .parent()
+            .is_some_and(|p| p.kind() == K::RecordField && spelled_over_lines(n));
         let els = sig(n);
         let keyword = token(els.first(), K::CaseKw)?;
         let (open_at, close_at) = match (
@@ -610,63 +677,72 @@ impl Fmt<'_> {
         // `open_at < close_at` is in scope, so the range is in bounds and
         // cannot be reversed; `unwrap_or_default` states that rather than
         // relying on the reader to re-derive it.
-        let arms = els.get(open_at + 1..close_at).unwrap_or_default();
+        let middle = els.get(open_at + 1..close_at).unwrap_or_default();
+        let head = concat(vec![self.tok(&keyword), text(" "), self.tok(&open)]);
         // `case {}` has no arm to break after; the checker rejects it, but the
         // formatter must still lay it out rather than bail, so a file being
         // typed keeps formatting.
-        if arms.is_empty() && !has_inner_comment(n) {
-            return Ok(concat(vec![
-                self.tok(&keyword),
-                text(" "),
-                self.tok(&open),
-                self.tok(&close),
-            ]));
+        if middle.is_empty() && !has_inner_comment(n) {
+            return Ok(concat(vec![head, self.tok(&close)]));
         }
-        // The pad is one space, the way a record's is.
-        let mut inner = vec![text(" ")];
-        for (i, e) in arms.iter().enumerate() {
+        // Every arm, and its `;` when it has one, is one entry. The trailing
+        // `;` belongs to the last arm, so it never opens a line of its own.
+        let mut lines: Vec<Vec<Doc>> = Vec::new();
+        for e in middle {
             match e {
-                NodeOrToken::Node(a) if a.kind() == K::CaseArm => inner.push(self.arm(a)?),
-                NodeOrToken::Token(t) if t.kind() == K::Semicolon => {
-                    inner.push(self.tok(t));
-                    if i + 1 < arms.len() {
-                        inner.push(Doc::Line);
-                    }
-                }
+                NodeOrToken::Node(a) if a.kind() == K::CaseArm => lines.push(vec![self.arm(a)?]),
+                NodeOrToken::Token(t) if t.kind() == K::Semicolon => match lines.last_mut() {
+                    Some(line) => line.push(self.tok(t)),
+                    // `case {; ... }`: nothing to attach it to, so it opens
+                    // its own line rather than being moved.
+                    None => lines.push(vec![self.tok(t)]),
+                },
                 _ => return Err(Bail),
             }
         }
+        let mut inner = vec![Doc::Line];
+        for (i, line) in lines.into_iter().enumerate() {
+            if i > 0 {
+                inner.push(Doc::Line);
+            }
+            inner.extend(line);
+        }
         inner.push(self.leading(&close, false));
+        // A comment breaks the `case` (it would not fit on one line), and an
+        // arm laid out over several lines breaks it the way such a field
+        // breaks a record. A `case` written over several lines that does fit
+        // on one was folded, unless it is a record field keeping its layout.
+        let broken = has_inner_comment(n) || inner.iter().any(Doc::forces_break) || keep_layout;
+        // The pad is one space, the way a record's is; broken, it becomes the
+        // line break that puts `}` at the arms' level.
         let d = concat(vec![
-            self.tok(&keyword),
-            text(" "),
-            self.tok(&open),
+            head,
             indent(concat(inner)),
-            text(" "),
+            Doc::LineThenSpace,
             self.tok_body(&close),
         ]);
-        Ok(if has_inner_comment(n) {
-            broken_group(d)
-        } else {
-            group(d)
-        })
+        Ok(if broken { broken_group(d) } else { group(d) })
     }
 
-    /// `cond => value`. The condition is not printed with `rhs`, which could
-    /// move it to its own line: `=>` is a fixed separator, not a place a
-    /// `case` may break, so the arm stays together and only its own operands
-    /// break.
+    /// `cond => value`, one item of a `case` arm line.
+    ///
+    /// The condition is not printed with `rhs`, which could move it to its own
+    /// line: `=>` is a fixed separator, not a place a `case` may break, so the
+    /// arm stays together and only its own operands break. A value that brings
+    /// its own lines (a record, a nested `case`) indents those lines from the
+    /// arm, so an inner `}` cannot land at the arm's own level, where it would
+    /// read as the outer `}`.
     fn arm(&self, n: &SyntaxNode) -> R {
         let els = sig(n);
         let [cond, arrow, value] = els.as_slice() else {
             return Err(Bail);
         };
+        let value = node(Some(value))?;
         Ok(concat(vec![
             self.expr(&node(Some(cond))?, false)?,
             text(" "),
             self.tok(&token(Some(arrow), K::FatArrow)?),
-            text(" "),
-            self.expr(&node(Some(value))?, false)?,
+            indent(concat(vec![text(" "), self.expr(&value, false)?])),
         ]))
     }
 
@@ -695,6 +771,11 @@ impl Fmt<'_> {
 
     /// `{ a, b | r }` / `[a, b]`: flat if it fits, else one element per line.
     /// Commas are kept exactly as written (including a trailing one).
+    ///
+    /// An element laid out over several lines breaks the list around it, the
+    /// way a comment does: kept flat, the `,`s after it would not break, so a
+    /// multi-line `case` in a record would be folded into `..., b = case {` on
+    /// one line.
     fn delimited(&self, n: &SyntaxNode, open: K, close: K, pad: Doc) -> R {
         let els = sig(n);
         let (Some(first), Some(last)) = (els.first(), els.last()) else {
@@ -708,14 +789,33 @@ impl Fmt<'_> {
             return Ok(concat(vec![self.tok(&open), self.tok(&close)]));
         }
         let mut inner = vec![pad.clone()];
+        // Whether an element brings its own line breaks, held onto until the
+        // element list is built: it breaks the list the way a comment does.
+        let mut multiline = false;
         for (i, e) in middle.iter().enumerate() {
             match e {
-                NodeOrToken::Node(c) => inner.push(match c.kind() {
-                    K::RecordField => self.field(c, |v| self.rhs(v, false))?,
-                    K::TyField => self.field(c, |v| Ok(concat(vec![text(" "), self.ty(v)?])))?,
-                    _ if close.kind() == K::RBracket => self.expr(c, false)?,
-                    _ => return Err(Bail),
-                }),
+                NodeOrToken::Node(c) => {
+                    let d = match c.kind() {
+                        // A `case` written one arm per line keeps that
+                        // layout: laid out flat it would have to be broken
+                        // again, and the next run would see a one-line source
+                        // and fold it.
+                        K::RecordField if multiline_value(c) => {
+                            let v = self
+                                .field(c, |v| Ok(concat(vec![text(" "), self.expr(v, false)?])))?;
+                            multiline |= v.forces_break();
+                            v
+                        }
+                        K::RecordField => self.field(c, |v| self.rhs(v, false))?,
+                        K::TyField => {
+                            self.field(c, |v| Ok(concat(vec![text(" "), self.ty(v)?])))?
+                        }
+                        _ if close.kind() == K::RBracket => self.expr(c, false)?,
+                        _ => return Err(Bail),
+                    };
+                    multiline |= d.forces_break();
+                    inner.push(d);
+                }
                 NodeOrToken::Token(t) => match t.kind() {
                     K::Comma => {
                         inner.push(self.tok(t));
@@ -738,7 +838,7 @@ impl Fmt<'_> {
             pad,
             self.tok_body(&close),
         ]);
-        Ok(if has_inner_comment(n) {
+        Ok(if has_inner_comment(n) || multiline {
             broken_group(d)
         } else {
             group(d)

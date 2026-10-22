@@ -32,6 +32,19 @@ pub struct Def {
     pub span: Span,
 }
 
+/// One `name = type` in a record type — a column of a table, or a field of a
+/// signature's row.
+///
+/// The span is the field's own, and it is what connects a `##` block to the
+/// field: a field is not an item, so its documentation is read from the text at
+/// that position rather than being carried here (see [`crate::docs`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordField {
+    pub name: String,
+    pub ty: TypeExpr,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeExpr {
     /// `head arg...`; a lowercase head that is not a known constructor is a
@@ -42,7 +55,7 @@ pub enum TypeExpr {
         span: Span,
     },
     Record {
-        fields: Vec<(String, TypeExpr)>,
+        fields: Vec<RecordField>,
         tail: Option<String>,
         span: Span,
     },
@@ -279,8 +292,12 @@ impl Lower<'_> {
                     .filter(|c| c.kind() == K::TyField)
                     .filter_map(|f| {
                         let name = field_name(&f)?;
-                        let t = f.children().next().map(|t| self.ty(&t))?;
-                        Some((name, t))
+                        let ty = f.children().next().map(|t| self.ty(&t))?;
+                        Some(RecordField {
+                            name,
+                            ty,
+                            span: span(&f),
+                        })
                     })
                     .collect();
                 // a direct Ident token child of the record is the `| tail`
@@ -610,7 +627,7 @@ mod tests {
         let TypeExpr::Record { fields, tail, .. } = &args[0] else {
             panic!()
         };
-        assert_eq!(fields[0].0, "id");
+        assert_eq!(fields[0].name, "id");
         assert_eq!(tail.as_deref(), Some("r"));
         assert!(matches!(&m.defs[0].body.kind, ExprKind::Proj(_, f) if f == "users"));
         assert_eq!(m.defs[1].body.kind, ExprKind::Lit(Lit::Bool(true)));

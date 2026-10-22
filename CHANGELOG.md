@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- Document a table's columns, one level below the definition that names them. A
+  column is a field of a record type, so it cannot be an item with a `##` block
+  of its own; the block now goes above the field, inside the signature:
+
+      users : query {
+        ## The primary key.
+        id = int,
+        ## Display name; two people may share one.
+        name = string
+      } = table "public" "users"
+
+  `cagara doc` prints those notes as a `Fields:` list under the table, and
+  `--json` carries them as a `fields` array with the undocumented ones present
+  and `null`, so a tool asking what columns a table has does not have to infer
+  the gap. The two levels are independent: the block above `users` is the
+  table's, the block above `id` is that column's.
+- `cagara doc --check` reports a record type that documents some of its fields
+  and not the rest, naming each remaining field and its line. A record with no
+  field documentation at all says nothing — a table whose columns are
+  self-evident is not a gap, and warning about every field of every signature
+  would bury the definitions that do need writing. Still warnings, still exit 0.
+- A record type's fields now carry their own spans in the AST
+  (`ast::RecordField`), which is what attaches a doc block to a field. Nothing
+  else about the AST changes, and the two places that convert a record
+  annotation to a type read the field through the struct.
+- The examples document their columns (`schema.cagara`'s one table,
+  `report.cagara`'s two), and `tests/snapshots/pipeline_golden.txt` is
+  re-recorded for it: the emitted SQL and the pipeline output are unchanged, and
+  only the byte spans moved, because the generated programs' signatures are now
+  written over several lines. Checked the same way as before, by normalizing
+  `start:`/`end:` away and diffing.
+
 - `cagara fmt` lays a multi-line `case` out the way §4.5 of `CAGARA.md` writes
   one: `case {` ends its line, every arm and its `;` gets a line of its own,
   and `}` closes the last one. It used to hang the first arm off the `case {`

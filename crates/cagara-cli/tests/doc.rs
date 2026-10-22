@@ -161,6 +161,89 @@ fn an_overload_set_is_documented_and_reported_once() {
     assert!(text.contains("total : expr r float -> agg (expr r (maybe float))"));
 }
 
+/// A table's columns are fields of one definition, so a column's documentation
+/// is the `##` block above the field in the signature that names it. It prints
+/// under that definition, not as a section of its own.
+const FIELDS: &str = "## The user table.\n\
+                      users : query {\n\
+                      \x20 ## The primary key.\n\
+                      \x20 id = int,\n\
+                      \x20 ## The name, as the person writes it.\n\
+                      \x20 name = string,\n\
+                      \x20 password_hash = string\n\
+                      } = table \"public\" \"users\"\n\
+                      \n\
+                      ## The answer.\n\
+                      main = users\n";
+
+#[test]
+fn field_notes_print_under_their_table() {
+    let dir = TempDir::new("fields");
+    let f = dir.write("q.cagara", FIELDS);
+    let out = doc(&f, &[]);
+    let text = stdout(&out);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(text.contains("Fields:"), "{text}");
+    assert!(text.contains("- `id` — The primary key."), "{text}");
+    assert!(
+        text.contains("- `name` — The name, as the person writes it."),
+        "{text}"
+    );
+    // The signature already lists every column, so an undocumented field is not
+    // repeated in prose.
+    assert!(!text.contains("password_hash` —"), "{text}");
+    // Field notes belong to the definition that names them.
+    let (users, main) = text.split_once("## `main`").expect("a section for main");
+    assert!(users.contains("Fields:"), "{users}");
+    assert!(!main.contains("Fields:"), "{main}");
+}
+
+/// The same fields in JSON, with the undocumented one present and `null`: a
+/// tool asking what columns a table has should not have to infer the gap.
+#[test]
+fn json_carries_the_fields_and_their_docs() {
+    let dir = TempDir::new("fields-json");
+    let f = dir.write("q.cagara", FIELDS);
+    let out = doc(&f, &["--json"]);
+    let text = stdout(&out);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        text.contains(r#"{"name": "id", "line": 4, "doc": "The primary key."}"#),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"{"name": "password_hash", "line": 7, "doc": null}"#),
+        "{text}"
+    );
+}
+
+/// A field list that documents some of its columns and not the rest is almost
+/// certainly an oversight, so `--check` names the rest — and still exits 0.
+#[test]
+fn a_partly_documented_record_is_reported() {
+    let dir = TempDir::new("fields-partial");
+    let f = dir.write("q.cagara", FIELDS);
+    let out = doc(&f, &["--check"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "a warning must not fail: {err}");
+    assert!(
+        err.contains("field `password_hash` has no doc comment"),
+        "{err}"
+    );
+    assert!(err.contains(":7:"), "the field's own line is named: {err}");
+
+    // A record with no field docs at all says nothing: a table whose columns are
+    // self-evident is not a gap.
+    let f = dir.write(
+        "plain.cagara",
+        "## The table.\nusers : query { id = int, name = string } = table \"s\" \"t\"\n\
+         ## The answer.\nmain = users\n",
+    );
+    let out = doc(&f, &["--check"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).is_empty(), "{}", stderr(&out));
+}
+
 /// The formatter keeps the attachment: `##` lines stay above their definition,
 /// and the reference reads the same after `cagara fmt` as before it.
 #[test]

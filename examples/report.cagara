@@ -5,12 +5,34 @@
 #! to (`cagara examples/report.cagara`), and read the file as a tour.
 
 ## The user table, with its columns named by hand: a table's row type comes from
-## its signature, so `users` is what every `.name` below is checked against.
-users : query { id = int, name = string, age = int, active = bool } = table "public" "users"
+## its signature, so `users` is what every `.name` below is checked against, and
+## the `##` blocks here are the reference for those columns.
+users : query {
+    ## The primary key.
+    id = int,
+    ## Display name; two people may share one.
+    name = string,
+    ## Age in years, which is why `addYears` below is a date function only.
+    age = int,
+    ## Whether the account is active. Filtering on it is `&? .active`.
+    active = bool
+  } = table "public" "users"
 
-## The order table: one row per order, `created_at` a `date`.
-orders : query { id = int, user_id = int, amount = float, status = string, created_at = date } =
-  table "public" "orders"
+## The order table: one row per order.
+orders : query {
+    ## The primary key.
+    id = int,
+    ## The user who placed it. Joins reach this side as `.>user_id`.
+    user_id = int,
+    ## The charged amount, in the currency of the source table — a `float`, so
+    ## sums of it are approximate.
+    amount = float,
+    ## Free text the source system writes; filterable but not enumerable.
+    status = string,
+    ## The day the order was placed — a `date`, not a `timestamp`, so it has no
+    ## hour to truncate.
+    created_at = date
+  } = table "public" "orders"
 
 ## Filtering, projection, ordering and paging in one pipeline. `select` renames
 ## (`label`) and recomputes (`next_age`) as it projects; columns not listed are

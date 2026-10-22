@@ -791,7 +791,8 @@ impl<'w> Checker<'w> {
             }
             TypeExpr::Record { fields, tail, .. } => {
                 let mut fs: Vec<(String, Ty)> = Vec::new();
-                for (k, v) in fields {
+                for f in fields {
+                    let (k, v) = (&f.name, &f.ty);
                     if fs.iter().any(|(o, _)| o == k) {
                         return Err(format!("field `{k}` appears twice in a record type"));
                     }
@@ -857,7 +858,8 @@ impl<'w> Checker<'w> {
             TypeExpr::Record { fields, tail, .. } => {
                 // Records are always rows, regardless of expected_kind
                 let mut fs: Vec<(String, Ty)> = Vec::new();
-                for (k, v) in fields {
+                for f in fields {
+                    let (k, v) = (&f.name, &f.ty);
                     if fs.iter().any(|(o, _)| o == k) {
                         return Err(format!("field `{k}` appears twice in a record type"));
                     }

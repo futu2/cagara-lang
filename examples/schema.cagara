@@ -7,4 +7,11 @@
 ## The user table. `password_hash` is here and dropped at the import site: a
 ## table definition describes the table, and what may be published is decided
 ## where the query is written.
-users : query { id = int, name = string, password_hash = string } = table "public" "users"
+users : query {
+    ## The primary key.
+    id = int,
+    ## The name, as the person writes it — not necessarily unique.
+    name = string,
+    ## Never selected by `public.cagara`: hashes are not published.
+    password_hash = string
+  } = table "public" "users"

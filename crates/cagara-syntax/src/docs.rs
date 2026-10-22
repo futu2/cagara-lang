@@ -20,7 +20,7 @@
 //! Both markers require the line they mark: a `##` at the end of a line of code
 //! is a trailing comment, not documentation of the next definition.
 
-use crate::ast::Module;
+use crate::ast::{Module, TypeExpr};
 use std::ops::Range;
 
 /// What makes a line documentation of the definition below it.
@@ -74,28 +74,39 @@ pub fn module_doc(src: &str, module: &Module) -> Option<String> {
     Docs::new(src).module(first)
 }
 
-/// The text of the line ending just before `offset`, with the offset that line
-/// starts at. `None` at the start of the file.
+/// One field of a record type, with the documentation above it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldDoc {
+    pub name: String,
+    /// 1-based line of the field name, for a report that names a place.
+    pub line: usize,
+    pub doc: Option<String>,
+}
+
+/// The line above the one `offset` is on, with the offset that line starts at.
 ///
-/// `offset` is expected at a line break or at a line start — every caller passes
-/// the start of a definition or the start of a line it just walked up to.
+/// `offset` may be anywhere in its line: a definition's first token is in column
+/// 0, but a record field's is not, because the field is indented under its
+/// record type. `None` at the first line.
 fn line_above(src: &str, offset: usize) -> Option<(usize, &str)> {
+    let offset = offset.min(src.len());
     let before = src.get(..offset)?;
-    // Exactly one line break, because a blank line is a line: skipping every
-    // break would walk over an empty line and attach a doc block across it.
-    // A break is `\n`, `\r\n` or a bare `\r`, the same rule the lexer and the
+    // Where the line containing `offset` starts.
+    let line = before.rfind(['\n', '\r']).map_or(0, |at| at + 1);
+    if line == 0 {
+        return None;
+    }
+    // Skip exactly one break, because a blank line is a line: skipping every
+    // break would walk over an empty line and attach a doc block across it. A
+    // break is `\n`, `\r\n` or a bare `\r`, the same rule the lexer and the
     // parser's layout use.
-    let end = if before.ends_with("\r\n") {
-        before.len() - 2
-    } else if before.ends_with(['\n', '\r']) {
-        before.len() - 1
+    let head = src.get(..line)?;
+    let end = if head.ends_with("\r\n") {
+        line - 2
     } else {
-        before.len()
+        line - 1
     };
-    let start = before
-        .get(..end)?
-        .rfind(['\n', '\r'])
-        .map_or(0, |at| at + 1);
+    let start = src.get(..end)?.rfind(['\n', '\r']).map_or(0, |at| at + 1);
     Some((start, src.get(start..end)?))
 }
 
@@ -106,6 +117,7 @@ fn line_above(src: &str, offset: usize) -> Option<(usize, &str)> {
 /// Built once per file by callers that ask several of these questions.
 #[derive(Debug, Clone)]
 pub struct Docs<'a> {
+    src: &'a str,
     /// `(line text, byte offset of its first character)`, in source order.
     lines: Vec<(&'a str, usize)>,
     len: usize,
@@ -114,8 +126,66 @@ pub struct Docs<'a> {
 impl<'a> Docs<'a> {
     pub fn new(src: &'a str) -> Self {
         Docs {
+            src,
             lines: lines(src),
             len: src.len(),
+        }
+    }
+
+    /// The documentation of the item whose first token is at `offset`.
+    ///
+    /// The same answer as [`item_doc`], for a caller that already holds an
+    /// index: `cagara doc` asks per definition and wants the line numbers too.
+    pub fn item(&self, offset: usize) -> Option<String> {
+        item_doc(self.src, offset)
+    }
+
+    /// The record types in a declared signature, each with its fields in source
+    /// order.
+    ///
+    /// A record's fields are where a table's columns are named, so this is
+    /// where a column's documentation lives: `##` above the field, read from the
+    /// same text with the same rule as a definition's. Grouped by record rather
+    /// than flattened because "this table documents two columns out of six" is
+    /// a fact about one field list, not about the file.
+    pub fn record_fields(&self, ty: &TypeExpr) -> Vec<Vec<FieldDoc>> {
+        let mut out = Vec::new();
+        self.collect_record_fields(ty, &mut out);
+        out
+    }
+
+    fn collect_record_fields(&self, ty: &TypeExpr, out: &mut Vec<Vec<FieldDoc>>) {
+        match ty {
+            TypeExpr::Record { fields, .. } => {
+                out.push(
+                    fields
+                        .iter()
+                        .map(|f| {
+                            let at = f.span.start as usize;
+                            FieldDoc {
+                                name: f.name.clone(),
+                                line: self.line(at),
+                                doc: item_doc(self.src, at),
+                            }
+                        })
+                        .collect(),
+                );
+                for f in fields {
+                    self.collect_record_fields(&f.ty, out);
+                }
+            }
+            TypeExpr::App { args, .. } => {
+                for arg in args {
+                    self.collect_record_fields(arg, out);
+                }
+            }
+            TypeExpr::Fun(from, to) => {
+                self.collect_record_fields(from, out);
+                self.collect_record_fields(to, out);
+            }
+            // A string literal in type position is a label's affix, and an
+            // error has no fields to document.
+            TypeExpr::Str(..) | TypeExpr::Error(..) => {}
         }
     }
 
@@ -326,6 +396,89 @@ mod tests {
     fn a_file_with_no_items_can_still_be_documented() {
         let (src, module) = lower("#! Only prose.\n");
         assert_eq!(module_doc(&src, &module).as_deref(), Some("Only prose."));
+    }
+
+    /// A column is a field of a record type, so its documentation is the block
+    /// above the field — indented under the record, which is why the line lookup
+    /// cannot assume column 0.
+    #[test]
+    fn a_field_takes_the_block_above_it_and_its_record_keeps_its_own() {
+        let (src, module) = lower(
+            "## The table.\n\
+             users : query {\n\
+             \x20 ## The key.\n\
+             \x20 id = int,\n\
+             \x20 ## Display name.\n\
+             \x20 name = string,\n\
+             \x20 secret = string\n\
+             } = table \"s\" \"t\"\n",
+        );
+        let docs = Docs::new(&src);
+        let ty = module.defs[0].ty.as_ref().expect("a declared type");
+        let records = docs.record_fields(ty);
+        assert_eq!(records.len(), 1);
+        let fields = &records[0];
+        let found: Vec<(&str, Option<&str>)> = fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.doc.as_deref()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("id", Some("The key.")),
+                ("name", Some("Display name.")),
+                ("secret", None),
+            ]
+        );
+        // The definition's own block is not the first field's, and the fields
+        // do not disturb it.
+        assert_eq!(
+            item_doc(&src, module.defs[0].span.start as usize).as_deref(),
+            Some("The table.")
+        );
+        // Line numbers point at the field names, for the partial-documentation
+        // report.
+        assert_eq!(fields[0].line, 4);
+        assert_eq!(fields[2].line, 7);
+    }
+
+    /// A record written on one line documents nothing: the marker must be on a
+    /// line of its own above the field, and there is no such line.
+    #[test]
+    fn a_field_on_a_shared_line_has_no_documentation() {
+        let (src, module) =
+            lower("users : query { id = int, name = string } = table \"s\" \"t\"\n");
+        let docs = Docs::new(&src);
+        let ty = module.defs[0].ty.as_ref().expect("a declared type");
+        let records = docs.record_fields(ty);
+        assert_eq!(records.len(), 1);
+        assert!(records[0].iter().all(|f| f.doc.is_none()), "{records:?}");
+    }
+
+    /// Every record in a signature is walked, including one nested in a field's
+    /// type and one on either side of an arrow.
+    #[test]
+    fn every_record_in_a_signature_is_reached() {
+        let (src, module) = lower(
+            "f : {\n\
+             \x20 ## From.\n\
+             \x20 a = {\n\
+             \x20   ## Inner.\n\
+             \x20   b = int\n\
+             \x20 }\n\
+             } -> {\n\
+             \x20 ## To.\n\
+             \x20 c = string\n\
+             } = primitive \"__f\"\n",
+        );
+        let docs = Docs::new(&src);
+        let ty = module.defs[0].ty.as_ref().expect("a declared type");
+        let records = docs.record_fields(ty);
+        let names: Vec<Vec<&str>> = records
+            .iter()
+            .map(|r| r.iter().map(|f| f.name.as_str()).collect())
+            .collect();
+        assert_eq!(names, vec![vec!["a"], vec!["b"], vec!["c"]]);
     }
 
     #[test]

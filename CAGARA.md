@@ -206,8 +206,16 @@ before, and `cagara file.cagara` ignores both forms.
 
 ## The user table. The row type is named here because a table's columns come
 ## from its signature, not from the database.
-users : query { id = int, name = string, age = int, active = bool } =
-  table "public" "users"
+users : query {
+    ## The primary key.
+    id = int,
+    ## Display name; two people may share one.
+    name = string,
+    ## Age in years.
+    age = int,
+    ## Whether the account is active.
+    active = bool
+  } = table "public" "users"
 
 ## Adults only, with `name` relabelled for display.
 ##
@@ -224,9 +232,16 @@ Attachment is by adjacency, not by indentation or by naming: the block must end 
 immediately above the definition, and a blank line or an ordinary `#` comment ends it. A `##` at the
 end of a line of code is a trailing comment and attaches to nothing.
 
+A **column** is a field of a record type, not an item of its own, so it is documented the same way
+one level down: a `##` block above the field, inside the signature that names it. A record written on
+one line has no such line, so it documents nothing; break the type over several lines to document
+its fields, and `cagara fmt` will lay the record out as §1.2 shows. The two levels are independent — the block above `users` is the table's, the block above
+`id` is that column's — and a record with some fields documented and others not is reported by
+`cagara doc --check`, since that is almost always an oversight.
+
 `cagara doc file.cagara` prints that text as a reference — a section per name, with the inferred
-signature, in source order — and `cagara doc --prelude` does the same for the prelude, which is how
-§7 is generated. `cagara doc file.cagara --check` lists the top-level definitions that have no `##`
+signature and the field notes, in source order — and `cagara doc --prelude` does the same for the
+prelude, which is how §7 is generated. `cagara doc file.cagara --check` lists the top-level definitions that have no `##`
 block; it **warns and exits 0**, because a missing doc comment is a writing task, not a compile
 error. `--json` prints the same content for a tool to consume.
 
@@ -1356,8 +1371,8 @@ cagara --version                 # also -V; exit 0
   depend on the printed field order.
 - `--pretty` formats the SQL; `--optimize` runs the SQL optimizer.
 - `fmt` is a formatter, not a validity fixer: an unparseable file is left unchanged.
-- `doc` prints the `##` documentation of each top-level definition with its inferred signature, as
-  markdown or with `--json`. It needs no `main` and no well-typed file: a reference is most useful
+- `doc` prints the `##` documentation of each top-level definition with its inferred signature and
+  the `##` notes of its record fields, as markdown or with `--json`. It needs no `main` and no well-typed file: a reference is most useful
   for a file that is still being written. `--check` reports undocumented definitions on stderr and
   exits 0, so it can be run in a loop without failing a build.
 

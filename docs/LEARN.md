@@ -1998,6 +1998,22 @@ with the checker, and an undocumented one still shows its type. A file's
 definitions are grouped by name, so an overload set is one section with one
 explanation and every signature.
 
+A table's columns are fields of one definition, so each is documented one level
+down — a `##` block above the field inside the signature that names it:
+
+    users : query {
+        ## The primary key.
+        id = int,
+        ## Display name; two people may share one.
+        name = string
+      } = table "public" "users"
+
+`cagara doc` then prints those notes under the table, as a `Fields:` list. The
+field has to be on a line of its own to carry a block, so a record type written
+on one line documents no fields; `cagara doc --check` points at the ones a
+partly documented record leaves out.
+
+
 `cagara doc --check` lists the top-level definitions that have no `##` block and
 exits **0** — a missing doc comment is not a compile error, and this is the
 report that says what is left to write rather than a gate that stops a build.

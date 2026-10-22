@@ -17,7 +17,7 @@
 //! a documented one cannot disagree with the checker.
 
 use cagara_hir::{check, Workspace};
-use cagara_syntax::docs::{item_doc, module_doc, Docs};
+use cagara_syntax::docs::{item_doc, module_doc, Docs, FieldDoc};
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
@@ -44,6 +44,10 @@ struct DocumentedDef {
     /// error, or a definition the checker did not reach).
     ty: Option<String>,
     doc: Option<String>,
+    /// The record types in the definition's declared signature, each with its
+    /// fields: a table's columns are named here, so this is where a column's
+    /// documentation is found.
+    fields: Vec<Vec<FieldDoc>>,
     /// 1-based line of the definition, for `--check`'s report.
     line: usize,
 }
@@ -147,6 +151,12 @@ fn document(
             // Read from the text at the definition's own span: the span is the
             // whole connection between the two (see `cagara_syntax::docs`).
             doc: item_doc(&module.text, d.span.start as usize),
+            // A field has no item of its own: its documentation lives in the
+            // signature that names it.
+            fields: d
+                .ty
+                .as_ref()
+                .map_or_else(Vec::new, |ty| lines.record_fields(ty)),
             line: lines.line(d.span.start as usize),
         })
         .collect();
@@ -182,6 +192,31 @@ fn warn_missing(shown: &str, defs: &[DocumentedDef]) {
              (see `cagara doc --help`)",
             first.line, first.name
         );
+    }
+    for d in defs {
+        warn_partial_fields(shown, d);
+    }
+}
+
+/// A field list that documents some of its columns is almost certainly an
+/// oversight, so this reports the rest of them.
+///
+/// Nothing is said about a record with no field documentation at all: a table
+/// whose columns are self-evident is not a gap, and warning about every field of
+/// every signature would bury the file's own missing definitions.
+fn warn_partial_fields(shown: &str, def: &DocumentedDef) {
+    for record in &def.fields {
+        if record.iter().all(|f| f.doc.is_none()) {
+            continue;
+        }
+        for f in record.iter().filter(|f| f.doc.is_none()) {
+            eprintln!(
+                "{shown}:{}: warning: field `{}` has no doc comment, and other fields of this \
+                 record type do; put `## ...` on the line above the field, or drop the field \
+                 notes from this record",
+                f.line, f.name
+            );
+        }
     }
 }
 
@@ -219,9 +254,33 @@ fn markdown(modules: &[Documented]) -> String {
             for doc in group.iter().filter_map(|d| d.doc.as_deref()) {
                 out.push_str(&format!("\n{doc}\n"));
             }
+            let fields = field_notes(group);
+            if !fields.is_empty() {
+                out.push_str("\nFields:\n\n");
+                for (name, doc) in fields {
+                    // A field's note may be several lines; under a bullet, the
+                    // continuation is indented to stay inside the item.
+                    out.push_str(&format!("- `{name}` — {}\n", doc.replace('\n', "\n  ")));
+                }
+            }
         }
     }
     out
+}
+
+/// The documented fields of an overload set's declared signatures, in source
+/// order, as `(name, doc)`.
+///
+/// Only the documented ones: the signature above already lists every field, so
+/// repeating the undocumented names in prose would add lines without adding
+/// information.
+fn field_notes(group: &[DocumentedDef]) -> Vec<(&str, &str)> {
+    group
+        .iter()
+        .flat_map(|d| &d.fields)
+        .flatten()
+        .filter_map(|f| Some((f.name.as_str(), f.doc.as_deref()?)))
+        .collect()
 }
 
 /// Split definitions into runs of one name: an overload set, or a single
@@ -263,12 +322,27 @@ fn json(modules: &[Documented]) -> String {
                 out.push(',');
             }
             out.push_str(&format!(
-                "\n        {{\"name\": {}, \"type\": {}, \"line\": {}, \"doc\": {}}}",
+                "\n        {{\"name\": {}, \"type\": {}, \"line\": {}, \"doc\": {}, \"fields\": [",
                 string(&d.name),
                 option(d.ty.as_deref()),
                 d.line,
                 option(d.doc.as_deref())
             ));
+            let fields: Vec<String> = d
+                .fields
+                .iter()
+                .flatten()
+                .map(|f| {
+                    format!(
+                        "{{\"name\": {}, \"line\": {}, \"doc\": {}}}",
+                        string(&f.name),
+                        f.line,
+                        option(f.doc.as_deref())
+                    )
+                })
+                .collect();
+            out.push_str(&fields.join(", "));
+            out.push_str("]}");
         }
         out.push_str("\n      ]\n    }");
     }
@@ -350,6 +424,7 @@ mod tests {
             name: name.into(),
             ty: Some("query r".into()),
             doc: doc.map(String::from),
+            fields: Vec::new(),
             line: 1,
         }
     }
@@ -418,6 +493,7 @@ mod tests {
                 name: "broken".into(),
                 ty: None,
                 doc: None,
+                fields: Vec::new(),
                 line: 7,
             }],
         };

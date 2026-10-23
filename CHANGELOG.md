@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- A call whose last argument is a parenthesised condition no longer strands the
+  arguments before it. Hugging the paren printed `ifThenElse (` on the call's
+  line, the condition indented under it, and `) (toYuan .lstbal)
+  (toYuan .balance)` on the line after the `)` — the arguments after the
+  bracket were only visible by counting from a `)`. The hug is now taken only
+  when the hugged parts fit, so such a call packs its arguments like any other,
+  and two record fields that differ by a few characters no longer get
+  different shapes.
+
+- A lambda whose body is a pipeline moves the pipeline down after the arrow
+  when it does not fit, with the `&` stages flush with the head:
+
+      name = customer_number =>
+        some_query
+        & where (.customer_number == customer_number)
+
+  Instead of hugging it, which left `=> some_query` on the definition's line
+  however wide it grew — nothing measured that first line, so a long head ran
+  past the width. A short pipeline body still stays on the arrow's line, and a
+  definition's own pipeline is unchanged.
+
 - `cagara fmt` no longer shreds a long application. Arguments used to be
   laid out all-or-nothing: one column past the width and every argument got a
   line of its own, so 18 arguments became 19 lines where two would do. They now

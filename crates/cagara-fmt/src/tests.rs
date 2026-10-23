@@ -447,6 +447,94 @@ fn a_long_case_body_moves_to_an_indented_line() {
     assert_eq!(fmt(&out), out, "not idempotent:\n{out}");
 }
 
+/// A lambda whose body is a pipeline moves the pipeline down after the arrow
+/// when it does not fit, and the stages then sit flush with the head rather
+/// than one level in: `=>` / head / `& stage` are peers, so the second stage
+/// is not a child of the first. Hugging the body instead left `=> head` on the
+/// `=` line however wide it grew — nothing measured that first line, so a long
+/// head ran past the width.
+#[test]
+fn a_lambda_pipeline_body_moves_down_between_its_peers() {
+    check(
+        "realtime_corporate_current_accounts = customer_number =>\n  corporate_current_account_all_realtime\n  & where (.customer_number == customer_number)\n  & select { .id, .balance }\n",
+        "realtime_corporate_current_accounts = customer_number =>
+  corporate_current_account_all_realtime
+  & where (.customer_number == customer_number)
+  & select { .id, .balance }
+",
+    );
+    // The head alone is too wide: the first line must not run past the width.
+    let out = fmt(
+        "realtime_corporate_current_accounts = customer_number => corporate_current_account_all_realtime_with_an_extra_long_suffix_for_width\n  & where (.customer_number == customer_number)\n",
+    );
+    for line in out.lines() {
+        assert!(line.chars().count() <= WIDTH, "over width: {line:?}\n{out}");
+    }
+    assert!(
+        out.starts_with("realtime_corporate_current_accounts = customer_number =>\n  "),
+        "{out}"
+    );
+    // A short pipeline body stays on the arrow's line, however many stages.
+    check(
+        "f = a => q & where (.x == a) & limit 1\n",
+        "f = a => q & where (.x == a) & limit 1\n",
+    );
+    // A definition's own pipeline is unchanged: one stage per line, indented.
+    check(
+        "adults = users & where (.age >= 18) & select { id = .id }\n",
+        "adults = users\n  & where (.age >= 18)\n  & select { id = .id }\n",
+    );
+}
+
+/// A call whose last argument is a parenthesised condition keeps the earlier
+/// arguments beside it. Hugging the paren used to print `ifThenElse (` on the
+/// call's line, the condition indented under it, and the rest stranded after
+/// the `)`: `) (toYuan .lstbal) (toYuan .balance)`. The hug now only happens
+/// when the hugged parts fit, so the call packs its arguments instead.
+#[test]
+fn a_parenthesised_last_argument_does_not_strand_the_others() {
+    let src = "q = {
+    subject_code =
+      ifThenElse ((toDate .lstcintd) > (toDate .pt_dt) || (toDate .lsttrand) > (toDate .pt_dt))
+        .presub .subcode,
+    balance = ifThenElse (
+      (toDate .lstcintd) > (toDate .pt_dt) || (toDate .lsttrand) > (toDate .pt_dt)
+    ) (toYuan .lstbal) (toYuan .balance),
+}
+";
+    // Both fields are laid out the same way: the call opens on its own line
+    // under the field's `=`, its arguments follow it, and nothing is left
+    // after a broken bracket.
+    check(
+        src,
+        "q = {
+  subject_code =
+    ifThenElse ((toDate .lstcintd) > (toDate .pt_dt) || (toDate .lsttrand) > (toDate .pt_dt))
+      .presub .subcode,
+  balance =
+    ifThenElse ((toDate .lstcintd) > (toDate .pt_dt) || (toDate .lsttrand) > (toDate .pt_dt))
+      (toYuan .lstbal) (toYuan .balance),
+}
+",
+    );
+    // A paren that cannot sit on the call's line at all takes a block of its
+    // own, with the arguments before it still together.
+    check(
+        "a = f x y (condition_one_long > 1 || condition_two_long > 2 || condition_three_long > 3 || condition_four_long > 4)\n",
+        "a =
+  f x y
+    (
+      condition_one_long > 1
+        || condition_two_long > 2
+        || condition_three_long > 3
+        || condition_four_long > 4
+    )
+",
+    );
+    // A short paren still hugs.
+    check("a = f x y (.c > 1)\n", "a = f x y (.c > 1)\n");
+}
+
 #[test]
 fn spacing_is_normalized() {
     check("x={a=1,b=[1,2]}\n", "x = { a = 1, b = [1, 2] }\n");

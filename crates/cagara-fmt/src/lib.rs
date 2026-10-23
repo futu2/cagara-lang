@@ -24,7 +24,7 @@ mod doc;
 use cagara_syntax::{
     ops, parse, Fixity, ParseError, SyntaxElement, SyntaxKind as K, SyntaxNode, SyntaxToken,
 };
-use doc::{broken_group, concat, fill, group, indent, text, Doc};
+use doc::{broken_group, concat, fill, fits_flat, group, indent, text, Doc};
 use rowan::{NodeOrToken, WalkEvent};
 use std::cell::Cell;
 use std::fmt;
@@ -312,6 +312,12 @@ fn bin_parts(n: &SyntaxNode) -> Result<(SyntaxNode, SyntaxToken, SyntaxNode, (u8
     Ok((node(Some(l))?, op, node(Some(r))?, bp))
 }
 
+/// Whether `n` is a pipeline expression: a chain of stage operators (§4.2),
+/// which is what breaks one stage per line.
+fn is_pipeline(n: &SyntaxNode) -> bool {
+    n.kind() == K::BinExpr && bin_parts(n).is_ok_and(|(_, op, _, _)| is_pipe(&op))
+}
+
 /// Does this operator build a pipeline stage? That is a property of the
 /// operator table — an operator is a stage when it sits at `&`'s level — so the
 /// formatter has no list of its own to keep in step.
@@ -555,15 +561,57 @@ impl Fmt<'_> {
     }
 
     /// `f a { ... }`: an application whose last argument is bracketed keeps
-    /// its arguments on one line and lets the bracket break. A comment on the
-    /// argument's own line (after its `{`, before its `}`) is left to the
-    /// bracket, which breaks; one deeper inside belongs to an element of it
-    /// and breaks that element, not the call.
+    /// its arguments on one line and lets the bracket break.
+    ///
+    /// The hug is only worth taking when the bracket is what breaks and what
+    /// follows it has room. A hug prints the arguments flat around the
+    /// bracket, so a call whose hugged parts are too wide prints `ifThenElse (`
+    /// on one line, the condition indented under it, and
+    /// `) (toYuan .lstbal) (toYuan .balance)` stranded after the `)`. That
+    /// only beats the width by moving text to the left of a broken bracket,
+    /// which is where a reader stops counting arguments. Such a call uses the
+    /// ordinary argument layout, which packs them. A comment on the argument's
+    /// own line (after its bracket opens, before it closes) is left to the
+    /// bracket, which breaks; one deeper inside belongs to an element of it.
     fn hugs_last_arg(&self, n: &SyntaxNode) -> bool {
-        n.children().last().is_some_and(|l| {
-            matches!(l.kind(), K::RecordExpr | K::ListExpr | K::ParenExpr)
-                && !l.children_with_tokens().any(|e| e.kind() == K::Comment)
-        })
+        let Some(last) = n.children().last() else {
+            return false;
+        };
+        if !matches!(last.kind(), K::RecordExpr | K::ListExpr | K::ParenExpr)
+            || last.children_with_tokens().any(|e| e.kind() == K::Comment)
+        {
+            return false;
+        }
+        // Only a paren can be squeezed like this: `( … )` has no line-break
+        // points of its own beyond the contents, so hugging it is how a
+        // predicate argument gets the width. Records and lists always break
+        // at their `,`s and read fine that way, and a record holding a field
+        // that must break (a long value) would fail a flat measurement for a
+        // reason that has nothing to do with the hug.
+        if last.kind() != K::ParenExpr {
+            return true;
+        }
+        let Ok(args) = self.args(n) else {
+            return false;
+        };
+        let Some((_, hugged)) = args.split_first() else {
+            return false;
+        };
+        let flat = concat(
+            hugged
+                .iter()
+                .flat_map(|a| [text(" "), a.clone()])
+                .collect::<Vec<_>>(),
+        );
+        fits_flat(&flat, WIDTH)
+    }
+
+    /// An application's arguments, printed, head first.
+    fn args(&self, n: &SyntaxNode) -> Result<Vec<Doc>, Bail> {
+        sig(n)
+            .iter()
+            .map(|e| self.expr(&node(Some(e))?, false))
+            .collect()
     }
 
     // ── expressions ──────────────────────────────────────────
@@ -623,11 +671,33 @@ impl Fmt<'_> {
         let [body] = tail.get(1..).ok_or(Bail)? else {
             return Err(Bail);
         };
+        let body = node(Some(body))?;
+        let arrow = self.tok(&token(tail.first(), K::FatArrow)?);
+        // A pipeline body moves down after the arrow when it does not fit, the
+        // way any other long body does. Hugging it would leave `=> head` on
+        // the `=` line however wide it grew: the stages break after `&`, but
+        // nothing measures the first line, so it could run past the width.
+        // The stages then sit flush with the head (see [`bin`](Fmt::bin)).
+        if is_pipeline(&body) {
+            let gap = has_comment_before(&sig_tokens(&body).next().ok_or(Bail)?);
+            let d = indent(concat(vec![Doc::Line, self.expr(&body, top)?]));
+            let moved = if gap || d.forces_break() {
+                broken_group(d)
+            } else {
+                group(d)
+            };
+            return Ok(concat(vec![
+                self.lambda_param(head)?,
+                text(" "),
+                arrow,
+                moved,
+            ]));
+        }
         Ok(concat(vec![
             self.lambda_param(head)?,
             text(" "),
-            self.tok(&token(tail.first(), K::FatArrow)?),
-            self.rhs(&node(Some(body))?, top)?,
+            arrow,
+            self.rhs(&body, top)?,
         ]))
     }
 
@@ -905,10 +975,7 @@ impl Fmt<'_> {
     /// follow, breaking only where the next one would not fit. With a
     /// bracketed last argument, only that argument breaks.
     fn app(&self, n: &SyntaxNode) -> R {
-        let args = sig(n)
-            .iter()
-            .map(|e| self.expr(&node(Some(e))?, false))
-            .collect::<Result<Vec<_>, _>>()?;
+        let args = self.args(n)?;
         let Some((head, rest)) = args.split_first() else {
             return Err(Bail);
         };
@@ -942,8 +1009,21 @@ impl Fmt<'_> {
         for (op, e) in ops.iter().zip(rest) {
             tail.extend([Doc::Line, self.tok(op), text(" "), self.expr(e, false)?]);
         }
-        let d = concat(vec![self.expr(first, false)?, indent(concat(tail))]);
-        let force = has_inner_comment(n) || (top && is_pipe(&op) && ops.len() >= 2);
+        // A pipeline that is a lambda's body is moved down by the lambda
+        // (see [`lambda`](Fmt::lambda)), which indents it already: indenting
+        // the stages again would put them under the head instead of beside
+        // it, and `=>` / head / `& stage` reads as three peers.
+        let flush = n.parent().is_some_and(|p| p.kind() == K::Lambda);
+        let stages = concat(tail);
+        let d = concat(vec![
+            self.expr(first, false)?,
+            if flush { stages } else { indent(stages) },
+        ]);
+        // A definition body's pipeline of two or more stages always shows one
+        // stage per line, which is the shape the reference writes. A lambda's
+        // body is not that: it is one expression among the definition's, and
+        // a short one belongs on the arrow's line.
+        let force = has_inner_comment(n) || (top && !flush && is_pipe(&op) && ops.len() >= 2);
         Ok(if force { broken_group(d) } else { group(d) })
     }
 

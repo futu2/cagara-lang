@@ -61,6 +61,27 @@ pub fn broken_group(d: Doc) -> Doc {
     }
 }
 
+/// Whether `doc` prints on one line within `width`: the same test the printer
+/// makes for a group at column 0, which is the room a doc has when nothing
+/// precedes it.
+///
+/// The formatter uses it to decide *before* printing whether a bracketed
+/// argument can stay between its brackets, so it must agree with the printer
+/// rather than approximate: this walks the doc exactly as `fits` does.
+pub fn fits_flat(doc: &Doc, width: usize) -> bool {
+    if doc.forces_break() {
+        return false;
+    }
+    let p = Printer {
+        out: String::new(),
+        width,
+        col: 0,
+        at_line_start: true,
+        suffix: Vec::new(),
+    };
+    p.fits(0, doc, &[])
+}
+
 /// `items` separated by spaces that become line breaks only where the next
 /// item would not fit: a greedy fill.
 ///

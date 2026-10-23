@@ -928,7 +928,7 @@ pub fn symbols(ws: &Workspace) -> Vec<DocumentSymbol> {
 ///
 /// Column completion checks a speculative workspace snapshot, leaving the
 /// shared live module graph untouched.
-pub fn completion(ws: &Workspace, pos: Position) -> Vec<CompletionItem> {
+pub fn completion(ws: &mut Workspace, pos: Position) -> Vec<CompletionItem> {
     let text = &ws.modules[ws.root].text;
     let p = Positions::new(text);
     let Some(offset) = p.offset(pos) else {
@@ -937,7 +937,7 @@ pub fn completion(ws: &Workspace, pos: Position) -> Vec<CompletionItem> {
     match dot_context(text, offset) {
         Dot::Column(start, end) => field_completion(ws, start, end),
         Dot::Member(alias) => {
-            let ws: &Workspace = ws;
+            let ws: &Workspace = &*ws;
             let Some(Binding::Module(t)) = ws.modules[ws.root].scope.get(&alias) else {
                 return vec![];
             };
@@ -1002,18 +1002,13 @@ fn dot_context(text: &str, offset: usize) -> Dot {
 
 /// Columns for the reference at `start..end`: the file is checked with
 /// `PROBE_FIELD` written there, which records what its row is known to
-/// have (a table's columns, a join side's, or those used next to it), and
-/// then the text is restored. Nothing if the row is unknown.
-fn field_completion(ws: &Workspace, start: usize, end: usize) -> Vec<CompletionItem> {
-    let mut snapshot = ws.snapshot();
-    let root = snapshot.root;
-    let original = snapshot.modules[root].text.clone();
+/// have (a table's columns, a join side's, or those used next to it).
+/// Nothing if the row is unknown. The probe is a throwaway module in the live
+/// database, so it does not rebuild this graph the way `snapshot()` did.
+fn field_completion(ws: &mut Workspace, start: usize, end: usize) -> Vec<CompletionItem> {
+    let original = &ws.modules[ws.root].text;
     let probed = format!("{}{PROBE_FIELD}{}", &original[..start], &original[end..]);
-    let mut fields: Vec<(String, String)> = Vec::new();
-    if snapshot.set_source(root, probed) {
-        let tc = check(&snapshot);
-        fields = tc.probe_fields(root).map(<[_]>::to_vec).unwrap_or_default();
-    }
+    let fields: Vec<(String, String)> = ws.probe_fields(&probed).unwrap_or_default();
     fields
         .into_iter()
         .filter(|(n, _)| n != PROBE_FIELD)
@@ -1694,7 +1689,7 @@ mod tests {
     fn let_bindings_hover_and_navigate() {
         let src = "users : query { id = int, age = int } = table \"p\" \"users\"\n\
                    q = users & select { x = let age2 = .age in age2 + 1 }\n";
-        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
         let use_pos = at_in(src, "age2 + 1", 0);
         let h = hover(&ws, use_pos).unwrap_or_default();
         assert!(h.contains("age2") && h.contains("local binding"), "{h}");
@@ -1707,7 +1702,7 @@ mod tests {
         assert_eq!(rs.len(), 2, "binding and use: {rs:?}");
         // Completion inside the body sees the binding.
         let p = Positions::new(src).position(src.find("in age2").expect("body text") + 3);
-        let labels: Vec<String> = completion(&ws, p).into_iter().map(|i| i.label).collect();
+        let labels: Vec<String> = completion(&mut ws, p).into_iter().map(|i| i.label).collect();
         assert!(labels.iter().any(|l| l == "age2"), "{labels:?}");
     }
 
@@ -1746,7 +1741,7 @@ mod tests {
         let src = "users : query { id = int, name = string } = table \"p\" \"users\"\n\
                    twice = (x : expr r int) => x + x\n\
                    q = users & select { n = twice .id }\n";
-        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
         // A use jumps to the name inside the parentheses, not to the `(`.
         let d = definition(&ws, at_in(src, "x + x", 0));
         assert_eq!(d.len(), 1);
@@ -1766,7 +1761,7 @@ mod tests {
         let h = one_line(hover(&ws, at_in(src, "x : expr", 0)).unwrap());
         assert!(h.contains("local binding"), "{h}");
         // The parameter is offered while completing the body.
-        let labels = completion(&ws, at_in(src, "x + x", 0))
+        let labels = completion(&mut ws, at_in(src, "x + x", 0))
             .into_iter()
             .map(|i| i.label)
             .collect::<Vec<_>>();
@@ -1812,8 +1807,8 @@ mod tests {
     }
 
     fn fields(src: &str, p: Position) -> Vec<String> {
-        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
-        let items = completion(&ws, p);
+        let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        let items = completion(&mut ws, p);
         assert!(
             items
                 .iter()
@@ -1847,9 +1842,9 @@ mod tests {
         let src = "users : query { id = int, age = int } = table \"p\" \"users\"\n\
                    c = users & select { n = .\n";
         assert_eq!(fields(src, pos(1, 26)), ["id", "age"]);
-        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
         let before = diagnostics(&ws);
-        completion(&ws, pos(1, 26));
+        completion(&mut ws, pos(1, 26));
         assert_eq!(diagnostics(&ws), before);
     }
 
@@ -1875,9 +1870,9 @@ mod tests {
 
     #[test]
     fn completion_lists_scope_and_parameters() {
-        let ws = ws();
-        let labels = |p| {
-            completion(&ws, p)
+        let mut ws = ws();
+        let mut labels = |p| {
+            completion(&mut ws, p)
                 .into_iter()
                 .map(|i| i.label)
                 .collect::<Vec<_>>()
@@ -1898,9 +1893,9 @@ mod tests {
     #[test]
     fn projection_of_a_value_offers_nothing() {
         let src = "r = { a = 1 }\ns = r.\nt = (r).\n";
-        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
-        assert!(completion(&ws, pos(1, 6)).is_empty());
-        assert!(completion(&ws, pos(2, 8)).is_empty());
+        let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        assert!(completion(&mut ws, pos(1, 6)).is_empty());
+        assert!(completion(&mut ws, pos(2, 8)).is_empty());
     }
 
     #[test]
@@ -1910,14 +1905,14 @@ mod tests {
         std::fs::write(dir.join("lib.cagara"), "helper = .age >= 21\n").unwrap();
         let main = dir.join("main.cagara");
         let src = "import \"lib.cagara\" as lib\nq = lib.helper\nr = lib.\n";
-        let ws = Workspace::open_with(&main, src.to_string());
+        let mut ws = Workspace::open_with(&main, src.to_string());
         let h = hover(&ws, pos(1, 10)).unwrap();
         assert!(h.contains("helper : "), "{h}");
         let d = definition(&ws, pos(1, 10));
         assert_eq!(d.len(), 1);
         assert!(d[0].0.ends_with("lib.cagara"), "{d:?}");
         assert_eq!(d[0].1, range(0, 0, 6));
-        let ls: Vec<String> = completion(&ws, pos(2, 8))
+        let ls: Vec<String> = completion(&mut ws, pos(2, 8))
             .into_iter()
             .map(|i| i.label)
             .collect();
@@ -1949,10 +1944,10 @@ mod tests {
         // renamed columns must be offered either way.
         for stages in ["", "  & order [asc .label]\n  & limit 10\n"] {
             let src = format!("{head}{stages}{tail}");
-            let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.clone());
+            let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.clone());
             let line = src.lines().count() as u32 - 1;
             let col = src.lines().nth(line as usize).unwrap().chars().count() as u32 - 1;
-            let labels: Vec<String> = completion(&ws, pos(line, col))
+            let labels: Vec<String> = completion(&mut ws, pos(line, col))
                 .into_iter()
                 .map(|i| i.label)
                 .collect();

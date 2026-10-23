@@ -17,6 +17,16 @@ use std::sync::Arc;
 pub const PRELUDE_SRC: &str = include_str!("../../../prelude.cagara");
 pub(crate) const PRELUDE_PATH: &str = "<prelude>";
 
+/// Where the speculative probe module of [`Workspace::probe_fields`] is filed.
+/// It is never rendered, saved, or looked up by path.
+const PROBE_PATH: &str = "<probe>";
+
+/// The one reusable module input a workspace keeps for column probes.
+struct ProbeSlot {
+    file: SourceFile,
+    input: ModuleInput,
+}
+
 /// The first line that turns the implicit prelude import off.
 ///
 /// A comment rather than a directive, because there is no pragma syntax to
@@ -175,13 +185,22 @@ pub struct Workspace {
     /// Unsaved contents supplied by an editor. These take precedence over
     /// files on disk while imports are loaded.
     overlays: HashMap<PathBuf, String>,
-    /// Immutable compilation result for the current root and source graph.
-    /// Invalidated by the mutation methods below.
-    compile_cache: RefCell<Option<CachedCompilation>>,
-    /// The last compilation remains available after an accepted edit so the
-    /// compiler can reuse definitions whose source and checked dependencies
-    /// are unchanged.
-    previous_compile_cache: RefCell<Option<CachedCompilation>>,
+    /// One throwaway module input, reused for speculative column probes (see
+    /// [`Workspace::probe_fields`]).
+    probe: Option<ProbeSlot>,
+    /// Immutable compilation results, keyed by root module.
+    ///
+    /// Keyed by root rather than held in one slot because an editor asks for
+    /// the diagnostics of every open document in turn, switching the root
+    /// each time: a single slot threw away the compilation of the document
+    /// that was just published, so publishing N open documents cost N full
+    /// compilations whenever any of them had been edited. A root keeps its
+    /// entry until a module it (transitively) imports changes.
+    compile_cache: RefCell<HashMap<usize, CachedCompilation>>,
+    /// The last compilation of each root remains available after an accepted
+    /// edit so the compiler can reuse definitions whose source and checked
+    /// dependencies are unchanged.
+    previous_compile_cache: RefCell<HashMap<usize, CachedCompilation>>,
 }
 
 impl Workspace {
@@ -198,8 +217,9 @@ impl Workspace {
             by_path: HashMap::new(),
             stack: Vec::new(),
             overlays: HashMap::new(),
-            compile_cache: RefCell::new(None),
-            previous_compile_cache: RefCell::new(None),
+            probe: None,
+            compile_cache: RefCell::new(HashMap::new()),
+            previous_compile_cache: RefCell::new(HashMap::new()),
         };
         ws.add(PathBuf::from(PRELUDE_PATH), PRELUDE_SRC.to_string());
         ws
@@ -295,14 +315,14 @@ impl Workspace {
     }
 
     /// Select a loaded module as the root used by analysis and normalization.
+    ///
+    /// Switching the root does not invalidate any compilation: no module text
+    /// changed, and each root keeps its own cache entry.
     pub fn set_root_path(&mut self, path: &Path) -> bool {
         let path = normalize(path);
         let Some(&root) = self.by_path.get(&path) else {
             return false;
         };
-        if self.root != root {
-            self.invalidate_compile_cache();
-        }
         self.root = root;
         true
     }
@@ -312,17 +332,88 @@ impl Workspace {
         self.by_path.get(&normalize(path)).copied()
     }
 
-    /// Rebuild this graph from the loaded module texts. Used for speculative
-    /// editor queries so probing a field never mutates the live workspace.
-    pub fn snapshot(&self) -> Self {
-        let root = self.modules[self.root].path.clone();
-        let buffers: HashMap<_, _> = self
+    /// Re-read every module that came from disk, keeping the salsa database.
+    ///
+    /// A save or a watched-file event may have changed a file that is not open
+    /// in the editor, so the graph has to be refreshed. Rebuilding it from
+    /// scratch (`open_with_buffers`) throws away every memoized parse and check
+    /// — and with them the compilation of every open document, which then has
+    /// to be redone on the next publish. Re-reading the files and patching the
+    /// ones whose text actually differs keeps all of that.
+    ///
+    /// Returns `false` when the graph can no longer describe the files (a
+    /// module changed its imports, or a file can no longer be read), in which
+    /// case the caller must rebuild it.
+    pub fn reload_from_disk(&mut self) -> bool {
+        let from_disk: Vec<(usize, PathBuf)> = self
             .modules
             .iter()
-            .filter(|m| m.path != Path::new(PRELUDE_PATH))
-            .map(|m| (m.path.clone(), m.text.clone()))
+            .enumerate()
+            .filter(|(_, m)| !m.path.to_string_lossy().starts_with('<'))
+            .filter(|(_, m)| !self.overlays.contains_key(&m.path))
+            .map(|(k, m)| (k, m.path.clone()))
             .collect();
-        Self::open_with_buffers(&root, self.modules[self.root].text.clone(), &buffers)
+        for (k, path) in from_disk {
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    if text != self.modules[k].text && !self.set_source(k, text) {
+                        return false;
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+        true
+    }
+
+    /// The columns the row at `PROBE_FIELD` is known to have, for `text` in
+    /// place of the root's own text.
+    ///
+    /// Column completion has to check a hypothetical text (the one with a
+    /// marker written where the cursor is) without disturbing the module graph
+    /// the user is editing. It goes to a dedicated module input in *this*
+    /// database rather than [`Workspace::snapshot`], which built a whole new
+    /// database and re-added every module — parsing the prelude and the file
+    /// again for each keystroke typed after a `.`. Here only the probe module
+    /// is parsed and checked, and the modules it imports are the ones already
+    /// memoized for the real graph, so a probe costs one module check and
+    /// leaves the live queries untouched.
+    ///
+    /// Takes `&mut self` because writing the probe's text is a write to this
+    /// database, exactly like [`Workspace::set_source`]: a copy of the storage
+    /// handle must not be used for that.
+    pub fn probe_fields(&mut self, text: &str) -> Option<Vec<(String, String)>> {
+        let root = self.inputs[self.root];
+        let prelude = *root.prelude(&self.db);
+        let imports = root.imports(&self.db).clone();
+        let (file, input) = match self.probe {
+            Some(ProbeSlot { file, input }) => (file, input),
+            None => {
+                let file = SourceFile::new(&self.db, text.to_string());
+                let input = ModuleInput::new(
+                    &self.db,
+                    self.modules.len(),
+                    PathBuf::from(PROBE_PATH),
+                    file,
+                    prelude,
+                    imports.clone(),
+                );
+                self.probe = Some(ProbeSlot { file, input });
+                (file, input)
+            }
+        };
+        // The root, and with it the imports a probe must see, may have changed
+        // since the slot was made.
+        if *input.prelude(&self.db) != prelude {
+            input.set_prelude(&mut self.db).to(prelude);
+        }
+        if input.imports(&self.db).as_slice() != imports.as_slice() {
+            input.set_imports(&mut self.db).to(imports);
+        }
+        if file.text(&self.db) != text {
+            file.set_text(&mut self.db).to(text.to_string());
+        }
+        crate::check::probe_fields(&self.db, input)
     }
 
     /// Load one file as a module, or return the module already loaded for that
@@ -403,7 +494,9 @@ impl Workspace {
         if imports(&parsed.module) != imports(&self.modules[m].module) {
             return false;
         }
-        self.invalidate_compile_cache();
+        // Only roots that can see `m` need recompiling; a document in a file
+        // that shares no module with this one keeps its cached compilation.
+        self.invalidate_compile_caches(m);
         let file = *self.inputs[m].file(&self.db);
         // Set the file's text without going through a helper: this changes
         // what the queries parse but nothing else, so `Workspace` must update
@@ -432,29 +525,77 @@ impl Workspace {
     pub(crate) fn compilation_cache(&self) -> Option<Compilation> {
         self.compile_cache
             .borrow()
-            .as_ref()
+            .get(&self.root)
             .map(|cached| cached.compilation.clone())
     }
 
     pub(crate) fn compilation_diagnostics(&self) -> Option<Vec<Diag>> {
         self.compile_cache
             .borrow()
-            .as_ref()
+            .get(&self.root)
             .map(|cached| cached.compilation.diagnostics.clone())
     }
 
     pub(crate) fn set_compilation_cache(&self, compilation: CachedCompilation) {
-        *self.compile_cache.borrow_mut() = Some(compilation);
+        self.compile_cache
+            .borrow_mut()
+            .insert(self.root, compilation);
     }
 
     pub(crate) fn take_previous_compilation(&self) -> Option<CachedCompilation> {
-        self.previous_compile_cache.borrow_mut().take()
+        self.previous_compile_cache.borrow_mut().remove(&self.root)
     }
 
-    fn invalidate_compile_cache(&mut self) {
-        if let Some(previous) = self.compile_cache.get_mut().take() {
-            *self.previous_compile_cache.get_mut() = Some(previous);
+    /// Drop the compilation of every root that can see module `m`.
+    ///
+    /// A root that cannot reach `m` — a document in another file that imports
+    /// none of the same modules — is unaffected by the edit, so its cached
+    /// compilation is still exactly right and is kept. The dropped entries are
+    /// retained as *previous* compilations, which is what lets the compiler
+    /// reuse the definitions an edit did not touch.
+    fn invalidate_compile_caches(&mut self, m: usize) {
+        let stale: Vec<usize> = self
+            .compile_cache
+            .borrow()
+            .keys()
+            .copied()
+            .filter(|&root| self.reaches(root, m))
+            .collect();
+        if stale.is_empty() {
+            return;
         }
+        let mut cache = self.compile_cache.borrow_mut();
+        let mut previous = self.previous_compile_cache.borrow_mut();
+        for root in stale {
+            if let Some(cached) = cache.remove(&root) {
+                previous.insert(root, cached);
+            }
+        }
+    }
+
+    /// Whether module `from` is `target` or (transitively) imports it.
+    fn reaches(&self, from: usize, target: usize) -> bool {
+        if from == target {
+            return true;
+        }
+        let mut seen = vec![false; self.inputs.len()];
+        let mut stack = vec![from];
+        while let Some(k) = stack.pop() {
+            if k == target {
+                return true;
+            }
+            if std::mem::replace(&mut seen[k], true) {
+                continue;
+            }
+            let input = self.inputs[k];
+            if let Some(prelude) = input.prelude(&self.db) {
+                stack.push(*prelude.index(&self.db));
+            }
+            for (_, imported) in input.imports(&self.db).iter() {
+                stack.push(*imported.index(&self.db));
+            }
+        }
+        false
     }
 
     fn rebuild_diags(&mut self) {
@@ -665,6 +806,87 @@ mod tests {
             .iter()
             .map(|m| m.path.display().to_string())
             .collect()
+    }
+
+    /// A save reloads files in place instead of rebuilding the graph.
+    #[test]
+    fn reloading_from_disk_keeps_the_database_and_its_caches() {
+        let dir = PathBuf::from("/tmp/cagara-reload");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.cagara");
+        let lib = dir.join("lib.cagara");
+        std::fs::write(&lib, "value = 1\n").unwrap();
+        let root = "import \"lib.cagara\" as lib\nqa = lib.value\n";
+        std::fs::write(&a, root).unwrap();
+
+        // Only the root is open in the editor; `lib` comes from disk.
+        let buffers = HashMap::from([(a.clone(), root.to_string())]);
+        let mut ws = Workspace::open_with_buffers(&a, root.to_string(), &buffers);
+        let lib_module = ws.module_for_path(&lib).unwrap();
+        let _ = crate::compile_diagnostics(&ws);
+        assert!(ws.compilation_diagnostics().is_some());
+
+        // Another root whose compilation must survive the reload.
+        std::fs::write(&a, root).unwrap();
+
+        std::fs::write(&lib, "value = 2\n").unwrap();
+        assert!(ws.reload_from_disk(), "a plain text change reloads in place");
+        assert_eq!(ws.modules[lib_module].text, "value = 2\n");
+        assert!(crate::check(&ws).errors().is_empty(), "{:?}", ws.diags);
+
+        // An import changed, so the graph no longer describes the files and
+        // the caller has to rebuild it.
+        std::fs::write(&lib, "import \"other.cagara\"\nvalue = 3\n").unwrap();
+        assert!(!ws.reload_from_disk(), "an import change needs a rebuild");
+    }
+
+    /// Editing one open document must not throw away another's compilation.
+    ///
+    /// The language server publishes every open document's diagnostics after
+    /// each edit, switching the root each time; a single-slot cache made that
+    /// N full compilations per keystroke.
+    #[test]
+    fn an_edit_keeps_the_compilations_of_unrelated_roots() {
+        let a = PathBuf::from("/tmp/cagara-cache/a.cagara");
+        let b = PathBuf::from("/tmp/cagara-cache/b.cagara");
+        let lib = PathBuf::from("/tmp/cagara-cache/lib.cagara");
+        let buffers = HashMap::from([
+            (
+                a.clone(),
+                "import \"lib.cagara\" as lib\nqa = lib.value\n".to_string(),
+            ),
+            (
+                b.clone(),
+                "import \"lib.cagara\" as lib\nqb = lib.value\n".to_string(),
+            ),
+            (lib.clone(), "value = 1\n".to_string()),
+        ]);
+        let mut ws = Workspace::open_with_buffers(&a, buffers[&a].clone(), &buffers);
+
+        // Compile both roots, then edit A.
+        assert!(ws.set_root_path(&a));
+        let _ = crate::compile_diagnostics(&ws);
+        assert!(ws.compilation_diagnostics().is_some(), "A compiled");
+        assert!(ws.set_root_path(&b));
+        let _ = crate::compile_diagnostics(&ws);
+        assert!(ws.compilation_diagnostics().is_some(), "B compiled");
+
+        let ma = ws.module_for_path(&a).unwrap();
+        assert!(ws.set_source(ma, buffers[&a].replace("qa = ", "qa2 = ")));
+        assert!(ws.set_root_path(&b));
+        assert!(
+            ws.compilation_diagnostics().is_some(),
+            "editing A dropped B's compilation"
+        );
+        assert!(ws.set_root_path(&a));
+        let _ = crate::compile_diagnostics(&ws);
+
+        // Editing the shared import invalidates both, since both can see it.
+        let mlib = ws.module_for_path(&lib).unwrap();
+        assert!(ws.set_source(mlib, "value = 2\n".to_string()));
+        assert!(ws.compilation_diagnostics().is_none(), "A sees lib");
+        assert!(ws.set_root_path(&b));
+        assert!(ws.compilation_diagnostics().is_none(), "B sees lib");
     }
 
     #[test]

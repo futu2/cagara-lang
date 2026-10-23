@@ -73,6 +73,7 @@ dependencies = [
  "cagara-fmt",
  "cagara-hir",
  "cagara-syntax",
+ "crossbeam-channel",
  "line-index",
  "lsp-server",
  "lsp-types",

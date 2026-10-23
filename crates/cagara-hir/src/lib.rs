@@ -12,7 +12,7 @@ pub mod workspace;
 
 mod elaborate;
 mod normalize;
-pub use check::{check, TypeCheck};
+pub use check::{check, probe_fields, TypeCheck};
 pub use checked::{CheckedExpr, ExprKind};
 pub use compile::{
     compile, compile_checked, compile_diagnostics, compile_input, root_queries,

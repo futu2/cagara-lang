@@ -169,13 +169,47 @@ route, which is exactly what the migration removed.
 - The import measurements use a namespace alias. An unaliased import merges
   exported names into the importing module's scope, which remains proportional
   to the number of exported names when that scope is rebuilt.
-- Field completion uses a speculative `Workspace::snapshot` that rebuilds
-  the source graph. These measurements do not establish fast field completion
-  over a million-table catalog. Large symbol lists and error-heavy files are
-  also outside this benchmark.
+- Field completion checks a hypothetical text (the file with a marker where
+  the cursor is) in a dedicated module input inside the live database, so the
+  modules it imports are the ones already memoized and the live graph is not
+  rebuilt. It costs one module check of the file — the same work as editing it
+  — so these measurements still do not establish fast field completion over a
+  million-table catalog. Large symbol lists and error-heavy files are also
+  outside this benchmark.
 
 For large generated catalogs, keeping definitions in imported modules allows
 small query edits to use the existing cache effectively. Supporting frequent
-edits inside a million-definition module or cheap speculative completion would
-require finer-grained parsing/inference or shared speculative snapshots; neither
-is a property of the current implementation.
+edits inside a million-definition module would require finer-grained
+parsing/inference: a module's check is one query, so any edit inside it
+re-checks the whole module. That granularity, not a missing cache, is what the
+language server's latency figures below run into.
+
+## The language server
+
+The measurements above are of the compiler API. An editor adds transport, and
+it used to add something worse: one thread that checked a change before reading
+the next message, a compilation cache with a single slot, and a graph rebuild on
+every save. Measured on 2026-10-23 with release builds on an AMD Ryzen 9 5900HX,
+rustc 1.99.1, over real stdio LSP: a generated 1000-definition file (125 KB)
+with three smaller documents open, and the same file with 100 definitions.
+
+| Scenario | 100 defs before | after | 1000 defs before | after |
+| --- | ---: | ---: | ---: | ---: |
+| Open, to first diagnostics | 23 ms | 24 ms | 193 ms | 192 ms |
+| Keystroke, to its own diagnostics | 22 ms | 22 ms | 227 ms | 227 ms |
+| Keystroke, until every document settled | 173 ms | 150 ms | 378 ms | 228 ms |
+| Ten keystrokes typed in a burst | 324 ms | 152 ms | 2.33 s | 392 ms |
+| Save, four documents open | 30 ms | 0.1 ms | 353 ms | 0.5 ms |
+| Column completion, a new text | 37 ms | 16 ms | 345 ms | 163 ms |
+| Column completion, the same text again | 31 ms | 0.2 ms | 343 ms | 0.3 ms |
+
+A settled column of 150 ms is the publish debounce, not work: the small file
+has nothing left to do once that timer fires.
+
+Two things did not move, and they are the same thing: opening a file and one
+keystroke each cost a whole-file check, because a module is the unit of
+incrementality. The burst and save figures were fixed by the server (collapsing
+superseded keystrokes onto an analysis thread, and keying the compilation cache
+by root instead of rebuilding it), and completion by probing the live database.
+Making one keystroke cost one definition rather than one file is the remaining
+work, and it needs per-definition parsing and inference, not more threads.

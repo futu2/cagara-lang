@@ -493,6 +493,19 @@ pub fn check(ws: &Workspace) -> TypeCheck {
     out
 }
 
+/// The columns a column probe at [`PROBE_FIELD`] reported, if any.
+///
+/// The language server's completion writes [`PROBE_FIELD`] where the cursor is
+/// and asks what row that position sees. The probe module is a throwaway input
+/// in the caller's database, so this is the same memoized per-module check
+/// every other query uses, and the live module graph is untouched.
+pub fn probe_fields(db: &dyn salsa::Database, input: ModuleInput) -> Option<Vec<(String, String)>> {
+    module_check(db, input)
+        .probe_fields
+        .as_ref()
+        .map(|(_, fields)| fields.clone())
+}
+
 /// Check one module (memoized). Dependencies are checked first; only their
 /// self-contained schemes are used.
 #[salsa::tracked(returns(ref))]

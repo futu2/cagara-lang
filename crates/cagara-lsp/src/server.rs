@@ -4,6 +4,7 @@
 
 use crate::{analysis, uri};
 use cagara_hir::workspace::Workspace;
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
@@ -25,6 +26,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub(crate) type Res<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -35,6 +37,8 @@ struct Doc {
 }
 
 struct State {
+    /// Open documents, keyed by their URI string (`Uri` has interior
+    /// mutability, so it is not a key itself).
     docs: HashMap<String, Doc>,
     /// All open buffers share one module graph. The selected root is changed
     /// for each request so imported unsaved files are visible everywhere.
@@ -110,6 +114,14 @@ pub fn run() -> Res<()> {
 }
 
 /// Initialize, then handle messages until shutdown or disconnect.
+///
+/// Two threads: this one only reads messages and routes them, and an analysis
+/// thread owns the workspace and does the work. That split is what keeps
+/// typing from queueing: while a document is being checked, further keystrokes
+/// arrive and pile up here instead of waiting to be read, and [`next_batch`]
+/// then drops the ones a later keystroke has already overwritten. Analysing a
+/// burst of ten keystrokes used to cost ten checks of the file; it now costs
+/// one, of the text the user is actually looking at.
 fn serve(conn: &Connection) -> Res<()> {
     let caps = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -126,12 +138,14 @@ fn serve(conn: &Connection) -> Res<()> {
         ..Default::default()
     };
     conn.initialize(serde_json::to_value(caps)?)?;
-    // Keyed by the URI string: `Uri` has interior mutability.
-    let mut state = State::new();
-    // A change is published for its own document immediately. Other open
-    // documents may import it, so their diagnostics are refreshed once the
-    // typing pauses. Recompiling every open document on every keystroke made
-    // each edit scale with the number of editors.
+    let (work, jobs) = crossbeam_channel::unbounded::<Work>();
+    let sender = conn.sender.clone();
+    let worker = std::thread::Builder::new()
+        .name("cagara-analysis".into())
+        .spawn(move || analyse(jobs, sender))?;
+    // A change is published for its own document immediately, so the file
+    // being edited shows its diagnostics without waiting. Other open documents
+    // may import it, so theirs are refreshed once the typing pauses.
     let debounce = Duration::from_millis(150);
     let mut publish_at: Option<Instant> = None;
     loop {
@@ -140,13 +154,13 @@ fn serve(conn: &Connection) -> Res<()> {
             .unwrap_or(Duration::from_secs(3600));
         let msg = match conn.receiver.recv_timeout(timeout) {
             Ok(msg) => msg,
-            Err(_) if publish_at.is_some_and(|at| Instant::now() >= at) => {
-                publish_all(conn, &mut state)?;
+            Err(RecvTimeoutError::Timeout) => {
                 publish_at = None;
+                let _ = work.send(Work::Publish);
                 continue;
             }
             // Disconnected; the writer thread will end with it.
-            Err(_) => break,
+            Err(RecvTimeoutError::Disconnected) => break,
         };
         match msg {
             Message::Request(req) => {
@@ -154,40 +168,175 @@ fn serve(conn: &Connection) -> Res<()> {
                     break;
                 }
                 let Request { id, method, params } = req;
-                let r = catch_unwind(AssertUnwindSafe(|| request(&mut state, &method, params)));
-                let resp = match r {
+                let (reply, answer) = mpsc::channel();
+                if work
+                    .send(Work::Request {
+                        method: method.clone(),
+                        params,
+                        reply,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                let resp = match answer.recv() {
                     Ok(Ok(v)) => Response::new_ok(id, v),
                     Ok(Err((code, msg))) => Response::new_err(id, code as i32, msg),
-                    Err(p) => {
-                        rebuild(&mut state);
-                        let msg = format!("internal error in {method}: {}", panic_message(&*p));
-                        Response::new_err(id, ErrorCode::InternalError as i32, msg)
-                    }
+                    Err(_) => Response::new_err(
+                        id,
+                        ErrorCode::InternalError as i32,
+                        format!("internal error in {method}: analysis stopped"),
+                    ),
                 };
                 conn.sender.send(Message::Response(resp))?;
             }
             Message::Notification(n) => {
-                let method = n.method.clone();
-                match catch_unwind(AssertUnwindSafe(|| notification(conn, &mut state, n))) {
-                    Ok(Ok(needs_refresh)) => {
-                        if needs_refresh {
-                            publish_at = Some(Instant::now() + debounce);
-                        }
-                    }
-                    Ok(Err(e)) => eprintln!("cagara lsp: {method}: {e}"),
-                    Err(p) => {
-                        rebuild(&mut state);
-                        eprintln!(
-                            "cagara lsp: internal error in {method}: {}",
-                            panic_message(&*p)
-                        );
-                    }
+                // These four change the text the other documents are checked
+                // against, so every open document's diagnostics are refreshed
+                // once the stream goes quiet.
+                let refresh = matches!(
+                    n.method.as_str(),
+                    DidChangeTextDocument::METHOD
+                        | DidSaveTextDocument::METHOD
+                        | DidChangeWatchedFiles::METHOD
+                        | DidCloseTextDocument::METHOD
+                );
+                if work.send(Work::Notify(n)).is_err() {
+                    break;
+                }
+                if refresh {
+                    publish_at = Some(Instant::now() + debounce);
                 }
             }
             Message::Response(_) => {}
         }
     }
+    // The analysis thread ends when its channel closes.
+    drop(work);
+    let _ = worker.join();
     Ok(())
+}
+
+/// Work for the analysis thread.
+enum Work {
+    Request {
+        method: String,
+        params: serde_json::Value,
+        reply: mpsc::Sender<Result<serde_json::Value, Fail>>,
+    },
+    Notify(Notification),
+    /// Refresh the diagnostics of every open document.
+    Publish,
+}
+
+/// Everything already queued, with superseded document updates dropped.
+struct Batch {
+    notify: Vec<Notification>,
+    requests: Vec<Work>,
+    publish: bool,
+}
+
+/// The analysis thread: own the workspace, do the work, never read stdin.
+fn analyse(jobs: Receiver<Work>, sender: Sender<Message>) {
+    let mut state = State::new();
+    while let Some(batch) = next_batch(&jobs) {
+        for n in batch.notify {
+            let method = n.method.clone();
+            match catch_unwind(AssertUnwindSafe(|| notification(&sender, &mut state, n))) {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("cagara lsp: {method}: {e}"),
+                Err(p) => {
+                    rebuild(&mut state);
+                    eprintln!(
+                        "cagara lsp: internal error in {method}: {}",
+                        panic_message(&*p)
+                    );
+                }
+            }
+        }
+        for job in batch.requests {
+            let Work::Request {
+                method,
+                params,
+                reply,
+            } = job
+            else {
+                unreachable!("only requests are collected here");
+            };
+            let answer = match catch_unwind(AssertUnwindSafe(|| {
+                request(&mut state, &method, params)
+            })) {
+                Ok(result) => result,
+                Err(p) => {
+                    rebuild(&mut state);
+                    Err((
+                        ErrorCode::InternalError,
+                        format!("internal error in {method}: {}", panic_message(&*p)),
+                    ))
+                }
+            };
+            let _ = reply.send(answer);
+        }
+        if batch.publish {
+            if let Err(e) = publish_all(&sender, &mut state) {
+                eprintln!("cagara lsp: publish: {e}");
+            }
+        }
+    }
+}
+
+/// Wait for one message, then take everything else already queued.
+///
+/// Requests are all kept — each needs its own answer — but only the newest
+/// text of a document matters, so earlier `didChange`s for the same document
+/// are dropped: their text no longer exists anywhere, and checking it would
+/// only delay the text that does.
+fn next_batch(jobs: &Receiver<Work>) -> Option<Batch> {
+    let first = jobs.recv().ok()?;
+    let mut batch = Batch {
+        notify: Vec::new(),
+        requests: Vec::new(),
+        publish: false,
+    };
+    for work in std::iter::once(first).chain(jobs.try_iter()) {
+        match work {
+            Work::Notify(n) => batch.notify.push(n),
+            Work::Publish => batch.publish = true,
+            request @ Work::Request { .. } => batch.requests.push(request),
+        }
+    }
+    drop_superseded_changes(&mut batch.notify);
+    Some(batch)
+}
+
+/// Keep only the last `didChange` for each document.
+fn drop_superseded_changes(notifications: &mut Vec<Notification>) {
+    if notifications.len() < 2 {
+        return;
+    }
+    let uri_of = |n: &Notification| -> Option<String> {
+        if n.method != DidChangeTextDocument::METHOD {
+            return None;
+        }
+        n.params
+            .pointer("/textDocument/uri")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let mut last: HashMap<String, usize> = HashMap::new();
+    for (i, n) in notifications.iter().enumerate() {
+        if let Some(uri) = uri_of(n) {
+            last.insert(uri, i);
+        }
+    }
+    let mut kept = Vec::with_capacity(notifications.len());
+    for (i, n) in notifications.drain(..).enumerate() {
+        let superseded = uri_of(&n).is_some_and(|uri| last.get(&uri) != Some(&i));
+        if !superseded {
+            kept.push(n);
+        }
+    }
+    *notifications = kept;
 }
 
 /// A panic may have left a workspace half-updated (completion edits the
@@ -291,7 +440,7 @@ fn request(
             let key = doc_key(&tp.text_document.uri);
             let items = state
                 .select(&key)
-                .then(|| analysis::completion(&state.ws, tp.position));
+                .then(|| analysis::completion(&mut state.ws, tp.position));
             json(serde_json::to_value(items.map(CompletionResponse::Array)))
         }
         Formatting::METHOD => {
@@ -309,29 +458,29 @@ fn request(
     }
 }
 
-fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<bool> {
+fn notification(sender: &Sender<Message>, state: &mut State, n: Notification) -> Res<()> {
     match n.method.as_str() {
         DidOpenTextDocument::METHOD => {
             let p: lsp_types::DidOpenTextDocumentParams = serde_json::from_value(n.params)?;
             let Some(path) = uri::to_path(&p.text_document.uri) else {
-                return Ok(false);
+                return Ok(());
             };
             let path = path.canonicalize().unwrap_or(path);
             let text = p.text_document.text;
             let key = doc_key(&p.text_document.uri);
             state.docs.insert(key, Doc { path, text });
             state.rebuild();
-            publish_all(conn, state)?;
-            Ok(false)
+            publish_all(sender, state)?;
+            Ok(())
         }
         DidChangeTextDocument::METHOD => {
             let p: lsp_types::DidChangeTextDocumentParams = serde_json::from_value(n.params)?;
             let Some(change) = p.content_changes.into_iter().last() else {
-                return Ok(false);
+                return Ok(());
             };
             let key = doc_key(&p.text_document.uri);
             let Some(doc) = state.docs.get_mut(&key) else {
-                return Ok(false);
+                return Ok(());
             };
             doc.text = change.text;
             // A keystroke usually does not change imports: patch that module
@@ -345,10 +494,10 @@ fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<bo
                 state.rebuild();
             }
             // The edited document's diagnostics are what the user is looking
-            // at; publish them now. The caller schedules a refresh of the
-            // other open documents after a short pause.
-            publish_doc(conn, state, &key)?;
-            Ok(true)
+            // at; publish them now. The other open documents are refreshed
+            // once the typing pauses (see `serve`).
+            publish_doc(sender, state, &key)?;
+            Ok(())
         }
         DidSaveTextDocument::METHOD => {
             let p: lsp_types::DidSaveTextDocumentParams = serde_json::from_value(n.params)?;
@@ -357,50 +506,61 @@ fn notification(conn: &Connection, state: &mut State, n: Notification) -> Res<bo
             {
                 doc.text = text;
             }
-            // A save may have changed an imported file that is not open, so
-            // reload the graph from disk while retaining all open overlays.
-            state.rebuild();
-            publish_all(conn, state)?;
-            Ok(false)
+            // A save may have changed an imported file that is not open.
+            // Re-read those files in place, which keeps the salsa memos and
+            // every open document's compilation; only an import that changed
+            // needs the graph rebuilt around it.
+            if !state.ws.reload_from_disk() {
+                state.rebuild();
+            }
+            publish_all(sender, state)?;
+            Ok(())
         }
         DidChangeWatchedFiles::METHOD => {
             let _: lsp_types::DidChangeWatchedFilesParams = serde_json::from_value(n.params)?;
-            state.rebuild();
-            publish_all(conn, state)?;
-            Ok(false)
+            if !state.ws.reload_from_disk() {
+                state.rebuild();
+            }
+            publish_all(sender, state)?;
+            Ok(())
         }
         DidCloseTextDocument::METHOD => {
             let p: lsp_types::DidCloseTextDocumentParams = serde_json::from_value(n.params)?;
             state.docs.remove(p.text_document.uri.as_str());
+            // The document is no longer an overlay: its file, if it is on
+            // disk, is now what the graph should use.
+            if !state.ws.reload_from_disk() {
+                state.rebuild();
+            }
             let params = PublishDiagnosticsParams {
                 uri: p.text_document.uri,
                 diagnostics: vec![],
                 version: None,
             };
-            conn.sender.send(Message::Notification(Notification::new(
+            sender.send(Message::Notification(Notification::new(
                 PublishDiagnostics::METHOD.into(),
                 params,
             )))?;
             state.rebuild();
-            publish_all(conn, state)?;
-            Ok(false)
+            publish_all(sender, state)?;
+            Ok(())
         }
-        _ => Ok(false),
+        _ => Ok(()),
     }
 }
 
 /// Publish diagnostics for one open document, making it the workspace root.
-fn publish_doc(conn: &Connection, state: &mut State, key: &str) -> Res<()> {
+fn publish_doc(sender: &Sender<Message>, state: &mut State, key: &str) -> Res<()> {
     if !state.select(key) {
         return Ok(());
     }
     let uri: Uri = key
         .parse()
         .map_err(|e| format!("invalid document URI: {e}"))?;
-    publish(conn, uri, &state.ws)
+    publish(sender, uri, &state.ws)
 }
 
-fn publish_all(conn: &Connection, state: &mut State) -> Res<()> {
+fn publish_all(sender: &Sender<Message>, state: &mut State) -> Res<()> {
     let docs: Vec<(String, PathBuf)> = state
         .docs
         .iter()
@@ -413,12 +573,12 @@ fn publish_all(conn: &Connection, state: &mut State) -> Res<()> {
         let uri = key
             .parse()
             .map_err(|e| format!("invalid document URI: {e}"))?;
-        publish(conn, uri, &state.ws)?;
+        publish(sender, uri, &state.ws)?;
     }
     Ok(())
 }
 
-fn publish(conn: &Connection, uri: Uri, ws: &Workspace) -> Res<()> {
+fn publish(sender: &Sender<Message>, uri: Uri, ws: &Workspace) -> Res<()> {
     let diagnostics = analysis::diagnostics(ws)
         .into_iter()
         .map(|(range, message)| Diagnostic {
@@ -434,7 +594,7 @@ fn publish(conn: &Connection, uri: Uri, ws: &Workspace) -> Res<()> {
         diagnostics,
         version: None,
     };
-    conn.sender.send(Message::Notification(Notification::new(
+    sender.send(Message::Notification(Notification::new(
         PublishDiagnostics::METHOD.into(),
         params,
     )))?;

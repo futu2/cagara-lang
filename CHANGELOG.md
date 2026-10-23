@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- The language server no longer queues keystrokes behind its own analysis. It
+  ran on one thread: a change was checked and its diagnostics published before
+  the next message was even read, so ten keystrokes typed in a burst cost ten
+  full checks of the file — 2.3 s of backlog on a thousand definitions — and a
+  hover asked meanwhile waited for all of it. The message loop now only reads
+  and routes; an analysis thread owns the workspace, and the work it is handed
+  is collapsed before it runs: superseded `didChange`s for a document are
+  dropped unread, because their text no longer exists anywhere. A burst of ten
+  keystrokes settles in 0.4 s instead of 2.3 s, and no document waits behind
+  another's copy.
+
+- Publishing every open document no longer recompiles them all. The compilation
+  cache held one root — whichever was current — so switching roots (which
+  publishing each open document does) discarded the previous result: an edit
+  cost one compilation per open document, 350 ms per save at four documents.
+  Caches are keyed by root now, and dropped only for roots that can reach the
+  edited module through imports. Publishing a document that did not change is a
+  cache hit, so the same save is 0.5 ms.
+
+- A save or a watched-file event re-reads the files in place instead of
+  rebuilding the graph. Rebuilding keeps only the texts held in memory and
+  throws away every memoized parse and check, including each open document's
+  compilation, which the publish that follows then redid from scratch. Files
+  whose text is unchanged are now left alone, and a changed one is checked again
+  like any edit; only a changed import list still needs the graph rebuilt.
+
+- Column completion no longer rebuilds the workspace for every `.`. Probing for
+  the columns at the cursor checked a copy of the whole graph — a new database
+  with every module re-added and the prelude re-parsed — which cost 345 ms on a
+  thousand definitions, and cost it again for a request asking the same question
+  twice. The probe is one dedicated module inside the live database, sharing the
+  memoized parses and checks of the modules it imports: 163 ms for a new text,
+  0.3 ms for a repeat.
+
 - A call whose last argument is a parenthesised condition no longer strands the
   arguments before it. Hugging the paren printed `ifThenElse (` on the call's
   line, the condition indented under it, and `) (toYuan .lstbal)

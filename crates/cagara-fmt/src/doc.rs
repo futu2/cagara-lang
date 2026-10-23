@@ -61,6 +61,24 @@ pub fn broken_group(d: Doc) -> Doc {
     }
 }
 
+/// `items` separated by spaces that become line breaks only where the next
+/// item would not fit: a greedy fill.
+///
+/// Each item carries its own separator as a separate group, so breaking one
+/// does not break the rest: inside a broken outer group every item is
+/// measured again at the column it will start in. That is what an argument
+/// list wants — `f a b c d` with `d` overflowing becomes
+/// `f a b c`<br>`  d`, not one argument per line, which is both wider in
+/// total and says less about the call.
+pub fn fill(items: Vec<Doc>) -> Doc {
+    concat(
+        items
+            .into_iter()
+            .map(|item| group(concat(vec![Doc::Line, item])))
+            .collect(),
+    )
+}
+
 impl Doc {
     /// Whether this doc can never print on one line. Groups cache the answer,
     /// so this is linear in the doc built since the enclosing group.

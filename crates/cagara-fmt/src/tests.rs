@@ -253,11 +253,12 @@ fn a_case_written_one_arm_per_line_is_canonical() {
     );
     assert_eq!(
         out,
-        "v = case {
-  .a_very_long_condition_name_here > 1 => 2;
-  .b_very_long_column_name_x > 2 && .c_also_long > 3 => 4;
-  true => 5
-}
+        "v =
+  case {
+    .a_very_long_condition_name_here > 1 => 2;
+    .b_very_long_column_name_x > 2 && .c_also_long > 3 => 4;
+    true => 5
+  }
 "
     );
     // An arm's own `&&` chain is part of the arm: it stays on the arm's line
@@ -266,7 +267,9 @@ fn a_case_written_one_arm_per_line_is_canonical() {
         "v = case { .a_very_long_condition_name_here > 1 => .some_long_name && .another_long_name && .third_long_name; true => 5 }\n",
     );
     assert!(out.contains("=> .some_long_name"), "{out}");
-    assert!(out.trim_end().ends_with("\n}"), "{out}");
+    // The body moved down, so the closing brace is indented with the `case`,
+    // and it closes the last arm on its own line.
+    assert!(out.trim_end().ends_with("\n  }"), "{out}");
 }
 
 /// The trailing `;` and comments around arms keep their place when the case
@@ -290,14 +293,14 @@ fn case_comments_and_trailing_semicolons_keep_their_place() {
     );
     check(
         "q = case {\n  # why\n  .a => 1; true => 2 }\n",
-        "q = case {\n  # why\n  .a => 1;\n  true => 2\n}\n",
+        "q =\n  case {\n    # why\n    .a => 1;\n    true => 2\n  }\n",
     );
     // A trailing `;` on a flat case is kept, and never left to open a line
     // when the case breaks.
     check("q = case { .a => 1; }\n", "q = case { .a => 1; }\n");
     check(
         "q = case { a_very_long_condition_name_here > 1 => \"first\"; another_long_condition_name > 2 => \"second\"; }\n",
-        "q = case {\n  a_very_long_condition_name_here > 1 => \"first\";\n  another_long_condition_name > 2 => \"second\";\n}\n",
+        "q =\n  case {\n    a_very_long_condition_name_here > 1 => \"first\";\n    another_long_condition_name > 2 => \"second\";\n  }\n",
     );
     // Blank lines inside a case do not survive, but no arm is lost: the
     // arms that fit on one line do.
@@ -378,12 +381,70 @@ fn a_case_nests_like_any_braced_expression() {
     // does, and it never puts its `}` on the outer arm's line.
     check(
         "v = case { .a => case { .b_very_long_name_one > 1 => \"x\"; .b_very_long_name_two > 2 => \"y\"; true => \"z\" }; true => \"fallback value here\" }\n",
-        "v = case {
-  .a => case { .b_very_long_name_one > 1 => \"x\"; .b_very_long_name_two > 2 => \"y\"; true => \"z\" };
-  true => \"fallback value here\"
-}
+        "v =
+  case {
+    .a => case { .b_very_long_name_one > 1 => \"x\"; .b_very_long_name_two > 2 => \"y\"; true => \"z\" };
+    true => \"fallback value here\"
+  }
 ",
     );
+}
+
+/// A long application keeps its arguments together: the body moves to an
+/// indented line, and past that the arguments fill the lines rather than each
+/// taking one. The old layout was all-or-nothing — one more argument turned a
+/// two-line definition into one line per argument, which is both taller and
+/// less readable.
+#[test]
+fn long_applications_fill_their_lines() {
+    // Nothing is split when the body fits once it has moved down.
+    let args: Vec<String> = (0..18).map(|i| format!("arg{i:02}")).collect();
+    let src = format!("x = f {}\n", args.join(" "));
+    check(
+        &src,
+        "x =
+  f arg00 arg01 arg02 arg03 arg04 arg05 arg06 arg07 arg08 arg09 arg10 arg11 arg12 arg13 arg14 arg15
+    arg16 arg17
+",
+    );
+    // The one argument that does not fit breaks on its own; its neighbours stay
+    // where they are.
+    check(
+        "x = someFunctionName arg_one arg_two arg_three arg_four arg_five arg_six arg_seven arg_eight arg_nineXYZ\n",
+        "x =
+  someFunctionName arg_one arg_two arg_three arg_four arg_five arg_six arg_seven arg_eight
+    arg_nineXYZ
+",
+    );
+}
+
+/// A `case` used as a definition's body is on the `=` line while it fits, and
+/// otherwise moves down whole, onto a line whose width the `case` itself gets
+/// to use. As a record field it stays hugged to the field's name, because that
+/// is the shape `select { b = case { ...` is written in.
+#[test]
+fn a_long_case_body_moves_to_an_indented_line() {
+    check(
+        "x = case { .a_very_long_condition_name > 1 => \"first_result\"; .b_another_long_condition > 2 => \"second\"; true => \"fallback\" }\n",
+        "x =
+  case {
+    .a_very_long_condition_name > 1 => \"first_result\";
+    .b_another_long_condition > 2 => \"second\";
+    true => \"fallback\"
+  }
+",
+    );
+    // Shorter than the width: the body stays where it is, on one line.
+    check(
+        "x = case { .a > 1 => \"x\"; true => \"y\" }\n",
+        "x = case { .a > 1 => \"x\"; true => \"y\" }\n",
+    );
+    // A record field keeps `b = case {` however long the case is.
+    let out = fmt(
+        "q = t & select { b = case { .amount_in_cents >= 1000000 => \"huge\"; .amount_in_cents >= 100000 => \"big\"; true => \"small\" } }\n",
+    );
+    assert!(out.contains("b = case {"), "{out}");
+    assert_eq!(fmt(&out), out, "not idempotent:\n{out}");
 }
 
 #[test]
@@ -461,10 +522,12 @@ fn long_arguments_break_onto_indented_lines() {
         "b".repeat(40),
         "c".repeat(40)
     );
+    // The arguments fill the indented line rather than taking one line each:
+    // `someFunction` and the first two fit there, and only the third breaks.
     check(
         &src,
         &format!(
-            "x =\n  someFunction\n    {}\n    {}\n    {}\n",
+            "x =\n  someFunction {} {}\n    {}\n",
             "a".repeat(40),
             "b".repeat(40),
             "c".repeat(40)

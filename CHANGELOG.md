@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- `cagara fmt` no longer shreds a long application. Arguments used to be
+  laid out all-or-nothing: one column past the width and every argument got a
+  line of its own, so 18 arguments became 19 lines where two would do. They now
+  fill the lines after the head, breaking only where the next argument would not
+  fit — and a body that fits once it has moved down is not split at all.
+- A `case` used as a definition's body now moves down whole when it does not
+  fit, instead of hugging `x = case {` and spending the rest of the width on
+  nothing: `x =` on one line, then `case {` and its arms indented under it. A
+  short `case` stays on the `=` line, and a record field's `case` still hugs
+  (`b = case { ...`), which is the shape the reference writes.
+
 - A lambda's parameter can carry a type annotation: `(x : string) => body`.
   The annotation is checked, not noted — the body is typed with the parameter at
   that type, and a use has to supply it, so `(x : string) => x + 1` is the

@@ -24,7 +24,7 @@ mod doc;
 use cagara_syntax::{
     ops, parse, Fixity, ParseError, SyntaxElement, SyntaxKind as K, SyntaxNode, SyntaxToken,
 };
-use doc::{broken_group, concat, group, indent, text, Doc};
+use doc::{broken_group, concat, fill, group, indent, text, Doc};
 use rowan::{NodeOrToken, WalkEvent};
 use std::cell::Cell;
 use std::fmt;
@@ -539,12 +539,15 @@ impl Fmt<'_> {
 
     fn huggable(&self, n: &SyntaxNode, top: bool) -> bool {
         match n.kind() {
+            // A definition body's `case` is not hugged: `x = case {` followed
+            // by arms says nothing about where the arm list belongs, so a
+            // `case` that does not fit moves to an indented line whole and
+            // opens its arms there. One that fits stays on the `=` line like
+            // any body. A record field's `case` is hugged — `b = case {` is
+            // the shape the reference writes, and the field decides whether
+            // the record breaks around it (`multiline_value`).
+            K::CaseExpr => n.parent().is_some_and(|p| p.kind() == K::RecordField),
             K::RecordExpr | K::ListExpr | K::ParenExpr | K::Lambda | K::LetExpr => true,
-            // A `case` breaks between its arms, never after `case`, so it is
-            // kept on the `=` line and breaks itself when it does not fit;
-            // moving it whole would leave `case` alone on a line whose arms
-            // then start at the `case`'s level.
-            K::CaseExpr => true,
             K::BinExpr => top && bin_parts(n).is_ok_and(|(_, op, _, _)| is_pipe(&op)),
             K::App => self.hugs_last_arg(n),
             _ => false,
@@ -898,7 +901,8 @@ impl Fmt<'_> {
         ]))
     }
 
-    /// `f a b`: flat if it fits, else arguments on indented lines. With a
+    /// `f a b`: flat if it fits, else the arguments fill the lines that
+    /// follow, breaking only where the next one would not fit. With a
     /// bracketed last argument, only that argument breaks.
     fn app(&self, n: &SyntaxNode) -> R {
         let args = sig(n)
@@ -915,8 +919,7 @@ impl Fmt<'_> {
             }
             return Ok(concat(parts));
         }
-        let tail = rest.iter().flat_map(|a| [Doc::Line, a.clone()]).collect();
-        let d = concat(vec![head.clone(), indent(concat(tail))]);
+        let d = concat(vec![head.clone(), indent(fill(rest.to_vec()))]);
         Ok(if has_inner_comment(n) {
             broken_group(d)
         } else {

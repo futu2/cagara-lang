@@ -3,7 +3,7 @@
 The cache preserves useful work across edits without putting mutable state in
 the checked relational tree. It shares immutable module checks and name maps,
 borrows imported schemes, and reuses erased queries only when their exact
-checked facts and dependencies are unchanged. Inference still runs per module.
+checked facts and dependencies are unchanged. Inference still runs per definition within a module.
 
 ## Reproducing the measurements
 
@@ -172,17 +172,17 @@ route, which is exactly what the migration removed.
 - Field completion checks a hypothetical text (the file with a marker where
   the cursor is) in a dedicated module input inside the live database, so the
   modules it imports are the ones already memoized and the live graph is not
-  rebuilt. It costs one module check of the file — the same work as editing it
-  — so these measurements still do not establish fast field completion over a
-  million-table catalog. Large symbol lists and error-heavy files are also
-  outside this benchmark.
+  rebuilt. The first probe of a file parses it and checks every definition;
+  later probes reuse the inputs of every definition the marker is not in. These
+  measurements do not establish fast field completion over a million-table
+  catalog, since even one probe is linear in the file. Large symbol lists and
+  error-heavy files are also outside this benchmark.
 
 For large generated catalogs, keeping definitions in imported modules allows
-small query edits to use the existing cache effectively. Supporting frequent
-edits inside a million-definition module would require finer-grained
-parsing/inference: a module's check is one query, so any edit inside it
-re-checks the whole module. That granularity, not a missing cache, is what the
-language server's latency figures below run into.
+small query edits to use the existing cache effectively. Edits inside one
+module are memoized per definition (`def_check`), so an edit re-checks the
+edited definition and the checks that read it; parsing is still per file, and
+so is the aggregation of a module's results.
 
 ## The language server
 
@@ -196,20 +196,28 @@ with three smaller documents open, and the same file with 100 definitions.
 | Scenario | 100 defs before | after | 1000 defs before | after |
 | --- | ---: | ---: | ---: | ---: |
 | Open, to first diagnostics | 23 ms | 24 ms | 193 ms | 192 ms |
-| Keystroke, to its own diagnostics | 22 ms | 22 ms | 227 ms | 227 ms |
-| Keystroke, until every document settled | 173 ms | 150 ms | 378 ms | 228 ms |
-| Ten keystrokes typed in a burst | 324 ms | 152 ms | 2.33 s | 392 ms |
-| Save, four documents open | 30 ms | 0.1 ms | 353 ms | 0.5 ms |
-| Column completion, a new text | 37 ms | 16 ms | 345 ms | 163 ms |
-| Column completion, the same text again | 31 ms | 0.2 ms | 343 ms | 0.3 ms |
+| Keystroke, to its own diagnostics | 22 ms | 3 ms | 206 ms | 42 ms |
+| Keystroke, until every document settled | 173 ms | 150 ms | 378 ms | 151 ms |
+| Ten keystrokes typed in a burst | 324 ms | 151 ms | 2.33 s | 155 ms |
+| Save, four documents open | 30 ms | 0.1 ms | 353 ms | 0.4 ms |
+| Column completion, a new text | 37 ms | 17 ms | 345 ms | 162 ms |
+| Column completion, the same text again | 31 ms | 0.4 ms | 343 ms | 2.7 ms |
 
 A settled column of 150 ms is the publish debounce, not work: the small file
 has nothing left to do once that timer fires.
 
-Two things did not move, and they are the same thing: opening a file and one
-keystroke each cost a whole-file check, because a module is the unit of
-incrementality. The burst and save figures were fixed by the server (collapsing
-superseded keystrokes onto an analysis thread, and keying the compilation cache
-by root instead of rebuilding it), and completion by probing the live database.
-Making one keystroke cost one definition rather than one file is the remaining
-work, and it needs per-definition parsing and inference, not more threads.
+The burst and save figures were fixed in the server: superseded keystrokes are
+collapsed before they are analysed, and the compilation cache is keyed by root
+instead of being rebuilt. Completion was fixed by probing the live database
+rather than a rebuilt copy of it.
+
+The keystroke figures came a different way, in the compiler: type checking is
+memoized per definition (`def_check`), so an edit re-checks the definition it
+touched and the checks that read it, not the file. In process, the same edit to
+a generated file takes about 1.6 ms and 23 ms including parsing.
+
+What is still linear in the file: parsing (about 8 ms per 1000 definitions, per
+keystroke), the aggregation that collects a module's per-definition results, and
+compilation, which walks the edited module's definitions once. A keystroke that
+changes a *type* re-checks more than its direct readers, because each check
+reads the module's name map; narrowing that is the next step.

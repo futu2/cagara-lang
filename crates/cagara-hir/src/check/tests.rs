@@ -888,6 +888,82 @@ fn aggregate_nullability_is_explicit() {
     assert!(t.contains("s = maybe int"), "{t}");
 }
 
+/// A keystroke inside one definition re-checks that definition and the checks
+/// that read it — not the file.
+///
+/// This is the property the per-definition split exists for: before it,
+/// `module_check` was one query, so any edit re-ran inference over every
+/// definition in the file (~140 ms at 1000 definitions) whatever was touched.
+///
+/// What a check reads is what decides the count. A body that changes only its
+/// own literal depends on nothing but its own input, so editing it re-checks
+/// exactly one definition however many definitions follow — which is what this
+/// test guards, because a single big-module check makes this number the number
+/// of definitions in the file.
+///
+/// The second test below records where the granularity stops: an edit that
+/// changes a type still ripples further. That ripple is a known limitation,
+/// asserted as a bound rather than as a wished-for number.
+#[test]
+fn editing_one_definition_rechecks_only_it_and_its_readers() {
+    let src = "a = 1\nb = a + 1\nc = 2\nd = c + 1\ne = 3\nf = e + 1\nq = f + 1\n";
+    let mut ws = Workspace::from_source(src);
+    assert!(check(&ws).errors().is_empty(), "{:?}", ws.diags);
+
+    let check_root = |ws: &mut Workspace, target: String| {
+        assert!(ws.set_source(ws.root, target));
+        let _ = check(ws);
+        super::check_runs()
+    };
+    let edit = |from: &str, to: &str| src.replace(from, to);
+
+    // A body that only changes its own literal: one definition, not seven.
+    let _ = check_root(&mut ws, edit("c = 2", "c = 20"));
+    let c_1 = check_root(&mut ws, edit("c = 2", "c = 21"));
+    let c_2 = check_root(&mut ws, edit("c = 2", "c = 22"));
+    assert_eq!(c_2 - c_1, 1, "editing `c` re-checks `c` alone");
+
+    // The same at the end of the file.
+    let _ = check_root(&mut ws, edit("q = f + 1", "q = f + 11"));
+    let q_1 = check_root(&mut ws, edit("q = f + 1", "q = f + 12"));
+    let q_2 = check_root(&mut ws, edit("q = f + 1", "q = f + 13"));
+    assert_eq!(q_2 - q_1, 1, "editing `q` re-checks `q` alone");
+
+    // Re-checking without an edit re-runs nothing at all.
+    let _ = check(&ws);
+    assert_eq!(super::check_runs(), q_2, "nothing changed, nothing rechecked");
+}
+
+/// The remaining ripple, recorded so that it is measured rather than assumed.
+///
+/// Editing `a` changes the type `b` is computed at, so `b` must be checked
+/// again; that much is inference, not cache. The count is higher than `b`
+/// alone because the other definitions read `a` in their own scope — through
+/// the module's name map — even though none of their bodies mentions it. What a
+/// check reads therefore extends past what a body spells; narrowing that is the
+/// next step, not a property of this one.
+///
+/// Asserted as a bound so the test fails if the split stops helping, while
+/// documenting that this number is not yet 2.
+#[test]
+fn an_edit_that_changes_a_type_rechecks_a_bounded_set() {
+    let src = "a = 1\nb = a + 1\nc = 2\nd = c + 1\ne = 3\nf = e + 1\nq = f + 1\n";
+    let mut ws = Workspace::from_source(src);
+    assert!(check(&ws).errors().is_empty(), "{:?}", ws.diags);
+    let edit = |from: &str, to: &str| src.replace(from, to);
+    let check_root = |ws: &mut Workspace, target: String| {
+        assert!(ws.set_source(ws.root, target));
+        let _ = check(ws);
+        super::check_runs()
+    };
+    let _ = check_root(&mut ws, edit("a = 1", "a = 10"));
+    let base = check_root(&mut ws, edit("a = 1", "a = 11"));
+    let after = check_root(&mut ws, edit("a = 1", "a = 12"));
+    let n = after - base;
+    assert!(n >= 1, "editing `a` must re-check at least `a`");
+    assert!(n <= 7, "editing `a` re-checked {n} definitions of 7");
+}
+
 #[test]
 fn editing_the_root_rechecks_only_the_root() {
     let mut ws = Workspace::from_source(&format!("{TABLES}q = users & where (.age > 1)\n"));

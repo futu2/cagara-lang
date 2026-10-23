@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Type checking is memoized per definition, so a keystroke re-checks the
+  definition it touched rather than the file it is in. A module used to be one
+  salsa query: any edit re-ran inference over every definition, 140 ms at a
+  thousand definitions, whether one digit of one literal had changed or not
+  (measured: the same 1000 definitions split across ten modules re-checked in
+  17 ms instead of 180 ms). Each definition is now an input of its own — its
+  name kept apart from its body, so editing a body leaves the module's name map
+  alone — and `def_check` checks one definition, reading the memoized check of
+  any definition above it. A reader therefore depends on the definition it
+  read, not on the whole file. The language server's keystroke went from 206 ms
+  to 42 ms at a thousand definitions, and from 19 ms to 3 ms at a hundred.
+
+  A name defined *below* its use is still checked inline, as before: that is
+  what lets a forward reference close a cycle and report `q = q` as the
+  recursion it is, where routing it through salsa would make it a salsa cycle
+  instead. The depth guard stays where it was too, and now attributes its
+  diagnostic to the definition whose chain is too deep, with the module keeping
+  only the first such diagnostic so one broken chain is reported once.
+
+  Parsing is still per file, and so is collecting a module's results, so a
+  keystroke still costs a parse (about 8 ms per thousand definitions). An edit
+  that changes a *type* also re-checks more than its direct readers, because
+  every check reads the module's name map; `docs/PERFORMANCE.md` records both.
+
 - The language server no longer queues keystrokes behind its own analysis. It
   ran on one thread: a change was checked and its diagnostics published before
   the next message was even read, so ten keystrokes typed in a burst cost ten

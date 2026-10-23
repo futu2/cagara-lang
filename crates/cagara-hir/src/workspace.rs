@@ -2,11 +2,11 @@
 //! Parsing goes through the salsa `parse_module` query.
 
 use crate::compile::Compilation;
-use crate::db::{Database, ModuleInput, SourceFile};
+use crate::db::{Database, DefAst, DefInput, ModuleInput, SourceFile};
 use crate::incremental::CachedCompilation;
 use crate::lower::{parse_module, ParsedModule};
 use crate::resolve::{module_own, module_scope};
-use cagara_syntax::ast::{Import, Module, Span};
+use cagara_syntax::ast::{Def, Import, Module, Span};
 use salsa::Setter;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -25,6 +25,9 @@ const PROBE_PATH: &str = "<probe>";
 struct ProbeSlot {
     file: SourceFile,
     input: ModuleInput,
+    /// The probe text's definitions, kept so that the next probe reuses the
+    /// inputs of every definition the marker is not in.
+    defs: Vec<DefInput>,
 }
 
 /// The first line that turns the implicit prelude import off.
@@ -58,6 +61,10 @@ pub struct LoadedModule {
     pub path: PathBuf,
     pub text: String,
     pub module: Module,
+    /// This module's definitions as salsa inputs, in source order. Reused
+    /// across edits so a body change leaves every other definition — and every
+    /// check that read only those — memoized (see `Workspace::sync_defs`).
+    defs: Vec<DefInput>,
     pub scope: Arc<HashMap<String, Binding>>,
     /// This module's own definitions (what `import` and `alias.name` see).
     pub own: Arc<HashMap<String, Binding>>,
@@ -332,6 +339,31 @@ impl Workspace {
         self.by_path.get(&normalize(path)).copied()
     }
 
+    /// Bring a module's per-definition inputs up to date with `defs`.
+    ///
+    /// The input for a definition whose *name* is unchanged is kept and only
+    /// its AST is written, so `module_own` and `module_scope` — which read
+    /// names — stay memoized across an edit to a body, and every check that
+    /// never read the edited definition survives with them. A rename, an
+    /// insertion, or a deletion changes the list itself, which invalidates the
+    /// module's scope, as it must: names moved.
+    fn sync_defs(&mut self, previous: &[DefInput], defs: &[Def]) -> Vec<DefInput> {
+        let mut out = Vec::with_capacity(defs.len());
+        for (i, def) in defs.iter().enumerate() {
+            let input = match previous.get(i).copied() {
+                Some(old) if *old.name(&self.db) == def.name => {
+                    if old.def(&self.db).0 != *def {
+                        old.set_def(&mut self.db).to(DefAst(def.clone()));
+                    }
+                    old
+                }
+                _ => DefInput::new(&self.db, def.name.clone(), DefAst(def.clone())),
+            };
+            out.push(input);
+        }
+        out
+    }
+
     /// Re-read every module that came from disk, keeping the salsa database.
     ///
     /// A save or a watched-file event may have changed a file that is not open
@@ -386,8 +418,8 @@ impl Workspace {
         let root = self.inputs[self.root];
         let prelude = *root.prelude(&self.db);
         let imports = root.imports(&self.db).clone();
-        let (file, input) = match self.probe {
-            Some(ProbeSlot { file, input }) => (file, input),
+        let (file, input, previous_defs) = match &self.probe {
+            Some(slot) => (slot.file, slot.input, slot.defs.clone()),
             None => {
                 let file = SourceFile::new(&self.db, text.to_string());
                 let input = ModuleInput::new(
@@ -397,9 +429,14 @@ impl Workspace {
                     file,
                     prelude,
                     imports.clone(),
+                    Vec::new(),
                 );
-                self.probe = Some(ProbeSlot { file, input });
-                (file, input)
+                self.probe = Some(ProbeSlot {
+                    file,
+                    input,
+                    defs: Vec::new(),
+                });
+                (file, input, Vec::new())
             }
         };
         // The root, and with it the imports a probe must see, may have changed
@@ -412,6 +449,16 @@ impl Workspace {
         }
         if file.text(&self.db) != text {
             file.set_text(&mut self.db).to(text.to_string());
+        }
+        // Re-read the definitions of the probe text: only the one the marker
+        // sits in is new, so the rest of the module keeps its checks.
+        let parsed = parse_module(&self.db, file).clone();
+        let defs = self.sync_defs(&previous_defs, &parsed.module.defs);
+        if defs != previous_defs {
+            input.set_defs(&mut self.db).to(defs.clone());
+            if let Some(slot) = &mut self.probe {
+                slot.defs = defs;
+            }
         }
         crate::check::probe_fields(&self.db, input)
     }
@@ -458,7 +505,16 @@ impl Workspace {
         self.stack.pop();
         let m = self.modules.len();
         self.by_path.insert(path.clone(), m);
-        let input = ModuleInput::new(&self.db, m, path.clone(), file, prelude, imports);
+        let defs = self.sync_defs(&[], &parsed.module.defs);
+        let input = ModuleInput::new(
+            &self.db,
+            m,
+            path.clone(),
+            file,
+            prelude,
+            imports,
+            defs.clone(),
+        );
         let own = module_own(&self.db, input).clone();
         let scope = module_scope(&self.db, input).clone();
         self.file_diags
@@ -469,6 +525,7 @@ impl Workspace {
             path,
             text,
             module: parsed.module,
+            defs,
             scope,
             own,
             line_starts: starts,
@@ -488,21 +545,30 @@ impl Workspace {
     pub fn set_source(&mut self, m: usize, text: String) -> bool {
         // A BOM is transport metadata; keep it out of every span and excerpt.
         let text = cagara_syntax::strip_bom(&text).to_string();
-        // Parse the candidate text up front, so a rejected edit (one that
-        // changes the imports) leaves both texts as they were.
-        let parsed = parse_text(&text);
+        // Write the candidate text and read the parse back, rather than parsing
+        // it here and parsing it again inside salsa: one parse per keystroke.
+        // A rejected edit (one that changes the imports) puts the old text
+        // back, so the caller never observes the candidate.
+        let file = *self.inputs[m].file(&self.db);
+        let previous = self.modules[m].text.clone();
+        file.set_text(&mut self.db).to(text.clone());
+        let parsed = parse_module(&self.db, file).clone();
         if imports(&parsed.module) != imports(&self.modules[m].module) {
+            file.set_text(&mut self.db).to(previous);
             return false;
         }
         // Only roots that can see `m` need recompiling; a document in a file
         // that shares no module with this one keeps its cached compilation.
         self.invalidate_compile_caches(m);
-        let file = *self.inputs[m].file(&self.db);
-        // Set the file's text without going through a helper: this changes
-        // what the queries parse but nothing else, so `Workspace` must update
-        // `modules[m].text` in the same breath (below) or the two phases
-        // would analyze different programs.
-        file.set_text(&mut self.db).to(text.clone());
+        // The file's text is already written above, and the queries read it
+        // from there; `modules[m].text` is updated in the same breath (below)
+        // or the two phases would analyze different programs.
+        let input = self.inputs[m];
+        let previous_defs = self.modules[m].defs.clone();
+        let defs = self.sync_defs(&previous_defs, &parsed.module.defs);
+        if defs != previous_defs {
+            input.set_defs(&mut self.db).to(defs.clone());
+        }
         let path = self.modules[m].path.clone();
         // Exports of `m` feed the scopes of its importers: refresh all
         // modules (the queries recompute only what changed, and immutable
@@ -517,6 +583,7 @@ impl Workspace {
         let md = &mut self.modules[m];
         md.text = text;
         md.module = parsed.module;
+        md.defs = defs;
         md.line_starts = starts;
         self.rebuild_diags();
         true
@@ -673,12 +740,6 @@ fn imports(md: &Module) -> Vec<(String, Option<String>)> {
         .iter()
         .map(|i| (i.path.clone(), i.alias.clone()))
         .collect()
-}
-
-/// Parse a file that is not (yet) in the db.
-fn parse_text(text: &str) -> ParsedModule {
-    let (module, errors) = cagara_syntax::ast::lower_source(text);
-    ParsedModule { module, errors }
 }
 
 /// Syntax errors of a file, and overloads missing a signature.

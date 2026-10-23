@@ -1,20 +1,22 @@
 //! Name resolution as salsa queries.
 
 use crate::db::ModuleInput;
-use crate::lower::parse_module;
 use crate::workspace::Binding;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A module's own definitions (what `import` and `alias.name` see). A name
 /// defined more than once is an overload set.
+///
+/// Reads the definitions' *names* only (`DefInput::name`, not their bodies), so
+/// editing one definition's body does not invalidate this map — and with it
+/// nothing that looked a name up.
 #[salsa::tracked(returns(ref))]
 pub fn module_own(db: &dyn salsa::Database, input: ModuleInput) -> Arc<HashMap<String, Binding>> {
     let m = *input.index(db);
-    let defs = &parse_module(db, *input.file(db)).module.defs;
     let mut groups = HashMap::<String, Vec<usize>>::new();
-    for (i, d) in defs.iter().enumerate() {
-        groups.entry(d.name.clone()).or_default().push(i);
+    for (i, d) in input.defs(db).iter().enumerate() {
+        groups.entry(d.name(db).clone()).or_default().push(i);
     }
     Arc::new(
         groups

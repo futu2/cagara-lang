@@ -122,6 +122,20 @@ pub(crate) struct RawTypeError {
     def: usize,
     span: Span,
     message: String,
+    kind: RawErrorKind,
+}
+
+/// What a raw error is about, where aggregating per-definition checks has to
+/// treat it differently from an error about one definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RawErrorKind {
+    /// Something wrong with the definition itself.
+    Def,
+    /// The chain of forward-referenced definitions this one lies on is too deep
+    /// to check. Every definition on such a chain hits the limit in its own
+    /// check, so one broken chain would otherwise be reported once per
+    /// definition on it; the module keeps only the first.
+    Chain,
 }
 
 /// Result of checking every definition in a workspace.
@@ -261,7 +275,11 @@ impl TypeCheck {
     /// whose signature is its type, or one that failed before any expression
     /// was typed.
     pub fn typed_body(&self, module: usize, def: usize) -> Option<&TypedBody> {
-        self.modules.get(module)?.typed.get(&(module, def))
+        self.modules
+            .get(module)?
+            .typed
+            .get(&(module, def))
+            .map(Arc::as_ref)
     }
 
     /// The typed node for one expression of a module, found by `ExprId`.
@@ -506,23 +524,49 @@ pub fn probe_fields(db: &dyn salsa::Database, input: ModuleInput) -> Option<Vec<
         .map(|(_, fields)| fields.clone())
 }
 
-/// Check one module (memoized). Dependencies are checked first; only their
-/// self-contained schemes are used.
-#[salsa::tracked(returns(ref))]
-fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck> {
-    #[cfg(test)]
-    CHECK_RUNS.with(|c| c.set(c.get() + 1));
-    let imported: Vec<ModuleInput> = input
+#[cfg(test)]
+thread_local! {
+    static CHECK_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many definition checks ran on this thread (for incrementality tests).
+#[cfg(test)]
+fn check_runs() -> usize {
+    CHECK_RUNS.with(|c| c.get())
+}
+
+/// The modules a module may use: its prelude and its imports, in that order.
+fn imported_modules(db: &dyn salsa::Database, input: ModuleInput) -> Vec<ModuleInput> {
+    input
         .prelude(db)
         .iter()
         .copied()
         .chain(input.imports(db).iter().map(|(_, t)| *t))
-        .collect();
-    let file = *input.file(db);
-    let parsed = parse_module(db, file);
+        .collect()
+}
+
+/// Check one definition (memoized). Dependencies are checked first; only their
+/// self-contained schemes are used.
+///
+/// The unit of incrementality. A module's definitions are checked one at a
+/// time, each reading its own `DefInput` and — for a name defined above it —
+/// that definition's own check. An edit inside one definition therefore
+/// invalidates that check and the checks of the definitions that read it, and
+/// nothing else: a keystroke in a thousand-definition file costs one
+/// definition, not a thousand.
+///
+/// A name defined *below* its use is still checked inline, exactly as before.
+/// That is what lets a forward reference close a cycle; routing it through
+/// salsa would turn `q = q` into a salsa cycle instead of the diagnostic the
+/// compiler reports.
+#[salsa::tracked(returns(ref))]
+fn def_check(db: &dyn salsa::Database, input: ModuleInput, def: usize) -> Arc<DefCheck> {
+    #[cfg(test)]
+    CHECK_RUNS.with(|c| c.set(c.get() + 1));
+    let imported = imported_modules(db, input);
+    let m = *input.index(db);
     let env = ModuleEnv {
-        module: *input.index(db),
-        defs: &parsed.module.defs,
+        module: m,
         scope: module_scope(db, input),
         owns: imported
             .iter()
@@ -533,18 +577,78 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
             .map(|t| (*t.index(db), &module_check(db, *t).schemes))
             .collect(),
     };
-    let out = check_module(env);
+    let mut c = Checker::new(env, db, input, def);
+    c.def_scheme(m, def);
+    let failed = c.failed.contains(&(m, def));
+    let scheme = c.schemes.get(&(m, def)).cloned();
+    let types = scheme
+        .as_ref()
+        .filter(|_| !failed)
+        .map(|scheme| c.show_scheme(scheme));
+    let typed = c.typed_bodies.remove(&(m, def)).map(Arc::new);
+    // Only this definition's errors: a forward reference checked inline is
+    // attributed to *its* own definition, and that definition's check reports
+    // it. Passing it on here would report it twice.
+    let errors: Vec<RawTypeError> = c.errors.iter().filter(|e| e.def == def).cloned().collect();
+    Arc::new(DefCheck {
+        scheme,
+        failed,
+        types,
+        typed,
+        errors,
+        probe_fields: c.probe_fields,
+    })
+}
+
+/// Check every definition of a module (memoized), one `def_check` each.
+///
+/// Results are collected in source order, which is the order diagnostics are
+/// reported in.
+#[salsa::tracked(returns(ref))]
+fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck> {
+    let m = *input.index(db);
+    let count = input.defs(db).len();
+    let mut schemes = HashMap::new();
+    let mut types = HashMap::new();
+    let mut errors = Vec::new();
+    let mut typed = HashMap::new();
+    let mut probe_fields = None;
+    let mut chain_reported = false;
+    for def in 0..count {
+        let checked = def_check(db, input, def);
+        if let Some(scheme) = &checked.scheme {
+            schemes.insert((m, def), scheme.clone());
+        }
+        if let Some(t) = &checked.types {
+            types.insert((m, def), t.clone());
+        }
+        for error in &checked.errors {
+            // One chain is one problem, however many of its definitions report
+            // it (see `RawErrorKind::Chain`).
+            if error.kind == RawErrorKind::Chain {
+                if chain_reported {
+                    continue;
+                }
+                chain_reported = true;
+            }
+            errors.push(error.clone());
+        }
+        if let Some(body) = &checked.typed {
+            typed.insert((m, def), body.clone());
+        }
+        if probe_fields.is_none() {
+            probe_fields = checked.probe_fields.clone().map(|fields| (m, fields));
+        }
+    }
     // Render the diagnostics here, once per module text, rather than in every
-    // `check()`: an editor calls `check()` on each request, and re-rendering
-    // every message against the text each time was the cost of a request on an
-    // error-heavy file. The salsa query already depends on the text, so a
-    // rendered diagnostic is invalidated exactly when its span would be.
+    // `check()`. This is the one step that cannot move into `def_check`: it
+    // reads the whole file's text, which would make every definition's check
+    // depend on every edit.
     let path = input.path(db);
-    let text = file.text(db);
+    let text = input.file(db).text(db);
     let starts = crate::workspace::line_starts(text);
-    let errors = out
-        .errors
-        .iter()
+    let errors = errors
+        .into_iter()
         .map(|e| TypeError {
             module: e.module,
             def: e.def,
@@ -554,135 +658,10 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
                 &starts,
                 e.span.start as usize,
                 e.span.end as usize,
-                e.message.clone(),
+                e.message,
             ),
         })
         .collect();
-    Arc::new(ModuleCheck {
-        schemes: out.schemes,
-        errors,
-        types: out.types,
-        probe_fields: out.probe_fields,
-        typed: out.typed,
-        typed_index: out.typed_index,
-        typed_spans: out.typed_spans,
-    })
-}
-
-#[cfg(test)]
-thread_local! {
-    static CHECK_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// How many module checks ran on this thread (for incrementality tests).
-#[cfg(test)]
-fn check_runs() -> usize {
-    CHECK_RUNS.with(|c| c.get())
-}
-
-/// What one module's check produced, before its diagnostics are rendered.
-///
-/// Rendering needs the module's path and text, which the pure checker does not
-/// have; [`module_check`] converts this into a [`ModuleCheck`].
-#[derive(Debug, Clone, PartialEq)]
-struct ModuleOutput {
-    schemes: HashMap<(usize, usize), Scheme>,
-    errors: Vec<RawTypeError>,
-    types: HashMap<(usize, usize), String>,
-    probe_fields: Option<(usize, Vec<(String, String)>)>,
-    /// Each definition's body as a typed tree, by `(module, def)`.
-    typed: HashMap<(usize, usize), TypedBody>,
-    /// `ExprId` to the definition that has it and the node's place in that
-    /// body, ascending by id. Positions only: the facts stay on the node, and
-    /// this is what lets an id-keyed reader find one without scanning every
-    /// definition.
-    typed_index: Vec<(u32, usize, usize)>,
-    /// Key span to the definition that has it and the node's place in that
-    /// body, ascending by span. The span twin of `typed_index`, and the same
-    /// rule: positions only, facts on the node. A definition's body occupies
-    /// one range of the module text, so two definitions cannot share a key
-    /// span; a repeated span within one body was already resolved by the tree
-    /// keeping its last write.
-    typed_spans: Vec<(u32, u32, usize, usize)>,
-}
-
-/// A checked module with its diagnostics already rendered.
-///
-/// Rendered once per module text, inside the salsa query, so a request that
-/// only needs the diagnostics does not re-render them.
-#[derive(Debug, Clone, PartialEq)]
-struct ModuleCheck {
-    schemes: HashMap<(usize, usize), Scheme>,
-    errors: Vec<TypeError>,
-    types: HashMap<(usize, usize), String>,
-    probe_fields: Option<(usize, Vec<(String, String)>)>,
-    /// Each definition's body as a typed tree, by `(module, def)`.
-    typed: HashMap<(usize, usize), TypedBody>,
-    /// `ExprId` to the definition that has it and the node's place in that
-    /// body, ascending by id. Positions only: the facts stay on the node, and
-    /// this is what lets an id-keyed reader find one without scanning every
-    /// definition.
-    typed_index: Vec<(u32, usize, usize)>,
-    /// Key span to the definition that has it and the node's place in that
-    /// body, ascending by span. See [`ModuleOutput::typed_spans`].
-    typed_spans: Vec<(u32, u32, usize, usize)>,
-}
-
-/// What checking one module reads: its definitions and scope, and every
-/// module's exports (for `alias.name`). Nothing else of the workspace is
-/// needed, so a salsa query can build this view.
-pub(crate) struct ModuleEnv<'w> {
-    pub(crate) module: usize,
-    pub(crate) defs: &'w [ast::Def],
-    pub(crate) scope: &'w HashMap<String, Binding>,
-    /// Exports of the modules it imports, by module index.
-    pub(crate) owns: HashMap<usize, &'w HashMap<String, Binding>>,
-    /// Borrowed checked exports; looking up one name never copies a catalog.
-    pub(crate) schemes: HashMap<usize, &'w HashMap<(usize, usize), Scheme>>,
-}
-
-/// Check one module against the schemes of the modules it may use.
-fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
-    let m = env.module;
-    let mut c = Checker {
-        env,
-        module: m,
-        vars: Vec::new(),
-        schemes: HashMap::new(),
-        failed: HashSet::new(),
-        active: Vec::new(),
-        recursion_reported: HashSet::new(),
-        depth: 0,
-        depth_reported: false,
-        pending: Vec::new(),
-        errors: Vec::new(),
-        span: Span::default(),
-        trail: Vec::new(),
-        fit_cache: HashMap::new(),
-        probe: None,
-        probe_fields: None,
-        uses: Vec::new(),
-        resolutions: HashMap::new(),
-        row_stages: Vec::new(),
-        combines: Vec::new(),
-        combine_partials: HashMap::new(),
-        holes: HashMap::new(),
-        choices: HashMap::new(),
-        typed_bodies: HashMap::new(),
-        unify_depth: 0,
-        par_ann: false,
-    };
-    for i in 0..c.env.defs.len() {
-        c.def_scheme(m, i);
-    }
-    let types = c
-        .schemes
-        .iter()
-        .filter(|(k, _)| !c.failed.contains(k))
-        .map(|(k, s)| (*k, c.show_scheme(s)))
-        .collect();
-    let probe_fields = c.probe_fields.map(|fs| (m, fs));
-    let typed = c.typed_bodies;
     let mut typed_index: Vec<(u32, usize, usize)> = Vec::new();
     for (&(_, def), body) in &typed {
         for (at, node) in body.nodes().iter().enumerate() {
@@ -697,15 +676,72 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         }
     }
     typed_spans.sort_unstable_by_key(|(start, end, _, _)| (*start, *end));
-    ModuleOutput {
-        schemes: c.schemes,
-        errors: c.errors,
+    Arc::new(ModuleCheck {
+        schemes,
+        errors,
         types,
         probe_fields,
         typed,
         typed_index,
         typed_spans,
-    }
+    })
+}
+
+/// What checking one definition produced, before its diagnostics are rendered.
+///
+/// Rendering needs the module's path and text, which the pure checker does not
+/// have; [`module_check`] converts this into a [`ModuleCheck`].
+#[derive(Debug, Clone, PartialEq)]
+struct DefCheck {
+    scheme: Option<Scheme>,
+    /// Whether the definition's own check failed. It still gets a scheme, so a
+    /// use of it does not cascade, but no type is printed for it.
+    failed: bool,
+    /// Its printed type, if it has one.
+    types: Option<String>,
+    /// Its body as a typed tree. Behind an `Arc` so that collecting a
+    /// module's checks shares the trees instead of copying them: a deep copy of
+    /// a thousand of them was most of the cost of a request.
+    typed: Option<Arc<TypedBody>>,
+    /// Type errors reported at this definition.
+    errors: Vec<RawTypeError>,
+    /// The row a `PROBE_FIELD` column saw here, if this is the definition that
+    /// referenced it.
+    probe_fields: Option<Vec<(String, String)>>,
+}
+
+/// A checked module with its diagnostics already rendered.
+///
+/// Rendered once per module text, inside the salsa query, so a request that
+/// only needs the diagnostics does not re-render them.
+#[derive(Debug, Clone, PartialEq)]
+struct ModuleCheck {
+    schemes: HashMap<(usize, usize), Scheme>,
+    errors: Vec<TypeError>,
+    types: HashMap<(usize, usize), String>,
+    probe_fields: Option<(usize, Vec<(String, String)>)>,
+    /// Each definition's body as a typed tree, by `(module, def)`.
+    typed: HashMap<(usize, usize), Arc<TypedBody>>,
+    /// `ExprId` to the definition that has it and the node's place in that
+    /// body, ascending by id. Positions only: the facts stay on the node, and
+    /// this is what lets an id-keyed reader find one without scanning every
+    /// definition.
+    typed_index: Vec<(u32, usize, usize)>,
+    /// Key span to the definition that has it and the node's place in that
+    /// body, ascending by span. See [`def_check`].
+    typed_spans: Vec<(u32, u32, usize, usize)>,
+}
+
+/// What checking one module reads: its definitions and scope, and every
+/// module's exports (for `alias.name`). Nothing else of the workspace is
+/// needed, so a salsa query can build this view.
+pub(crate) struct ModuleEnv<'w> {
+    pub(crate) module: usize,
+    pub(crate) scope: &'w HashMap<String, Binding>,
+    /// Exports of the modules it imports, by module index.
+    pub(crate) owns: HashMap<usize, &'w HashMap<String, Binding>>,
+    /// Borrowed checked exports; looking up one name never copies a catalog.
+    pub(crate) schemes: HashMap<usize, &'w HashMap<(usize, usize), Scheme>>,
 }
 
 #[cfg(test)]

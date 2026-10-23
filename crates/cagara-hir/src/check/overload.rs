@@ -14,9 +14,8 @@ impl<'w> Checker<'w> {
         if let Some(s) = self.def_scheme(m, i) {
             return s;
         }
-        let defs = self.env.defs;
         let ann = if m == self.module {
-            defs[i].ty.as_ref().map(|t| self.annotation(t))
+            self.defs.get(i).ty.as_ref().map(|t| self.annotation(t))
         } else {
             None
         };

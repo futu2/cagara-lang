@@ -703,10 +703,84 @@ pub(crate) struct VarInfo {
     pub(crate) version: u64,
 }
 
+/// A module's definitions, fetched from salsa as the checker asks for them.
+///
+/// Reading a definition here is a dependency on *that* definition's input. That
+/// is what narrows an edit to the definitions it touched: a checker handed the
+/// file's parse would depend on every definition in the file, and a keystroke
+/// anywhere in it would re-check all of them.
+pub(crate) struct ModuleDefs<'w> {
+    db: &'w dyn salsa::Database,
+    input: ModuleInput,
+}
+
+impl<'w> ModuleDefs<'w> {
+    pub(crate) fn new(db: &'w dyn salsa::Database, input: ModuleInput) -> Self {
+        Self { db, input }
+    }
+
+    pub(crate) fn get(&self, i: usize) -> &'w ast::Def {
+        let db = self.db;
+        &self.input.defs(db)[i].def(db).0
+    }
+}
+
+impl<'w> Checker<'w> {
+    /// A checker for one definition of `input`.
+    pub(crate) fn new(
+        env: ModuleEnv<'w>,
+        db: &'w dyn salsa::Database,
+        input: ModuleInput,
+        current: usize,
+    ) -> Self {
+        Checker {
+            module: env.module,
+            env,
+            db,
+            input,
+            current,
+            defs: ModuleDefs::new(db, input),
+            vars: Vec::new(),
+            schemes: HashMap::new(),
+            failed: HashSet::new(),
+            active: Vec::new(),
+            recursion_reported: HashSet::new(),
+            depth: 0,
+            depth_reported: false,
+            pending: Vec::new(),
+            errors: Vec::new(),
+            span: Span::default(),
+            trail: Vec::new(),
+            fit_cache: HashMap::new(),
+            probe: None,
+            probe_fields: None,
+            uses: Vec::new(),
+            resolutions: HashMap::new(),
+            row_stages: Vec::new(),
+            combines: Vec::new(),
+            combine_partials: HashMap::new(),
+            holes: HashMap::new(),
+            choices: HashMap::new(),
+            typed_bodies: HashMap::new(),
+            unify_depth: 0,
+            par_ann: false,
+        }
+    }
+}
+
 pub(crate) struct Checker<'w> {
     pub(crate) env: ModuleEnv<'w>,
     /// The module being checked; other modules' schemes are given.
     pub(crate) module: usize,
+    /// The database and module this definition belongs to, so a name defined
+    /// above it is answered by that definition's own memoized check.
+    pub(crate) db: &'w dyn salsa::Database,
+    pub(crate) input: ModuleInput,
+    /// This definition's index in the module: the boundary between a memoized
+    /// check (a name defined above it) and an inline one (a name below it).
+    pub(crate) current: usize,
+    /// The module's definitions, read from salsa as the checker asks for them.
+    pub(crate) defs: ModuleDefs<'w>,
     pub(crate) vars: Vec<VarInfo>,
     pub(crate) schemes: HashMap<(usize, usize), Scheme>,
     pub(crate) failed: HashSet<(usize, usize)>,

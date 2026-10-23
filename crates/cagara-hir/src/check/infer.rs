@@ -82,6 +82,32 @@ impl<'w> Checker<'w> {
         if let Some(s) = self.schemes.get(&(m, i)) {
             return Some(s.clone());
         }
+        // A name defined *above* this definition is answered by its own
+        // memoized check: that is what makes an edit to it invalidate the
+        // definitions that read it rather than the whole file.
+        //
+        // A name defined *below* its use is judged the same way inside the
+        // inline chain of `check_def` below — the cycle and depth rules there
+        // decide what a forward reference sees, exactly as they did when a
+        // module was one query. This branch only serves a caller outside such a
+        // chain (an overload candidate asked for a definition it has not
+        // reached), which has no cycle of its own to close. Rechecking it
+        // inline would make a module of n definitions cost n checks of growing
+        // prefixes — which is what checking the whole module in one query
+        // already was, and what splitting it apart exists to avoid.
+        //
+        // A name defined *below* its use is deliberately not routed this way:
+        // `check_def` below closes the cycle with `active` and reports it, and a
+        // salsa query would make the same program a salsa cycle instead.
+        if i < self.current {
+            let checked = def_check(self.db, self.input, i);
+            let scheme = checked.scheme.clone()?;
+            if checked.failed {
+                self.failed.insert((m, i));
+            }
+            self.schemes.insert((m, i), scheme.clone());
+            return Some(scheme);
+        }
         if self.active.contains(&(m, i)) {
             // A use of a definition that is still being checked is a cycle.
             // Returning a fresh type here used to let `q = q` check as `q : a`
@@ -90,12 +116,13 @@ impl<'w> Checker<'w> {
             // Report it where the cycle closes, then continue with a fresh
             // type so the rest of the definition still gets checked.
             if self.recursion_reported.insert((m, i)) {
-                let name = &self.env.defs[i].name;
+                let name = &self.defs.get(i).name;
                 self.errors.push(RawTypeError {
                     module: m,
                     def: i,
-                    span: self.env.defs[i].span,
+                    span: self.defs.get(i).span,
                     message: format!("`{name}` refers to itself; recursion is not supported"),
+                    kind: RawErrorKind::Def,
                 });
             }
             let v = self.fresh();
@@ -106,17 +133,27 @@ impl<'w> Checker<'w> {
             // and would overflow the stack before a diagnostic could be
             // reported, so report it once, here, and let the rest of the
             // chain check against a fresh type instead of cascading.
+            //
+            // Reported at the definition being checked, not at the one the
+            // walk happens to stop on: that is the definition whose own type is
+            // unknown, and it is the one the reader is looking at. Each check
+            // walks its own chain, so a chain of n definitions yields one
+            // diagnostic per definition that lies on a chain of its own that is
+            // too long — where checking a module in one query reported the
+            // single place one shared walk gave up.
             if !self.depth_reported {
                 self.depth_reported = true;
+                let current = self.defs.get(self.current);
                 self.errors.push(RawTypeError {
                     module: m,
-                    def: i,
-                    span: self.env.defs[i].span,
+                    def: self.current,
+                    span: current.span,
                     message: format!(
                         "`{}` lies on a chain of more than {MAX_DEF_DEPTH} forward-referenced \
                          definitions; define a name before the definitions that use it",
-                        self.env.defs[i].name
+                        current.name
                     ),
+                    kind: RawErrorKind::Chain,
                 });
             }
             let v = self.fresh();
@@ -221,6 +258,7 @@ impl<'w> Checker<'w> {
                     def: i,
                     span: e.span,
                     message: e.msg,
+                    kind: RawErrorKind::Def,
                 });
                 self.failed.insert((m, i));
                 let v = self.fresh();
@@ -241,7 +279,7 @@ impl<'w> Checker<'w> {
         // contributes none to the tree's stages: the chain is closed only when
         // the definition's rows are solved.
         if !typed_facts.is_empty() {
-            let body = &self.env.defs[i].body;
+            let body = &self.defs.get(i).body;
             let holes = self.holes.get(&(m, i)).copied().unwrap_or(0);
             let recorded = self.choices.get(&(m, i)).cloned().unwrap_or_default();
             let tree = crate::check::typed::build(
@@ -340,8 +378,7 @@ impl<'w> Checker<'w> {
     }
 
     pub(crate) fn check_def(&mut self, i: usize) -> R<Ty> {
-        let defs = self.env.defs;
-        let def = &defs[i];
+        let def = self.defs.get(i);
         let ann = match &def.ty {
             Some(t) => Some(self.annotation(t).map_err(at(def.span))?),
             None => None,
@@ -1144,7 +1181,7 @@ impl<'w> Checker<'w> {
     /// The stage a definition is, from its body. A `primitive` whose signature
     /// is a query stage owns that stage's row rule.
     pub(crate) fn def_stage(&self, i: usize) -> Option<RowStage> {
-        match &self.env.defs[i].body.kind {
+        match &self.defs.get(i).body.kind {
             ExprKind::Primitive(name) => {
                 crate::primitive::prim_of(name).and_then(RowStage::of_prim)
             }
@@ -1153,7 +1190,7 @@ impl<'w> Checker<'w> {
     }
 
     pub(crate) fn def_combine(&self, i: usize) -> Option<CombineKind> {
-        match &self.env.defs[i].body.kind {
+        match &self.defs.get(i).body.kind {
             ExprKind::Primitive(name) => match crate::primitive::prim_of(name) {
                 Some(crate::primitive::Prim::Join(kind)) => Some(CombineKind::Join(kind)),
                 Some(crate::primitive::Prim::Set(kind)) => Some(CombineKind::Set(kind)),
@@ -2002,7 +2039,7 @@ impl<'w> Checker<'w> {
 
     pub(crate) fn failed_use(&self, m: usize, i: usize) -> String {
         let name = if m == self.module {
-            Some(self.env.defs[i].name.as_str())
+            Some(self.defs.get(i).name.as_str())
         } else {
             self.env.owns.get(&m).and_then(|own| {
                 own.iter().find_map(|(n, b)| match b {

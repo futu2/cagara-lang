@@ -344,6 +344,26 @@ fn a_long_lambda_moves_its_body_to_an_indented_line() {
     );
 }
 
+/// `(x : ty) => body`: the parameter and its annotation are one head, so the
+/// arrow never separates them and a long type breaks the way a signature's
+/// does rather than pushing the arrow away.
+#[test]
+fn an_annotated_parameter_stays_with_its_arrow() {
+    check("f = (x : int) => x + 1\n", "f = (x : int) => x + 1\n");
+    // Spacing inside the parentheses is normalised, and an annotation written
+    // over several lines is pulled back together when it fits.
+    check("f = ( x:int ) => x\n", "f = (x : int) => x\n");
+    check(
+        "f = (x : query {\n  id = int\n}) => x\n",
+        "f = (x : query { id = int }) => x\n",
+    );
+    // Only the body moves when the whole lambda is too wide.
+    check(
+        "f = (x : query { id = int, name = string }) => where (.id == x && .name == \"a\" && .age > 18 && .region == \"eu\") q\n",
+        "f = (x : query { id = int, name = string }) =>\n  where (.id == x && .name == \"a\" && .age > 18 && .region == \"eu\") q\n",
+    );
+}
+
 /// A `case` used as a value (an argument, an arm of another `case`) is
 /// huggable like any braced expression, and a nested one indents under its
 /// arm rather than closing at the outer arm's level.

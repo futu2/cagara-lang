@@ -764,6 +764,17 @@ pub(crate) struct Checker<'w> {
     /// Recursion depth of `unify`, to turn a cyclic reduction into a
     /// diagnostic instead of a stack overflow.
     pub(crate) unify_depth: usize,
+    /// Set while a lambda parameter's annotation is being converted.
+    ///
+    /// A signature's type variables are rigid: `f : a -> a` promises to work at
+    /// every type, and `f = x => x + 1` is rejected because `a` is a string
+    /// there too. A *parameter's* annotation makes no such promise — it says
+    /// what this argument is — so its names are ordinary unification
+    /// variables, and `(p : expr r bool) => ...` lets the row of the argument
+    /// fill in `r` instead of demanding a universal row. Without this, the most
+    /// useful annotation in this language (`expr r a`) could not be used
+    /// anywhere a column is read: `r` would clash with the row of that column.
+    pub(crate) par_ann: bool,
 }
 
 pub(crate) fn missing(l: &str, have: &[(String, Ty)]) -> String {

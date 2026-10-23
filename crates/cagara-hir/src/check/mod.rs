@@ -657,6 +657,7 @@ fn check_module(env: ModuleEnv<'_>) -> ModuleOutput {
         choices: HashMap::new(),
         typed_bodies: HashMap::new(),
         unify_depth: 0,
+        par_ann: false,
     };
     for i in 0..c.env.defs.len() {
         c.def_scheme(m, i);

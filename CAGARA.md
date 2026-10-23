@@ -308,6 +308,7 @@ ty_field    := field_name '=' type
 
 expr        := lambda | let_expr | binary
 lambda      := IDENT '=>' expr
+             | '(' IDENT ':' type ')' '=>' expr
 let_expr    := 'let' IDENT '=' expr 'in' expr
 binary      := unary (OP binary)?          -- precedence per §4.2
 unary       := '-' unary | application
@@ -396,6 +397,10 @@ main = orders
 
 - `f x y` applies `f` to `x`, then to `y`.
 - `x => body` is a one-parameter lambda; curry for more.
+- `(x : ty) => body` is the same lambda with an annotated parameter. The annotation is
+  **checked**, not documentation: the body is typed with `x` at `ty`, and a call site must supply it.
+  The parentheses are required — `x : ty => body` is a syntax error, since a `:` cannot otherwise
+  say how far it reaches.
 - Functions take their **subject last**: `upper .name`, `substring 1 3 .s`, `coalesce 0 .score`,
   `addDays 7 .d`. This is what makes partial application a reusable stage.
 - `q & stage` means `stage q`. The pipeline's right operand is a whole expression.
@@ -409,6 +414,26 @@ byName = n => q => where (.name == n) q
 
 main = users & byName "ada" & select { .id, x = addOne .id, e = .name & clean }
 ```
+
+Annotating a parameter pins the type its body would otherwise leave open, the way a signature does
+for a whole definition. Its type variables relate what the annotation mentions — in
+`(least : expr r int)` one `r` is the row of the parameter and of the query it builds — but they are
+*filled in* by the argument rather than promised for every type the way a signature's are, because a
+parameter is monomorphic and has exactly one type at each use:
+
+```cagara
+users : query { id = int, name = string, age = int } = table "public" "users"
+
+onlyAdults = (q : query { id = int, name = string, age = int }) =>
+  q & where (.age >= 18)
+
+atLeast = (least : expr r int) => q => where (.age >= least) q
+
+main = users & onlyAdults & atLeast 21 & select { .id, .name }
+```
+
+`let` still binds without an annotation; write the lambda it stands for when a local needs a type:
+`let f = (x : int) => x + 1 in f .id`.
 
 ### 4.1.1 Local bindings
 
@@ -1660,6 +1685,7 @@ The compiler names the column and often the fix. Match the wording, then apply t
 | `\`byId\` does not match its signature` | bare `query r` annotation on a column-reading helper | name the field: `query { id = int \| r }` |
 | `\`main\` must be a query, found ...` | scalar definition named `main` | make `main` a query, or omit it for a library |
 | `a line starting with an identifier in column 0 begins a new definition` | unindented continuation | indent the line, or terminate the previous item with `;` |
+| `a lambda parameter's type annotation is written \`(x : ty) => body\`` | `x : int => x` | put the parameter and its type in parentheses |
 | `unknown name \`_&_\`` | prelude disabled | remove `# no prelude` or define your own |
 
 Two habits prevent the rest: give every table an accurate closed annotation, and ask **which phase**

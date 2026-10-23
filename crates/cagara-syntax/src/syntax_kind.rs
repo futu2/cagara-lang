@@ -309,7 +309,8 @@ kind_table! {
         /// A string literal in type position: `keyMap (prefix "u_") r`. The
         /// affix of a key mapper, read where the text still is.
         TyStr,
-        /// `x => body`
+        /// `x => body`, or `(x : ty) => body`. The optional `TypeAnn` child is
+        /// the parameter's annotation.
         Lambda,
         /// `lhs op rhs`
         BinExpr,

@@ -595,20 +595,52 @@ impl Fmt<'_> {
             K::ListExpr => self.delimited(n, K::LBracket, K::RBracket, Doc::SoftLine),
             K::App => self.app(n),
             K::BinExpr => self.bin(n, top),
-            K::Lambda => {
-                let els = sig(n);
-                let [param, arrow, body] = els.as_slice() else {
-                    return Err(Bail);
-                };
-                Ok(concat(vec![
-                    self.tok(&token(Some(param), K::Ident)?),
-                    text(" "),
-                    self.tok(&token(Some(arrow), K::FatArrow)?),
-                    self.rhs(&node(Some(body))?, top)?,
-                ]))
-            }
+            K::Lambda => self.lambda(n, top),
             K::CaseExpr => self.case(n),
             K::LetExpr => self.let_expr(n, top),
+            _ => Err(Bail),
+        }
+    }
+
+    /// `x => body`, or `(x : ty) => body`.
+    ///
+    /// The parameter and its annotation stay together before the arrow: an
+    /// annotation is part of what the arrow binds, not something hung off it,
+    /// and `(x : string) =>` reads like the signature it mirrors. Only the body
+    /// goes through [`rhs`](Fmt::rhs), so a long lambda still breaks after the
+    /// arrow exactly as a bare one does.
+    fn lambda(&self, n: &SyntaxNode, top: bool) -> R {
+        let els = sig(n);
+        let Some(arrow) = els.iter().position(|e| e.kind() == K::FatArrow) else {
+            return Err(Bail);
+        };
+        let (Some(head), Some(tail)) = (els.get(..arrow), els.get(arrow..)) else {
+            return Err(Bail);
+        };
+        let [body] = tail.get(1..).ok_or(Bail)? else {
+            return Err(Bail);
+        };
+        Ok(concat(vec![
+            self.lambda_param(head)?,
+            text(" "),
+            self.tok(&token(tail.first(), K::FatArrow)?),
+            self.rhs(&node(Some(body))?, top)?,
+        ]))
+    }
+
+    /// A lambda's parameter before the arrow: `name`, or `(name : ty)`.
+    fn lambda_param(&self, els: &[SyntaxElement]) -> R {
+        match els {
+            [param] => Ok(self.tok(&token(Some(param), K::Ident)?)),
+            [open, name, colon, ann, close] => Ok(concat(vec![
+                self.tok(&token(Some(open), K::LParen)?),
+                self.tok(&token(Some(name), K::Ident)?),
+                text(" "),
+                self.tok(&token(Some(colon), K::Colon)?),
+                text(" "),
+                self.ty(&node(Some(ann))?.children().next().ok_or(Bail)?)?,
+                self.tok(&token(Some(close), K::RParen)?),
+            ])),
             _ => Err(Bail),
         }
     }

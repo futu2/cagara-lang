@@ -404,6 +404,68 @@ fn scalar_type_errors() {
     );
 }
 
+/// A parameter's annotation is a type, not a comment.
+///
+/// The parameter is bound to it before the body is visited, so the body is
+/// checked against what the reader wrote rather than against whatever its
+/// first use happens to imply.
+#[test]
+fn a_parameter_annotation_fixes_the_parameter_type() {
+    assert_eq!(
+        ty("f = (q : query { id = int }) => q\n", "f"),
+        "query { id = int } -> query { id = int }"
+    );
+    // Body side: `+` has no `string` instance, and the parameter is a string.
+    assert!(err("f = (x : string) => x + 1\n", "f").contains("no overload of `+`"));
+    // Use side: an argument that does not fit is caught where it is passed
+    // — here the closed row says the stage reads one column, so the extra
+    // ones are named as the problem.
+    assert!(
+        err("f = (x : query { id = int }) => x\nq = users & f\n", "q").contains("no column `name`")
+    );
+}
+
+/// When the expectation is also known, the two must agree — the annotation
+/// is not silently discarded in favour of the expected type.
+#[test]
+fn a_parameter_annotation_meets_the_expected_type() {
+    assert_eq!(ty("f : int -> int = (x : int) => x\n", "f"), "int -> int");
+    assert!(
+        err("f : int -> int = (x : string) => x\n", "f").contains("does not match its signature")
+    );
+}
+
+/// An annotation's type variables relate the rows it mentions: `r` in
+/// `expr r bool` is one unknown throughout the annotation, so the parameter
+/// and the result are over the same row. They are *not* the rigid universals
+/// a signature's variables are — the row is whatever the argument turns out
+/// to be — which is why `where (p && .active)` type-checks.
+#[test]
+fn a_parameter_annotation_can_relate_rows() {
+    let src = "keep = (p : expr r bool) => where p\n\
+                   a = users & keep .active\n\
+                   b = orders & keep (.amount > 1.0)\n";
+    assert_eq!(ty(src, "keep"), "expr a bool -> query a -> query a");
+    assert_eq!(
+        ty(src, "a"),
+        "query { active = bool, id = int, name = string, age = int }"
+    );
+    assert_eq!(
+        ty(src, "b"),
+        "query { amount = float, id = int, user_id = int, status = string }"
+    );
+    // A row variable in an annotation is *filled* by the argument, so the
+    // body can read the columns of the row it received. A signature's `r`
+    // is a universal and could not.
+    assert_eq!(
+            ty(
+                "keep2 = (p : expr r bool) => q => where (p && .active) q\n",
+                "keep2"
+            ),
+            "expr { active = bool | a } bool -> query { active = bool | a } -> query { active = bool | a }"
+        );
+}
+
 #[test]
 fn signatures_are_checked() {
     assert!(err("f : int -> string = x => x + 1\n", "f").contains("does not match its signature"));

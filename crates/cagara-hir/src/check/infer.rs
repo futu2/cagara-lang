@@ -1037,7 +1037,13 @@ impl<'w> Checker<'w> {
         if let Some(t) = names.get(name) {
             return t.clone();
         }
-        let t = Ty::Rigid(self.fresh_with(false, true, kind), name.to_string());
+        // A parameter's annotation names a type the argument has, not one the
+        // definition promises to work at universally (see `Checker::par_ann`).
+        let t = if self.par_ann {
+            Ty::Var(self.fresh_with(false, true, kind))
+        } else {
+            Ty::Rigid(self.fresh_with(false, true, kind), name.to_string())
+        };
         names.insert(name.to_string(), t.clone());
         t
     }
@@ -1379,6 +1385,12 @@ impl<'w> Checker<'w> {
     /// but loses the expectation — and is why annotating a helper's signature
     /// used to be the workaround for a deferred row.
     ///
+    /// An annotation on the parameter (`(x : string) => ...`) wins over the
+    /// expectation and is compared with it, because the reader wrote it to pin
+    /// the type down: agreeing silently would let `(x : int) => x` pass where a
+    /// `string -> string` is wanted, and would report the mismatch at the
+    /// argument instead of at the annotation that caused it.
+    ///
     /// The body is inferred exactly once and its type *is* the result type of
     /// the function type returned; inferring the whole lambda as well would
     /// visit every subexpression twice.
@@ -1386,20 +1398,29 @@ impl<'w> Checker<'w> {
         let ExprKind::Lambda(param, body) = &e.kind else {
             unreachable!("dispatched on ExprKind::Lambda")
         };
+        let annotated = self.param_ty(param).map_err(at(param.span))?;
         let want = self.resolve(expected);
         // Peel one arrow when the expectation has one. When it is not a
         // function there is nothing to draw the parameter type from, so
-        // synthesis is the only option.
-        let param_ty = match &want {
+        // synthesis is the only option — or the annotation, when there is one.
+        let from_expected = match &want {
             Ty::Fun(p, _) => Some((**p).clone()),
             _ => None,
         };
-        let Some(param_ty) = param_ty else {
-            let actual = self.infer(env, e)?;
-            self.coerce(&actual, expected).map_err(at(e.span))?;
-            return Ok(self.resolve(expected));
+        let param_ty = match (annotated, from_expected) {
+            (Some(ann), Some(expect)) => {
+                self.coerce(&ann, &expect).map_err(at(param.span))?;
+                ann
+            }
+            (Some(ann), None) => ann,
+            (None, Some(expect)) => expect,
+            (None, None) => {
+                let actual = self.infer(env, e)?;
+                self.coerce(&actual, expected).map_err(at(e.span))?;
+                return Ok(self.resolve(expected));
+            }
         };
-        env.push((param.clone(), param_ty.clone()));
+        env.push((param.name.clone(), param_ty.clone()));
         let body_ty = self.infer(env, body);
         env.pop();
         let actual = fun(param_ty, body_ty?);
@@ -1759,11 +1780,36 @@ impl<'w> Checker<'w> {
         let ExprKind::Lambda(p, body) = &e.kind else {
             unreachable!("dispatched on ExprKind::Lambda")
         };
-        let pt = self.fresh();
-        env.push((p.clone(), pt.clone()));
+        // Nothing constrains a bare parameter, so it starts as a variable the
+        // body settles. An annotated one is already fixed, which is the whole
+        // point of writing it: the body is checked against the type the reader
+        // meant, not against whatever its first use happens to imply.
+        let pt = match self.param_ty(p).map_err(at(p.span))? {
+            Some(t) => t,
+            None => self.fresh(),
+        };
+        env.push((p.name.clone(), pt.clone()));
         let bt = self.infer(env, body);
         env.pop();
         Ok(fun(pt, bt?))
+    }
+
+    /// The type a lambda's parameter is annotated with, if it has one.
+    ///
+    /// The conversion is a signature's, so `(q : query { id = int }) => ...`
+    /// means here exactly what the same text means after a definition's `:`.
+    /// Its type variables differ: they are unknowns the argument settles rather
+    /// than universals the lambda must work for (see `Checker::par_ann`), since
+    /// a parameter is monomorphic and its annotation describes the one argument
+    /// it received.
+    fn param_ty(&mut self, p: &ast::LambdaParam) -> Result<Option<Ty>, String> {
+        let Some(t) = p.ty.as_deref() else {
+            return Ok(None);
+        };
+        let outer = std::mem::replace(&mut self.par_ann, true);
+        let ty = self.annotation(t);
+        self.par_ann = outer;
+        ty.map(Some)
     }
 
     fn infer_record(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {

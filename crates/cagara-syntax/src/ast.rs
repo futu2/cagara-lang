@@ -93,6 +93,20 @@ pub enum Lit {
     Bool(bool),
 }
 
+/// The parameter a lambda binds: its name, and the type it was annotated with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LambdaParam {
+    pub name: String,
+    /// The parameter as written — `x` in `x => body`, `x : string` in
+    /// `(x : string) => body`. The lambda's own span starts at the `(`, so this
+    /// is what an editor makes clickable, and `let` desugaring needs it too
+    /// (its lambda spans the binding's name through the end of the `let`).
+    pub span: Span,
+    /// `(x : string) => body`. `None` for the bare form; the checker binds a
+    /// fresh variable instead.
+    pub ty: Option<Box<TypeExpr>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExprKind {
     Name(String),
@@ -104,7 +118,10 @@ pub enum ExprKind {
     /// Application arguments: usually one or two (operators desugar into
     /// applications), so they live behind one allocation as a boxed slice.
     App(Box<Expr>, Box<[Expr]>),
-    Lambda(String, Box<Expr>),
+    /// `x => body`, or `(x : ty) => body`. The parameter is boxed so a lambda
+    /// costs what a name does: every node carries its `kind`, and an annotation
+    /// inlined here would be paid by every expression in the file.
+    Lambda(Box<LambdaParam>, Box<Expr>),
     Record(Vec<(String, Expr)>),
     List(Vec<Expr>),
     /// `sql "template"` with `$1`, `$2` placeholders
@@ -440,9 +457,27 @@ impl Lower<'_> {
                 Some(c) => return self.expr(&c),
                 None => ExprKind::Error,
             },
-            K::Lambda => match (token(n, K::Ident), n.children().next()) {
+            K::Lambda => match (
+                token(n, K::Ident),
+                n.children().find(|c| c.kind() != K::TypeAnn),
+            ) {
                 (Some(p), Some(b)) => {
-                    ExprKind::Lambda(p.text().to_string(), Box::new(self.expr(&b)))
+                    let range = p.text_range();
+                    let param_span = Span {
+                        start: range.start().into(),
+                        end: range.end().into(),
+                    };
+                    let ty = n
+                        .children()
+                        .find(|c| c.kind() == K::TypeAnn)
+                        .and_then(|a| a.children().next())
+                        .map(|t| Box::new(self.ty(&t)));
+                    let param = LambdaParam {
+                        name: p.text().to_string(),
+                        span: param_span,
+                        ty,
+                    };
+                    ExprKind::Lambda(Box::new(param), Box::new(self.expr(&b)))
                 }
                 _ => ExprKind::Error,
             },
@@ -503,8 +538,18 @@ impl Lower<'_> {
                         };
                         let value = self.expr(&value);
                         let body = self.expr(&body);
-                        let lambda =
-                            self.mk(lambda_span, ExprKind::Lambda(binding, Box::new(body)));
+                        let param = LambdaParam {
+                            name: binding,
+                            span: Span {
+                                start: range.start().into(),
+                                end: range.end().into(),
+                            },
+                            ty: None,
+                        };
+                        let lambda = self.mk(
+                            lambda_span,
+                            ExprKind::Lambda(Box::new(param), Box::new(body)),
+                        );
                         ExprKind::App(Box::new(lambda), vec![value].into())
                     }
                     _ => ExprKind::Error,
@@ -647,8 +692,43 @@ mod tests {
             fs.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(),
             ["id", "label"]
         );
-        assert!(matches!(&m.defs[1].body.kind, ExprKind::Lambda(p, _) if p == "x"));
+        assert!(matches!(&m.defs[1].body.kind, ExprKind::Lambda(p, _) if p.name == "x"));
+        assert!(
+            matches!(&m.defs[1].body.kind, ExprKind::Lambda(p, _) if p.ty.is_none()),
+            "a bare parameter carries no annotation"
+        );
         assert_eq!(m.defs[2].body.kind, ExprKind::Sql("UPPER($1)".into()));
+    }
+
+    /// A parameter's span is the parameter, not the lambda's first token.
+    ///
+    /// `(x : string) => body` starts at `(`, so the lambda's own span cannot say
+    /// where the name is; the parameter carries its own for editors to use.
+    #[test]
+    fn a_parameter_carries_its_own_span_and_annotation() {
+        let src = "f = (x : string) => x\n";
+        let (m, errs) = lower_source(src);
+        assert!(errs.is_empty(), "{errs:?}");
+        let ExprKind::Lambda(p, _) = &m.defs[0].body.kind else {
+            panic!("`f` is not a lambda")
+        };
+        assert_eq!(p.name, "x");
+        let start = p.span.start as usize;
+        assert_eq!(&src[start..start + 1], "x");
+        assert!(matches!(p.ty.as_deref(), Some(TypeExpr::App { head, .. }) if head == "string"));
+        // The `let` desugaring builds a parameter too, and it must keep the
+        // binding's own position.
+        let src = "g = let y = 1 in y\n";
+        let (m, _) = lower_source(src);
+        let ExprKind::App(f, _) = &m.defs[0].body.kind else {
+            panic!("`let` should desugar to an application")
+        };
+        let ExprKind::Lambda(p, _) = &f.kind else {
+            panic!("the applied value should be a lambda")
+        };
+        let start = p.span.start as usize;
+        assert_eq!(&src[start..start + 1], "y");
+        assert!(p.ty.is_none());
     }
 
     #[test]

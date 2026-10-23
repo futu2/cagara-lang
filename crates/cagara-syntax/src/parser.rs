@@ -519,7 +519,55 @@ impl<'a> Parser<'a> {
     // ── expressions ──────────────────────────────────────────
 
     fn at_lambda(&self) -> bool {
-        self.at_inner(Token::Ident) && self.peek_lex(1).map(|l| l.kind) == Some(Token::FatArrow)
+        if self.at_inner(Token::Ident) && self.peek_lex(1).map(|l| l.kind) == Some(Token::FatArrow)
+        {
+            return true;
+        }
+        self.at_annotated_lambda()
+    }
+
+    /// Is the cursor at `(` IDENT `:` … `)` `=>` — a parameter carrying a type
+    /// annotation, as in `(x : string) => body`?
+    ///
+    /// The whole parameter is scanned to its closing bracket, because the type
+    /// may nest (`(x : query { id = int | r }) => ...`), and only then is the
+    /// arrow checked: without one, the group is an ordinary parenthesised
+    /// expression, which `atom` handles. Trivia is skipped, so spacing inside
+    /// the parentheses is free. An annotated parameter is only recognised here,
+    /// at the start of an expression: `f a b` never annotates `b`, which is why
+    /// the form spells its brackets out.
+    fn at_annotated_lambda(&self) -> bool {
+        if !self.at(Token::LParen) {
+            return false;
+        }
+        let mut toks = self
+            .toks
+            .get(self.pos.min(self.toks.len())..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|l| !l.kind.is_trivia());
+        // The `(` at the cursor, then the parameter's name and its `:`. Anything
+        // else leaves this an ordinary parenthesis.
+        if toks.next().map(|l| l.kind) != Some(Token::LParen)
+            || toks.next().map(|l| l.kind) != Some(Token::Ident)
+            || toks.next().map(|l| l.kind) != Some(Token::Colon)
+        {
+            return false;
+        }
+        let mut depth = 1usize;
+        while let Some(l) = toks.next() {
+            match l.kind {
+                Token::LParen | Token::LBrace | Token::LBracket => depth += 1,
+                Token::RParen | Token::RBrace | Token::RBracket => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return toks.next().map(|l| l.kind) == Some(Token::FatArrow);
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Like [`at_lambda`](Parser::at_lambda), but not at the start of a `case`
@@ -549,15 +597,44 @@ impl<'a> Parser<'a> {
             return;
         }
         if self.at_lambda_operand() {
-            self.start(K::Lambda);
-            self.bump(); // param
-            self.bump(); // =>
-            self.expr();
-            self.finish();
+            self.lambda();
         } else {
             self.bin(0);
         }
         self.depth -= 1;
+    }
+
+    /// `x => body`, or `(x : type) => body`.
+    ///
+    /// The annotation sits inside parentheses because a `:` cannot otherwise
+    /// tell how far it reaches: `f x : int => body` would annotate the
+    /// application's result, or its last argument, or the lambda — and the bare
+    /// form would only be available where an expression *starts*. Bracketing the
+    /// parameter says what is annotated and reads the same everywhere. `let`
+    /// still binds without an annotation; annotate the lambda it stands for:
+    /// `let f = (x : int) => ... in ...`.
+    fn lambda(&mut self) {
+        self.start(K::Lambda);
+        if self.at(Token::LParen) {
+            self.bump(); // (
+            self.without_in_stop(|p| {
+                if p.at_inner(Token::Ident) {
+                    p.bump(); // parameter
+                } else {
+                    p.error("expected a lambda parameter after `(`");
+                }
+                p.expect(Token::Colon, "`:` after a lambda parameter's name");
+                p.start(K::TypeAnn);
+                p.ty();
+                p.finish();
+            });
+            self.expect(Token::RParen, "`)` after a lambda parameter's type");
+        } else {
+            self.bump(); // parameter
+        }
+        self.expect(Token::FatArrow, "`=>` after a lambda parameter");
+        self.expr();
+        self.finish();
     }
 
     /// Pratt loop over the operator table in `SyntaxKind::infix`.
@@ -580,6 +657,17 @@ impl<'a> Parser<'a> {
                 if l.kind.is_op_symbol() {
                     let msg = unknown_op(l.text, self.ops);
                     self.bail(&msg);
+                }
+                // `x : ty => body` and `(x : ty) 1`: a `:` has no meaning
+                // inside an expression, and the one thing it means next to a
+                // name is a parameter's annotation. Spell the form out at the
+                // `:` itself, instead of leaving the definition to report
+                // "unexpected tokens" past the whole body.
+                if l.kind == Token::Colon {
+                    self.bail(
+                        "a lambda parameter's type annotation is written \
+                         `(x : ty) => body`",
+                    );
                 }
                 break;
             };
@@ -1006,6 +1094,53 @@ mod tests {
             body("f = x => y => x + y"),
             "(Lambda x (Lambda y (BinExpr (NameRef x) (NameRef y))))"
         );
+    }
+
+    /// `(x : ty) => body` — a parameter carrying its own annotation.
+    #[test]
+    fn annotated_lambda_parameter() {
+        assert_eq!(
+            body("f = (x : int) => x + 1"),
+            "(Lambda x (TypeAnn (TyApp int)) (BinExpr (NameRef x) (Literal 1)))"
+        );
+        assert_eq!(
+            body("f = (q : query { id = int }) => q"),
+            "(Lambda q (TypeAnn (TyApp query (TyRecord (TyField id (TyApp int))))) (NameRef q))"
+        );
+        // The annotation is a parameter's, not the lambda's: another parameter
+        // in the same curried chain can have its own.
+        assert_eq!(
+            body("f = (x : int) => y => x"),
+            "(Lambda x (TypeAnn (TyApp int)) (Lambda y (NameRef x)))"
+        );
+    }
+
+    /// A `(name : ty)` group is a lambda's parameter only when an arrow
+    /// follows. Without one it stays an ordinary parenthesised expression, and
+    /// the `:` is a syntax error *there* rather than an annotation that eats the
+    /// group and then complains about a missing arrow.
+    #[test]
+    fn a_parameter_group_needs_its_arrow() {
+        let p = parse("f = (x : int) 1\n");
+        assert!(
+            p.errors.iter().any(|e| e.message.contains("=> body")),
+            "{:?}",
+            p.errors
+        );
+        // The bare form names the parentheses that are missing, at the `:`,
+        // rather than reporting whatever the definition ran into next.
+        let p = parse("f = x : int => x\n");
+        assert_eq!(
+            p.errors
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>(),
+            ["a lambda parameter's type annotation is written `(x : ty) => body`"]
+        );
+        // With the arrow, both definitions parse and stay separate items.
+        let p = parse("a = 1\nb = (x : int) => x\n");
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(p.syntax().children().count(), 2);
     }
 
     #[test]

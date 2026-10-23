@@ -1728,6 +1728,23 @@ An inline lambda works the same way, wherever a stage is expected:
 users & (q => where (.age > 18) q)
 ```
 
+A parameter can carry its own annotation, in parentheses, and it is checked
+rather than merely noted: the body is typed with the parameter at that type,
+and every call site has to supply it.
+
+```haskell
+onlyAdults = (q : query {id = int, name = string, age = int}) =>
+  q & where (.age > 18)
+
+a = users & onlyAdults
+```
+
+The brackets are required — `q : query {...} =>` does not parse. A type
+variable in the annotation is filled in by the argument, so
+`(least : expr r int) => q => where (.age > least) q` is accepted wherever the
+row it is given has a readable `age`: it is the same `r` as the query's, not a
+promise the helper works at every row.
+
 Because a stage is any function from a query to a query, stages also **compose**
 with `>>>` (and its mirror `<<<`) like any other function:
 
@@ -2053,6 +2070,7 @@ common ones, with the fix:
 | `only one side is nullable` | wrap with `coalesce`, or use `just` |
 | `expected a non-null value, found a \`maybe\`` | handle it; for an aggregate input use the `*Maybe` helper |
 | `a line starting with an identifier in column 0` | indent the continuation, or terminate the previous item with `;` |
+| `a lambda parameter's type annotation is written \`(x : ty) => body\`` | put the parameter and its type in parentheses |
 | `\`main\` must be a query` | make `main` a query, or omit it for a library |
 | `helper does not match its signature` | use a field-tail row: `query { id = int \| r }` |
 | `join predicates must say which input a column comes from` | use `.<x` / `.>x` |

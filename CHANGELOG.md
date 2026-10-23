@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- A lambda's parameter can carry a type annotation: `(x : string) => body`.
+  The annotation is checked, not noted — the body is typed with the parameter at
+  that type, and a use has to supply it, so `(x : string) => x + 1` is the
+  overload error it looks like and `users & named`, where `named` reads columns
+  the argument does not have, is reported rather than passed along. The
+  parentheses are required: `x : string => body` stays a syntax error, because
+  a `:` cannot otherwise say how far it reaches (`f x : string => body` would
+  annotate the application's argument, or its result, or the lambda), and the
+  bare form would only be available where an expression starts. `let` still
+  binds without one; write the lambda it stands for.
+
+  A type variable in the annotation is *filled in* by the argument rather than
+  promised for every type: `(least : expr r int) => q => where (.age >= least) q`
+  infers `expr { age = int | r } int -> query { age = int | r } -> query { age = int | r }`,
+  the row it was given. That is the same text a signature would use, read the
+  one way a parameter can mean it, and it is what makes an annotation useful
+  here at all: a signature's `r` is rigid, and a rigid row clashes with the row
+  of the first column a body reads.
+
+  The parameter is now a boxed `ast::LambdaParam` — its name, its own span, and
+  its optional annotation — so the language server finds the name inside the
+  parentheses for hover, go-to-definition, references, and highlights, and an
+  expression node still costs what a name does. Writing `x : int => body`
+  reports the form it wants instead of "unexpected tokens after definition".
 - Document a table's columns, one level below the definition that names them. A
   column is a field of a record type, so it cannot be an item with a `##` block
   of its own; the block now goes above the field, inside the signature:

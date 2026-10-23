@@ -200,7 +200,9 @@ impl<'a> Normalizer<'a, 'a> {
         let mut params = Vec::new();
         let mut body = expr;
         while let ExprKind::Lambda(parameter, next) = &body.kind {
-            params.push(parameter.clone());
+            // The annotation has already done its work: the checker fixed the
+            // parameter's type with it, and a closure carries types, not source.
+            params.push(parameter.name.clone());
             body = next;
         }
         Ok(Value::Closure(Closure {

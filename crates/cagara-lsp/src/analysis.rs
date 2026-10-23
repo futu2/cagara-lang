@@ -161,17 +161,22 @@ impl Walk<'_> {
                 args.iter().for_each(|a| self.expr(a));
             }
             ExprKind::Lambda(p, body) => {
-                // A lambda's span starts at its parameter.
-                let Some((start, scope_end)) = trimmed(&md.text, e.span) else {
+                // The parameter carries its own span, so `(x : string) => ...`
+                // is as navigable as the bare `x => ...`: the name sits at the
+                // start of that span whether or not brackets and a type come
+                // before the arrow. Only the name is the occurrence; the
+                // annotation is types, not a reference to a name in scope.
+                let Some((_, scope_end)) = trimmed(&md.text, e.span) else {
                     return;
                 };
-                let at = if md.text[start..].starts_with(p.as_str()) {
-                    Some(start)
-                } else {
-                    None
-                };
+                let start = p.span.start as usize;
+                let end = start + p.name.len();
+                let at = md
+                    .text
+                    .get(start..end)
+                    .filter(|t| *t == p.name)
+                    .map(|_| start);
                 if let Some(at) = at {
-                    let end = start + p.len();
                     self.out.push(Occ {
                         start,
                         end,
@@ -181,7 +186,7 @@ impl Walk<'_> {
                         site: None,
                     });
                 }
-                self.env.push((p.clone(), at));
+                self.env.push((p.name.clone(), at));
                 self.expr(body);
                 self.env.pop();
             }
@@ -1731,6 +1736,41 @@ mod tests {
         let d = definition(&ws, at("shadow = users", 10));
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].1, range(5, 9, 14));
+    }
+
+    /// An annotated parameter is a name like any other: `(x : ty)` puts the
+    /// name after a `(` and a `:`, which used to be the one place a parameter
+    /// could not be found.
+    #[test]
+    fn an_annotated_parameter_is_a_name_in_scope() {
+        let src = "users : query { id = int, name = string } = table \"p\" \"users\"\n\
+                   twice = (x : expr r int) => x + x\n\
+                   q = users & select { n = twice .id }\n";
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
+        // A use jumps to the name inside the parentheses, not to the `(`.
+        let d = definition(&ws, at_in(src, "x + x", 0));
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].1, range(1, 9, 10));
+        // Both uses and the declaration are one name.
+        assert_eq!(
+            highlights(&ws, at_in(src, "x + x", 0))
+                .iter()
+                .map(|(r, _)| *r)
+                .collect::<Vec<_>>(),
+            vec![range(1, 9, 10), range(1, 28, 29), range(1, 32, 33)]
+        );
+        // Hovering a use shows the type the annotation gave it.
+        let h = one_line(hover(&ws, at_in(src, "x + x", 0)).unwrap());
+        assert!(h.contains("x : ") && h.contains("int"), "{h}");
+        // Hovering the declaration itself names what it is.
+        let h = one_line(hover(&ws, at_in(src, "x : expr", 0)).unwrap());
+        assert!(h.contains("local binding"), "{h}");
+        // The parameter is offered while completing the body.
+        let labels = completion(&ws, at_in(src, "x + x", 0))
+            .into_iter()
+            .map(|i| i.label)
+            .collect::<Vec<_>>();
+        assert!(labels.iter().any(|l| l == "x"), "{labels:?}");
     }
 
     #[test]

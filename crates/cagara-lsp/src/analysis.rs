@@ -298,7 +298,13 @@ fn column_doc(
         .position(|d| contains(d.span, offset))?;
     let owner = (ws.root, def);
     let body = &md.module.defs.get(def)?.body;
-    let At::Here(Some((m, i))) = row_at(ws, occs, body, offset, None, owner, side) else {
+    let descent = Descent {
+        ws,
+        occs,
+        offset,
+        side,
+    };
+    let At::Here(Some((m, i))) = descent.at(ws.root, body, None, owner) else {
         return None;
     };
     let decl = ws.modules.get(m)?;
@@ -311,6 +317,18 @@ fn column_doc(
         .doc
 }
 
+/// A walk from a cursor back to the declaration that named the column it reads.
+///
+/// One descent per hover, so what it needs that does not change — the workspace,
+/// the root file's occurrences, the cursor, and which side of a join the column
+/// is on — lives here rather than being threaded through every call.
+struct Descent<'a> {
+    ws: &'a Workspace,
+    occs: &'a [Occ],
+    offset: usize,
+    side: Side,
+}
+
 /// What the descent found at the cursor.
 enum At {
     /// The cursor is in this expression; this is the row in effect there.
@@ -319,105 +337,189 @@ enum At {
     Elsewhere,
 }
 
-/// Descend to the cursor, carrying the definition whose declared record type
-/// fixed the row the sub-expression reads.
-fn row_at(
-    ws: &Workspace,
-    occs: &[Occ],
-    e: &Expr,
-    offset: usize,
-    input: Option<(usize, usize)>,
-    owner: (usize, usize),
-    side: Side,
-) -> At {
-    if !contains(e.span, offset) {
-        return At::Elsewhere;
-    }
-    let Some((callee, args)) = spine(e) else {
-        return At::Here(input);
-    };
-    let name = head_name(callee);
-    // `q & st`: the stage's arguments read `q`'s row, and `q` is a pipeline of
-    // its own.
-    if name == Some("_&_") {
-        let (Some(q), Some(st)) = (args.first(), args.get(1)) else {
+impl Descent<'_> {
+    /// Descend to the cursor, carrying the definition whose declared record type
+    /// fixed the row the sub-expression reads.
+    ///
+    /// `module` is the module `e` was parsed from: the root while the walk is
+    /// in the file being edited, and the defining module while it follows a
+    /// body there.
+    fn at(
+        &self,
+        module: usize,
+        e: &Expr,
+        input: Option<(usize, usize)>,
+        owner: (usize, usize),
+    ) -> At {
+        if !contains(e.span, self.offset) {
+            return At::Elsewhere;
+        }
+        let Some((callee, args)) = spine(e) else {
             return At::Here(input);
         };
-        return if contains(st.span, offset) {
-            row_at(
-                ws,
-                occs,
-                st,
-                offset,
-                row_source(ws, occs, q, owner),
-                owner,
-                side,
-            )
-        } else {
-            row_at(ws, occs, q, offset, input, owner, side)
-        };
+        let name = head_name(callee);
+        // `q & st`, and the shorthands that carry the stage inline (`q &? pred`,
+        // `q &= fields`, `q &| r`): the piped query decides the row, and every
+        // later argument is an expression over that row.
+        if is_pipeline(name) {
+            let Some(q) = args.first() else {
+                return At::Here(input);
+            };
+            let row = self.source(module, q, owner);
+            for a in args.iter().skip(1) {
+                if contains(a.span, self.offset) {
+                    return self.at(module, a, row, owner);
+                }
+            }
+            return self.at(module, q, input, owner);
+        }
+        // A join's predicate reads the joined row: `.>x` is the query the join
+        // names, `.<x` the query piped into it.
+        if is_join(name) {
+            let row = if self.side == Side::Right {
+                args.first().and_then(|q| self.source(module, q, owner))
+            } else {
+                input
+            };
+            return args
+                .iter()
+                .skip(1)
+                .find(|a| contains(a.span, self.offset))
+                .map_or(At::Elsewhere, |a| self.at(module, a, row, owner));
+        }
+        // Everything else — a stage applied as a function value (`where p`,
+        // `select {..}`), a record, a list, a lambda body — is an expression
+        // over whatever row the caller established.
+        args.iter()
+            .find(|a| contains(a.span, self.offset))
+            .map_or(At::Here(input), |a| self.at(module, a, input, owner))
     }
-    // A join's predicate reads the joined row: `.>x` is the query the join
-    // names, `.<x` the query piped into it.
-    if is_join(name) {
-        let row = if side == Side::Right {
-            args.first().and_then(|q| row_source(ws, occs, q, owner))
-        } else {
-            input
-        };
-        return args
-            .iter()
-            .skip(1)
-            .find(|a| contains(a.span, offset))
-            .map_or(At::Elsewhere, |a| {
-                row_at(ws, occs, a, offset, row, owner, side)
-            });
+
+    /// The definition whose declared record type fixed the row of `e`, if one
+    /// did.
+    ///
+    /// A name that declares a record type is the answer. A name that does not —
+    /// an alias with no signature (`t = aam.tbl`), or one narrowed to an opaque
+    /// `query r` — is a *step*, not a declaration: it says nothing about the
+    /// columns, so the walk follows its body instead. The depth bound is what
+    /// keeps a file with a cycle (`a = b`, `b = a`, which the checker rejects)
+    /// from spinning here.
+    fn source(&self, module: usize, e: &Expr, owner: (usize, usize)) -> Option<(usize, usize)> {
+        self.source_at(module, e, owner, 8)
     }
-    // Everything else — a stage applied as a function value (`where p`,
-    // `select {..}`), a record, a lambda body — is an expression over whatever
-    // row the caller established.
-    args.iter()
-        .find(|a| contains(a.span, offset))
-        .map_or(At::Here(input), |a| {
-            row_at(ws, occs, a, offset, input, owner, side)
-        })
+
+    fn source_at(
+        &self,
+        module: usize,
+        e: &Expr,
+        owner: (usize, usize),
+        depth: u8,
+    ) -> Option<(usize, usize)> {
+        if depth == 0 {
+            return None;
+        }
+        match &e.kind {
+            // A name: its own signature names its columns, if it declares a
+            // record type. Otherwise keep following what it stands for.
+            ExprKind::Name(_) | ExprKind::Proj(..) => {
+                let (m, i) = def_of(self.ws, self.occs, module, e)?;
+                if declares_record(self.ws, m, i) {
+                    return Some((m, i));
+                }
+                let body = &self.ws.modules.get(m)?.module.defs.get(i)?.body;
+                self.source_at(m, body, (m, i), depth - 1)
+            }
+            ExprKind::App(..) => {
+                let (callee, args) = spine(e)?;
+                match head_name(callee) {
+                    // `q & st`: the row is `q`'s unless `st` rebuilds the
+                    // columns.
+                    Some("_&_") => {
+                        let q = args.first()?;
+                        let keeps = keeps_columns(args.get(1)?);
+                        keeps.then(|| self.source_at(module, q, owner, depth))?
+                    }
+                    // The shorthands, and the set operations that keep the left
+                    // row: everything `&…` that does not rebuild the columns.
+                    Some("_&?_" | "_&._" | "_&-_" | "_&|_" | "_&!_" | "_&^_" | "_&~_") => {
+                        self.source_at(module, args.first()?, owner, depth)
+                    }
+                    // `union a b` and friends: the left query's row, unchanged.
+                    Some("union" | "unionAll" | "intersect" | "except") => {
+                        self.source_at(module, args.first()?, owner, depth)
+                    }
+                    // A table's row is fixed by the signature of the definition
+                    // that writes it.
+                    Some("table") => Some(owner),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
-/// The definition whose declared record type fixed the row of `e`, if one did.
-fn row_source(
-    ws: &Workspace,
-    occs: &[Occ],
-    e: &Expr,
-    owner: (usize, usize),
-) -> Option<(usize, usize)> {
-    match &e.kind {
-        // A named query: its own signature names its columns.
-        ExprKind::Name(_) | ExprKind::Proj(..) => {
-            let Binding::Def(m, i) = binding_of(occs, e)? else {
-                return None;
-            };
-            let (m, i) = (*m, *i);
-            ws.modules.get(m)?.module.defs.get(i)?.ty.as_ref()?;
-            Some((m, i))
-        }
-        ExprKind::App(..) => {
-            let (callee, args) = spine(e)?;
-            match head_name(callee) {
-                // `q & st`: the row is `q`'s unless `st` rebuilds the columns.
-                Some("_&_") => {
-                    let q = args.first()?;
-                    keeps_columns(args.get(1)?).then(|| row_source(ws, occs, q, owner))?
-                }
-                // The shorthands that only read their input.
-                Some("_&?_" | "_&._" | "_&-_") => row_source(ws, occs, args.first()?, owner),
-                // A table's row is fixed by the signature of the definition
-                // that writes it.
-                Some("table") => Some(owner),
-                _ => None,
+/// The `(module, definition)` a name expression denotes.
+///
+/// The root file's occurrences already know which names a lambda parameter
+/// shadows; another module's body is resolved against that module's own scope,
+/// which is all a definition's top level needs.
+fn def_of(ws: &Workspace, occs: &[Occ], module: usize, e: &Expr) -> Option<(usize, usize)> {
+    let binding = if module == ws.root {
+        binding_of(occs, e)?.clone()
+    } else {
+        let md = ws.modules.get(module)?;
+        match &e.kind {
+            ExprKind::Name(n) => md.scope.get(n)?.clone(),
+            ExprKind::Proj(inner, field) => {
+                let ExprKind::Name(alias) = &inner.kind else {
+                    return None;
+                };
+                let Binding::Module(t) = md.scope.get(alias)? else {
+                    return None;
+                };
+                ws.modules.get(*t)?.own.get(field)?.clone()
             }
+            _ => return None,
         }
-        _ => None,
-    }
+    };
+    let Binding::Def(m, i) = binding else {
+        return None;
+    };
+    Some((m, i))
+}
+
+/// Whether a definition's own signature declares a record type — the only place
+/// a column can be documented.
+fn declares_record(ws: &Workspace, m: usize, i: usize) -> bool {
+    let Some(md) = ws.modules.get(m) else {
+        return false;
+    };
+    let Some(ty) = md.module.defs.get(i).and_then(|d| d.ty.as_ref()) else {
+        return false;
+    };
+    !Docs::new(&md.text).record_fields(ty).is_empty()
+}
+
+/// Whether an expression is a pipeline step: `&`, or one of its shorthand
+/// spellings, all of which take the query first.
+fn is_pipeline(name: Option<&str>) -> bool {
+    matches!(
+        name,
+        Some(
+            "_&_"
+                | "_&?_"
+                | "_&=_"
+                | "_&+_"
+                | "_&*_"
+                | "_&._"
+                | "_&-_"
+                | "_&|_"
+                | "_&!_"
+                | "_&^_"
+                | "_&~_"
+        )
+    )
 }
 
 /// Whether a stage expression (`where p`, `order keys`, …) leaves every column
@@ -432,7 +534,18 @@ fn keeps_columns(st: &Expr) -> bool {
     };
     matches!(
         head_name(callee),
-        Some("where" | "whereTrue" | "order" | "limit" | "offset" | "distinct")
+        Some(
+            "where"
+                | "whereTrue"
+                | "order"
+                | "limit"
+                | "offset"
+                | "distinct"
+                | "union"
+                | "unionAll"
+                | "intersect"
+                | "except"
+        )
     )
 }
 
@@ -1366,6 +1479,35 @@ mod tests {
             src.to_string(),
         );
         assert_eq!(hover(&ws, at_in(src, "name = string", 1)), None);
+    }
+
+    /// An alias is not a declaration. `t = users` says nothing about the
+    /// columns, so the walk follows its body rather than stopping at a
+    /// definition with no record to read; and the `&…` shorthands carry the
+    /// step inline, so their arguments read the piped query's row like any
+    /// other stage's.
+    #[test]
+    fn an_alias_and_a_shorthand_still_reach_the_declaration() {
+        let src = "## T.\nusers : query {\n    ## Age.\n    age = int\n  } = table \"p\" \"t\"\n\n\
+                   alias = users\n\
+                   via_alias = alias & where (.age > 0)\n\
+                   shorthand = users &? (.age > 0)\n\
+                   sorted = users &. [asc .age]\n\
+                   unioned = users &| users & where (.age > 0)\n";
+        let ws = Workspace::open_with(Path::new("/nonexistent/alias.cagara"), src.to_string());
+        for needle in [
+            "via_alias = alias & where (.age > 0)",
+            "shorthand = users &? (.age > 0)",
+            "sorted = users &. [asc .age]",
+            "unioned = users &| users & where (.age > 0)",
+        ] {
+            let h = hover(
+                &ws,
+                at_in(src, needle, needle.find(".age").unwrap_or(0) + 1),
+            )
+            .unwrap_or_default();
+            assert!(h.contains("Age."), "`{needle}` lost the doc: {h}");
+        }
     }
 
     /// A column with no declaration behind it shows its type and nothing else:

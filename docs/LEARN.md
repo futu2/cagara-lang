@@ -2015,7 +2015,8 @@ partly documented record leaves out.
 
 Hovering a column (`age` in `.age >= 18`, `.<id` in a join predicate) shows that
 text as well: the language server follows the row back to the signature that
-named it, through the stages that keep their columns. A column that a `select`
+named it, through the stages that keep their columns and through aliases that
+declare no row of their own (`t = aam.users`). A column that a `select`
 computed, that `prefix` renamed, or that a join merged has no declaration to
 point at, and the hover shows only the type.
 

@@ -38,7 +38,11 @@
   reaches, and appends it to the type it already showed. `.>x` in a join
   predicate follows the join's own query, `.<x` the one piped into it, and a
   column inside a `select`/`update`/`agg` argument is read from that stage's
-  input row — which is where those dots actually point.
+  input row — which is where those dots actually point. `t = aam.tbl` is a step
+  rather than a declaration (it says nothing about the columns), so the walk
+  follows its body instead of stopping there, and the `&…` shorthands (`&?`,
+  `&.`, `&-`, `&|` …) carry their stage inline and read the piped query's row
+  like every other stage.
 - Hovering a field where it is *declared* — `age` in
   `users : query { age = int }` — shows its block as the whole tooltip. A field
   has no type of its own to report, and the line beside the cursor already says

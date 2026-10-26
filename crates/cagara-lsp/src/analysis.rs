@@ -21,10 +21,15 @@ use std::path::PathBuf;
 pub fn diagnostics(ws: &Workspace) -> Vec<(Range, String)> {
     let compilation_diagnostics = compile_diagnostics(ws);
     let root = ws.modules[ws.root].path.display().to_string();
+    // Deduped through a set, not `Vec::contains`: a file being typed has as
+    // many diagnostics as it has errors, and comparing each against every one
+    // already collected made publishing quadratic in them. The compiler's own
+    // collector dedupes the same way (`compile::push_unique`).
     let mut out: Vec<(Range, String)> = Vec::new();
+    let mut seen: HashSet<(Range, String)> = HashSet::new();
     for d in compilation_diagnostics.iter().filter(|d| d.path == root) {
         let item = (diag_range(d), d.message.clone());
-        if !out.contains(&item) {
+        if seen.insert(item.clone()) {
             out.push(item);
         }
     }

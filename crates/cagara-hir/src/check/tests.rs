@@ -931,7 +931,11 @@ fn editing_one_definition_rechecks_only_it_and_its_readers() {
 
     // Re-checking without an edit re-runs nothing at all.
     let _ = check(&ws);
-    assert_eq!(super::check_runs(), q_2, "nothing changed, nothing rechecked");
+    assert_eq!(
+        super::check_runs(),
+        q_2,
+        "nothing changed, nothing rechecked"
+    );
 }
 
 /// The remaining ripple, recorded so that it is measured rather than assumed.

@@ -279,18 +279,17 @@ fn analyse(jobs: Receiver<Work>, sender: Sender<Message>) {
             else {
                 unreachable!("only requests are collected here");
             };
-            let answer = match catch_unwind(AssertUnwindSafe(|| {
-                request(&mut state, &method, params)
-            })) {
-                Ok(result) => result,
-                Err(p) => {
-                    rebuild(&mut state);
-                    Err((
-                        ErrorCode::InternalError,
-                        format!("internal error in {method}: {}", panic_message(&*p)),
-                    ))
-                }
-            };
+            let answer =
+                match catch_unwind(AssertUnwindSafe(|| request(&mut state, &method, params))) {
+                    Ok(result) => result,
+                    Err(p) => {
+                        rebuild(&mut state);
+                        Err((
+                            ErrorCode::InternalError,
+                            format!("internal error in {method}: {}", panic_message(&*p)),
+                        ))
+                    }
+                };
             let _ = reply.send(answer);
         }
         if batch.publish {

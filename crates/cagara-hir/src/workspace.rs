@@ -891,7 +891,10 @@ mod tests {
         std::fs::write(&a, root).unwrap();
 
         std::fs::write(&lib, "value = 2\n").unwrap();
-        assert!(ws.reload_from_disk(), "a plain text change reloads in place");
+        assert!(
+            ws.reload_from_disk(),
+            "a plain text change reloads in place"
+        );
         assert_eq!(ws.modules[lib_module].text, "value = 2\n");
         assert!(crate::check(&ws).errors().is_empty(), "{:?}", ws.diags);
 

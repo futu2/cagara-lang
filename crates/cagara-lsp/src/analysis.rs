@@ -1700,7 +1700,10 @@ mod tests {
         assert_eq!(rs.len(), 2, "binding and use: {rs:?}");
         // Completion inside the body sees the binding.
         let p = Positions::new(src).position(src.find("in age2").expect("body text") + 3);
-        let labels: Vec<String> = completion(&mut ws, p).into_iter().map(|i| i.label).collect();
+        let labels: Vec<String> = completion(&mut ws, p)
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
         assert!(labels.iter().any(|l| l == "age2"), "{labels:?}");
     }
 

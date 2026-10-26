@@ -21,6 +21,22 @@
   from the built-in SQL grammar by scope name and its `editor.wordWrap: "on"`
   from `configurationDefaults`.
 
+- A call that breaks now puts one argument per indented line, always. Packing
+  kept the early arguments on the head's line and pushed the rest below, so an
+  argument's position depended on its length, and an argument that opened a
+  bracket left the ones after it past the `)` — `) (same_day process_date)`,
+  which is where a reader stops counting arguments. Every argument now opens
+  its own line in the same column:
+
+      corporate_current_account_open_count_day = process_date =>
+        corporate_current_account_open_count
+          (toString (truncYear (toDate process_date)))
+          (same_day process_date)
+
+  The trade is that a call whose head takes one long argument and several short
+  ones — `ifThenElse (cond) .presub .subcode` — now gives each its own line
+  where it used to keep the last two together.
+
 - Staging the server builds it before copying it, and copies the newer of the
   two builds that can exist. A stage is a copy and a copy is a snapshot:
   nothing else in the loop rebuilt, so the development host launched whatever

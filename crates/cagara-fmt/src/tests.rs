@@ -390,34 +390,6 @@ fn a_case_nests_like_any_braced_expression() {
     );
 }
 
-/// A long application keeps its arguments together: the body moves to an
-/// indented line, and past that the arguments fill the lines rather than each
-/// taking one. The old layout was all-or-nothing — one more argument turned a
-/// two-line definition into one line per argument, which is both taller and
-/// less readable.
-#[test]
-fn long_applications_fill_their_lines() {
-    // Nothing is split when the body fits once it has moved down.
-    let args: Vec<String> = (0..18).map(|i| format!("arg{i:02}")).collect();
-    let src = format!("x = f {}\n", args.join(" "));
-    check(
-        &src,
-        "x =
-  f arg00 arg01 arg02 arg03 arg04 arg05 arg06 arg07 arg08 arg09 arg10 arg11 arg12 arg13 arg14 arg15
-    arg16 arg17
-",
-    );
-    // The one argument that does not fit breaks on its own; its neighbours stay
-    // where they are.
-    check(
-        "x = someFunctionName arg_one arg_two arg_three arg_four arg_five arg_six arg_seven arg_eight arg_nineXYZ\n",
-        "x =
-  someFunctionName arg_one arg_two arg_three arg_four arg_five arg_six arg_seven arg_eight
-    arg_nineXYZ
-",
-    );
-}
-
 /// A `case` used as a definition's body is on the `=` line while it fits, and
 /// otherwise moves down whole, onto a line whose width the `case` itself gets
 /// to use. As a record field it stays hugged to the field's name, because that
@@ -484,55 +456,6 @@ fn a_lambda_pipeline_body_moves_down_between_its_peers() {
         "adults = users & where (.age >= 18) & select { id = .id }\n",
         "adults = users\n  & where (.age >= 18)\n  & select { id = .id }\n",
     );
-}
-
-/// A call whose last argument is a parenthesised condition keeps the earlier
-/// arguments beside it. Hugging the paren used to print `ifThenElse (` on the
-/// call's line, the condition indented under it, and the rest stranded after
-/// the `)`: `) (toYuan .lstbal) (toYuan .balance)`. The hug now only happens
-/// when the hugged parts fit, so the call packs its arguments instead.
-#[test]
-fn a_parenthesised_last_argument_does_not_strand_the_others() {
-    let src = "q = {
-    subject_code =
-      ifThenElse ((toDate .lstcintd) > (toDate .pt_dt) || (toDate .lsttrand) > (toDate .pt_dt))
-        .presub .subcode,
-    balance = ifThenElse (
-      (toDate .lstcintd) > (toDate .pt_dt) || (toDate .lsttrand) > (toDate .pt_dt)
-    ) (toYuan .lstbal) (toYuan .balance),
-}
-";
-    // Both fields are laid out the same way: the call opens on its own line
-    // under the field's `=`, its arguments follow it, and nothing is left
-    // after a broken bracket.
-    check(
-        src,
-        "q = {
-  subject_code =
-    ifThenElse ((toDate .lstcintd) > (toDate .pt_dt) || (toDate .lsttrand) > (toDate .pt_dt))
-      .presub .subcode,
-  balance =
-    ifThenElse ((toDate .lstcintd) > (toDate .pt_dt) || (toDate .lsttrand) > (toDate .pt_dt))
-      (toYuan .lstbal) (toYuan .balance),
-}
-",
-    );
-    // A paren that cannot sit on the call's line at all takes a block of its
-    // own, with the arguments before it still together.
-    check(
-        "a = f x y (condition_one_long > 1 || condition_two_long > 2 || condition_three_long > 3 || condition_four_long > 4)\n",
-        "a =
-  f x y
-    (
-      condition_one_long > 1
-        || condition_two_long > 2
-        || condition_three_long > 3
-        || condition_four_long > 4
-    )
-",
-    );
-    // A short paren still hugs.
-    check("a = f x y (.c > 1)\n", "a = f x y (.c > 1)\n");
 }
 
 #[test]
@@ -610,17 +533,79 @@ fn long_arguments_break_onto_indented_lines() {
         "b".repeat(40),
         "c".repeat(40)
     );
-    // The arguments fill the indented line rather than taking one line each:
-    // `someFunction` and the first two fit there, and only the third breaks.
     check(
         &src,
         &format!(
-            "x =\n  someFunction {} {}\n    {}\n",
+            "x =\n  someFunction\n    {}\n    {}\n    {}\n",
             "a".repeat(40),
             "b".repeat(40),
             "c".repeat(40)
         ),
     );
+}
+
+/// A long application puts one argument per indented line. Packing kept the
+/// early arguments on the head's line and the rest below, so where an argument
+/// appeared depended on its length, and an argument that opened a bracket left
+/// the ones behind it stranded past the `)`.
+#[test]
+fn long_applications_put_one_argument_per_line() {
+    let args: Vec<String> = (0..18).map(|i| format!("arg{i:02}")).collect();
+    let src = format!("x = f {}\n", args.join(" "));
+    let expected: String = args
+        .iter()
+        .fold("x =\n  f\n".to_string(), |acc, a| acc + "    " + a + "\n");
+    check(&src, &expected);
+    // A call that breaks never leaves a later argument on the head's line.
+    let out = fmt(
+        "corporate_current_account_open_count_day = process_date => corporate_current_account_open_count (\n  toString (truncYear (toDate process_date))\n) (same_day process_date)\n",
+    );
+    assert_eq!(
+        out,
+        "corporate_current_account_open_count_day = process_date =>
+  corporate_current_account_open_count
+    (toString (truncYear (toDate process_date)))
+    (same_day process_date)
+"
+    );
+}
+
+/// A call that breaks puts one argument per line, so an argument that opens a
+/// bracket never strands the ones after it past its `)`. Hugging the bracket
+/// used to print `ifThenElse (` on the call's line, the condition indented
+/// under it, and `) (toYuan .lstbal) (toYuan .balance)` after the `)`.
+#[test]
+fn a_call_that_breaks_puts_one_argument_per_line() {
+    let src = "q = {
+    subject_code =
+      ifThenElse ((toDate .lstcintd) > (toDate .pt_dt) || (toDate .lsttrand) > (toDate .pt_dt))
+        .presub .subcode,
+    balance = ifThenElse (\n      (toDate .lstcintd) > (toDate .pt_dt) || (toDate .lsttrand) > (toDate .pt_dt)\n    ) (toYuan .lstbal) (toYuan .balance),
+}
+";
+    let out = fmt(src);
+    assert_eq!(
+        out,
+        "q = {
+  subject_code =
+    ifThenElse
+      ((toDate .lstcintd) > (toDate .pt_dt) || (toDate .lsttrand) > (toDate .pt_dt))
+      .presub
+      .subcode,
+  balance =
+    ifThenElse
+      ((toDate .lstcintd) > (toDate .pt_dt) || (toDate .lsttrand) > (toDate .pt_dt))
+      (toYuan .lstbal)
+      (toYuan .balance),
+}
+"
+    );
+    // Nothing is stranded after a closing bracket.
+    for line in out.lines() {
+        assert!(!line.trim_start().starts_with(')'), "{line:?}\n{out}");
+    }
+    // A call that fits is untouched, bracket or not.
+    check("a = f x y (.c > 1)\n", "a = f x y (.c > 1)\n");
 }
 
 #[test]

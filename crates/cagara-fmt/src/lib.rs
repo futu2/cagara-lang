@@ -24,7 +24,7 @@ mod doc;
 use cagara_syntax::{
     ops, parse, Fixity, ParseError, SyntaxElement, SyntaxKind as K, SyntaxNode, SyntaxToken,
 };
-use doc::{broken_group, concat, fill, fits_flat, group, indent, text, Doc};
+use doc::{broken_group, concat, fits_flat, group, indent, text, Doc};
 use rowan::{NodeOrToken, WalkEvent};
 use std::cell::Cell;
 use std::fmt;
@@ -594,13 +594,18 @@ impl Fmt<'_> {
         let Ok(args) = self.args(n) else {
             return false;
         };
-        let Some((_, hugged)) = args.split_first() else {
-            return false;
-        };
+        // The whole call, head first: the head is part of what has to fit for
+        // the hug to be worth taking.
         let flat = concat(
-            hugged
-                .iter()
-                .flat_map(|a| [text(" "), a.clone()])
+            args.iter()
+                .enumerate()
+                .flat_map(|(i, a)| {
+                    if i == 0 {
+                        vec![a.clone()]
+                    } else {
+                        vec![text(" "), a.clone()]
+                    }
+                })
                 .collect::<Vec<_>>(),
         );
         fits_flat(&flat, WIDTH)
@@ -971,9 +976,15 @@ impl Fmt<'_> {
         ]))
     }
 
-    /// `f a b`: flat if it fits, else the arguments fill the lines that
-    /// follow, breaking only where the next one would not fit. With a
-    /// bracketed last argument, only that argument breaks.
+    /// `f a b`: flat if it fits, else one argument per indented line.
+    ///
+    /// The whole list breaks together. Packing kept two arguments on a line
+    /// and the rest below, so which line an argument was on depended on its
+    /// length, and an argument that opened a bracket left the ones after it
+    /// past the `)` — `) (same_day process_date)` — which is where a reader
+    /// stops counting arguments. One per line puts every opening token in the
+    /// same column: the call reads as a list of arguments, and an argument
+    /// that opens a bracket simply gets its contents indented under it.
     fn app(&self, n: &SyntaxNode) -> R {
         let args = self.args(n)?;
         let Some((head, rest)) = args.split_first() else {
@@ -986,7 +997,8 @@ impl Fmt<'_> {
             }
             return Ok(concat(parts));
         }
-        let d = concat(vec![head.clone(), indent(fill(rest.to_vec()))]);
+        let tail = rest.iter().flat_map(|a| [Doc::Line, a.clone()]).collect();
+        let d = concat(vec![head.clone(), indent(concat(tail))]);
         Ok(if has_inner_comment(n) {
             broken_group(d)
         } else {

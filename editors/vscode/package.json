@@ -29,6 +29,14 @@
           ".cagara"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "cagara-sql",
+        "aliases": [
+          "Cagara SQL",
+          "cagara-sql"
+        ],
+        "configuration": "./language-configuration.sql.json"
       }
     ],
     "grammars": [
@@ -36,8 +44,18 @@
         "language": "cagara",
         "scopeName": "source.cagara",
         "path": "./syntaxes/cagara.tmLanguage.json"
+      },
+      {
+        "language": "cagara-sql",
+        "scopeName": "source.cagara-sql",
+        "path": "./syntaxes/cagara-sql.tmLanguage.json"
       }
     ],
+    "configurationDefaults": {
+      "[cagara-sql]": {
+        "editor.wordWrap": "on"
+      }
+    },
     "configuration": {
       "title": "Cagara",
       "properties": {
@@ -115,7 +133,13 @@
           "type": "boolean",
           "default": false,
           "scope": "resource",
-          "markdownDescription": "When SQL is copied on save, also open it beside the source. Off by default so saving does not move the editor; the clipboard is still filled either way. The \"Cagara: Copy SQL\" command always opens it, since running it is a request to see the SQL."
+          "markdownDescription": "When SQL is copied on save, also show it beside the source. Off by default so saving does not move the editor; the clipboard is still filled either way. The \"Cagara: Copy SQL\" command always shows it, since running it is a request to see the SQL."
+        },
+        "cagara.sqlPreviewFocus": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "markdownDescription": "Move the keyboard into the SQL shown beside the source. Off by default: the cursor stays in the file being saved and the SQL appears without interrupting, in a read-only preview tab that wraps and takes a third of the window. Turn it on to put the cursor in the SQL as it appears, to search or select from it."
         },
         "cagara.extraArgs": {
           "type": "string",

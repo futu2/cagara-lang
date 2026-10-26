@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- The SQL the extension shows beside a `.cagara` file is a preview instead of a
+  second editor. Saving with `cagara.showSqlOnSave` on used to open a new
+  untitled buffer, focus it, and give it half the window: the save moved the
+  cursor out of the file being written, the file lost half its width, and a
+  statement on one line ran off the right edge of the other half. The preview
+  now opens without moving the keyboard (`cagara.sqlPreviewFocus`, off by
+  default, turns that back on), sizes the two columns 2:1 the first time the
+  split is made — once, so a divider you drag stays dragged — and wraps, since
+  a pane a third wide and a `CASE` a hundred characters long are not
+  compatible. The column is a remembered split rather than a new one per save:
+  a second file's SQL opens where the first one's did. And it is one tab per
+  source file, `q.cagara.sql`, served by a content provider and refreshed in
+  place — read-only, so closing it never asks to save — instead of an
+  `Untitled-1` per save that no longer says which file it came from. Wrapping
+  needs a language of its own, because `[sql]` is the user's and this is a
+  read-only preview: generated SQL is `cagara-sql`, which takes its tokenizing
+  from the built-in SQL grammar by scope name and its `editor.wordWrap: "on"`
+  from `configurationDefaults`.
+
 - Staging the server builds it before copying it, and copies the newer of the
   two builds that can exist. A stage is a copy and a copy is a snapshot:
   nothing else in the loop rebuilt, so the development host launched whatever

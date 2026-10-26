@@ -90,13 +90,32 @@ clipboard, so SQL does not have to be fetched from a terminal.
 |---|---|---|
 | `cagara.copyOnSave` | `false` | Compile and copy on every save of a `.cagara` file. |
 | `cagara.dialect` | `ansi` | Dialect to compile to. The names are the ones `cagara --dialect` accepts. |
-| `cagara.showSqlOnSave` | `false` | Also open the SQL beside the source. Off, saving only fills the clipboard. |
+| `cagara.showSqlOnSave` | `false` | Also show the SQL beside the source. Off, saving only fills the clipboard. |
+| `cagara.sqlPreviewFocus` | `false` | Put the keyboard in the SQL as it appears. Off, saving does not interrupt. |
 | `cagara.extraArgs` | `""` | Extra `cagara` arguments, split on whitespace, e.g. `--pretty` or `--optimize`. |
 
 **Cagara: Copy SQL** in the command palette does the same for the active file
-and always opens the SQL, since running it is a request to see the result.
+and always shows the SQL, since running it is a request to see the result.
 Both paths use the compiler the extension already runs as a language server,
 so `cagara.path` applies.
+
+The SQL appears in a preview tab rather than an editor of its own, because the
+point is to glance at it while saving:
+
+- **It does not take the keyboard.** With `cagara.sqlPreviewFocus` off — the
+  default — the cursor stays in the file being saved, and the status bar says
+  the SQL went beside it. Turn the setting on to put the cursor in the SQL.
+- **It takes a third of the window, not half.** The first time the extension
+  makes the split it sizes the two columns 2:1 and remembers that it did, so a
+  divider you drag stays where you put it. A window that already had two
+  columns is left as it is.
+- **It wraps.** `Cagara SQL` is a language of its own, wrapping at the pane's
+  width, so a statement stays readable in a third of the screen. Override it
+  with `"[cagara-sql]": { "editor.wordWrap": "..." }` in `settings.json`; your
+  `[sql]` settings apply to the SQL you write by hand, not to this preview.
+- **One tab per file**, named after the source (`q.cagara.sql`), refreshed in
+  place by the next save instead of leaving a trail of `Untitled-1` behind.
+  It is read-only, and its highlighting is the built-in SQL grammar's.
 
 The SQL is compiled from the **file on disk**, which is why saving is the
 natural trigger: the compiler reads the file, not the editor's buffer. Running

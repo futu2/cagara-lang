@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Cagara SQL",
+  "scopeName": "source.cagara-sql",
+  "comment": "The compiled SQL the extension shows beside a source file. The tokenizing is the built-in SQL grammar's, reached across grammars by scope name, so generated SQL is coloured exactly as hand-written SQL is and this file has no patterns of its own to fall behind. What is different about the preview is not its tokens but its editor: it wraps by default, which is `configurationDefaults` in package.json, and it is why the preview gets a language of its own rather than `sql`.",
+  "patterns": [
+    {
+      "include": "source.sql"
+    }
+  ]
+}

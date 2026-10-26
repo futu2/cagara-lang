@@ -7,13 +7,36 @@ import * as vscode from "vscode";
 import { LanguageClient, LanguageClientOptions, ServerOptions } from "vscode-languageclient/node";
 
 import { classify, compileArgs, splitArgs, stripBanner } from "./compile";
+import { SQL_PREVIEW_LANGUAGE, SQL_PREVIEW_SCHEME, splitLayout, sqlPreviewPath } from "./preview";
 import { formattingOptions, shouldFormat } from "./save";
 import { describeServer, resolveServer, vscodeTarget, type ResolvedServer } from "./serverpath";
 
 let client: LanguageClient | undefined;
 
+/**
+ * The SQL shown in each preview tab, by document URI.
+ *
+ * The preview is served by a content provider rather than opened as an
+ * untitled buffer, so that a file has one tab, named after it, which the next
+ * save refreshes where it stands. This map is what the provider answers from,
+ * and so also what a tab restored after a window reload reads: nothing, since
+ * compiled SQL is not kept across a restart.
+ */
+const previewText = new Map<string, string>();
+
+/** Fires when a preview's SQL is replaced, so an open tab re-reads the map. */
+const previewChanged = new vscode.EventEmitter<vscode.Uri>();
+
+/** `workspaceState` key: the SQL split has been sized once in this workspace. */
+const PREVIEW_SIZED = "cagara.sqlPreviewSized";
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   context.subscriptions.push(
+    previewChanged,
+    vscode.workspace.registerTextDocumentContentProvider(SQL_PREVIEW_SCHEME, {
+      onDidChange: previewChanged.event,
+      provideTextDocumentContent: (uri) => previewText.get(uri.toString()) ?? "",
+    }),
     vscode.commands.registerCommand("cagara.restartServer", async () => {
       await stop();
       await start(context);
@@ -52,7 +75,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
  * Compile a file and put its SQL on the clipboard.
  *
  * `showSqlOnSave` decides between the two useful behaviours: copy quietly so
- * the SQL can be pasted elsewhere, or open it in an untitled buffer to be read.
+ * the SQL can be pasted elsewhere, or show it beside the source to be read.
  * Both are offered because the two are wanted at different times, and copying
  * silently is the one that needs no window to be in the way.
  */
@@ -90,20 +113,13 @@ async function copySql(
     case "sql": {
       const sql = stripBanner(outcome.sql);
       await vscode.env.clipboard.writeText(sql);
-      // The manual command opens the SQL, because running it is a request to
-      // see the result. On save that would be a window per save, so it is
+      // The manual command shows the SQL, because running it is a request to
+      // see the result. On save that would be a pane per save, so it is
       // opt-in, and the clipboard stays the default so the SQL can be pasted
       // without anything moving.
       const show = trigger === "cagara.copySql" || config.get<boolean>("showSqlOnSave", false);
       if (show) {
-        const shown = await vscode.workspace.openTextDocument({
-          content: sql,
-          language: "sql",
-        });
-        await vscode.window.showTextDocument(shown, {
-          preview: true,
-          viewColumn: vscode.ViewColumn.Beside,
-        });
+        await showSql(context, sql, doc);
       } else {
         vscode.window.setStatusBarMessage("Cagara: SQL copied to clipboard", 3000);
       }
@@ -124,6 +140,94 @@ async function copySql(
       void vscode.window.showErrorMessage(`Cagara: ${firstLines(outcome.message, 6)}`);
       break;
   }
+}
+
+/**
+ * Show the compiled SQL beside the file it came from.
+ *
+ * A preview, not a second editor. Three things make the difference, and each
+ * one was a reason to close the pane again:
+ *
+ * - It does not take the keyboard. Saving is done in the file being written,
+ *   and the next keystroke belongs there, not in a read-only document that
+ *   swallowed it. `preserveFocus` keeps the cursor where the save left it.
+ * - It is a third of the window, not half. VS Code splits evenly, which hands
+ *   a three-line `SELECT` as much room as the source; see `splitLayout`.
+ * - It wraps. Its language carries `editor.wordWrap: "on"` as a default, since
+ *   a statement on one line is wider than any pane, and reading it by
+ *   scrolling sideways is not reading it.
+ */
+async function showSql(
+  context: vscode.ExtensionContext,
+  sql: string,
+  source: vscode.TextDocument,
+): Promise<void> {
+  const config = vscode.workspace.getConfiguration("cagara", source.uri);
+  const focus = config.get<boolean>("sqlPreviewFocus", false);
+
+  const uri = vscode.Uri.from({
+    scheme: SQL_PREVIEW_SCHEME,
+    path: sqlPreviewPath(source.uri.fsPath),
+  });
+  previewText.set(uri.toString(), sql);
+  // A tab left over from an earlier save holds the old text: the document is
+  // cached by URI, so the provider has to be told the content moved.
+  previewChanged.fire(uri);
+
+  // The language is set rather than inferred from the URI's `.sql` extension,
+  // because that extension belongs to the built-in SQL language too, and which
+  // of the two claims the document would depend on registration order. A
+  // failure here costs the wrapping, not the SQL.
+  const opened = await vscode.workspace.openTextDocument(uri);
+  const document = await vscode.languages
+    .setTextDocumentLanguage(opened, SQL_PREVIEW_LANGUAGE)
+    .then(undefined, () => opened);
+
+  // One preview per window: shown where the last one is, so a second file's
+  // SQL does not open a third column, and the split is made at most once.
+  const groupsBefore = vscode.window.tabGroups.all.length;
+  await vscode.window.showTextDocument(document, {
+    preview: true,
+    preserveFocus: !focus,
+    viewColumn: previewColumn() ?? vscode.ViewColumn.Beside,
+  });
+
+  const layout = splitLayout(
+    groupsBefore,
+    vscode.window.tabGroups.all.length,
+    context.workspaceState.get<boolean>(PREVIEW_SIZED, false),
+  );
+  if (layout) {
+    // Best effort: `vscode.setEditorLayout` is a command rather than an API,
+    // and an editor width is not worth failing a save over.
+    await vscode.commands
+      .executeCommand("vscode.setEditorLayout", layout)
+      .then(undefined, () => undefined);
+    await context.workspaceState.update(PREVIEW_SIZED, true);
+  }
+  if (!focus) {
+    // Nothing moved, so say where the SQL went: the status bar is the only
+    // sign, and it does not take the keyboard either.
+    vscode.window.setStatusBarMessage("Cagara: SQL shown beside the source", 3000);
+  }
+}
+
+/**
+ * The column an SQL preview is already in, if one is open.
+ *
+ * Read from the tab groups rather than remembered: a column number goes stale
+ * as groups are closed, and a preview tab is recognisable by its scheme.
+ */
+function previewColumn(): vscode.ViewColumn | undefined {
+  for (const group of vscode.window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      const input = tab.input;
+      if (input instanceof vscode.TabInputText && input.uri.scheme === SQL_PREVIEW_SCHEME) {
+        return group.viewColumn;
+      }
+    }
+  }
+  return undefined;
 }
 
 /** Run the compiler, capturing both streams. Never rejects; a spawn error is a message. */

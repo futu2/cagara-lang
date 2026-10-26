@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Formatting sends the lines that changed, not the whole file. The language
+  server answered `textDocument/formatting` with a single edit spanning line 0
+  to the end, and an editor pays for that edit in full: every token and fold
+  invalidated, an undo entry the size of the file, the cursor and selection
+  moved, and — with a vim or neovim client mirroring the buffer elsewhere —
+  every line pushed back again. Formatting one definition therefore cost the
+  editor what retyping the file costs, however fast the formatter itself is
+  (8 ms on `prelude.cagara`, 49 KB, and nothing at all on a file that is
+  already formatted). The edits are a line-level patience diff now: a line
+  occurring exactly once in each text anchors the two, and the gaps between
+  anchors are compared again, so a re-laid-out definition is one small edit
+  and its neighbours are in no range at all. A 56-line file whose third
+  definition needs laying out goes from one 56-line replacement to one
+  one-line replacement.
+
 - Type checking is memoized per definition, so a keystroke re-checks the
   definition it touched rather than the file it is in. A module used to be one
   salsa query: any edit re-ran inference over every definition, 140 ms at a

@@ -5,6 +5,7 @@
 //! unit-tested.
 
 pub mod analysis;
+pub mod edits;
 pub mod server;
 pub mod uri;
 

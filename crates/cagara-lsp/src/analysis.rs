@@ -1106,27 +1106,23 @@ fn is_name(n: &str) -> bool {
         && !n.starts_with("__")
 }
 
-/// Formatting edits for the root file: one edit replacing the whole text, or
-/// none if it is already formatted. Definitions with syntax errors are left
-/// as written, so formatting works while a file is being edited.
+/// Formatting edits for the root file: the lines that change, or none if it is
+/// already formatted. Definitions with syntax errors are left as written, so
+/// formatting works while a file is being edited.
+///
+/// The edits are per changed line ([`crate::edits::between`]), not one range
+/// over the whole file. A whole-file range is the most expensive thing an
+/// editor can be asked to apply: every token, fold and undo entry goes, the
+/// cursor and selection move, and a client that mirrors the buffer elsewhere
+/// hands the file to whatever mirrors it. Formatting one definition used to
+/// cost the editor exactly what reformatting the file by hand costs.
 pub fn format(ws: &Workspace) -> Result<Vec<TextEdit>, cagara_fmt::FmtError> {
     let text = &ws.modules[ws.root].text;
     let out = cagara_fmt::format(text)?.text;
     if &out == text {
         return Ok(vec![]);
     }
-    let p = Positions::new(text);
-    let range = Range {
-        start: Position {
-            line: 0,
-            character: 0,
-        },
-        end: p.position(text.len()),
-    };
-    Ok(vec![TextEdit {
-        range,
-        new_text: out,
-    }])
+    Ok(crate::edits::between(text, &out))
 }
 
 /// Byte↔position mapping for one text. Built once per request: line-index
@@ -1321,24 +1317,26 @@ mod tests {
     }
 
     #[test]
-    fn formatting_replaces_the_whole_document() {
+    fn formatting_edits_only_the_lines_that_change() {
         let edits = format(&ws()).unwrap();
         let [edit] = edits.as_slice() else {
             panic!("{edits:?}")
         };
+        // `q` is the definition whose layout changes and the only one in the
+        // range: the five definitions around it are left out of the edit, so
+        // formatting does not invalidate their tokens, folds or the cursor.
+        assert_eq!(edit.range.start, pos(2, 0));
+        assert_eq!(edit.range.end, pos(3, 0));
         assert_eq!(
-            edit.range,
-            Range {
-                start: pos(0, 0),
-                end: pos(6, 0)
-            }
+            edit.new_text,
+            "q = users\n  & where adult\n  & agg { s = sum .age }\n"
         );
-        assert!(edit
-            .new_text
-            .contains("q = users\n  & where adult\n  & agg { s = sum .age }\n"));
-        let formatted =
-            Workspace::open_with(Path::new("/nonexistent/main.cagara"), edit.new_text.clone());
-        assert!(format(&formatted).unwrap().is_empty());
+        // Applying them is what a client does, and it has to reproduce the
+        // formatter's own output exactly.
+        let formatted = crate::edits::test_support::apply(SRC, &edits);
+        assert_eq!(formatted, cagara_fmt::format(SRC).unwrap().text);
+        let again = Workspace::open_with(Path::new("/nonexistent/main.cagara"), formatted);
+        assert!(format(&again).unwrap().is_empty());
     }
 
     #[test]

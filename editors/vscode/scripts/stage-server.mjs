@@ -5,9 +5,13 @@
 // instead; staging makes the development host exercise the same path a
 // released VSIX does.
 //
-// Run by the "cagara: stage server" preLaunchTask (which compiles first, since
-// the target name comes from the compiled module) and by `npm run stage:server`.
+// Run by the "cagara: stage server" preLaunchTask (after `npm run compile`,
+// since the target name comes from the compiled module) and by
+// `npm run stage:server`. It builds the server before copying it: a stage is a
+// copy, and a copy is a snapshot, so without the build nothing in the loop
+// rebuilds and the editor keeps launching whatever was staged last time.
 
+import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -133,31 +137,72 @@ const native = join(repoRoot, "target", profile, hostExe);
 const rustTarget = process.env.CAGARA_STAGE_RUST_TARGET?.trim() || rustTargetFor(target);
 const triple = rustTarget ? join(repoRoot, "target", rustTarget, profile, exe) : undefined;
 
-// Which build to stage, in order of preference:
+const forcedRust = process.env.CAGARA_STAGE_RUST_TARGET?.trim();
+
+// Build the server first, so the copy below cannot be a snapshot of a build
+// from last week. Two cases are skipped, and for opposite reasons:
 //
-//   1. the target-triple build, when one exists -- this is what a release
-//      build for a specific platform produces, and the only correct answer
-//      when the target is not this machine's;
-//   2. otherwise, this machine's build, but only when the target is this
-//      machine's, because that binary runs here;
-//   3. otherwise the triple path, so the error below names the file a
-//      `cargo build --target <triple>` would create.
+//   - packaging for another platform: the binary for that VSIX was built on
+//     that platform (the release workflow downloads it), and building here
+//     would produce the wrong one;
+//   - `CAGARA_STAGE_RUST_TARGET`, where the caller asked for a specific
+//     toolchain's output and this script must not second-guess it.
 //
-// Case 2 is not a fallback to be ashamed of -- `rustTargetFor` maps linux-x64
-// to the musl triple, while a plain `cargo build --release` writes to
-// target/release/, so requiring the triple would make the common local case
-// fail. It is only wrong when the point of the build is to ship elsewhere.
+// `cargo build` is the whole point: nothing else in the loop rebuilds, so an
+// editor launched by F5 ran whatever was staged last, and a copied file keeps
+// the copy's timestamp and so looks current however old it is.
+const crossTarget = Boolean(forcedTarget) && forcedTarget !== hostTarget;
+if (process.env.CAGARA_STAGE_NO_BUILD === "1") {
+  console.log("cagara: CAGARA_STAGE_NO_BUILD=1, staging the existing build");
+} else if (crossTarget) {
+  console.log(`cagara: packaging for ${target}; not building it on this machine`);
+} else if (forcedRust) {
+  console.log(`cagara: CAGARA_STAGE_RUST_TARGET=${forcedRust}; not building, staging it`);
+} else {
+  const build = ["build", "-p", "cagara-cli"];
+  if (profile === "release") {
+    build.push("--release");
+  } else {
+    build.push("--profile", profile);
+  }
+  console.log(`cagara: cargo ${build.join(" ")}`);
+  const built = spawnSync("cargo", build, { cwd: repoRoot, stdio: "inherit" });
+  if (built.error) {
+    console.error(`cagara: could not run cargo (${built.error.message}); not staging.`);
+    process.exit(1);
+  }
+  if (built.status !== 0) {
+    console.error("cagara: the build failed; not staging a binary from before it.");
+    process.exit(built.status ?? 1);
+  }
+}
+
+// Which build to stage: of the two paths that can hold one, the newer.
+//
+// `cargo build --release` writes target/release/, while a build for a named
+// triple -- what a release uses, and what packaging for another platform needs
+// -- writes target/<triple>/release/. Preferring the triple whenever it existed
+// staged that one however old it was, so a fresh local build was ignored. The
+// triple is still the only correct answer when the target is not this
+// machine's, which `crossTarget` already covers by leaving only it to choose.
 let source;
 let shadowedTarget = false;
-const forcedRust = process.env.CAGARA_STAGE_RUST_TARGET?.trim();
+const candidates = [];
 if (triple && existsSync(triple)) {
-  source = triple;
-} else if (target === hostTarget && existsSync(native)) {
-  source = native;
+  candidates.push(triple);
+}
+if (target === hostTarget && existsSync(native)) {
+  candidates.push(native);
+}
+if (candidates.length > 0) {
+  candidates.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  source = candidates[0];
   // Naming an explicit rust target means the caller expects that toolchain's
   // output; staging a different binary instead should not pass silently.
-  shadowedTarget = Boolean(forcedRust);
+  shadowedTarget = Boolean(forcedRust) && source !== triple;
 } else {
+  // Neither exists: name the triple path, so the error below names the file a
+  // `cargo build --target <triple>` would create.
   source = triple ?? native;
 }
 

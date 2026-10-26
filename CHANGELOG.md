@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Staging the server builds it before copying it, and copies the newer of the
+  two builds that can exist. A stage is a copy and a copy is a snapshot:
+  nothing else in the loop rebuilt, so the development host launched whatever
+  binary was staged last — an Oct 14 build against Oct 22 sources, with the
+  staged file looking current because a copy carries the copy's timestamp.
+  `stage-server.mjs` now runs `cargo build -p cagara-cli --release` itself, and
+  refuses to stage anything if that build fails; the build is skipped when
+  packaging for another platform (that binary was built on that platform),
+  when `CAGARA_STAGE_RUST_TARGET` names a toolchain, or with
+  `CAGARA_STAGE_NO_BUILD=1`. It also picks the *newer* of
+  `target/release/cagara` and `target/<triple>/release/cagara`: preferring the
+  triple whenever it existed staged that one however old it was, so a fresh
+  `cargo build --release` could be ignored for a months-old musl build.
+
 - The language server names the build it is, as the first thing it says after
   initialization: `cagara 0.3.1 (24b8547, release, x86_64-unknown-linux-gnu,
   built 2026-10-26 03:12 UTC)`. A binary is staged into `editors/vscode/bin/`,

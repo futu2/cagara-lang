@@ -48,6 +48,20 @@ release does. Step 3 is the fallback for a package that carries no server, and
 searches upward, so a build in the repository root serves a nested workspace
 such as `examples/`.
 
+Staging builds before it copies — `cargo build -p cagara-cli --release`, skipped
+when packaging for another platform — because a stage is a copy and a copy is a
+snapshot: nothing else in the loop rebuilds, so F5 would otherwise launch
+whatever was staged last. The server also names itself, as the first line in
+the *Cagara Language Server* output channel:
+
+```
+cagara 0.3.1 (24b8547, release, x86_64-unknown-linux-gnu, built 2026-10-26 03:12 UTC)
+```
+
+That line is the only reliable answer to "which compiler is this window
+running": a staged or copied binary cannot be told from a current one by its
+path, and a copy carries the copy's timestamp rather than the build's.
+
 ## Formatting
 
 `Shift+Alt+F` formats the file with `cagara fmt`. The server sends back only the

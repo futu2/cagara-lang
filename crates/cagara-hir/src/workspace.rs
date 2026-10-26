@@ -28,6 +28,8 @@ struct ProbeSlot {
     /// The probe text's definitions, kept so that the next probe reuses the
     /// inputs of every definition the marker is not in.
     defs: Vec<DefInput>,
+    /// The text each of those inputs was parsed from (see `LoadedModule`).
+    def_sources: Vec<Box<str>>,
 }
 
 /// The first line that turns the implicit prelude import off.
@@ -65,6 +67,14 @@ pub struct LoadedModule {
     /// across edits so a body change leaves every other definition — and every
     /// check that read only those — memoized (see `Workspace::sync_defs`).
     defs: Vec<DefInput>,
+    /// The text each entry of `defs` was parsed from, in the same order.
+    ///
+    /// A definition's input keeps the spans of the text it was parsed from
+    /// while it is unchanged, so its own source text is the only thing that can
+    /// say whether a later parse of the file still describes it. Comparing the
+    /// parsed trees instead cannot answer that: every span in an unchanged
+    /// definition moves when something above it changes length.
+    def_sources: Vec<Box<str>>,
     pub scope: Arc<HashMap<String, Binding>>,
     /// This module's own definitions (what `import` and `alias.name` see).
     pub own: Arc<HashMap<String, Binding>>,
@@ -347,12 +357,41 @@ impl Workspace {
     /// never read the edited definition survives with them. A rename, an
     /// insertion, or a deletion changes the list itself, which invalidates the
     /// module's scope, as it must: names moved.
-    fn sync_defs(&mut self, previous: &[DefInput], defs: &[Def]) -> Vec<DefInput> {
+    ///
+    /// A definition whose own text is byte-identical is kept even when
+    /// everything above it moved, which is what makes a keystroke cost a
+    /// definition instead of a file. It is compared as *text*: two parses of
+    /// one unchanged definition differ in every span they contain as soon as
+    /// something above them changes length, so comparing the parsed trees said
+    /// "this definition changed" for every definition below a keystroke and
+    /// re-checked the whole file per character typed near the top. Spans are
+    /// not part of what a definition *is*.
+    ///
+    /// A definition kept this way holds the spans of the text it was parsed
+    /// from, stale by exactly the distance it moved, and its memoized check
+    /// holds them too. `module_check` moves them onto the current text when it
+    /// renders them, and the compilation re-anchors the locations of a reused
+    /// query (see `incremental`), so the staleness reaches no diagnostic —
+    /// only the decision to re-check is spared.
+    fn sync_defs(
+        &mut self,
+        previous: &[DefInput],
+        sources: &[Box<str>],
+        defs: &[Def],
+        text: &str,
+    ) -> (Vec<DefInput>, Vec<Box<str>>) {
         let mut out = Vec::with_capacity(defs.len());
+        let mut snapshot = Vec::with_capacity(defs.len());
         for (i, def) in defs.iter().enumerate() {
+            let source = def_text(text, def.span);
             let input = match previous.get(i).copied() {
                 Some(old) if *old.name(&self.db) == def.name => {
-                    if old.def(&self.db).0 != *def {
+                    // Kept across a move, rewritten when its own text changed.
+                    // `sources[i]` is the text its AST was parsed from, which is
+                    // what the comparison has to be against: the AST holds
+                    // spans from that text, not from this one.
+                    let unchanged = sources.get(i).is_some_and(|was| **was == *source);
+                    if !unchanged {
                         old.set_def(&mut self.db).to(DefAst(def.clone()));
                     }
                     old
@@ -360,8 +399,9 @@ impl Workspace {
                 _ => DefInput::new(&self.db, def.name.clone(), DefAst(def.clone())),
             };
             out.push(input);
+            snapshot.push(source.into());
         }
-        out
+        (out, snapshot)
     }
 
     /// Re-read every module that came from disk, keeping the salsa database.
@@ -418,8 +458,13 @@ impl Workspace {
         let root = self.inputs[self.root];
         let prelude = *root.prelude(&self.db);
         let imports = root.imports(&self.db).clone();
-        let (file, input, previous_defs) = match &self.probe {
-            Some(slot) => (slot.file, slot.input, slot.defs.clone()),
+        let (file, input, previous_defs, previous_sources) = match &self.probe {
+            Some(slot) => (
+                slot.file,
+                slot.input,
+                slot.defs.clone(),
+                slot.def_sources.clone(),
+            ),
             None => {
                 let file = SourceFile::new(&self.db, text.to_string());
                 let input = ModuleInput::new(
@@ -435,8 +480,9 @@ impl Workspace {
                     file,
                     input,
                     defs: Vec::new(),
+                    def_sources: Vec::new(),
                 });
-                (file, input, Vec::new())
+                (file, input, Vec::new(), Vec::new())
             }
         };
         // The root, and with it the imports a probe must see, may have changed
@@ -453,12 +499,14 @@ impl Workspace {
         // Re-read the definitions of the probe text: only the one the marker
         // sits in is new, so the rest of the module keeps its checks.
         let parsed = parse_module(&self.db, file).clone();
-        let defs = self.sync_defs(&previous_defs, &parsed.module.defs);
+        let (defs, sources) =
+            self.sync_defs(&previous_defs, &previous_sources, &parsed.module.defs, text);
         if defs != previous_defs {
             input.set_defs(&mut self.db).to(defs.clone());
-            if let Some(slot) = &mut self.probe {
-                slot.defs = defs;
-            }
+        }
+        if let Some(slot) = &mut self.probe {
+            slot.defs = defs;
+            slot.def_sources = sources;
         }
         crate::check::probe_fields(&self.db, input)
     }
@@ -505,7 +553,7 @@ impl Workspace {
         self.stack.pop();
         let m = self.modules.len();
         self.by_path.insert(path.clone(), m);
-        let defs = self.sync_defs(&[], &parsed.module.defs);
+        let (defs, def_sources) = self.sync_defs(&[], &[], &parsed.module.defs, &text);
         let input = ModuleInput::new(
             &self.db,
             m,
@@ -526,6 +574,7 @@ impl Workspace {
             text,
             module: parsed.module,
             defs,
+            def_sources,
             scope,
             own,
             line_starts: starts,
@@ -565,7 +614,13 @@ impl Workspace {
         // or the two phases would analyze different programs.
         let input = self.inputs[m];
         let previous_defs = self.modules[m].defs.clone();
-        let defs = self.sync_defs(&previous_defs, &parsed.module.defs);
+        let previous_sources = self.modules[m].def_sources.clone();
+        let (defs, def_sources) = self.sync_defs(
+            &previous_defs,
+            &previous_sources,
+            &parsed.module.defs,
+            &text,
+        );
         if defs != previous_defs {
             input.set_defs(&mut self.db).to(defs.clone());
         }
@@ -584,6 +639,7 @@ impl Workspace {
         md.text = text;
         md.module = parsed.module;
         md.defs = defs;
+        md.def_sources = def_sources;
         md.line_starts = starts;
         self.rebuild_diags();
         true
@@ -727,6 +783,16 @@ impl Workspace {
             message.into(),
         )
     }
+}
+
+/// The source text of one definition.
+///
+/// A span always lies on the text it was parsed from; the fallback covers a
+/// caller that hands over a span from a different text, where no slice is
+/// meaningful and an empty one is the honest answer.
+fn def_text(text: &str, span: Span) -> &str {
+    text.get(span.start as usize..span.end as usize)
+        .unwrap_or("")
 }
 
 fn normalize(path: &Path) -> PathBuf {

@@ -503,7 +503,8 @@ impl<'i, 'a> Normalizer<'i, 'a> {
             if let Some(path) = ancestor_path(tree, expr.id) {
                 return Some(path);
             }
-            if let Some(path) = ancestor_path_at(tree, expr.id, expr.span) {
+            let shift = tc.def_shift(module, site.def);
+            if let Some(path) = ancestor_path_at(tree, expr.id, moved(expr.span, -shift)) {
                 return Some(path);
             }
         }
@@ -585,8 +586,10 @@ impl<'i, 'a> Normalizer<'i, 'a> {
     /// stack is read rather than a definition.
     pub(crate) fn ty_at(&self, _origin: Origin) -> Option<crate::core::ScalarType> {
         let site = self.sites.last()?;
-        let tree = self.input.type_check().typed_body(site.module, site.def)?;
-        tree.node_at(site.span).and_then(|node| node.ty())
+        self.input
+            .type_check()
+            .typed_node_at(site.module, site.span)
+            .and_then(|node| node.ty())
     }
 
     /// The row the checker closed for a query-shaped expression.
@@ -763,6 +766,20 @@ fn ancestor_path(tree: &crate::check::TypedBody, id: u32) -> Option<Vec<u32>> {
     }
     let mut path = Vec::new();
     walk(tree, tree.root(), id, &mut path).then_some(path)
+}
+
+/// A span moved `delta` bytes, clamped at the start of the text.
+///
+/// The checker records spans in the coordinates of the text it checked. That is
+/// the current text for every definition except one the workspace kept through
+/// a move (see [`crate::check::TypeCheck::def_shift`]), whose spans are off by
+/// one offset for the whole definition.
+pub(crate) fn moved(span: Span, delta: i64) -> Span {
+    let at = |offset: u32| (i64::from(offset) + delta).max(0) as u32;
+    Span {
+        start: at(span.start),
+        end: at(span.end),
+    }
 }
 
 /// The path of the node at `id` *and* `span`, when an id alone is ambiguous.

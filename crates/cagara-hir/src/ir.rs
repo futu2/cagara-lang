@@ -285,6 +285,26 @@ impl Rel {
         }
     }
 
+    /// [`Rel::children`] with which to rewrite a subtree in place.
+    pub fn children_mut(&mut self) -> Vec<&mut Rel> {
+        match self {
+            Rel::Table { .. } => vec![],
+            Rel::Where(r, _)
+            | Rel::Select(r, _)
+            | Rel::Update(r, _)
+            | Rel::Omit(r, _)
+            | Rel::Prefix(r, _)
+            | Rel::Suffix(r, _)
+            | Rel::Agg(r, _)
+            | Rel::Order(r, _)
+            | Rel::Limit(r, _)
+            | Rel::Offset(r, _)
+            | Rel::Distinct(r)
+            | Rel::At(_, r) => vec![r],
+            Rel::Join { left, right, .. } | Rel::Set { left, right, .. } => vec![left, right],
+        }
+    }
+
     /// The relation without location wrappers at its root.
     pub fn bare(&self) -> &Rel {
         match self {

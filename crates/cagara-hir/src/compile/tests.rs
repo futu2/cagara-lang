@@ -993,14 +993,16 @@ fn changing_a_dependency_reelaborates_its_users() {
     );
 }
 
-/// A one-definition edit rebuilds that definition's *module* and the cached
-/// result still matches a fresh compile.
+/// An edit rebuilds the definition it touched, and decides the fate of its
+/// siblings one at a time.
 ///
-/// Reuse is per definition, but the unit of invalidation is the module check, so
-/// a sibling query in the same module is re-elaborated too. That is the boundary
-/// `docs/PERFORMANCE.md` states: an edit inside a module rechecks that module.
+/// `second` is untouched: its text is identical, so its check is memoized and
+/// its elaboration is reused — with the location it now sits at, since the edit
+/// above it moved it. That is the property `docs/PERFORMANCE.md` states: what is
+/// linear in the file is parsing and the per-module aggregation, not the work
+/// per definition.
 #[test]
-fn an_edit_rebuilds_its_module_and_stays_fresh() {
+fn an_edit_rebuilds_the_definition_it_touched_and_keeps_its_siblings() {
     let mut ws = Workspace::from_source(
         "first : query { a = int } = table \"public\" \"first\"\n\
          second : query { a = int } = table \"public\" \"second\"\n",
@@ -1019,10 +1021,110 @@ fn an_edit_rebuilds_its_module_and_stays_fresh() {
     assert!(after.diagnostics.is_empty(), "{:?}", after.diagnostics);
     assert_eq!(
         &crate::elaborate::elaborated_defs()[before..],
-        &[(ws.root, 0), (ws.root, 1)],
-        "an edit invalidates the module check, so both definitions are rebuilt"
+        &[(ws.root, 0)],
+        "an untouched sibling keeps its elaboration and only moves its location"
     );
     assert_eq!(after, compile_checked(&ws, &crate::check::check(&ws)));
+}
+
+/// Typing above a definition moves it, and a move is not an edit.
+///
+/// This is the case an editor lives in: a character typed anywhere but the end
+/// of a file shifts every byte below it. Both halves of the incremental machine
+/// have to survive that. The check must stay memoized (its definition's text did
+/// not change), and the compilation must reuse the query it already built and
+/// move the locations it recorded onto the text as it is now — which is what the
+/// comparison against a fresh compile below is for: a reused relation whose
+/// `Rel::At` still pointed at the old offsets would differ from a fresh one, and
+/// a diagnostic taken from it would name the wrong line.
+#[test]
+fn a_move_rechecks_nothing_and_reuses_every_elaboration() {
+    let src = "users : query { a = int } = table \"public\" \"t\"\n\
+               q = users & prefix \"p_\"\n\
+               alone : query { a = int } = table \"public\" \"own\"\n";
+    let mut ws = Workspace::from_source(src);
+    let first = compile(&ws);
+    assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
+    let runs = crate::check::check_runs();
+    let before = crate::elaborate::elaborated_defs().len();
+
+    // Two comment lines above everything, so every definition moves by the same
+    // distance and none of them is touched.
+    assert!(ws.set_source(ws.root, format!("# moved\n# twice\n{src}")));
+    let moved = compile(&ws);
+
+    assert_eq!(
+        crate::check::check_runs(),
+        runs,
+        "a definition whose own text did not change must not be re-checked"
+    );
+    assert_eq!(
+        &crate::elaborate::elaborated_defs()[before..],
+        &[],
+        "and must not be re-elaborated"
+    );
+    assert!(moved.diagnostics.is_empty(), "{:?}", moved.diagnostics);
+    assert_eq!(
+        moved,
+        compile_checked(&ws, &crate::check::check(&ws)),
+        "a reused relation carries the locations of the current text"
+    );
+}
+
+/// A definition kept across a move still reports its errors where it is now.
+///
+/// The check that produced the message recorded a span in the old text, so the
+/// rendered diagnostic has to move with the definition. Getting this wrong is
+/// silent: the file still has an error, at a line that no longer says it.
+#[test]
+fn a_kept_definition_reports_its_error_at_its_new_line() {
+    let src = "users : query { a = int } = table \"public\" \"t\"\n\
+               bad = users &? (.missing > 1)\n";
+    let mut ws = Workspace::from_source(src);
+    let first = compile_diagnostics(&ws);
+    let line = |diags: &[Diag]| {
+        diags
+            .iter()
+            .find(|d| d.message.contains("missing"))
+            .map(|d| (d.line, d.col))
+    };
+    assert_eq!(line(&first), Some((2, 17)), "{first:?}");
+
+    assert!(ws.set_source(ws.root, format!("# one\n# two\n{src}")));
+    let after = compile_diagnostics(&ws);
+    let (line_no, _) = line(&after).expect("the error is still there");
+    assert_eq!(line_no, 4, "two lines were inserted above it: {after:?}");
+}
+
+/// The typed tree answers about the text as it is now, not as it was checked.
+///
+/// Hover and the span-keyed type lookups read a tree the checker built; for a
+/// definition kept through a move those spans are the old ones, and the lookup
+/// translates them. Compared against a workspace that never moved, so the
+/// answer has to be the *same node*, not merely some node.
+#[test]
+fn a_kept_definition_answers_span_lookups_in_current_coordinates() {
+    let src = "a = 1\n\
+               b = a + 2\n";
+    let mut ws = Workspace::from_source(src);
+    compile(&ws);
+    assert!(ws.set_source(ws.root, format!("# moved\n{src}")));
+
+    let edited = crate::check::check(&ws);
+    let fresh = Workspace::from_source(&format!("# moved\n{src}"));
+    let fresh_check = crate::check::check(&fresh);
+    let mut asked = 0;
+    for def in &ws.modules[ws.root].module.defs {
+        for expr in crate::check::child_exprs(&def.body) {
+            let here = edited.typed_node_at(ws.root, expr.span).map(|n| n.id);
+            let there = fresh_check
+                .typed_node_at(fresh.root, expr.span)
+                .map(|n| n.id);
+            assert_eq!(here, there, "lookup at {:?}", expr.span);
+            asked += 1;
+        }
+    }
+    assert!(asked >= 2, "the body of `b` has nodes to ask about");
 }
 
 #[test]

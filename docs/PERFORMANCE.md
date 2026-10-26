@@ -159,9 +159,15 @@ route, which is exactly what the migration removed.
   an iterative dependency graph. Reuse is authorized by comparing those facts
   and nothing else: there is no hash identity, so no collision can stand in for
   an unchanged definition, and no source hash is computed per compile.
-- Only successful unaffected query results are reused. Moved definitions
-  are rebuilt so diagnostic and `Rel::At` locations refer to the current text.
-  The one-query edit benchmark deliberately keeps later source positions fixed.
+- Only successful unaffected query results are reused. A definition that only
+  *moved* is unaffected: the facts that authorize reuse do not include where it
+  sits, and the reused relation's `Rel::At` locations are translated onto the
+  current text by the definition they were written in (`incremental::relocate`).
+  A move that cannot be translated — a module whose definition list changed, so
+  an index no longer names the same definition — refuses reuse and rebuilds.
+  This is what makes typing cost one definition rather than a file: an inserted
+  character shifts every definition below it, which used to look like an edit to
+  every one of them.
 - A cold load still parses and checks the entire imported catalog. Editing
   the catalog itself still reparses and rechecks that module. The root layout
   also walks all root definitions and returns all query results after an edit.
@@ -221,3 +227,66 @@ keystroke), the aggregation that collects a module's per-definition results, and
 compilation, which walks the edited module's definitions once. A keystroke that
 changes a *type* re-checks more than its direct readers, because each check
 reads the module's name map; narrowing that is the next step.
+
+## A keystroke that moves the file
+
+The figures above were measured with edits that keep every later source position
+fixed — a same-length replacement, or an edit in the last definition. Typing does
+not work that way: a character inserted anywhere but the end of a file shifts
+every byte below it, and the incremental cache used to read that shift as an edit
+to every definition it touched. A definition below the cursor had *different
+spans*, and spans were part of both the per-definition facts that authorize reuse
+and the parse trees the checker is handed. One inserted character therefore
+re-checked and re-elaborated the rest of the file.
+
+Measured on 2026-10-26 with release builds on an AMD Ryzen 9 5900HX, rustc
+1.99.1, over real stdio LSP: one generated file, one document open, and a single
+character inserted per keystroke at the top of the file, so every definition
+moves. Median of eight keystrokes, each timed from `textDocument/didChange` to
+the `publishDiagnostics` the server sends for that document.
+
+| File | Before | After |
+| --- | ---: | ---: |
+| 200 definitions, 16 KB | 29.5 ms | 2.5 ms |
+| 1000 definitions, 84 KB | 154.3 ms | 18.8 ms |
+
+An insertion in the middle of the file measured the same as one at the top
+(140.4 ms before, 18.6 ms after), because it moves just as much of the file. Open,
+to first diagnostics, is unchanged — 164 ms for the 1000-definition file — since
+that is a cold compile and nothing about it is incremental. What is left per
+keystroke at 1000 definitions is parsing (about 5 ms), the per-definition facts
+walk salsa re-runs because the file's parse changed (about 3.7 ms), the module
+check's aggregation (about 5 ms), and the reuse itself (about 0.3 ms).
+
+Both binaries were run alternately, and the absolute figures move with the
+machine: a second set of runs on a busier machine measured the same pair at
+180 ms and 32 ms. The ratio is what the change is about.
+
+Cold compilation of a catalogue pays a little for this. Compiling a generated
+100 000-definition file once, end to end (`cagara large.cagara`), went from
+2.73 s to 2.85 s — about 4% — because the workspace now keeps each definition's
+source text beside its input (to tell an untouched definition from a moved one
+without re-parsing anything) and the module check reads a definition's offset
+once per definition. Peak memory for the 100 000-definition benchmark went from
+852 MB to 875 MB. That is the trade: a catalogue is compiled once, and typed in
+continuously.
+
+Two changes, one in each half of the pipeline, and neither adds a second route:
+
+- **The check is kept across a move.** `Workspace::sync_defs` decides whether a
+  definition's input is still current by comparing its *text*, not its parsed
+  tree. Its check is memoized per definition, so a definition whose own text did
+  not change keeps its check even when it moved. The spans that check recorded
+  are then stale by the distance it moved — one offset for the whole definition —
+  and `module_check` applies it where spans become positions: rendered
+  diagnostics, the module's typed-span index, and the two places in
+  normalization that build an origin from a typed span.
+- **The compilation is reused across a move.** `DefinitionFacts` no longer
+  includes a definition's offset, so a definition that only moved is not dirty,
+  and its cached relation is reused with every `Rel::At` translated through the
+  definition that wrote it (`incremental::Moves`). The translation is refused
+  rather than guessed when the module's definition list changed.
+
+Both are still keyed on exact facts, with no hash standing in for equality: the
+text of a definition and the closed data its check produced. What changed is what
+counts as part of a definition — an offset does not.

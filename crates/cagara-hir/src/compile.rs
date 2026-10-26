@@ -102,8 +102,11 @@ impl<'a> ModuleSnapshot<'a> {
 ///
 /// `def` is a source-order position, so inserting a definition changes the ids
 /// of everything after it. Reuse does not key on it: the incremental shell
-/// compares exact per-definition facts, so a moved definition is rebuilt with
-/// its new locations instead of being reused under a stale identity.
+/// compares exact per-definition facts, so a definition that is the same
+/// definition under a new index keeps its compiled result. The index is still
+/// what names the definition in that comparison, which is why the shell checks
+/// that the module's definition list is the same, by name, before it reuses
+/// anything at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DefinitionId {
     pub module: usize,

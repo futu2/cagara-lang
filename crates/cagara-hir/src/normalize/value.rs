@@ -12,8 +12,8 @@ use cagara_syntax::ast::{Expr, ExprKind, Lit};
 use super::arena::{Kept, Projection, QueryNodeKind, Rewrite};
 use super::scalar;
 use super::{
-    frame, BodyRef, Closure, CombineFn, Control, Env, Label, Normalizer, Site, StageFn, StageSpec,
-    Value,
+    frame, moved, BodyRef, Closure, CombineFn, Control, Env, Label, Normalizer, Site, StageFn,
+    StageSpec, Value,
 };
 use crate::check::NodeRef;
 use crate::check::Resolved;
@@ -541,10 +541,13 @@ impl<'a> Normalizer<'a, 'a> {
         // The row the checker closed for the table call, found by the site of the
         // application that consumed the primitive value.
         let call_row = self.call_site().and_then(|site| {
+            // Looked up through the module's span index rather than the
+            // definition's own: that index is in the text's coordinates, and a
+            // definition kept through a move recorded its spans in the
+            // coordinates of the text it was parsed from.
             self.input
                 .type_check()
-                .typed_body(site.module, site.def)
-                .and_then(|tree| tree.node_at(site.span))
+                .typed_node_at(site.module, site.span)
                 .and_then(|node| node.row())
         });
         let Value::Label(label) = arg else {
@@ -895,12 +898,18 @@ impl<'a> Normalizer<'a, 'a> {
                 .row_stages(site.module, site.def)
                 .find(|stage| stage.node == node && Self::kind_of_stage(stage.kind) == kind)
             {
-                let span = self
-                    .input
-                    .type_check()
+                let tc = self.input.type_check();
+                // The span was recorded while checking the definition that
+                // wrote this stage — which is the definition `stage.node`
+                // names, and may be another module's when a helper is inlined.
+                let shift = tc.def_shift(stage.node.definition_module, stage.node.definition);
+                let span = tc
                     .typed_node(site.module, operation_id)
                     .map_or(stage.span, |typed| typed.span);
-                return (Origin::new(stage.node.definition_module, span), stage.node);
+                return (
+                    Origin::new(stage.node.definition_module, moved(span, shift)),
+                    stage.node,
+                );
             }
             if matches!(kind, QueryNodeKind::Join(_) | QueryNodeKind::Set(_)) {
                 if let Some(combine) = self
@@ -909,12 +918,12 @@ impl<'a> Normalizer<'a, 'a> {
                     .typed_node(site.module, operation_id)
                     .and_then(|node| node.combine.as_ref())
                 {
-                    let span = self
-                        .input
-                        .type_check()
+                    let tc = self.input.type_check();
+                    let shift = tc.def_shift(site.module, site.def);
+                    let span = tc
                         .typed_node(site.module, operation_id)
                         .map_or(site.span, |typed| typed.span);
-                    return (Origin::new(site.module, span), combine.node);
+                    return (Origin::new(site.module, moved(span, shift)), combine.node);
                 }
             }
         }
@@ -925,8 +934,10 @@ impl<'a> Normalizer<'a, 'a> {
                 .row_stages(site.module, site.def)
                 .find(|stage| stage.site == site.id && Self::kind_of_stage(stage.kind) == kind);
             if let Some(stage) = found {
+                let tc = self.input.type_check();
+                let shift = tc.def_shift(stage.node.definition_module, stage.node.definition);
                 return (
-                    Origin::new(stage.node.definition_module, stage.span),
+                    Origin::new(stage.node.definition_module, moved(stage.span, shift)),
                     stage.node,
                 );
             }
@@ -1004,8 +1015,7 @@ impl<'a> Normalizer<'a, 'a> {
         let site = self.sites.last()?;
         self.input
             .type_check()
-            .typed_body(site.module, site.def)
-            .and_then(|tree| tree.node_at(site.span))
+            .typed_node_at(site.module, site.span)
             .and_then(|node| node.scalar_phase())
     }
 

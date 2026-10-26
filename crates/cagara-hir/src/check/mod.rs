@@ -282,6 +282,26 @@ impl TypeCheck {
             .map(Arc::as_ref)
     }
 
+    /// How far the spans the checker recorded for `def` sit from the module's
+    /// current text.
+    ///
+    /// Normally zero. It is nonzero for a definition the workspace kept through
+    /// an edit that only *moved* it: `Workspace::sync_defs` compares a
+    /// definition's text, so an untouched definition below an insertion keeps
+    /// its memoized check — and that check, and this tree, recorded the spans of
+    /// the text it was parsed from. Every recorded span moves together, so one
+    /// offset puts them back; the readers that answer in the module's current
+    /// coordinates (`typed_node_at`, the rendered diagnostics, the typed-span
+    /// index) add it themselves, and the two places in normalization that build
+    /// an origin from a *typed* span add it here.
+    pub fn def_shift(&self, module: usize, def: usize) -> i64 {
+        self.modules
+            .get(module)
+            .and_then(|checked| checked.shifts.get(def))
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// The typed node for one expression of a module, found by `ExprId`.
     ///
     /// `Facts` is keyed by `ExprId` alone while a tree belongs to one
@@ -531,7 +551,7 @@ thread_local! {
 
 /// How many definition checks ran on this thread (for incrementality tests).
 #[cfg(test)]
-fn check_runs() -> usize {
+pub(crate) fn check_runs() -> usize {
     CHECK_RUNS.with(|c| c.get())
 }
 
@@ -644,22 +664,48 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
     // `check()`. This is the one step that cannot move into `def_check`: it
     // reads the whole file's text, which would make every definition's check
     // depend on every edit.
+    //
+    // The text a definition's check was made against is not always the text
+    // here. `Workspace::sync_defs` keeps the input of a definition whose own
+    // text did not change when something above it did, so its memoized check
+    // recorded spans that are stale by exactly the distance it moved — and
+    // that is the whole reason a keystroke above a definition no longer
+    // re-checks it. The two spans are both known here (the parse of *this*
+    // text, and the span the kept input was parsed from), so the offset is
+    // applied where the spans are rendered: every inner span of a definition
+    // moved with it, so one delta covers the definition's diagnostics and its
+    // typed tree.
     let path = input.path(db);
     let text = input.file(db).text(db);
     let starts = crate::workspace::line_starts(text);
+    let current: Vec<Span> = parse_module(db, *input.file(db))
+        .module
+        .defs
+        .iter()
+        .map(|d| d.span)
+        .collect();
+    let moved = |def: usize| -> i64 {
+        let kept = input.defs(db)[def].def(db).0.span.start;
+        let now = current.get(def).map_or(kept, |span| span.start);
+        i64::from(now) - i64::from(kept)
+    };
+    let shifts: Vec<i64> = (0..count).map(moved).collect();
+    let place = |span: Span, def: usize| -> (usize, usize) {
+        let delta = moved(def);
+        let at = |offset: u32| (i64::from(offset) + delta).max(0) as usize;
+        (at(span.start), at(span.end))
+    };
     let errors = errors
         .into_iter()
-        .map(|e| TypeError {
-            module: e.module,
-            def: e.def,
-            diag: crate::workspace::make_diag_indexed(
-                path,
-                text,
-                &starts,
-                e.span.start as usize,
-                e.span.end as usize,
-                e.message,
-            ),
+        .map(|e| {
+            let (start, end) = place(e.span, e.def);
+            TypeError {
+                module: e.module,
+                def: e.def,
+                diag: crate::workspace::make_diag_indexed(
+                    path, text, &starts, start, end, e.message,
+                ),
+            }
         })
         .collect();
     let mut typed_index: Vec<(u32, usize, usize)> = Vec::new();
@@ -671,8 +717,10 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
     typed_index.sort_unstable_by_key(|(id, _, _)| *id);
     let mut typed_spans: Vec<(u32, u32, usize, usize)> = Vec::new();
     for (&(_, def), body) in &typed {
-        for &(start, end, at) in body.span_index() {
-            typed_spans.push((start, end, def, at));
+        let delta = moved(def);
+        let at = |offset: u32| (i64::from(offset) + delta).max(0) as u32;
+        for &(start, end, at_node) in body.span_index() {
+            typed_spans.push((at(start), at(end), def, at_node));
         }
     }
     typed_spans.sort_unstable_by_key(|(start, end, _, _)| (*start, *end));
@@ -684,6 +732,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         typed,
         typed_index,
         typed_spans,
+        shifts,
     })
 }
 
@@ -730,6 +779,10 @@ struct ModuleCheck {
     /// Key span to the definition that has it and the node's place in that
     /// body, ascending by span. See [`def_check`].
     typed_spans: Vec<(u32, u32, usize, usize)>,
+    /// Per definition, the distance from the spans its check recorded to this
+    /// text's (see [`TypeCheck::def_shift`]). Zero for a definition whose own
+    /// text was edited, which is the common case.
+    shifts: Vec<i64>,
 }
 
 /// What checking one module reads: its definitions and scope, and every

@@ -8,10 +8,9 @@
 use super::*;
 use crate::compile::DefinitionId;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct DefinitionFacts {
     source: String,
-    span: Span,
     failed: bool,
     holes: usize,
     scheme: Option<SchemeView>,
@@ -20,6 +19,30 @@ pub(crate) struct DefinitionFacts {
     uses: Vec<(u32, Option<ScalarType>)>,
     bindings: Vec<Option<Binding>>,
     pub dependencies: Vec<DefinitionId>,
+}
+
+/// Equal when the definition is the same definition.
+///
+/// Written out rather than derived because it deliberately leaves out *where*
+/// the definition sits. Its own `source` already says what it is; an offset
+/// says only where it is, and a definition that moved is not a definition that
+/// changed. Deriving the comparison made every definition below a keystroke
+/// look edited — their spans had all shifted — so a character typed near the
+/// top of a file re-elaborated the whole file. The cached result of a
+/// definition that only moved is reused, and its locations are moved onto the
+/// current text by the shell that owns the cache (`crate::incremental`).
+impl PartialEq for DefinitionFacts {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.failed == other.failed
+            && self.holes == other.holes
+            && self.scheme == other.scheme
+            && self.result == other.result
+            && self.choices == other.choices
+            && self.uses == other.uses
+            && self.bindings == other.bindings
+            && self.dependencies == other.dependencies
+    }
 }
 
 #[salsa::tracked(returns(ref))]
@@ -52,7 +75,6 @@ pub(crate) fn definition_facts(
     choices.sort_by_key(|&(site, hole, _)| (site, hole));
     let mut facts = DefinitionFacts {
         source: file.text(db)[definition.span.start as usize..definition.span.end as usize].into(),
-        span: definition.span,
         failed: scheme.is_none_or(|s| s.failed),
         holes: typed.map_or(0, |body| body.holes),
         scheme: scheme.map(|s| scheme_view(&s.ty)),
@@ -203,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn facts_are_memoized_and_compare_checked_types_and_locations() {
+    fn facts_are_memoized_and_compare_checked_types_but_not_locations() {
         let src = "q : query { a = int } = table \"s\" \"t\"\n";
         let mut ws = Workspace::from_source(src);
         let input = ws.inputs[ws.root];
@@ -211,8 +233,16 @@ mod tests {
         let runs = FACT_RUNS.with(|runs| runs.get());
         assert!(Arc::ptr_eq(&first, definition_facts(&ws.db, input, 0)));
         assert_eq!(FACT_RUNS.with(|runs| runs.get()), runs);
+
+        // A definition that only moved is the same definition: its source text
+        // and its checked facts are unchanged, and the offset it now sits at is
+        // not part of either. The cached result of one that moved is reused and
+        // relocated, so treating the move as a change would rebuild the file
+        // for a keystroke typed above it.
         assert!(ws.set_source(ws.root, format!("# moved\n{src}")));
-        assert_ne!(first, *definition_facts(&ws.db, input, 0));
+        assert_eq!(first, *definition_facts(&ws.db, input, 0));
+
+        // Its checked type is part of what it is.
         assert!(ws.set_source(ws.root, src.replace("int", "bool")));
         assert_ne!(first, *definition_facts(&ws.db, input, 0));
     }

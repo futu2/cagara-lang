@@ -9,10 +9,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  describeServer,
   resolveServer,
   rustTargetFor,
   selfAndAncestors,
+  stamp,
   vscodeTarget,
+  type ResolvedServer,
   type ServerSearch,
 } from "../serverpath";
 
@@ -135,4 +138,28 @@ test("release VS Code targets map to the Rust targets used by packaging", () => 
   assert.equal(rustTargetFor("win32-x64"), "x86_64-pc-windows-msvc");
   assert.equal(rustTargetFor("win32-arm64"), "aarch64-pc-windows-msvc");
   assert.equal(rustTargetFor("linux-armhf"), undefined);
+});
+
+test("describeServer names the file, where it came from, and its date", () => {
+  // Named directly rather than resolved: the point is the line, not the search.
+  const resolved: ResolvedServer = {
+    command: "/ext/bin/linux-x64/cagara",
+    source: "bundled",
+  };
+  const built = new Date(2026, 9, 14, 18, 26);
+  assert.equal(
+    describeServer(resolved, built),
+    "running /ext/bin/linux-x64/cagara (bundled with the extension, file dated 2026-10-14 18:26)",
+  );
+});
+
+test("describeServer says PATH when there is no file to name", () => {
+  // A bare name is resolved by `spawn`, so there is nothing to date.
+  const resolved = resolveServer(search());
+  assert.equal(resolved.source, "path");
+  assert.equal(describeServer(resolved), "running cagara (from PATH)");
+});
+
+test("stamp pads to a fixed width, so log lines line up", () => {
+  assert.equal(stamp(new Date(2026, 0, 5, 4, 7)), "2026-01-05 04:07");
 });

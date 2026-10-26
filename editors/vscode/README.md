@@ -48,6 +48,25 @@ release does. Step 3 is the fallback for a package that carries no server, and
 searches upward, so a build in the repository root serves a nested workspace
 such as `examples/`.
 
+## Formatting
+
+`Shift+Alt+F` formats the file with `cagara fmt`. The server sends back only the
+lines that changed, so the rest of the file keeps its tokens, folds and cursor,
+and `cagara.formatOnSave` can do the same on every save:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `cagara.formatOnSave` | `false` | Format `.cagara` files as they are saved, before the text is written. |
+
+On Linux `Ctrl+Shift+I` is also Format Document, and in the **extension
+development host** that key opens Developer Tools instead: both commands claim
+it, and the DevTools binding exists only in a development host, where its
+weight beats the format binding's. Someone formatting from the keyboard while
+developing the extension therefore opens a debugger, which looks like the
+editor freezing for a minute while DevTools starts. Use `Shift+Alt+F` there.
+A normal window — an installed VSIX — has no DevTools binding on that key, so
+`Ctrl+Shift+I` formats as usual.
+
 ## Compiling to SQL
 
 The extension can run `cagara <file>` for you and put the result on the

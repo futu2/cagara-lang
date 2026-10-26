@@ -128,3 +128,36 @@ export function resolveServer(search: ServerSearch): ResolvedServer {
   }
   return { command: search.exe, source: "path" };
 }
+
+/** How a [`ResolvedServer`] reads in a log line, next to its file's date. */
+const ORIGIN: Record<ServerSource, string> = {
+  configured: "from cagara.path",
+  bundled: "bundled with the extension",
+  workspace: "workspace build",
+  path: "from PATH",
+};
+
+/** A date as `YYYY-MM-DD HH:MM` in local time, for a log line. */
+export function stamp(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  );
+}
+
+/**
+ * One line naming the server that will run, so "which compiler is this window
+ * actually using" is answered from the log instead of from a guess.
+ *
+ * A bundled server outranks every other candidate, and an F5 session stages
+ * one from the checkout it was launched from — so two checkouts, or a stage
+ * older than the sources, silently run a compiler behind the code on screen.
+ * The path says which checkout it came from; `fileDate` is the server file's
+ * own timestamp, which is the build time for a `target/` build and the *copy*
+ * time for a staged one, enough to see that the file is from last week.
+ */
+export function describeServer(server: ResolvedServer, fileDate?: Date): string {
+  const date = fileDate ? `, file dated ${stamp(fileDate)}` : "";
+  return `running ${server.command} (${ORIGIN[server.source]}${date})`;
+}

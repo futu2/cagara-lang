@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- `cagara.formatOnSave` formats a file as it is saved, before the text is
+  written, so the file on disk is the formatted text and the buffer is not left
+  dirty the way formatting after the save would leave it. The edits are the
+  language server's, asked for through the command Format Document runs, so a
+  save and `Shift+Alt+F` produce the same text — including the property that
+  only the lines that change are replaced. A server that is not up cannot
+  fail a save.
+
+- The extension names the server it runs, in its output channel: the path,
+  where it came from, and the file's date. A bundled server outranks every
+  other candidate, and a development host stages one from the checkout it was
+  launched from, so two checkouts — or a stage older than the sources — run an
+  older compiler with nothing on screen saying so. The development host also
+  says that `Ctrl+Shift+I` is Developer Tools there rather than Format
+  Document: both claim the key on Linux, and the DevTools binding exists only
+  in a development host, where its weight (250) beats the format binding's
+  (100), so formatting from the keyboard there opens a debugger instead. The
+  line points at `Shift+Alt+F`.
+
 - Formatting sends the lines that changed, not the whole file. The language
   server answered `textDocument/formatting` with a single edit spanning line 0
   to the end, and an editor pays for that edit in full: every token and fold

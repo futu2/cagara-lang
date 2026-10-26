@@ -7,7 +7,8 @@ import * as vscode from "vscode";
 import { LanguageClient, LanguageClientOptions, ServerOptions } from "vscode-languageclient/node";
 
 import { classify, compileArgs, splitArgs, stripBanner } from "./compile";
-import { resolveServer, vscodeTarget, type ResolvedServer } from "./serverpath";
+import { formattingOptions, shouldFormat } from "./save";
+import { describeServer, resolveServer, vscodeTarget, type ResolvedServer } from "./serverpath";
 
 let client: LanguageClient | undefined;
 
@@ -26,6 +27,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       await copySql(context, "cagara.copyOnSave", doc);
+    }),
+    // Formatting on save belongs in `onWillSave`, not `onDidSave`: the edits go
+    // in with the write, so the file on disk is the formatted text and the
+    // buffer is not left dirty the way formatting after the save leaves it.
+    vscode.workspace.onWillSaveTextDocument((event) => {
+      const config = vscode.workspace.getConfiguration("cagara", event.document.uri);
+      if (!shouldFormat(config.get<boolean>("formatOnSave", false), event.document.languageId)) {
+        return;
+      }
+      event.waitUntil(formatBeforeSave(event.document));
     }),
     vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (e.affectsConfiguration("cagara.path")) {
@@ -160,13 +171,37 @@ function firstLines(text: string, n: number): string {
   return lines.length <= n ? text : `${lines.slice(0, n).join("\n")}\n…`;
 }
 
+/**
+ * The formatter's edits, to be applied with the save.
+ *
+ * The edits are the language server's, asked for through the same command
+ * Format Document runs, so `cagara.formatOnSave` and `Shift+Alt+F` produce the
+ * same text — including the server's property that only the lines that change
+ * are replaced. A server that is not up, or that answers with an error, must
+ * not fail the save: the file is still worth writing as it stands.
+ */
+function formatBeforeSave(document: vscode.TextDocument): Thenable<vscode.TextEdit[]> {
+  const editor = vscode.workspace.getConfiguration("editor", document.uri);
+  const options = formattingOptions((key) => editor.get(key));
+  return Promise.resolve(
+    vscode.commands.executeCommand<vscode.TextEdit[]>(
+      "vscode.executeFormatDocumentProvider",
+      document.uri,
+      options,
+    ),
+  ).then(
+    (edits) => edits ?? [],
+    () => [],
+  );
+}
+
 export async function deactivate(): Promise<void> {
   await stop();
 }
 
 async function start(context: vscode.ExtensionContext): Promise<void> {
-  const { command } = serverFor(context);
-  const run = { command, args: ["lsp"] };
+  const server = serverFor(context);
+  const run = { command: server.command, args: ["lsp"] };
   const serverOptions: ServerOptions = { run, debug: run };
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "cagara" }],
@@ -177,11 +212,49 @@ async function start(context: vscode.ExtensionContext): Promise<void> {
   client = new LanguageClient("cagara", "Cagara Language Server", serverOptions, clientOptions);
   try {
     await client.start();
+    announce(context, client, server);
   } catch (err) {
     client = undefined;
     const msg = err instanceof Error ? err.message : String(err);
     void vscode.window.showErrorMessage(
-      `Cagara: could not start \`${command} lsp\` (${msg}). Build it with \`cargo build --release\` or set cagara.path.`,
+      `Cagara: could not start \`${server.command} lsp\` (${msg}). Build it with \`cargo build --release\` or set cagara.path.`,
+    );
+  }
+}
+
+/**
+ * Say which server is running, in the output channel next to its own log.
+ *
+ * A bundled server outranks every other candidate, and a development host
+ * stages one from the checkout it was launched from: two checkouts, or a stage
+ * older than the sources, run a compiler the window gives no sign of. The line
+ * is three facts — the path, where it came from, and the file's date — which
+ * is enough to see that the server is from another checkout or from last week.
+ *
+ * The development host also gets a reminder that `Ctrl+Shift+I` is Developer
+ * Tools there and Format Document everywhere else: both commands claim the
+ * key, and the DevTools binding only exists in a development host, where its
+ * weight (250) beats the format binding's (100). Someone formatting from the
+ * keyboard in an F5 window therefore opens a debugger instead, which is a
+ * minute of DevTools start-up rather than a reformat.
+ */
+function announce(
+  context: vscode.ExtensionContext,
+  started: LanguageClient,
+  server: ResolvedServer,
+): void {
+  let fileDate: Date | undefined;
+  try {
+    fileDate = fs.statSync(server.command).mtime;
+  } catch {
+    // A bare name for `PATH` to resolve: there is no file to date.
+  }
+  const channel = started.outputChannel;
+  channel.appendLine(`Cagara: ${describeServer(server, fileDate)}`);
+  if (context.extensionMode === vscode.ExtensionMode.Development) {
+    channel.appendLine(
+      "Cagara: development host — Ctrl+Shift+I opens Developer Tools here and " +
+        "Shift+Alt+F (or the Command Palette) formats the document.",
     );
   }
 }

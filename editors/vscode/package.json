@@ -99,6 +99,12 @@
           ],
           "markdownDescription": "SQL dialect to compile to when copying SQL. The names are the ones `cagara --dialect` accepts, and the choice is the same one the CLI makes: dialects differ in how Cagara's date, string and integer operations are rewritten, and a few cannot express some operations at all."
         },
+        "cagara.formatOnSave": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "markdownDescription": "Format a `.cagara` file as it is saved, before the text is written. The language server sends only the lines that change, so the rest of the file keeps its tokens, folds and cursor. `Shift+Alt+F` formats without saving."
+        },
         "cagara.copyOnSave": {
           "type": "boolean",
           "default": false,

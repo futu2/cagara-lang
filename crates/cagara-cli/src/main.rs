@@ -26,6 +26,27 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The name `--version` reports for the binary.
 const NAME: &str = "cagara";
 
+/// What this binary is, beyond its version: the commit it was built from, the
+/// profile, the target and the time.
+///
+/// `--version` stays a bare version line, because that is the one thing scripts
+/// parse and the reference documents. This is for the language server's first
+/// log line instead, which is where a stale compiler has to be recognisable —
+/// a binary that has been staged or copied cannot be told from a current one by
+/// its path or its timestamp.
+const BUILD: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("CAGARA_BUILD_COMMIT"),
+    ", ",
+    env!("CAGARA_BUILD_PROFILE"),
+    ", ",
+    env!("CAGARA_BUILD_TARGET"),
+    ", built ",
+    env!("CAGARA_BUILD_DATE"),
+    ")"
+);
+
 const USAGE: &str =
     "usage: cagara <file.cagara|-> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
        cagara fmt [--check] <files...>   format files in place (`-` for stdin to stdout)
@@ -90,7 +111,7 @@ fn main_inner() -> std::io::Result<ExitCode> {
                 display(a)
             )));
         }
-        return match cagara_lsp::run() {
+        return match cagara_lsp::run(BUILD) {
             Ok(()) => Ok(ExitCode::SUCCESS),
             Err(e) => {
                 eprintln!("cagara lsp: {e}");

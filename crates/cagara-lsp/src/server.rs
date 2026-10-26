@@ -8,7 +8,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
-    DidSaveTextDocument, Notification as _, PublishDiagnostics,
+    DidSaveTextDocument, LogMessage, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
     Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting, GotoDefinition,
@@ -18,9 +18,9 @@ use lsp_types::{
     CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams,
     DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, HoverProviderCapability, Location, MarkupContent, MarkupKind, OneOf,
-    PublishDiagnosticsParams, ReferenceParams, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri,
+    HoverParams, HoverProviderCapability, Location, LogMessageParams, MarkupContent, MarkupKind,
+    MessageType, OneOf, PublishDiagnosticsParams, ReferenceParams, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use std::collections::HashMap;
 use std::error::Error;
@@ -104,9 +104,14 @@ fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
 /// A malformed message gets an error reply (or is logged, for a
 /// notification), and a panic while handling one is reported the same way,
 /// so neither ends the session.
-pub fn run() -> Res<()> {
+///
+/// `build` is what the binary says it is — version, commit, profile, target,
+/// build time — and is announced in the client's log before anything else. It
+/// is passed in because only `cagara-cli` can stamp its own build; this crate
+/// is a library.
+pub fn run(build: &str) -> Res<()> {
     let (conn, io) = Connection::stdio();
-    serve(&conn)?;
+    serve(&conn, build)?;
     // The writer thread ends when every sender is gone.
     drop(conn);
     io.join()?;
@@ -122,7 +127,7 @@ pub fn run() -> Res<()> {
 /// then drops the ones a later keystroke has already overwritten. Analysing a
 /// burst of ten keystrokes used to cost ten checks of the file; it now costs
 /// one, of the text the user is actually looking at.
-fn serve(conn: &Connection) -> Res<()> {
+fn serve(conn: &Connection, build: &str) -> Res<()> {
     let caps = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
@@ -138,6 +143,17 @@ fn serve(conn: &Connection) -> Res<()> {
         ..Default::default()
     };
     conn.initialize(serde_json::to_value(caps)?)?;
+    // The client logs this next to its own output, so the answer to "which
+    // compiler is this window running" is in the log rather than in a guess.
+    // A copy carries the copy's timestamp and a staged file looks new, so the
+    // binary has to name itself.
+    conn.sender.send(Message::Notification(Notification::new(
+        LogMessage::METHOD.to_string(),
+        serde_json::to_value(LogMessageParams {
+            typ: MessageType::INFO,
+            message: format!("cagara {build}"),
+        })?,
+    )))?;
     let (work, jobs) = crossbeam_channel::unbounded::<Work>();
     let sender = conn.sender.clone();
     let worker = std::thread::Builder::new()
@@ -603,8 +619,11 @@ fn publish(sender: &Sender<Message>, uri: Uri, ws: &Workspace) -> Res<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::serve;
+    use super::{serve, LogMessage, LogMessageParams, MessageType};
     use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
+    // `LogMessage::METHOD` is a method of this trait, and `lsp_server` has a
+    // `Notification` of its own, hence the anonymous import.
+    use lsp_types::notification::Notification as _;
     use serde_json::json;
     use std::time::Duration;
 
@@ -634,10 +653,55 @@ mod tests {
         }
     }
 
+    /// A window has to be able to say which compiler answers it: a binary that
+    /// was staged or copied cannot be told from a current one by its path, and
+    /// a copy carries the copy's timestamp. So the first thing the server says
+    /// after initialization is the build it was made from.
+    #[test]
+    fn the_server_names_its_build() {
+        let build =
+            "0.3.1 (abc1234, release, x86_64-unknown-linux-gnu, built 2026-10-26 03:00 UTC)";
+        let (server, client) = Connection::memory();
+        let t = std::thread::spawn(move || serve(&server, build).map_err(|e| e.to_string()));
+        client
+            .sender
+            .send(request(1, "initialize", json!({ "capabilities": {} })))
+            .unwrap();
+        response(&client, 1);
+        client
+            .sender
+            .send(notify("initialized", json!({})))
+            .unwrap();
+
+        let message = client
+            .receiver
+            .recv_timeout(Duration::from_secs(30))
+            .expect("a message after initialized");
+        let Message::Notification(n) = message else {
+            panic!("expected the build announcement, got {message:?}")
+        };
+        assert_eq!(n.method, LogMessage::METHOD);
+        let params: LogMessageParams = serde_json::from_value(n.params).expect("log message");
+        assert_eq!(params.typ, MessageType::INFO);
+        assert!(params.message.contains(build), "{}", params.message);
+
+        client
+            .sender
+            .send(request(4, "shutdown", serde_json::Value::Null))
+            .unwrap();
+        response(&client, 4);
+        client
+            .sender
+            .send(notify("exit", serde_json::Value::Null))
+            .unwrap();
+        t.join().unwrap().unwrap();
+    }
+
     #[test]
     fn malformed_messages_do_not_end_the_session() {
         let (server, client) = Connection::memory();
-        let t = std::thread::spawn(move || serve(&server).map_err(|e| e.to_string()));
+        let t =
+            std::thread::spawn(move || serve(&server, "0.3.1 (test)").map_err(|e| e.to_string()));
         client
             .sender
             .send(request(1, "initialize", json!({ "capabilities": {} })))

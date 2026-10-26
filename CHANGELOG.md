@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- The language server names the build it is, as the first thing it says after
+  initialization: `cagara 0.3.1 (24b8547, release, x86_64-unknown-linux-gnu,
+  built 2026-10-26 03:12 UTC)`. A binary is staged into `editors/vscode/bin/`,
+  packed into a VSIX, copied into an install directory — and once copied,
+  nothing on the outside says where it came from, because a copy carries the
+  copy's timestamp, so an old build looks new exactly when it matters. A
+  session that spent a minute in a debugger was measuring an Oct 14 compiler
+  against Oct 22 sources with no way to see it. `crates/cagara-cli/build.rs`
+  stamps the commit (`+dirty` when the tree had uncommitted changes to tracked
+  files), the profile, the target and the time, honouring `SOURCE_DATE_EPOCH`
+  and falling back to `unknown` wherever git is absent rather than failing the
+  build. `--version` is unchanged: it is the one line scripts parse and the
+  reference documents, and a stamp in it would be a format change for every
+  consumer.
+
 - `cagara.formatOnSave` formats a file as it is saved, before the text is
   written, so the file on disk is the formatted text and the buffer is not left
   dirty the way formatting after the save would leave it. The edits are the

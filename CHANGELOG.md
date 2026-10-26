@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- The extension host is bundled into one file, so the VSIX is eight files
+  instead of 235. 223 of those were `node_modules`: `vscode-languageclient` and
+  the tree it arrives with — `vscode-jsonrpc`, `vscode-languageserver-protocol`,
+  `vscode-languageserver-types`, `vscode-languageserver-textdocument`, `semver`,
+  `minimatch`, `brace-expansion`, `balanced-match` — every one of them needed
+  at runtime, so no ignore pattern could take them out, and `vsce` said so on
+  every package run. `npm run bundle` folds them into `dist/extension.js` with
+  esbuild, `main` points there, `dependencies` is empty, and `.vscodeignore`
+  drops `node_modules/` and `out/`. `vscode` stays external: the editor supplies
+  it, and it only exists inside the extension host. The bundle is not minified
+  and keeps its names, so a stack trace from a VSIX — which carries no source
+  map, `.vscodeignore` drops `**/*.map` — is still readable; the map is written
+  anyway, because F5 debugs the bundle and a breakpoint in `src/` needs it.
+  `tsc` still runs and `out/` still exists —
+  `npm test` compiles into `out-test/`, and `stage-server.mjs` reads
+  `out/serverpath.js` — but `npm run compile` now finishes by bundling, so F5
+  and a packaged VSIX run the same file.
+
 - The SQL the extension shows beside a `.cagara` file is a preview instead of a
   second editor. Saving with `cagara.showSqlOnSave` on used to open a new
   untitled buffer, focus it, and give it half the window: the save moved the

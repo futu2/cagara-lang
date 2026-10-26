@@ -9,3 +9,9 @@ tsconfig.test.json
 *.vsix
 # Compiled from src/test by `npm test`; the released extension does not run tests.
 out-test/**
+# The extension host is bundled into dist/ by `npm run bundle`, so neither the
+# TypeScript output it was compiled from nor the dependency tree it was built
+# with belongs in the package: 235 files, 186 of them JavaScript, every one of
+# them a file the editor host would otherwise parse per window.
+node_modules/**
+out/**

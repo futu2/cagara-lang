@@ -1,5 +1,7 @@
 node_modules/
 out/
+# The bundled extension host, built from src/ by `npm run bundle`.
+dist/
 out-test/
 *.vsix
 # Release binaries staged for packaging, one directory per VS Code target.

@@ -148,6 +148,18 @@ npm run compile
 npm test
 ```
 
+`npm run compile` type-checks and compiles `src/` with `tsc`, then bundles it
+into `dist/extension.js` with esbuild; `dist/extension.js` is `main`, so F5 runs
+the same file the VSIX ships. `out/` still exists, because `npm test` and
+`npm run stage:server` read it, but it is not what the extension loads. The
+bundle is why `node_modules/` is not in the package: 223 of the 235 files in a
+VSIX were the language client's own dependency tree, and folding it into one
+file leaves eight files to install. A source map is written beside the bundle
+so a breakpoint in `src/` still binds under F5; `.vscodeignore` keeps it out of
+the VSIX. Editing during F5 wants `npm run bundle:watch` alongside
+`npm run watch`, since a stale bundle is a window running code you did not
+write.
+
 Open this folder in VS Code and press F5 (Run Extension) to launch it on
 `examples/`. The launch task compiles this folder and stages the repository's
 `target/release/cagara` into `bin/<target>/`, so F5 runs the same bundled-server

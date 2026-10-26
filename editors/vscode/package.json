@@ -16,7 +16,7 @@
   "categories": [
     "Programming Languages"
   ],
-  "main": "./out/extension.js",
+  "main": "./dist/extension.js",
   "contributes": {
     "languages": [
       {
@@ -171,21 +171,22 @@
     ]
   },
   "scripts": {
-    "compile": "tsc -p ./",
+    "compile": "tsc -p ./ && node scripts/bundle.mjs",
     "compile:tests": "tsc -p ./tsconfig.test.json",
+    "bundle": "node scripts/bundle.mjs",
+    "bundle:watch": "node scripts/bundle.mjs --watch",
+    "watch": "tsc -watch -p ./",
     "test": "npm run compile:tests && node --test out-test/test/",
     "stage:server": "npm run compile && node scripts/stage-server.mjs",
-    "watch": "tsc -watch -p ./",
-    "vscode:prepublish": "npm run compile",
-    "package": "node scripts/package.mjs"
-  },
-  "dependencies": {
-    "vscode-languageclient": "10.1.2"
+    "package": "node scripts/package.mjs",
+    "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
     "@types/node": "20.19.43",
     "@types/vscode": "1.91.0",
     "@vscode/vsce": "4.0.0",
-    "typescript": "5.9.3"
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3",
+    "vscode-languageclient": "10.1.2"
   }
 }

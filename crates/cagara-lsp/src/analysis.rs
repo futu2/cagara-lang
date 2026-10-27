@@ -1334,7 +1334,7 @@ mod tests {
         assert_eq!(edit.range.end, pos(3, 0));
         assert_eq!(
             edit.new_text,
-            "q = users\n  & where adult\n  & agg { s = sum .age }\n"
+            "q =\n  users\n  & where adult\n  & agg { s = sum .age }\n"
         );
         // Applying them is what a client does, and it has to reproduce the
         // formatter's own output exactly.

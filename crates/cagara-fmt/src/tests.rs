@@ -27,7 +27,8 @@ const SOURCES: &[(&str, &str)] = &[
         "reference",
         "orders : query { id = int, amount = float, status = string } = table \"public\" \"orders\"
 
-main = orders
+main =
+  orders
   & select {
     .id,
     bucket = case {
@@ -143,9 +144,11 @@ fn every_prefix_of_the_examples_formats() {
 
 #[test]
 fn pipelines_break_per_stage() {
+    // The head is the pipeline's first stage, so it starts the block: nothing
+    // is hugged to the `=` line, and the stages share one column.
     check(
         "adults = users & where (.age >= 18) & select { id = .id }\n",
-        "adults = users\n  & where (.age >= 18)\n  & select { id = .id }\n",
+        "adults =\n  users\n  & where (.age >= 18)\n  & select { id = .id }\n",
     );
     // One stage stays on one line.
     check(
@@ -155,13 +158,23 @@ fn pipelines_break_per_stage() {
     // Continuation lines are re-indented.
     check(
         "a = q\n      & where .x\n        &- 10\n",
-        "a = q\n  & where .x\n  &- 10\n",
+        "a =\n  q\n  & where .x\n  &- 10\n",
     );
     // `&+` is a stage like any other, and is spaced like its siblings.
     check(
         "a = q &+{ age = .age + 1 } &= {.id}\n",
-        "a = q\n  &+ { age = .age + 1 }\n  &= { .id }\n",
+        "a =\n  q\n  &+ { age = .age + 1 }\n  &= { .id }\n",
     );
+    // A pipeline in a record field moves down the same way, so a head that
+    // starts a line always has its stages beside it rather than under it.
+    check(
+        "outer = { q = users & where (.age >= 18 && .active) & select { id = .id, label = upper .name, extra = .age + 1 } }\n",
+        "outer = {\n  q =\n    users\n    & where (.age >= 18 && .active)\n    & select { id = .id, label = upper .name, extra = .age + 1 }\n}\n",
+    );
+    // A pipeline that follows a token — here a `let`'s `in` — is not one of
+    // those: the head is not at the margin, so the stages indent under it.
+    let out = fmt("g = let y = 1 in q & where (.x == y) & limit 1 & offset 2\n");
+    assert!(out.contains("\n    & where (.x == y)"), "{out}");
 }
 
 #[test]
@@ -169,7 +182,8 @@ fn long_records_break_one_field_per_line() {
     let src = "s = q & select { id = .id, a_rather_long_name = upper .name, another_long_one = .age + 1, more_fields = .xyzw }\n";
     check(
         src,
-        "s = q
+        "s =
+  q
   & select {
     id = .id,
     a_rather_long_name = upper .name,
@@ -188,7 +202,8 @@ fn long_cases_break_one_arm_per_line() {
     // `case {` line.
     check(
         "q = t & select { b = case { a_very_long_condition_name_here > 1 => \"first_result\"; another_long_condition > 2 => \"second_result\"; true => \"fallback\" } }\n",
-        "q = t
+        "q =
+  t
   & select {
     b = case {
       a_very_long_condition_name_here > 1 => \"first_result\";
@@ -221,7 +236,8 @@ fn long_cases_break_one_arm_per_line() {
 /// line or have its first arm left on the `case {` line.
 #[test]
 fn a_case_written_one_arm_per_line_is_canonical() {
-    let want = "q = t
+    let want = "q =
+  t
   & select {
     b = case {
       .amount > 1000.0 => \"huge\";
@@ -236,7 +252,8 @@ fn a_case_written_one_arm_per_line_is_canonical() {
     // indented under `case` and `}` closing the last arm, not hanging off it.
     check(
         "q = t & select { b = case { .amount_in_cents >= 1000000 => \"huge\"; .amount_in_cents >= 100000 => \"big\"; true => \"small\" } }\n",
-        "q = t
+        "q =
+  t
   & select {
     b = case {
       .amount_in_cents >= 1000000 => \"huge\";
@@ -281,7 +298,8 @@ fn case_comments_and_trailing_semicolons_keep_their_place() {
     // lines is laid out over them, here inside a two-stage pipeline.
     check(
         "q = t & select {\n    b = case {\n        .a > 1 => 1;  # low\n        .a > 10 => 10; # high\n        true => 0\n    }\n}\n",
-        "q = t
+        "q =
+  t
   & select {
     b = case {
       .a > 1 => 1; # low
@@ -451,10 +469,11 @@ fn a_lambda_pipeline_body_moves_down_between_its_peers() {
         "f = a => q & where (.x == a) & limit 1\n",
         "f = a => q & where (.x == a) & limit 1\n",
     );
-    // A definition's own pipeline is unchanged: one stage per line, indented.
+    // A definition's own pipeline is laid out the same way: the head starts
+    // the block, and the stages sit flush with it.
     check(
         "adults = users & where (.age >= 18) & select { id = .id }\n",
-        "adults = users\n  & where (.age >= 18)\n  & select { id = .id }\n",
+        "adults =\n  users\n  & where (.age >= 18)\n  & select { id = .id }\n",
     );
 }
 
@@ -491,11 +510,11 @@ fn comments_and_blank_lines() {
     // Comments inside a pipeline force it to break and stay with their stage.
     check(
         "a = q & where .x # only x\n  & limit 1\n",
-        "a = q\n  & where .x # only x\n  & limit 1\n",
+        "a =\n  q\n  & where .x # only x\n  & limit 1\n",
     );
     check(
         "a = q\n  # keep active\n  & where .active\n",
-        "a = q\n  # keep active\n  & where .active\n",
+        "a =\n  q\n  # keep active\n  & where .active\n",
     );
     check(
         "r = {\n  a = 1, # one\n  b = 2\n}\n",

@@ -37,7 +37,8 @@ orders : query {
 ## Filtering, projection, ordering and paging in one pipeline. `select` renames
 ## (`label`) and recomputes (`next_age`) as it projects; columns not listed are
 ## dropped, which is why `select` is the projection and `update` is the merge.
-adults = users
+adults =
+  users
   & where (.age >= 18 && .active)
   & select { id = .id, label = upper .name, next_age = .age + 1 }
   & order [asc .label]
@@ -50,7 +51,8 @@ adults = users
 ##
 ## `coalesce 0.0 .revenue` is there because `sum` is `maybe`: every aggregate
 ## that can be NULL says so in its type.
-revenue = orders
+revenue =
+  orders
   & where (.status == "paid")
   & agg { user_id = group .user_id, revenue = sum .amount, n = count }
   & where (.n >= 5)
@@ -63,13 +65,15 @@ spec = { partition = [.user_id], order = [desc .created_at] }
 ## The latest three orders per user: number the rows within each partition, then
 ## filter on the number. The filter cannot be in the same `select` — a window
 ## function is evaluated after filtering — so it is the next stage.
-latest = orders
+latest =
+  orders
   & select { id = .id, user_id = .user_id, rn = rowNumber spec }
   & where (.rn <= 3)
 
 ## A running total per user: `sumOver` with `runningFrame`, which is the frame
 ## from the partition's start to the current row.
-running = orders
+running =
+  orders
   & select {
     id = .id,
     total =
@@ -79,7 +83,8 @@ running = orders
 ## A join, read in stages: the names are made unique before the join (both
 ## tables have an `id`), then the joined row is projected. `.<x` is the left
 ## side of the join, `.>x` the right.
-order_names = orders
+order_names =
+  orders
   & select { .user_id, .amount, order_id = .id }
   & innerJoin users (.<user_id == .>id)
   & select { order_id = .order_id, name = .name, amount = .amount }
@@ -88,7 +93,8 @@ order_names = orders
 ## `sum` / `avg` / `min` / `max`. Operators take non-null values, so each one is
 ## `coalesce`d — `0.0` for money, and a count built from a test rather than
 ## `count`, so that a user with no orders is 0 and not NULL.
-user_totals = users
+user_totals =
+  users
   & leftJoin orders (.<id == .>user_id)
   & agg {
     id = group .id,
@@ -99,7 +105,8 @@ user_totals = users
 ## The same report as `user_totals`, for active users, written with the operator
 ## shorthands: `&?` where, `&=` select, `&+` update, `&*` agg, `&.` order, `&-`
 ## limit; joins `?` innerJoin, `<?` left, `?>` right, `<?>` full; `??` coalesce.
-active_totals = users
+active_totals =
+  users
   &? .active
   & (orders & select { .user_id, .amount, .status, .created_at }) <? .<id == .>user_id
   &* { id = group .id, name = group .name, total = sum (coalesce 0.0 .amount) ?? 0.0 }

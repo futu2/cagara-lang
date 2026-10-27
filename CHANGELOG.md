@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- `cagara fmt` moves a definition's pipeline down: `=` ends the first line and
+  the pipeline's first stage opens the block, so the name, the head and every
+  `& stage` line up — the head is a stage like the others and is now laid out
+  like one. Hugging the head to the `=` put it on the definition's own line
+  while the stages it belongs with sat two spaces in, and a head such as
+  `nae.dcm_nae_nase_ch_nthchsub_rf_f` spent 74 of the 100 columns on a line that
+  read as part of the definition rather than as the pipeline's source. The
+  stages themselves are unchanged: a one-stage pipeline that fits is still
+  `n = users & agg { t = sum .age }` on one line, and a body of two or more
+  stages still shows one stage per line. `examples/report.cagara`, the worked
+  examples in `CAGARA.md`, `LEARN.md` and the README are re-laid out to match,
+  and `LEARN.md`'s style guide now says which shape to write.
+
 - Typing near the top of a file no longer re-checks and re-elaborates the rest
   of it. A character inserted anywhere but the end shifts every byte below it,
   and the incremental cache read that shift as an *edit*: a definition below the

@@ -516,8 +516,15 @@ impl Fmt<'_> {
     }
 
     /// What follows `=` or `=>`: on the same line if the body brings its own
-    /// line breaks (record, list, parens, case, lambda, pipeline), otherwise
-    /// moved to an indented line when it does not fit.
+    /// line breaks (record, list, parens, case, lambda), otherwise moved to an
+    /// indented line when it does not fit.
+    ///
+    /// A pipeline is never hugged. Hugging put the first stage on the `=` line
+    /// and the stages after it at the item's indent, so the head sat in a
+    /// different column from the `&`s and read as part of the definition's
+    /// line rather than as the pipeline's first stage. Moved down, the stages
+    /// start at one column and the name sits above them — the head is then one
+    /// stage among the others, which is what it is.
     ///
     /// When the body moves, whether it is grouped decides which brace of a
     /// `}` its line break lands on, so it is chosen here rather than taken
@@ -532,7 +539,7 @@ impl Fmt<'_> {
         let first = sig_tokens(body).next().ok_or(Bail)?;
         let gap = has_comment_before(&first);
         let doc = self.expr(body, top)?;
-        if !gap && self.huggable(body, top) {
+        if !gap && self.huggable(body) {
             return Ok(concat(vec![text(" "), doc]));
         }
         let d = indent(concat(vec![Doc::Line, doc]));
@@ -543,7 +550,7 @@ impl Fmt<'_> {
         })
     }
 
-    fn huggable(&self, n: &SyntaxNode, top: bool) -> bool {
+    fn huggable(&self, n: &SyntaxNode) -> bool {
         match n.kind() {
             // A definition body's `case` is not hugged: `x = case {` followed
             // by arms says nothing about where the arm list belongs, so a
@@ -554,7 +561,6 @@ impl Fmt<'_> {
             // the record breaks around it (`multiline_value`).
             K::CaseExpr => n.parent().is_some_and(|p| p.kind() == K::RecordField),
             K::RecordExpr | K::ListExpr | K::ParenExpr | K::Lambda | K::LetExpr => true,
-            K::BinExpr => top && bin_parts(n).is_ok_and(|(_, op, _, _)| is_pipe(&op)),
             K::App => self.hugs_last_arg(n),
             _ => false,
         }
@@ -1021,21 +1027,29 @@ impl Fmt<'_> {
         for (op, e) in ops.iter().zip(rest) {
             tail.extend([Doc::Line, self.tok(op), text(" "), self.expr(e, false)?]);
         }
-        // A pipeline that is a lambda's body is moved down by the lambda
-        // (see [`lambda`](Fmt::lambda)), which indents it already: indenting
-        // the stages again would put them under the head instead of beside
-        // it, and `=>` / head / `& stage` reads as three peers.
-        let flush = n.parent().is_some_and(|p| p.kind() == K::Lambda);
+        // A pipeline that its parent moved to a line of its own — a
+        // definition's body and a record field's value (see
+        // [`rhs`](Fmt::rhs)), a lambda's body (see
+        // [`lambda`](Fmt::lambda)) — has been indented there already:
+        // indenting the stages again would put them under the head instead of
+        // beside it, and `=` / `=>` / head / `& stage` reads as peers. A
+        // pipeline that follows a token on its line (an argument, an arm of a
+        // `case`, a `let`'s `in`) is not one of these: there the stages indent
+        // under the head.
+        let parent = n.parent();
+        let in_lambda = parent.as_ref().is_some_and(|p| p.kind() == K::Lambda);
+        let moved =
+            in_lambda || parent.is_some_and(|p| matches!(p.kind(), K::Definition | K::RecordField));
         let stages = concat(tail);
         let d = concat(vec![
             self.expr(first, false)?,
-            if flush { stages } else { indent(stages) },
+            if moved { stages } else { indent(stages) },
         ]);
         // A definition body's pipeline of two or more stages always shows one
         // stage per line, which is the shape the reference writes. A lambda's
         // body is not that: it is one expression among the definition's, and
         // a short one belongs on the arrow's line.
-        let force = has_inner_comment(n) || (top && !flush && is_pipe(&op) && ops.len() >= 2);
+        let force = has_inner_comment(n) || (top && !in_lambda && is_pipe(&op) && ops.len() >= 2);
         Ok(if force { broken_group(d) } else { group(d) })
     }
 

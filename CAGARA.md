@@ -69,7 +69,8 @@ a program.
 users : query { id = int, name = string, age = int, active = bool } =
   table "public" "users"
 
-adults = users
+adults =
+  users
   & where (.age >= 18 && .active)
   & select { id = .id, label = upper .name }
   & order [asc .label]
@@ -220,7 +221,8 @@ users : query {
 ## Adults only, with `name` relabelled for display.
 ##
 ## `select` drops the columns it does not list; `update` would keep them.
-active_users = users
+active_users =
+  users
   & where (.age >= 18 && .active)
   & select { id = .id, label = upper .name }
 
@@ -384,7 +386,8 @@ Most of these appear only in signatures and diagnostics. An agent normally write
 ```cagara
 orders : query { id = int, amount = float, created_at = date } = table "public" "orders"
 
-main = orders
+main =
+  orders
   & where (.created_at >= "2024-01-01")
   & select { .id, doubled = .amount * 2.0, n = .id + 1 }
 ```
@@ -697,7 +700,8 @@ expression. Constants are allowed. If no field is grouped, the result is one row
 orders : query { id = int, user_id = int, amount = float, status = string } =
   table "public" "orders"
 
-main = orders
+main =
+  orders
   & where (.status == "paid")
   & agg { user_id = group .user_id, revenue = sum .amount, n = count }
   & where (.n >= 5)
@@ -757,7 +761,8 @@ as SQL `FILTER`.
 ```cagara
 orders : query { id = int, amount = float, created_at = date } = table "public" "orders"
 
-main = orders
+main =
+  orders
   & order [desc .amount, asc .id]
   & limit 20
   & offset 40
@@ -803,7 +808,8 @@ Plain `.x` is an error inside a join predicate.
 users : query { id = int, name = string } = table "public" "users"
 orders : query { id = int, user_id = int, amount = float } = table "public" "orders"
 
-main = users
+main =
+  users
   & innerJoin orders (.<id == .>user_id)
   & select { .id, .name, .amount }
 ```
@@ -824,7 +830,8 @@ a shared name the **left** value wins. To keep both, rename one side **before** 
 users : query { id = int, name = string } = table "public" "users"
 orders : query { id = int, user_id = int, amount = float } = table "public" "orders"
 
-main = orders
+main =
+  orders
   & select { order_id = .id, .user_id, .amount }
   & innerJoin users (.<user_id == .>id)
   & select { .order_id, .name, .amount }
@@ -843,7 +850,8 @@ is SQL `COUNT(x)` over the null-extended side: it counts matched rows and is nev
 users : query { id = int } = table "public" "users"
 orders : query { user_id = int, amount = float } = table "public" "orders"
 
-main = users
+main =
+  users
   & leftJoin orders (.<id == .>user_id)
   & agg {
       id = group .id,
@@ -857,7 +865,8 @@ A join input may be any query; parenthesize a pipeline on the right:
 users : query { id = int } = table "public" "users"
 orders : query { user_id = int, amount = float } = table "public" "orders"
 
-main = users
+main =
+  users
   & leftJoin (orders & where (.amount > 10.0)) (.<id == .>user_id)
   & select { .id, .amount }
 ```
@@ -985,7 +994,8 @@ Examples:
 users : query { id = int, score = maybe int } = table "public" "users"
 orders : query { user_id = int, amount = maybe float } = table "public" "orders"
 
-main = users
+main =
+  users
   & leftJoin orders (.<id == .>user_id)
   & agg {
       id = group .id,
@@ -1004,7 +1014,8 @@ A nullable value also cannot be a sort key or a group key. Wrap it first:
 ```cagara
 users : query { id = int, score = maybe int } = table "public" "users"
 
-main = users
+main =
+  users
   & order [asc (coalesce 0 .score)]
   & agg { bucket = group (coalesce 0 .score), n = count }
 ```
@@ -1017,7 +1028,8 @@ accounts : query { id = int, name = string } = table "public" "accounts"
 tx : query { account_id = int, amount = float, kind = string } =
   table "public" "tx"
 
-main = accounts
+main =
+  accounts
   & leftJoin tx (.<id == .>account_id)
   & agg {
       id = group .id,
@@ -1495,7 +1507,8 @@ Each block is a whole file. Copy the shape, not just the tokens.
 users : query { id = int, name = string, age = int, active = bool } =
   table "public" "users"
 
-adults = users
+adults =
+  users
   & where (.age >= 18 && .active)
   & select { id = .id, label = upper .name, next_age = .age + 1 }
   & order [asc .label]
@@ -1513,7 +1526,8 @@ orders : query { id = int, user_id = int, amount = float, status = string } =
 
 paid = orders & where (.status == "paid")
 
-report = paid
+report =
+  paid
   & agg {
       user_id = group .user_id,
       revenue = coalesce 0.0 (sum .amount),
@@ -1531,7 +1545,8 @@ main = report
 users : query { id = int, name = string } = table "public" "users"
 orders : query { id = int, user_id = int, amount = float } = table "public" "orders"
 
-report = users
+report =
+  users
   & leftJoin orders (.<id == .>user_id)
   & agg {
       id = group .id,
@@ -1550,7 +1565,8 @@ main = report
 orders : query { id = int, user_id = int, amount = float, ts = timestamp } =
   table "public" "orders"
 
-ranked = orders
+ranked =
+  orders
   & select {
       .id,
       .user_id,
@@ -1568,7 +1584,8 @@ main = ranked & select { .id, .user_id, .amount }
 orders : query { id = int, amount = float, status = string, ts = timestamp } =
   table "public" "orders"
 
-monthly = orders
+monthly =
+  orders
   & agg {
       month = group (truncMonth .ts),
       paid = coalesce 0.0 (sum (ifThenElse (.status == "paid") .amount 0.0)),
@@ -1602,7 +1619,8 @@ orders : query { id = int, user_id = int, amount = float, status = string } =
 paidOnly = q => where (.status == "paid") q
 shout : expr r string -> expr r string = sql "UPPER($1)"
 
-report = orders
+report =
+  orders
   & paidOnly
   & agg {
       user_id = group .user_id,
@@ -1624,7 +1642,8 @@ boss : query { id = int, name = string } = table "public" "employees"
 
 boss_named = boss & select { boss_id = .id, boss_name = .name }
 
-main = employees
+main =
+  employees
   & leftJoin boss_named (.<manager_id == .>boss_id)
   & select { .id, .name, .boss_name }
 ```

@@ -44,7 +44,8 @@ and `cagara doc --prelude` prints the prelude's own (see §17).
 users : query { id = int, name = string, age = int, active = bool } =
   table "public" "users"
 
-adults = users
+adults =
+  users
   & where (.age >= 18 && .active)
   & select { id = .id, name = .name }
   & order [asc .name]
@@ -162,7 +163,8 @@ left-associative and sits just above `$` — the loosest operator — so a pipel
 reads top to bottom:
 
 ```haskell
-revenue = orders
+revenue =
+  orders
   & where (.status == "paid")
   & select { user_id = .user_id, amount = .amount }
   & order [desc .amount]
@@ -656,7 +658,8 @@ column, rename on one side *before* joining. `.<x` / `.>x` belong to the join
 predicate only, so `.>id` is **not** available after the join:
 
 ```haskell
-order_names = orders
+order_names =
+  orders
   & select { .user_id, .amount, order_id = .id }
   & innerJoin users (.<user_id == .>id)
   & select { order_id = .order_id, name = .name, amount = .amount }
@@ -748,7 +751,8 @@ every other field must be an aggregate expression. There is no implicit
 grouping: the compiler will not guess.
 
 ```haskell
-by_user = orders
+by_user =
+  orders
   & agg {
       user_id = group .user_id,
       revenue = sum .amount,
@@ -944,7 +948,8 @@ nulls. Use `countOfMaybe` for that meaning: it counts matched rows across a
 left join, because the synthetic null-extended row has a `NULL` key:
 
 ```haskell
-matches = users
+matches =
+  users
   & leftJoin orders (.<id == .>user_id)
   & agg { id = group .id, n = countOfMaybe .user_id }
 ```
@@ -952,7 +957,8 @@ matches = users
 The same count without a nullable helper sums an indicator:
 
 ```haskell
-matches = users
+matches =
+  users
   & leftJoin orders (.<id == .>user_id)
   & agg { id = group .id, n = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0)) }
 ```
@@ -971,7 +977,8 @@ A join takes another query and a predicate. **The predicate must name which
 input each column comes from**: `.<x` is the left input, `.>x` is the right.
 
 ```haskell
-user_orders = users
+user_orders =
+  users
   & innerJoin orders (.<id == .>user_id)
   & select { id = .id, amount = .amount }
 ```
@@ -1014,7 +1021,8 @@ keeps the common case (join on a key, keep the left key) simple.
 When you need both values, rename before joining — `update` is the tool:
 
 ```haskell
-order_names = orders
+order_names =
+  orders
   & select { .user_id, .amount, order_id = .id }
   & innerJoin users (.<user_id == .>id)
   & select { order_id = .order_id, name = .name, amount = .amount }
@@ -1080,7 +1088,8 @@ bad3 = users & select {.id, rn = rowNumber [asc .age]}
 | `countOver spec` | `int` |
 
 ```haskell
-ranked = orders
+ranked =
+  orders
   & select {.id, rn = rowNumber {partition = [.user_id], order = [desc .amount]}}
 ```
 
@@ -1092,7 +1101,8 @@ FROM public.orders;
 A running total uses a frame:
 
 ```haskell
-running = orders
+running =
+  orders
   & select {
       .id,
       total = sumOver {partition = [.user_id], order = [asc .created_at], frame = runningFrame} .amount
@@ -2088,7 +2098,9 @@ the computation one stage earlier.
 
 ## 19. Style guide
 
-- Put one stage per line in a pipeline. `cagara fmt` will do this for you.
+- Put one stage per line in a pipeline, and let the first stage have its own
+  line: the name stays alone on the `=` line, so the stages share one column.
+  `cagara fmt` will do this for you.
 - Prefer `select` when you are deciding what to publish and `update` when you
   are recomputing or renaming in place.
 - Keep table declarations in their own module (`schema.cagara`) and import them.

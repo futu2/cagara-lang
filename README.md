@@ -16,7 +16,8 @@ ungrouped fields in an aggregate, or `null` misuse before any SQL runs.
 orders : query { id = int, user_id = int, amount = float, status = string } =
   table "public" "orders"
 
-main = orders
+main =
+  orders
   & where (.status == "paid")
   & agg { user_id = group .user_id, revenue = sum .amount, n = count }
   & where (.n >= 5)

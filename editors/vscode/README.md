@@ -10,24 +10,24 @@ Each [GitHub release](https://github.com/futu2/cagara-lang/releases) has one
 VSIX per platform, each carrying the `cagara` server built for that platform:
 
 ```
-cagara-vscode-v0.3.1-linux-x64.vsix
-cagara-vscode-v0.3.1-linux-arm64.vsix
-cagara-vscode-v0.3.1-darwin-x64.vsix
-cagara-vscode-v0.3.1-darwin-arm64.vsix
-cagara-vscode-v0.3.1-win32-x64.vsix
-cagara-vscode-v0.3.1-win32-arm64.vsix
+cagara-vscode-v0.3.2-linux-x64.vsix
+cagara-vscode-v0.3.2-linux-arm64.vsix
+cagara-vscode-v0.3.2-darwin-x64.vsix
+cagara-vscode-v0.3.2-darwin-arm64.vsix
+cagara-vscode-v0.3.2-win32-x64.vsix
+cagara-vscode-v0.3.2-win32-arm64.vsix
 ```
 
 Install the one matching your machine:
 
 ```sh
-code --install-extension cagara-vscode-v0.3.1-linux-x64.vsix
+code --install-extension cagara-vscode-v0.3.2-linux-x64.vsix
 ```
 
 VS Code picks the package for the platform it is running on. Nothing needs to
 be installed or on `PATH`: the extension runs the server it ships. Releases
 also have `cagara-<tag>-<platform>.tar.gz` static binaries for using `cagara`
-from a shell, and a target-less `cagara-vscode-v0.3.1.vsix` for platforms with
+from a shell, and a target-less `cagara-vscode-v0.3.2.vsix` for platforms with
 no package of their own — that one carries no server, so it needs `cagara` on
 `PATH` or a build in the workspace.
 

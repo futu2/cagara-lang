@@ -1,6 +1,6 @@
 # Cagara: one-file reference for code-generating agents
 
-**Version 0.3.1.** This document is self-contained: it assumes no repository access and no SQL
+**Version 0.3.2.** This document is self-contained: it assumes no repository access and no SQL
 habits. Every block tagged `cagara` is a complete file that compiles with
 `cagara file.cagara` and exits 0; `crates/cagara-cli/tests/doc_blocks.rs` compiles all of them in
 CI. Fragments and grammar use `text`.
@@ -1745,7 +1745,7 @@ Run this in order before returning a file.
 ## 13. Suggested prompt skeleton for an orchestrator
 
 ```text
-You are writing Cagara 0.3.1. Read CAGARA.md in full before answering.
+You are writing Cagara 0.3.2. Read CAGARA.md in full before answering.
 Write one complete .cagara file, not a fragment and not SQL.
 Use only names and forms listed in CAGARA.md.
 Define every table with a closed `query { ... }` annotation.

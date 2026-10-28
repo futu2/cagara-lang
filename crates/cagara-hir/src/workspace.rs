@@ -639,12 +639,12 @@ impl Workspace {
     /// Column completion has to check a hypothetical text (the one with a
     /// marker written where the cursor is) without disturbing the module graph
     /// the user is editing. It goes to a dedicated module input in *this*
-    /// database rather than [`Workspace::snapshot`], which built a whole new
-    /// database and re-added every module — parsing the prelude and the file
-    /// again for each keystroke typed after a `.`. Here only the probe module
-    /// is parsed and checked, and the modules it imports are the ones already
-    /// memoized for the real graph, so a probe costs one module check and
-    /// leaves the live queries untouched.
+    /// database rather than a separate workspace copy, which would build a
+    /// whole new database and re-add every module — parsing the prelude and
+    /// the file again for each keystroke typed after a `.`. Here only a probe
+    /// module is parsed and checked, and the modules it imports are the ones
+    /// already memoized for the real graph, so a probe costs one module check
+    /// and leaves the live queries untouched.
     ///
     /// Takes `&mut self` because writing the probe's text is a write to this
     /// database, exactly like [`Workspace::set_source`]: a copy of the storage

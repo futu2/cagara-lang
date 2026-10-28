@@ -8,7 +8,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { narrowSplitLayout, splitLayout, sqlPreviewPath } from "../preview";
+import {
+  narrowSplitLayout,
+  previewNeedsRefresh,
+  splitLayout,
+  sqlPreviewPath,
+} from "../preview";
 
 test("a preview is named after the file it came from", () => {
   assert.equal(sqlPreviewPath("/w/q.cagara"), "/w/q.cagara.sql");
@@ -49,4 +54,16 @@ test("no split, no sizing", () => {
 
 test("widths are set once, so a dragged divider survives", () => {
   assert.equal(splitLayout(1, 2, true), undefined);
+});
+
+test("a save that produced the same SQL does not touch the document", () => {
+  // The preview is provider-backed and keyed by URI, so the text it already
+  // holds is still right: firing the change event re-reads and re-renders it,
+  // per save, for nothing.
+  assert.equal(previewNeedsRefresh("SELECT 1", "SELECT 1"), false);
+  // A first save has nothing shown yet, and a changed statement is a change.
+  assert.equal(previewNeedsRefresh(undefined, "SELECT 1"), true);
+  assert.equal(previewNeedsRefresh("SELECT 1", "SELECT 2"), true);
+  // Whitespace is part of it: the compiler's layout is the preview's text.
+  assert.equal(previewNeedsRefresh("SELECT 1", "SELECT 1\n"), true);
 });

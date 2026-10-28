@@ -9,7 +9,7 @@ use crate::resolve::{module_own, module_scope};
 use cagara_syntax::ast::{Def, Import, Module, Span};
 use salsa::Setter;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -59,6 +59,27 @@ pub enum Binding {
     Module(usize),
 }
 
+/// What a file looked like when it was last read: its modification time and
+/// its length, in one `stat`.
+///
+/// Nanosecond modification times are what every filesystem this runs on
+/// reports, and a write of the same length a moment later still moves it; the
+/// length covers the file that was replaced by one of another size within a
+/// single timestamp tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiskStamp {
+    modified: std::time::SystemTime,
+    len: u64,
+}
+
+fn disk_stamp(path: &Path) -> Option<DiskStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some(DiskStamp {
+        modified: meta.modified().ok()?,
+        len: meta.len(),
+    })
+}
+
 pub struct LoadedModule {
     pub path: PathBuf,
     pub text: String,
@@ -78,6 +99,17 @@ pub struct LoadedModule {
     pub scope: Arc<HashMap<String, Binding>>,
     /// This module's own definitions (what `import` and `alias.name` see).
     pub own: Arc<HashMap<String, Binding>>,
+    /// What the file looked like when `text` was read from it, if it was.
+    ///
+    /// A save or a watched-file event has to notice a file that changed on
+    /// disk, and re-reading every loaded module to compare its text is the
+    /// wrong way to notice nothing changed: an editor whose document imports a
+    /// catalogue of a hundred megabytes read all of it back on every save.
+    /// The pair (mtime, length) answers "is this still the file we read?" with
+    /// one `stat`, and only a changed file is read. `None` for a module whose
+    /// text came from a buffer rather than from disk, and for one that has no
+    /// file at all (the prelude).
+    disk: Option<DiskStamp>,
     /// Byte offsets where each line of `text` starts. Built once per module so
     /// rendering a diagnostic is O(log lines) instead of rescanning the whole
     /// prefix, which made a file with many diagnostics quadratic.
@@ -218,6 +250,16 @@ pub struct Workspace {
     /// edit so the compiler can reuse definitions whose source and checked
     /// dependencies are unchanged.
     previous_compile_cache: RefCell<HashMap<usize, CachedCompilation>>,
+    /// Roots whose published diagnostics no longer describe the workspace.
+    ///
+    /// An edit invalidates the compilations of the roots that reach the edited
+    /// module (`invalidate_compile_caches`), and those roots are exactly the
+    /// documents whose diagnostics changed. Remembering them here is what lets
+    /// an editor republish those documents instead of every open document: a
+    /// save used to recompile each of N open files to discover that N-1 of
+    /// them said the same thing as before. The set holds module indices, so a
+    /// rebuilt workspace starts empty.
+    needs_publish: HashSet<usize>,
 }
 
 impl Workspace {
@@ -237,6 +279,7 @@ impl Workspace {
             probe: None,
             compile_cache: RefCell::new(HashMap::new()),
             previous_compile_cache: RefCell::new(HashMap::new()),
+            needs_publish: HashSet::new(),
         };
         ws.add(PathBuf::from(PRELUDE_PATH), PRELUDE_SRC.to_string());
         ws
@@ -413,6 +456,13 @@ impl Workspace {
     /// to be redone on the next publish. Re-reading the files and patching the
     /// ones whose text actually differs keeps all of that.
     ///
+    /// A file whose `(mtime, length)` is still the one it was read at is not
+    /// read again: a save is one watched-file event in a project of hundreds of
+    /// files, and re-reading them all to find that nothing changed is work
+    /// proportional to the *project* rather than to the event. Only a file that
+    /// changed is opened, and it is patched — not rebuilt — so the checks that
+    /// did not read it stay memoized.
+    ///
     /// Returns `false` when the graph can no longer describe the files (a
     /// module changed its imports, or a file can no longer be read), in which
     /// case the caller must rebuild it.
@@ -426,16 +476,161 @@ impl Workspace {
             .map(|(k, m)| (k, m.path.clone()))
             .collect();
         for (k, path) in from_disk {
+            // Equal stamps — including "there was no file and there is still
+            // none", for a buffer that was closed without ever being saved —
+            // mean there is nothing to read. A file that *was* read and has
+            // since gone is not equal, and falls through to the error below,
+            // which is a rebuild because the graph no longer describes it.
+            let stamp = disk_stamp(&path);
+            if stamp == self.modules[k].disk {
+                continue;
+            }
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
                     if text != self.modules[k].text && !self.set_source(k, text) {
                         return false;
                     }
+                    // Record what was read, not what the module now holds: a
+                    // BOM is stripped on the way in, and comparing the stripped
+                    // text against the file would call it changed on every
+                    // event forever.
+                    self.modules[k].disk = stamp;
                 }
                 Err(_) => return false,
             }
         }
         true
+    }
+
+    /// Load an editor buffer into this workspace, reusing everything already
+    /// loaded.
+    ///
+    /// The language server used to rebuild the whole graph for a `didOpen`,
+    /// which threw away every memoized parse and check of every other open
+    /// document: opening the Nth file cost the checks of all N. Adding the
+    /// buffer to the live database is what makes opening a document cost that
+    /// document — its own parse, and its imports' first load.
+    ///
+    /// Returns `false` when the buffer cannot be described by this graph — it
+    /// reuses a path already loaded as an import with a different import list —
+    /// in which case the caller must rebuild.
+    pub fn add_buffer(&mut self, path: &Path, text: String) -> bool {
+        let path = normalize(path);
+        // A BOM is transport metadata; keep it out of every span and excerpt.
+        let text = cagara_syntax::strip_bom(&text).to_string();
+        self.overlays.insert(path.clone(), text.clone());
+        let m = match self.by_path.get(&path).copied() {
+            // Already loaded, as an import of an earlier document: the buffer
+            // takes its place, and every root that reaches it is invalidated.
+            Some(m) => m,
+            None => self.add(path.clone(), text.clone()),
+        };
+        self.modules[m].disk = None;
+        if self.modules[m].text != text && !self.set_source(m, text) {
+            return false;
+        }
+        self.needs_publish.insert(m);
+        true
+    }
+
+    /// Stop treating `path` as a buffer, and go back to what is on disk.
+    ///
+    /// Returns `false` when the graph can no longer describe the files (the
+    /// file is gone, or what is on disk imports differently), in which case the
+    /// caller must rebuild.
+    pub fn drop_buffer(&mut self, path: &Path) -> bool {
+        let path = normalize(path);
+        self.overlays.remove(&path);
+        let Some(&m) = self.by_path.get(&path) else {
+            return true;
+        };
+        let stamp = disk_stamp(&path);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                if text != self.modules[m].text && !self.set_source(m, text) {
+                    return false;
+                }
+                self.modules[m].disk = stamp;
+            }
+            // The document was never saved, and it is not an import of
+            // anything that is still open: nothing to go back to.
+            Err(_) if !self.imported_by_any(m) => return true,
+            Err(_) => return false,
+        }
+        true
+    }
+
+    /// Whether any other module imports `m`.
+    fn imported_by_any(&self, m: usize) -> bool {
+        let input = self.inputs[m];
+        self.inputs
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| *k != m)
+            .any(|(_, k)| k.imports(&self.db).iter().any(|(_, t)| *t == input))
+    }
+
+    /// Forget everything cached for `root`, an open document that just closed.
+    ///
+    /// Its compilation is keyed by a root that nothing will ask about again,
+    /// and both caches hold one — the current one and the one kept for reuse.
+    /// Dropping them is what keeps the server's memory proportional to the
+    /// documents that are open rather than to the ones that ever were.
+    pub fn forget_root(&mut self, root: usize) {
+        self.compile_cache.borrow_mut().remove(&root);
+        self.previous_compile_cache.borrow_mut().remove(&root);
+        self.needs_publish.remove(&root);
+    }
+
+    /// Take the roots that need republishing, leaving the set empty.
+    pub fn take_needs_publish(&mut self) -> Vec<usize> {
+        let mut out: Vec<usize> = self.needs_publish.iter().copied().collect();
+        out.sort_unstable();
+        self.needs_publish.clear();
+        out
+    }
+
+    /// Record that `root`'s diagnostics have just been published.
+    pub fn published(&mut self, root: usize) {
+        self.needs_publish.remove(&root);
+    }
+
+    /// Record that `root`'s diagnostics no longer describe this workspace.
+    pub fn mark_needs_publish(&mut self, root: usize) {
+        self.needs_publish.insert(root);
+    }
+
+    /// The text of every loaded module, by path: what a rebuild has to compare
+    /// itself against to know which documents it changed.
+    pub fn texts_by_path(&self) -> HashMap<PathBuf, String> {
+        self.modules
+            .iter()
+            .map(|m| (m.path.clone(), m.text.clone()))
+            .collect()
+    }
+
+    /// Which modules `from` can see: itself, its prelude, its imports, and
+    /// theirs, transitively. Indexed like `modules`.
+    ///
+    /// Checking reads this: a root's diagnostics can only depend on the
+    /// modules it reaches, and an editor with forty documents open has forty
+    /// module graphs loaded, of which one root needs one of them.
+    pub fn modules_reachable_from(&self, from: usize) -> Vec<bool> {
+        let mut seen = vec![false; self.inputs.len()];
+        let mut stack = vec![from];
+        while let Some(k) = stack.pop() {
+            if std::mem::replace(&mut seen[k], true) {
+                continue;
+            }
+            let input = self.inputs[k];
+            if let Some(prelude) = input.prelude(&self.db) {
+                stack.push(*prelude.index(&self.db));
+            }
+            for (_, imported) in input.imports(&self.db).iter() {
+                stack.push(*imported.index(&self.db));
+            }
+        }
+        seen
     }
 
     /// The columns the row at `PROBE_FIELD` is known to have, for `text` in
@@ -568,6 +763,14 @@ impl Workspace {
         self.file_diags
             .push(file_diags(&path, &text, &parsed, &own));
         let starts = line_starts(&text);
+        // A module that came from a buffer has no file to be stale against;
+        // one loaded from disk records what it read, so a later save costs a
+        // `stat` rather than a read of the whole file.
+        let disk = if self.overlays.contains_key(&path) {
+            None
+        } else {
+            disk_stamp(&path)
+        };
         self.inputs.push(input);
         self.modules.push(LoadedModule {
             path,
@@ -577,8 +780,12 @@ impl Workspace {
             def_sources,
             scope,
             own,
+            disk,
             line_starts: starts,
         });
+        // A new module is a document that has never been published, and it may
+        // have replaced one another open document imports.
+        self.needs_publish.insert(m);
         m
     }
 
@@ -693,32 +900,16 @@ impl Workspace {
             if let Some(cached) = cache.remove(&root) {
                 previous.insert(root, cached);
             }
+            // The document that owns this root is exactly the document whose
+            // published diagnostics no longer hold: they were computed from the
+            // compilation that has just been dropped.
+            self.needs_publish.insert(root);
         }
     }
 
     /// Whether module `from` is `target` or (transitively) imports it.
     fn reaches(&self, from: usize, target: usize) -> bool {
-        if from == target {
-            return true;
-        }
-        let mut seen = vec![false; self.inputs.len()];
-        let mut stack = vec![from];
-        while let Some(k) = stack.pop() {
-            if k == target {
-                return true;
-            }
-            if std::mem::replace(&mut seen[k], true) {
-                continue;
-            }
-            let input = self.inputs[k];
-            if let Some(prelude) = input.prelude(&self.db) {
-                stack.push(*prelude.index(&self.db));
-            }
-            for (_, imported) in input.imports(&self.db).iter() {
-                stack.push(*imported.index(&self.db));
-            }
-        }
-        false
+        self.modules_reachable_from(from)[target]
     }
 
     fn rebuild_diags(&mut self) {
@@ -1381,6 +1572,134 @@ mod tests {
                 .any(|e| e.diag.message.contains("unknown name `table`")),
             "CRLF must still opt out: {:?}",
             tc.errors()
+        );
+    }
+
+    /// A save that changed no file invalidates nothing.
+    ///
+    /// The editor watched-files and save paths both call `reload_from_disk`,
+    /// and their cost used to be the cost of reading the project: every loaded
+    /// module, back from disk, to compare texts. A save now costs one `stat`
+    /// per module, and a module that did not move keeps its memoized check and
+    /// every root's compilation with it.
+    #[test]
+    fn a_reload_that_changes_nothing_keeps_every_compilation() {
+        let dir = PathBuf::from("/tmp/cagara-stamps");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.cagara");
+        let lib = dir.join("lib.cagara");
+        std::fs::write(&lib, "value = 1\n").unwrap();
+        let root = "import \"lib.cagara\"\nq = value\n";
+        std::fs::write(&a, root).unwrap();
+        let buffers = HashMap::from([(a.clone(), root.to_string())]);
+        let mut ws = Workspace::open_with_buffers(&a, root.to_string(), &buffers);
+        let _ = crate::compile_diagnostics(&ws);
+        assert!(ws.compilation_diagnostics().is_some());
+        ws.take_needs_publish();
+
+        // Written again with the same bytes, which is what an editor's
+        // format-on-save does when the file is already formatted.
+        std::fs::write(&lib, "value = 1\n").unwrap();
+        assert!(ws.reload_from_disk());
+        assert!(
+            ws.compilation_diagnostics().is_some(),
+            "a save of unchanged text dropped the compilation"
+        );
+        assert!(
+            ws.take_needs_publish().is_empty(),
+            "an unchanged file asked for a republish"
+        );
+
+        // A file of the same length, written later, is a change.
+        std::fs::write(&lib, "value = 2\n").unwrap();
+        assert!(ws.reload_from_disk());
+        assert_eq!(
+            ws.modules[ws.module_for_path(&lib).unwrap()].text,
+            "value = 2\n"
+        );
+        assert!(
+            ws.compilation_diagnostics().is_none(),
+            "an edited import left the root's compilation in place"
+        );
+        assert_eq!(
+            ws.take_needs_publish(),
+            vec![ws.root],
+            "the root that reads the edited file must be republished"
+        );
+    }
+
+    /// Opening a document adds a module; it does not recompile the others.
+    ///
+    /// The language server opened documents by rebuilding the graph around
+    /// them, so the Nth tab cost the checks of all N and every open document's
+    /// compilation was thrown away. Adding the buffer to the live database
+    /// leaves the other roots exactly as they were.
+    #[test]
+    fn adding_a_buffer_keeps_the_other_roots_compiled() {
+        let dir = PathBuf::from("/tmp/cagara-add-buffer");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.cagara");
+        let b = dir.join("b.cagara");
+        let lib = dir.join("lib.cagara");
+        std::fs::write(&lib, "value = 1\n").unwrap();
+        let a_src = "import \"lib.cagara\"\nqa = value\n";
+        std::fs::write(&a, a_src).unwrap();
+        let buffers = HashMap::from([(a.clone(), a_src.to_string())]);
+        let mut ws = Workspace::open_with_buffers(&a, a_src.to_string(), &buffers);
+
+        assert!(ws.set_root_path(&a));
+        let _ = crate::compile_diagnostics(&ws);
+        assert!(ws.compilation_diagnostics().is_some(), "A compiled");
+        ws.take_needs_publish();
+
+        // Opening b: a new module, and a new root, in the same database.
+        assert!(ws.add_buffer(&b, "qb = 1 + 1\n".to_string()));
+
+        assert!(ws.set_root_path(&a));
+        assert!(
+            ws.compilation_diagnostics().is_some(),
+            "opening a second document dropped the first one's compilation"
+        );
+        assert_eq!(
+            ws.take_needs_publish(),
+            vec![ws.module_for_path(&b).unwrap()]
+        );
+
+        assert!(ws.set_root_path(&b));
+        let _ = crate::compile_diagnostics(&ws);
+        assert!(ws.compilation_diagnostics().is_some(), "B compiles");
+        assert!(
+            crate::check::check(&ws).errors().is_empty(),
+            "{:?}",
+            ws.diags
+        );
+    }
+
+    /// Closing a document goes back to its file without a rebuild.
+    #[test]
+    fn closing_a_buffer_returns_to_the_file_on_disk() {
+        let dir = PathBuf::from("/tmp/cagara-drop-buffer");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.cagara");
+        std::fs::write(&a, "q = 1\n").unwrap();
+        let buffers = HashMap::from([(a.clone(), "q = 1\n".to_string())]);
+        let mut ws = Workspace::open_with_buffers(&a, "q = 1\n".to_string(), &buffers);
+        let m = ws.module_for_path(&a).unwrap();
+
+        // An unsaved edit, then the document closes.
+        assert!(ws.add_buffer(&a, "q = 2\n".to_string()));
+        assert_eq!(ws.modules[m].text, "q = 2\n");
+        assert!(ws.drop_buffer(&a));
+        assert_eq!(ws.modules[m].text, "q = 1\n", "the disk text is back");
+
+        // And a file that never existed has nothing to go back to.
+        let ghost = dir.join("ghost.cagara");
+        assert!(ws.add_buffer(&ghost, "q = 3\n".to_string()));
+        assert!(ws.drop_buffer(&ghost), "a buffer with no file just goes");
+        // Its absence is not a reason to rebuild the graph on the next save.
+        assert!(
+            ws.reload_from_disk(),
+            "a document closed without ever being saved made the graph unreadable"
         );
     }
 }

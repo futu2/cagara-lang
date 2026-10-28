@@ -7,7 +7,13 @@ import * as vscode from "vscode";
 import { LanguageClient, LanguageClientOptions, ServerOptions } from "vscode-languageclient/node";
 
 import { classify, compileArgs, splitArgs, stripBanner } from "./compile";
-import { SQL_PREVIEW_LANGUAGE, SQL_PREVIEW_SCHEME, splitLayout, sqlPreviewPath } from "./preview";
+import {
+  previewNeedsRefresh,
+  SQL_PREVIEW_LANGUAGE,
+  SQL_PREVIEW_SCHEME,
+  splitLayout,
+  sqlPreviewPath,
+} from "./preview";
 import { formattingOptions, shouldFormat } from "./save";
 import { describeServer, resolveServer, vscodeTarget, type ResolvedServer } from "./serverpath";
 
@@ -26,6 +32,17 @@ const previewText = new Map<string, string>();
 
 /** Fires when a preview's SQL is replaced, so an open tab re-reads the map. */
 const previewChanged = new vscode.EventEmitter<vscode.Uri>();
+
+/**
+ * The preview documents that have already been given their language.
+ *
+ * `setTextDocumentLanguage` closes the document it is handed and opens another
+ * with the same URI and a different language, so calling it on every save
+ * builds a document and throws it away on the next one. It only has to be done
+ * once per preview: the URI never changes, and VS Code caches the document by
+ * URI.
+ */
+const previewPrepared = new Set<string>();
 
 /** `workspaceState` key: the SQL split has been sized once in this workspace. */
 const PREVIEW_SIZED = "cagara.sqlPreviewSized";
@@ -169,19 +186,42 @@ async function showSql(
     scheme: SQL_PREVIEW_SCHEME,
     path: sqlPreviewPath(source.uri.fsPath),
   });
-  previewText.set(uri.toString(), sql);
+  const key = uri.toString();
   // A tab left over from an earlier save holds the old text: the document is
-  // cached by URI, so the provider has to be told the content moved.
-  previewChanged.fire(uri);
+  // cached by URI, so the provider has to be told the content moved. A save
+  // that produced the same SQL has nothing to tell it.
+  const changed = previewNeedsRefresh(previewText.get(key), sql);
+  const firstTime = !previewPrepared.has(key);
+  previewText.set(key, sql);
+  // A document that does not exist yet reads the map when it is opened, so the
+  // event is only for a tab that is already holding an older statement.
+  if (changed && !firstTime) {
+    previewChanged.fire(uri);
+  }
+  const visible = (): boolean =>
+    vscode.window.visibleTextEditors.some((editor) => editor.document.uri.toString() === key);
+  if (!changed && !firstTime && visible()) {
+    // Nothing to update and nothing to bring forward: this save's SQL is
+    // already on screen. Opening, re-languaging and re-showing it anyway would
+    // rebuild a document to show the text it already holds.
+    if (!focus) {
+      vscode.window.setStatusBarMessage("Cagara: SQL preview is up to date", 3000);
+    }
+    return;
+  }
 
+  const opened = await vscode.workspace.openTextDocument(uri);
   // The language is set rather than inferred from the URI's `.sql` extension,
   // because that extension belongs to the built-in SQL language too, and which
   // of the two claims the document would depend on registration order. A
-  // failure here costs the wrapping, not the SQL.
-  const opened = await vscode.workspace.openTextDocument(uri);
-  const document = await vscode.languages
-    .setTextDocumentLanguage(opened, SQL_PREVIEW_LANGUAGE)
-    .then(undefined, () => opened);
+  // failure here costs the wrapping, not the SQL. Once is enough: see
+  // `previewPrepared`.
+  const document = firstTime
+    ? await vscode.languages
+        .setTextDocumentLanguage(opened, SQL_PREVIEW_LANGUAGE)
+        .then(undefined, () => opened)
+    : opened;
+  previewPrepared.add(key);
 
   // One preview per window: shown where the last one is, so a second file's
   // SQL does not open a third column, and the split is made at most once.

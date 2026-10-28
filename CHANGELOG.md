@@ -2,6 +2,71 @@
 
 ## Unreleased
 
+- The SQL preview is left alone by a save that produced the same SQL. Every
+  save re-opened its provider-backed document, reset its language and showed it
+  again — and `setTextDocumentLanguage` does not relabel a document, it closes
+  it and opens another with the same URI and a different language, so each save
+  built and threw away a document per file and asked the editor to re-render a
+  pane that already held that text. The preview now compares the SQL it is
+  holding against the new text: if they are equal and the tab is visible, the
+  save does nothing at all, and the language is set once per preview rather
+  than once per save.
+
+- A save republishes the documents whose modules changed, and no others. The
+  server published every open document after every save, three times over: once
+  from `didSave`, once from the `**/*.cagara` watcher that the same write
+  raises, and once from the refresh behind a burst — so a save cost `1 + 3N`
+  publications for N open documents, each a full type check of the workspace
+  plus a compilation of that root. The workspace now records which roots an
+  edit invalidated (`Workspace::needs_publish`) and the refresh publishes those.
+  Measured over real stdio LSP on a project whose library files run to
+  megabytes: with 46 documents open (81.6 MB of source), one save republished
+  13 documents in 0.39 s of CPU and now republishes none in none, because no
+  module moved; a keystroke went from 1.6 s of recompilation to 15 ms and one
+  publication.
+
+- Opening a document no longer rebuilds the module graph. `didOpen` called
+  `Workspace::open_with_buffers`, which builds a new salsa database and reloads
+  every open buffer and everything they import — so opening the Nth tab cost the
+  parses and checks of all N, and the session was quadratic in tabs. A buffer is
+  now added to the live database (`Workspace::add_buffer`), reusing the modules
+  already loaded, and closing one goes back to its file the same way
+  (`Workspace::drop_buffer`), dropping the two compilations it owned
+  (`Workspace::forget_root`). With six documents open, opening all of them costs
+  1.5 s of CPU instead of 3.9 s; the first save afterwards answers a format
+  request in 0.02 s instead of 4.6 s, and the server holds 388 MiB instead of
+  643.
+
+- A save or a watched-file event costs one `stat` per loaded module instead of
+  reading every one of them. `reload_from_disk` read the whole graph back —
+  168 MB in this project's catalogue — to discover that one file had changed,
+  and it also called a file changed when nothing but a BOM differed, because a
+  BOM is stripped on the way in and was compared against the raw bytes. Each
+  module now records the `(mtime, length)` it was read at, and only a file that
+  moved is opened.
+
+- A graph rebuild republishes the documents it changed, not every document.
+  Rebuilding is the one thing left that drops every compilation — an edit that
+  changes an `import` line, a file that can no longer be read — and it answered
+  by publishing each of N open documents, so one such edit cost N compilations.
+  The rebuild now compares the graph it built against the one it replaced, by
+  path and text, and marks only the roots that reach a module whose text moved:
+  rebuilding from the same buffers changes no diagnostics at all. With twelve
+  documents open (43.5 MB), an import-changing edit went from 12 publications
+  and 4.1 s of CPU to none and 2.0 s, and the 2.0 s that is left is the parse
+  and check of everything loaded, which is what a rebuild is.
+
+- Checking is scoped to the modules the root can see. `check` checked every
+  loaded module, and an editor with forty documents open has forty module graphs
+  loaded, of which one root needs one: publishing one document's diagnostics was
+  work proportional to the session. `check_reachable` fills in an empty result
+  for a module outside the root's closure, so indices still name the same
+  module and a reader that asks about one it cannot see gets "nothing checked".
+  Together with the two changes above this is what makes a save proportional to
+  what it changed: with twelve documents open, 28.5 MB between them, a save
+  plus the watcher event behind it blocked the format request the editor was
+  waiting on for 13.5 s of CPU before this change and for 0.01 s after it.
+
 - `cagara fmt` moves a definition's pipeline down: `=` ends the first line and
   the pipeline's first stage opens the block, so the name, the head and every
   `& stage` line up — the head is a stage like the others and is now laid out

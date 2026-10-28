@@ -17,7 +17,7 @@
 //! case when typing, and the reason the incremental cache looked warm and
 //! behaved cold.
 
-use crate::check::{check, definition_facts, DefinitionFacts};
+use crate::check::{check_reachable, definition_facts, DefinitionFacts};
 use crate::compile::{compile_reusing, Compilation, CompilerInput, DefinitionId};
 use crate::ir::{Loc, Rel};
 use crate::workspace::Workspace;
@@ -145,7 +145,7 @@ pub(crate) fn compile_current(
     ws: &Workspace,
     previous: Option<CachedCompilation>,
 ) -> CachedCompilation {
-    let tc = check(ws);
+    let tc = check_reachable(ws);
     let mut facts = HashMap::new();
     let mut users: HashMap<DefinitionId, Vec<DefinitionId>> = HashMap::new();
     let mut pending: Vec<_> = (0..ws.modules[ws.root].module.defs.len())

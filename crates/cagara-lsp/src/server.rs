@@ -70,8 +70,36 @@ impl State {
             self.ws = Workspace::from_source("");
             return;
         };
+        let before = self.ws.texts_by_path();
         let buffers = self.buffers();
         self.ws = Workspace::open_with_buffers(&path, text, &buffers);
+        // A rebuild marks every module as new; what matters is which documents
+        // it made a *different* answer for. The graph is built from the same
+        // buffers, so unless a file on disk changed under it, that is none of
+        // them — and publishing all N documents to find that out is how a
+        // rebuild turned into a minute of work.
+        self.ws.take_needs_publish();
+        let changed: Vec<bool> = self
+            .ws
+            .modules
+            .iter()
+            .map(|m| before.get(&m.path) != Some(&m.text))
+            .collect();
+        let roots: Vec<usize> = self
+            .docs
+            .values()
+            .filter_map(|doc| self.ws.module_for_path(&doc.path))
+            .collect();
+        for root in roots {
+            let reach = self.ws.modules_reachable_from(root);
+            if changed
+                .iter()
+                .zip(&reach)
+                .any(|(changed, reached)| *changed && *reached)
+            {
+                self.ws.mark_needs_publish(root);
+            }
+        }
     }
 
     fn select(&mut self, key: &str) -> bool {
@@ -161,7 +189,9 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
         .spawn(move || analyse(jobs, sender))?;
     // A change is published for its own document immediately, so the file
     // being edited shows its diagnostics without waiting. Other open documents
-    // may import it, so theirs are refreshed once the typing pauses.
+    // may import it, so theirs are refreshed once the typing pauses — and only
+    // those: the publish that follows a burst is the set of roots the workspace
+    // invalidated, not every document that happens to be open.
     let debounce = Duration::from_millis(150);
     let mut publish_at: Option<Instant> = None;
     loop {
@@ -207,12 +237,15 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
                 conn.sender.send(Message::Response(resp))?;
             }
             Message::Notification(n) => {
-                // These four change the text the other documents are checked
-                // against, so every open document's diagnostics are refreshed
-                // once the stream goes quiet.
+                // These change the text the other documents are checked
+                // against, so the documents whose modules moved have their
+                // diagnostics refreshed once the stream goes quiet. Which ones
+                // moved is the workspace's answer (`Workspace::take_needs_publish`),
+                // not a guess made here.
                 let refresh = matches!(
                     n.method.as_str(),
-                    DidChangeTextDocument::METHOD
+                    DidOpenTextDocument::METHOD
+                        | DidChangeTextDocument::METHOD
                         | DidSaveTextDocument::METHOD
                         | DidChangeWatchedFiles::METHOD
                         | DidCloseTextDocument::METHOD
@@ -293,7 +326,7 @@ fn analyse(jobs: Receiver<Work>, sender: Sender<Message>) {
             let _ = reply.send(answer);
         }
         if batch.publish {
-            if let Err(e) = publish_all(&sender, &mut state) {
+            if let Err(e) = publish_dirty(&sender, &mut state) {
                 eprintln!("cagara lsp: publish: {e}");
             }
         }
@@ -483,9 +516,21 @@ fn notification(sender: &Sender<Message>, state: &mut State, n: Notification) ->
             let path = path.canonicalize().unwrap_or(path);
             let text = p.text_document.text;
             let key = doc_key(&p.text_document.uri);
-            state.docs.insert(key, Doc { path, text });
-            state.rebuild();
-            publish_all(sender, state)?;
+            state.docs.insert(
+                key.clone(),
+                Doc {
+                    path: path.clone(),
+                    text: text.clone(),
+                },
+            );
+            // Opening a document adds it to the graph that is already loaded.
+            // Rebuilding the graph for it threw away every other document's
+            // parse and check, so opening the Nth tab cost the checks of all N
+            // (see `Workspace::add_buffer`).
+            if !state.ws.add_buffer(&path, text) {
+                state.rebuild();
+            }
+            publish_doc(sender, state, &key)?;
             Ok(())
         }
         DidChangeTextDocument::METHOD => {
@@ -501,10 +546,11 @@ fn notification(sender: &Sender<Message>, state: &mut State, n: Notification) ->
             // A keystroke usually does not change imports: patch that module
             // in place so salsa's memoized checks survive, and rebuild the
             // whole graph from disk only when they do.
+            let text = doc.text.clone();
             let patched = state
                 .ws
                 .module_for_path(&doc.path)
-                .is_some_and(|m| state.ws.set_source(m, doc.text.clone()));
+                .is_some_and(|m| state.ws.set_source(m, text));
             if !patched {
                 state.rebuild();
             }
@@ -525,28 +571,51 @@ fn notification(sender: &Sender<Message>, state: &mut State, n: Notification) ->
             // Re-read those files in place, which keeps the salsa memos and
             // every open document's compilation; only an import that changed
             // needs the graph rebuilt around it.
+            //
+            // Nothing is published here. `reload_from_disk` marks the roots
+            // whose modules actually changed — usually none, because the
+            // document that was just saved is a buffer and the files it
+            // imports did not move — and the refresh `serve` schedules behind a
+            // burst publishes those. Publishing every open document from here
+            // as well meant a save recompiled each of N documents twice more
+            // than the one document that changed.
             if !state.ws.reload_from_disk() {
                 state.rebuild();
             }
-            publish_all(sender, state)?;
             Ok(())
         }
         DidChangeWatchedFiles::METHOD => {
             let _: lsp_types::DidChangeWatchedFilesParams = serde_json::from_value(n.params)?;
+            // Same as a save, and for the same reason: a watcher event is one
+            // file changing, and the roots that read it are the ones to
+            // publish.
             if !state.ws.reload_from_disk() {
                 state.rebuild();
             }
-            publish_all(sender, state)?;
             Ok(())
         }
         DidCloseTextDocument::METHOD => {
             let p: lsp_types::DidCloseTextDocumentParams = serde_json::from_value(n.params)?;
             state.docs.remove(p.text_document.uri.as_str());
             // The document is no longer an overlay: its file, if it is on
-            // disk, is now what the graph should use.
-            if !state.ws.reload_from_disk() {
-                state.rebuild();
+            // disk, is now what the graph should use. Only that module is
+            // re-read; the rest of the graph, and every other document's
+            // compilation, stays memoized.
+            let closed =
+                uri::to_path(&p.text_document.uri).map(|path| path.canonicalize().unwrap_or(path));
+            if let Some(path) = &closed {
+                if let Some(m) = state.ws.module_for_path(path) {
+                    // Nothing will ask about this root again: drop both of its
+                    // compilations rather than keep them for a document that
+                    // is closed.
+                    state.ws.forget_root(m);
+                }
+                if !state.ws.drop_buffer(path) {
+                    state.rebuild();
+                }
             }
+            // The client keeps markers for a document it still has; clearing
+            // them is the other half of closing it.
             let params = PublishDiagnosticsParams {
                 uri: p.text_document.uri,
                 diagnostics: vec![],
@@ -556,8 +625,6 @@ fn notification(sender: &Sender<Message>, state: &mut State, n: Notification) ->
                 PublishDiagnostics::METHOD.into(),
                 params,
             )))?;
-            state.rebuild();
-            publish_all(sender, state)?;
             Ok(())
         }
         _ => Ok(()),
@@ -572,20 +639,45 @@ fn publish_doc(sender: &Sender<Message>, state: &mut State, key: &str) -> Res<()
     let uri: Uri = key
         .parse()
         .map_err(|e| format!("invalid document URI: {e}"))?;
-    publish(sender, uri, &state.ws)
+    publish(sender, uri, &state.ws)?;
+    // These diagnostics were computed from the workspace as it is now, so this
+    // root has nothing outstanding.
+    let root = state.ws.root;
+    state.ws.published(root);
+    Ok(())
 }
 
-fn publish_all(sender: &Sender<Message>, state: &mut State) -> Res<()> {
-    let docs: Vec<(String, PathBuf)> = state
-        .docs
-        .iter()
-        .map(|(uri, doc)| (uri.clone(), doc.path.clone()))
+/// Publish the diagnostics that actually changed, and nothing else.
+///
+/// The workspace records which roots it has invalidated (`needs_publish`), and
+/// that set is what an edit, a save, or a watched-file event leaves behind:
+/// the documents that read the module that moved. Everything else was
+/// published against a compilation that is still exactly right, so
+/// recomputing it would be work with no result — and on this project, where a
+/// document's imports can be megabytes, that work was the whole of a save.
+fn publish_dirty(sender: &Sender<Message>, state: &mut State) -> Res<()> {
+    let mut roots: Vec<(String, PathBuf)> = state
+        .ws
+        .take_needs_publish()
+        .into_iter()
+        .filter_map(|root| {
+            let path = state.ws.modules.get(root)?.path.clone();
+            let key = state
+                .docs
+                .iter()
+                .find(|(_, doc)| doc.path == path)
+                .map(|(key, _)| key.clone())?;
+            Some((key, path))
+        })
         .collect();
-    for (key, path) in docs {
+    // Document order, so a client sees the edits and the publishes in the same
+    // order however the set was built.
+    roots.sort();
+    for (key, path) in roots {
         if !state.ws.set_root_path(&path) {
             continue;
         }
-        let uri = key
+        let uri: Uri = key
             .parse()
             .map_err(|e| format!("invalid document URI: {e}"))?;
         publish(sender, uri, &state.ws)?;
@@ -594,7 +686,7 @@ fn publish_all(sender: &Sender<Message>, state: &mut State) -> Res<()> {
 }
 
 fn publish(sender: &Sender<Message>, uri: Uri, ws: &Workspace) -> Res<()> {
-    let diagnostics = analysis::diagnostics(ws)
+    let diagnostics: Vec<Diagnostic> = analysis::diagnostics(ws)
         .into_iter()
         .map(|(range, message)| Diagnostic {
             range,
@@ -618,11 +710,12 @@ fn publish(sender: &Sender<Message>, uri: Uri, ws: &Workspace) -> Res<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{serve, LogMessage, LogMessageParams, MessageType};
+    use super::{serve, LogMessage, LogMessageParams, MessageType, PublishDiagnostics};
     use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
     // `LogMessage::METHOD` is a method of this trait, and `lsp_server` has a
     // `Notification` of its own, hence the anonymous import.
     use lsp_types::notification::Notification as _;
+    use lsp_types::PublishDiagnosticsParams;
     use serde_json::json;
     use std::time::Duration;
 
@@ -753,6 +846,143 @@ mod tests {
             .send(request(4, "shutdown", serde_json::Value::Null))
             .unwrap();
         response(&client, 4);
+        client
+            .sender
+            .send(notify("exit", serde_json::Value::Null))
+            .unwrap();
+        t.join().unwrap().unwrap();
+    }
+
+    /// The documents a burst republishes, by file name.
+    fn published(client: &Connection, quiet: Duration) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(message) = client.receiver.recv_timeout(quiet) {
+            let Message::Notification(n) = message else {
+                continue;
+            };
+            if n.method != PublishDiagnostics::METHOD {
+                continue;
+            }
+            let params: PublishDiagnosticsParams = serde_json::from_value(n.params).unwrap();
+            out.push(
+                params
+                    .uri
+                    .as_str()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+        }
+        out.sort();
+        out
+    }
+
+    /// A save republishes the documents whose modules changed, and no others.
+    ///
+    /// Every save used to publish every open document, three times over: once
+    /// from `didSave`, once from the watched-file event that the same write
+    /// raises, and once from the refresh behind a burst. On a project whose
+    /// library files run to megabytes, that was the whole cost of a save — N
+    /// compilations to discover that N-1 documents still say the same thing.
+    #[test]
+    fn a_save_publishes_only_the_documents_that_changed() {
+        let dir = std::env::temp_dir().join("cagara-lsp-publish");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.cagara");
+        let b = dir.join("b.cagara");
+        let lib = dir.join("lib.cagara");
+        let a_src = "import \"lib.cagara\"\nqa = value\n";
+        let b_src = "qb = 1 + 1\n";
+        let lib_src = "value = 1\n";
+        std::fs::write(&a, a_src).unwrap();
+        std::fs::write(&b, b_src).unwrap();
+        std::fs::write(&lib, lib_src).unwrap();
+
+        let (server, client) = Connection::memory();
+        let t =
+            std::thread::spawn(move || serve(&server, "0.3.1 (test)").map_err(|e| e.to_string()));
+        client
+            .sender
+            .send(request(1, "initialize", json!({ "capabilities": {} })))
+            .unwrap();
+        let _ = response(&client, 1);
+        client
+            .sender
+            .send(notify("initialized", json!({})))
+            .unwrap();
+        // The build announcement.
+        let _ = client.receiver.recv_timeout(Duration::from_secs(30));
+
+        let uri = |p: &std::path::Path| format!("file://{}", p.display());
+        for (path, text) in [(&a, a_src), (&b, b_src), (&lib, lib_src)] {
+            client
+                .sender
+                .send(notify(
+                    "textDocument/didOpen",
+                    json!({ "textDocument": {
+                        "uri": uri(path), "languageId": "cagara", "version": 1, "text": text
+                    } }),
+                ))
+                .unwrap();
+        }
+        // Opening publishes each document as it arrives.
+        assert_eq!(
+            published(&client, Duration::from_millis(600)),
+            vec!["a.cagara", "b.cagara", "lib.cagara"]
+        );
+
+        let quiet = Duration::from_millis(600);
+
+        // Typing in `a` publishes `a`.
+        client
+            .sender
+            .send(notify(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": { "uri": uri(&a), "version": 2 },
+                    "contentChanges": [{ "text": "import \"lib.cagara\"\nqa = value + 1\n" }]
+                }),
+            ))
+            .unwrap();
+        assert_eq!(published(&client, quiet), vec!["a.cagara"]);
+
+        // Saving it publishes nothing: no module moved.
+        client
+            .sender
+            .send(notify(
+                "textDocument/didSave",
+                json!({
+                    "textDocument": { "uri": uri(&a) },
+                    "text": "import \"lib.cagara\"\nqa = value + 1\n"
+                }),
+            ))
+            .unwrap();
+        assert!(
+            published(&client, quiet).is_empty(),
+            "a save of unchanged modules republished"
+        );
+
+        // Editing the library republishes it and the document that reads it,
+        // and not the unrelated one.
+        client
+            .sender
+            .send(notify(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": { "uri": uri(&lib), "version": 2 },
+                    "contentChanges": [{ "text": "value = 2\n" }]
+                }),
+            ))
+            .unwrap();
+        assert_eq!(published(&client, quiet), vec!["a.cagara", "lib.cagara"]);
+
+        client
+            .sender
+            .send(request(2, "shutdown", serde_json::Value::Null))
+            .unwrap();
+        let _ = response(&client, 2);
         client
             .sender
             .send(notify("exit", serde_json::Value::Null))

@@ -3,7 +3,7 @@
 //! AST, so a lambda parameter shadows a top-level name of the same spelling.
 //! LSP positions count UTF-16 code units; the workspace uses byte offsets.
 
-use cagara_hir::check::{check, TypeCheck, PROBE_FIELD};
+use cagara_hir::check::{check_reachable, TypeCheck, PROBE_FIELD};
 use cagara_hir::compile_diagnostics;
 use cagara_hir::workspace::{Binding, Diag, Workspace};
 use cagara_syntax::ast::{Expr, ExprKind, Side, Span};
@@ -636,7 +636,7 @@ pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
         return declared_field_hover(ws, offset).or_else(|| atom_hover(ws, &occs, offset));
     };
     let name = &text[o.start..o.end];
-    let tc = check(ws);
+    let tc = check_reachable(ws);
     let here = o.site.and_then(|sp| tc.use_type(ws.root, sp));
     let Target::Global(b) = &o.target else {
         let head = here.map_or_else(|| name.to_string(), |t| sig(name, t));
@@ -725,7 +725,7 @@ fn atom_hover(ws: &Workspace, occs: &[Occ], offset: usize) -> Option<String> {
         atom_at(&md.text, &d.body, offset, &mut found);
     }
     let (span, (start, end), atom) = found?;
-    let ty = check(ws).use_type(ws.root, span)?.to_string();
+    let ty = check_reachable(ws).use_type(ws.root, span)?.to_string();
     let shown = match atom {
         Atom::Column(side) => format!("expr {} {}", row_of(side), value_arg(&ty)),
         Atom::Literal => ty,
@@ -872,7 +872,7 @@ pub fn highlights(ws: &Workspace, pos: Position) -> Vec<(Range, DocumentHighligh
 /// inferred types.
 #[allow(deprecated)] // `DocumentSymbol::deprecated` must still be set.
 pub fn symbols(ws: &Workspace) -> Vec<DocumentSymbol> {
-    let tc = check(ws);
+    let tc = check_reachable(ws);
     let md = &ws.modules[ws.root];
     let p = Positions::new(&md.text);
     let sym = |name: String, detail: Option<String>, kind, range: Range, selection_range: Range| {
@@ -946,7 +946,7 @@ pub fn completion(ws: &mut Workspace, pos: Position) -> Vec<CompletionItem> {
             let Some(Binding::Module(t)) = ws.modules[ws.root].scope.get(&alias) else {
                 return vec![];
             };
-            let tc = check(ws);
+            let tc = check_reachable(ws);
             let mut items: Vec<CompletionItem> = ws.modules[*t]
                 .own
                 .iter()
@@ -1030,7 +1030,7 @@ fn field_completion(ws: &mut Workspace, start: usize, end: usize) -> Vec<Complet
 }
 
 fn name_completion(ws: &Workspace, offset: usize) -> Vec<CompletionItem> {
-    let tc = check(ws);
+    let tc = check_reachable(ws);
     let md = &ws.modules[ws.root];
     let text = &md.text;
     let mut locals: Vec<CompletionItem> = occurrences(ws)

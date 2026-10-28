@@ -31,6 +31,19 @@ export function sqlPreviewPath(fsPath: string): string {
 }
 
 /**
+ * Whether a save's SQL has to be pushed into the preview document.
+ *
+ * A save that produced the same SQL as the last one has nothing to show: the
+ * provider-backed document already holds that text, so firing the change event
+ * makes the editor re-read and re-render a document that is already right. The
+ * text is compared rather than the save counted because the interesting case is
+ * exactly "saved again, nothing changed", which is most saves.
+ */
+export function previewNeedsRefresh(shown: string | undefined, next: string): boolean {
+  return shown !== next;
+}
+
+/**
  * What `vscode.setEditorLayout` takes.
  *
  * Only the two fields used here: `orientation` 0 is columns side by side, and

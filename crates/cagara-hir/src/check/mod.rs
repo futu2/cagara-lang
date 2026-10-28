@@ -506,6 +506,29 @@ impl TypeCheck {
 
 /// Type-check every definition of every loaded module (prelude included).
 pub fn check(ws: &Workspace) -> TypeCheck {
+    check_modules(ws, None)
+}
+
+/// Type-check every definition of the modules the root can see.
+///
+/// What the editor needs, and nothing else. A workspace holds one module graph
+/// per open document — forty tabs are forty graphs — and checking all of them
+/// to publish one document's diagnostics is work proportional to the session
+/// rather than to the document: cold, that was most of a save's cost on a
+/// project whose library files run to megabytes. Checking reads the same
+/// memoized per-module queries either way, so a module that is reached is
+/// checked exactly as often as before; the modules that are not are left alone.
+///
+/// A module outside the root's closure is filled in with an empty result, so
+/// indices still name the same module and every reader that asks about a
+/// module the root cannot see gets "nothing checked" rather than a wrong
+/// module's answer.
+pub fn check_reachable(ws: &Workspace) -> TypeCheck {
+    let reachable = ws.modules_reachable_from(ws.root);
+    check_modules(ws, Some(&reachable))
+}
+
+fn check_modules(ws: &Workspace, only: Option<&[bool]>) -> TypeCheck {
     // Modules are loaded after their imports, so index order is a valid
     // dependency order: each module is checked on its own, seeing only the
     // (self-contained) schemes of the modules before it.
@@ -516,7 +539,11 @@ pub fn check(ws: &Workspace) -> TypeCheck {
         by_def: HashMap::new(),
         modules: Vec::with_capacity(ws.inputs.len()),
     };
-    for &input in &ws.inputs {
+    for (m, &input) in ws.inputs.iter().enumerate() {
+        if only.is_some_and(|only| !only[m]) {
+            out.modules.push(Arc::new(ModuleCheck::empty()));
+            continue;
+        }
         let mc = module_check(&ws.db, input);
         for e in mc.errors.iter() {
             // One entry per definition: the checker reports at most one error
@@ -783,6 +810,23 @@ struct ModuleCheck {
     /// text's (see [`TypeCheck::def_shift`]). Zero for a definition whose own
     /// text was edited, which is the common case.
     shifts: Vec<i64>,
+}
+
+impl ModuleCheck {
+    /// A module no check has run on: what a [`TypeCheck`] holds for a module
+    /// the root cannot see, and what an unchecked module answers — nothing.
+    fn empty() -> Self {
+        ModuleCheck {
+            schemes: HashMap::new(),
+            errors: Vec::new(),
+            types: HashMap::new(),
+            probe_fields: None,
+            typed: HashMap::new(),
+            typed_index: Vec::new(),
+            typed_spans: Vec::new(),
+            shifts: Vec::new(),
+        }
+    }
 }
 
 /// What checking one module reads: its definitions and scope, and every

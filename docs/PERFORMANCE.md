@@ -290,3 +290,59 @@ Two changes, one in each half of the pipeline, and neither adds a second route:
 Both are still keyed on exact facts, with no hash standing in for equality: the
 text of a definition and the closed data its check produced. What changed is what
 counts as part of a definition — an offset does not.
+
+## What a save costs when a session is open
+
+Everything above measures one document. An editor session is not one document:
+the server keeps a module graph for every open tab, and the cost of an event
+used to be proportional to that session rather than to the event. Three things
+made it so, all in the server rather than the compiler:
+
+- **Every save published every open document, three times.** `didSave` called
+  `publish_all`, the `**/*.cagara` watcher that the same write raises called it
+  again, and the refresh behind a burst called it a third time: `1 + 3N`
+  publications for N open documents, each one a type check of the workspace plus
+  a compilation of that root. It is now the set of roots the edit actually
+  invalidated (`Workspace::needs_publish`), which for a save that changed no
+  module on disk is empty.
+- **Opening a document rebuilt the graph.** `didOpen` built a new salsa database
+  around every open buffer, so the Nth tab cost the parses and checks of all N.
+  A buffer is added to the live database instead, and closing one returns to its
+  file the same way.
+- **Checking read every loaded module.** `check` walked all of them; it now walks
+  the root's closure (`check_reachable`), so forty open documents are not checked
+  forty times to publish one.
+
+Measured on 2026-10-27 with release builds on an AMD Ryzen 5 5600X, rustc
+1.99.1, over real stdio LSP against this project's own `res/icmidle` catalogue —
+713 library files totalling 168 MB, with documents opened from it. "Before" is
+`fbe03f1`; "after" is the same commit plus the three changes above. Format-on-save
+is emulated the way the editor does it: the format request is sent immediately
+after the change and the save, as `onWillSaveTextDocument` does, so its latency
+includes whatever the save queued.
+
+| Scenario | Before | After |
+| --- | ---: | ---: |
+| Six documents open (the `src` files) — RSS | 626 MiB | 386 MiB |
+| …CPU to open them | 3.86 s | 1.51 s |
+| …first save: format answered after | 4.59 s | 0.02 s |
+| Twelve documents open, 28.5 MB — RSS | 1300 MiB | 834 MiB |
+| …first save: format answered after | 13.48 s | 0.01 s |
+| Forty-six documents open, 81.6 MB — CPU to open them | 42.0 s | 7.5 s |
+| …one keystroke: CPU | 1.6 s | 0.02 s |
+| …one keystroke: to its own diagnostics | > 1 s | 15 ms |
+| …one save: publications / CPU | 13 / 1.40 s | 0 / 0.00 s |
+
+The memory that remains is the loaded source: parsing and checking 81.6 MB of
+catalogue is what it is, and closing a document gives back what it held
+(`Workspace::forget_root`). What is gone is the part that grew with the session
+instead of with the work — the repeated publications, the re-checks of
+documents that did not move, and the graph rebuild behind every tab.
+
+A rebuild is still there, and still costs what it cost: an edit that changes a
+`import` line, or a file that can no longer be read, makes the graph describe
+something else, and the whole loaded graph is parsed and checked again. What it
+no longer does is publish every open document — it compares the graph it built
+against the one it replaced and marks only the roots that reach a module whose
+text moved, which for a rebuild from the same buffers is none. Twelve documents,
+43.5 MB: 2.0 s of CPU and a 1.6 GB peak, and no publications.

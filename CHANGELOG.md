@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- `cagara fmt` moves a `let` binding down as a block instead of hugging it to
+  the `=` / `=>`. Hugged,
+  `account_no_with_check_digit = value => let weighted =` stayed on the arrow's
+  line while the binding's value and its `in` clause broke one level in from the
+  definition, so the three parts of the binding sat in three places and the
+  `let` read as a word on the definition's line rather than as the head of a
+  block. The arrow's line now ends at the arrow, `let weighted =` opens the
+  block under it, the sum indents under that, and `in` rejoins the value's
+  column. A binding that fits is untouched (`x = let y = 1 in y`), and a short
+  value no longer breaks onto a line of its own just because the rest of the
+  binding is long: `let y = 1` stays together, `let weighted =` opens the block.
+
 - The SQL preview is left alone by a save that produced the same SQL. Every
   save re-opened its provider-backed document, reset its language and showed it
   again — and `setTextDocumentLanguage` does not relabel a document, it closes

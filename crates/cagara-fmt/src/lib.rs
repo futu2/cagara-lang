@@ -517,7 +517,8 @@ impl Fmt<'_> {
 
     /// What follows `=` or `=>`: on the same line if the body brings its own
     /// line breaks (record, list, parens, case, lambda), otherwise moved to an
-    /// indented line when it does not fit.
+    /// indented line when it does not fit. A `let` brings its own lines too and
+    /// is still moved: see [`huggable`](Fmt::huggable).
     ///
     /// A pipeline is never hugged. Hugging put the first stage on the `=` line
     /// and the stages after it at the item's indent, so the head sat in a
@@ -560,7 +561,16 @@ impl Fmt<'_> {
             // the shape the reference writes, and the field decides whether
             // the record breaks around it (`multiline_value`).
             K::CaseExpr => n.parent().is_some_and(|p| p.kind() == K::RecordField),
-            K::RecordExpr | K::ListExpr | K::ParenExpr | K::Lambda | K::LetExpr => true,
+            K::RecordExpr | K::ListExpr | K::ParenExpr | K::Lambda => true,
+            // A `let` is not hugged, though it too brings its own lines. Hugged,
+            // `value => let weighted =` stayed on the arrow's line while the
+            // binding's value and its `in` clause broke one level in from the
+            // definition, so the three parts of the binding sat in three
+            // places and the `let` read as a word on the arrow's line rather
+            // than as the head of a block. Moved down whole, `let`, the value
+            // and `in` stand in one column each and the block hangs off the
+            // `=` / `=>` it belongs to — the shape a `let` forms anywhere else.
+            K::LetExpr => false,
             K::App => self.hugs_last_arg(n),
             _ => false,
         }
@@ -731,8 +741,17 @@ impl Fmt<'_> {
 
     /// `let name = value in body`.
     ///
-    /// Flat when it fits; otherwise the value and the `in` clause move to an
-    /// indented line, so a long binding does not push the body off the width.
+    /// Flat when it fits; otherwise the `in` clause moves to an indented line,
+    /// so a long binding does not push the body off the width. The value is
+    /// hung off the `=` and breaks on its own line only when it does not fit
+    /// beside it: a binding whose value is short (`let y = 1`) keeps its three
+    /// words together, while a long one opens the block — `let weighted =` on a
+    /// line of its own with the value indented under it. Breaking both
+    /// unconditionally put a one-token value on a line by itself just because
+    /// something later in the body was long.
+    ///
+    /// The whole form is not hugged to a `=` / `=>`; see
+    /// [`huggable`](Fmt::huggable).
     fn let_expr(&self, n: &SyntaxNode, top: bool) -> R {
         let els = sig(n);
         let [let_tok, name, eq, value, in_tok, body] = els.as_slice() else {
@@ -742,7 +761,9 @@ impl Fmt<'_> {
         if in_tok.text() != "in" {
             return Err(Bail);
         }
-        Ok(group(concat(vec![
+        // `let name = value` measured at the column it starts in, so the value
+        // stays on the `=` line whenever it fits there.
+        let binding = concat(vec![
             self.tok(&token(Some(let_tok), K::LetKw)?),
             text(" "),
             self.tok(&token(Some(name), K::Ident)?),
@@ -751,6 +772,11 @@ impl Fmt<'_> {
             indent(concat(vec![
                 Doc::Line,
                 self.expr(&node(Some(value))?, false)?,
+            ])),
+        ]);
+        Ok(group(concat(vec![
+            group(binding),
+            indent(concat(vec![
                 Doc::Line,
                 self.tok(&in_tok),
                 text(" "),

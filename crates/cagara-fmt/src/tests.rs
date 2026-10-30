@@ -173,8 +173,10 @@ fn pipelines_break_per_stage() {
     );
     // A pipeline that follows a token — here a `let`'s `in` — is not one of
     // those: the head is not at the margin, so the stages indent under it.
-    let out = fmt("g = let y = 1 in q & where (.x == y) & limit 1 & offset 2\n");
-    assert!(out.contains("\n    & where (.x == y)"), "{out}");
+    check(
+        "g = let y = 1 in q & where (.x == y) & limit 1 & offset 2\n",
+        "g =\n  let y = 1\n    in q\n      & where (.x == y)\n      & limit 1\n      & offset 2\n",
+    );
 }
 
 #[test]
@@ -474,6 +476,83 @@ fn a_lambda_pipeline_body_moves_down_between_its_peers() {
     check(
         "adults = users & where (.age >= 18) & select { id = .id }\n",
         "adults =\n  users\n  & where (.age >= 18)\n  & select { id = .id }\n",
+    );
+}
+
+/// A `let` is a block, not a tail on the `=` / `=>` line. Hugged to the arrow,
+/// `value => let weighted =` stayed on the arrow's line while the binding's
+/// value and its `in` clause broke one level in from the definition: the three
+/// parts of the binding sat in three places, and the `let` read as a word on
+/// the definition's line rather than as the head of a block. Moved down whole,
+/// `let`, its value and `in` each get a column and the block hangs off the
+/// `=` / `=>` it belongs to.
+#[test]
+fn a_long_let_moves_its_block_to_an_indented_line() {
+    // The reported case: a checksum over 17 weighted digits. `let weighted =`
+    // opens the block, the sum indents under it, and `in` rejoins the value's
+    // column.
+    check(
+        "account_no_with_check_digit = value => let weighted =
+  toInt (substring 1 1 value) * 11
+    + toInt (substring 2 1 value) * 13
+    + toInt (substring 3 1 value) * 17
+    + toInt (substring 4 1 value) * 19
+    + toInt (substring 5 1 value) * 23
+    + toInt (substring 6 1 value) * 29
+    + toInt (substring 7 1 value) * 31
+    + toInt (substring 8 1 value) * 37
+    + toInt (substring 9 1 value) * 41
+    + toInt (substring 10 1 value) * 43
+    + toInt (substring 11 1 value) * 47
+    + toInt (substring 12 1 value) * 53
+    + toInt (substring 13 1 value) * 59
+    + toInt (substring 14 1 value) * 61
+    + toInt (substring 15 1 value) * 67
+    + toInt (substring 16 1 value) * 71
+    + toInt (substring 17 1 value) * 73
+  in value <> lpad 2 \"0\" (toString (97 - weighted % 97))
+",
+        "account_no_with_check_digit = value =>
+  let weighted =
+    toInt (substring 1 1 value) * 11
+      + toInt (substring 2 1 value) * 13
+      + toInt (substring 3 1 value) * 17
+      + toInt (substring 4 1 value) * 19
+      + toInt (substring 5 1 value) * 23
+      + toInt (substring 6 1 value) * 29
+      + toInt (substring 7 1 value) * 31
+      + toInt (substring 8 1 value) * 37
+      + toInt (substring 9 1 value) * 41
+      + toInt (substring 10 1 value) * 43
+      + toInt (substring 11 1 value) * 47
+      + toInt (substring 12 1 value) * 53
+      + toInt (substring 13 1 value) * 59
+      + toInt (substring 14 1 value) * 61
+      + toInt (substring 15 1 value) * 67
+      + toInt (substring 16 1 value) * 71
+      + toInt (substring 17 1 value) * 73
+    in value <> lpad 2 \"0\" (toString (97 - weighted % 97))
+",
+    );
+    // A binding that fits is left alone, whether or not the whole `let` fits:
+    // only where the block starts is the formatter's business.
+    check("x = let y = 1 in y\n", "x = let y = 1 in y\n");
+    check(
+        "y2 = let a = 1 in let b = 2 in a + b\n",
+        "y2 = let a = 1 in let b = 2 in a + b\n",
+    );
+    // A record field hangs the block under the field's `=` the same way, and
+    // the field's `,` stays on the block's last line.
+    check(
+        "q = t & select { total = let base = .amount_here * 1.2 + .shipping_cost * 1.08 + .tax_rate_value * 1.19 in base + 1.0, other_field = .base }\n",
+        "q =
+  t
+  & select {
+    total =
+      let base = .amount_here * 1.2 + .shipping_cost * 1.08 + .tax_rate_value * 1.19 in base + 1.0,
+    other_field = .base
+  }
+",
     );
 }
 

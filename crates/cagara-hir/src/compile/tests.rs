@@ -244,7 +244,7 @@ fn direct_plain_select_uses_production_normalizer() {
          running : frame = frameRows frameStart currentRow\n\
          q = users & select { id = .id, next = .id + 1, name = upper .name, tag = \"active\", \
              case_name = case { .id > 0 => .name; true => \"unknown\" }, \
-             total = sumOver { partition = [], order = [asc .id], frame = running } .id }\n",
+             total = over { partition = [], order = [asc .id], frame = running } (sum .id) }\n",
     );
     let tc = crate::check::check(&ws);
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
@@ -360,7 +360,7 @@ fn closed_window_projection_helper_uses_production_normalizer() {
          frameRows : bound -> bound -> frame = rows\n\
          running : frame = frameRows unboundedPreceding currentRow\n\
          numbered : query { id = int } -> query { id = int, rn = maybe int } = q => \
-             q & select { id = .id, rn = sumOver { order = [asc .id], frame = running } .id }\n\
+             q & select { id = .id, rn = over { order = [asc .id], frame = running } (sum .id) }\n\
          q = users & numbered\n",
     );
     let tc = crate::check::check(&ws);
@@ -910,8 +910,10 @@ fn cached_relations_keep_current_source_locations() {
 #[test]
 fn overloaded_query_definitions_keep_source_identity() {
     let ws = Workspace::from_source(
+        // Two definitions of one name must *replace* a type, not repeat it —
+        // see `same_signature` — so the overloads differ in their row.
         "q : query { a = int } = table \"s\" \"one\"\n\
-         q : query { a = int } = table \"s\" \"two\"\n",
+         q : query { b = string } = table \"s\" \"two\"\n",
     );
     let tc = crate::check::check(&ws);
     let compilation = compile_checked(&ws, &tc);
@@ -1079,7 +1081,7 @@ fn a_move_rechecks_nothing_and_reuses_every_elaboration() {
 #[test]
 fn a_kept_definition_reports_its_error_at_its_new_line() {
     let src = "users : query { a = int } = table \"public\" \"t\"\n\
-               bad = users &? (.missing > 1)\n";
+               bad = users & where (.missing > 1)\n";
     let mut ws = Workspace::from_source(src);
     let first = compile_diagnostics(&ws);
     let line = |diags: &[Diag]| {
@@ -1088,7 +1090,7 @@ fn a_kept_definition_reports_its_error_at_its_new_line() {
             .find(|d| d.message.contains("missing"))
             .map(|d| (d.line, d.col))
     };
-    assert_eq!(line(&first), Some((2, 17)), "{first:?}");
+    assert_eq!(line(&first), Some((2, 15)), "{first:?}");
 
     assert!(ws.set_source(ws.root, format!("# one\n# two\n{src}")));
     let after = compile_diagnostics(&ws);
@@ -1292,8 +1294,8 @@ fn a_definition_that_expands_past_the_budget_is_reported() {
 fn an_impossible_window_frame_is_reported() {
     let ws = Workspace::from_source(
         "users : query { id = int, age = int } = table \"s\" \"users\"\n\
-         q = users & select { s = sumOver { partition = [.id], order = [asc .age], \
-             frame = rows (following 1) (preceding 1) } .age }\n",
+         q = users & select { s = over { partition = [.id], order = [asc .age], \
+             frame = rows (following 1) (preceding 1) } (sum .age) }\n",
     );
     let diags: Vec<Diag> = compile(&ws)
         .queries
@@ -1457,7 +1459,7 @@ fn accepted_programs_have_no_checker_errors() {
         // the left join reads its input's columns to build the nullable side.
         (
             "left join on the added column",
-            "h = q => q & update { up1 = .id } & leftJoin orders (.<up1 == .>user_id)\nq = users & h\n",
+            "h = q => q & update { up1 = .id } & leftJoin (orders & prefix \"o_\") (.<up1 == .>o_user_id)\nq = users & h\n",
         ),
         // ... named by `omit`, which is a row equation.
         (
@@ -1602,7 +1604,7 @@ fn all_query_forms_compile_without_a_gap() {
         ("a projection", "q = users & select { .name }\n"),
         (
             "a join",
-            "q = users & innerJoin orders (.<id == .>user_id)\n",
+            "q = users & innerJoin (orders & select { user_id = .user_id, amount = .amount }) (.<id == .>user_id)\n",
         ),
         ("a set operation", "q = users & union admins\n"),
         (

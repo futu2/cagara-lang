@@ -189,6 +189,9 @@ kind_table! {
         GtEq OP #[token(">=")],
         Lt OP #[token("<")],
         Gt OP #[token(">")],
+        /// `++`, string concatenation. It keeps `+`'s sign case working: a bare
+        /// `+` before a number is still a sign, because `++` is matched first.
+        PlusPlus OP #[token("++")],
         Plus OP #[token("+")],
         Minus OP #[token("-")],
         Star OP #[token("*")],
@@ -373,7 +376,7 @@ mod tests {
     fn kind_order_and_numbering_are_frozen() {
         let expected = "\
             Whitespace Comment ImportKw AsKw SqlKw PrimitiveKw CaseKw FatArrow Arrow ComposeRight \
-            AndAnd OrOr EqEq NotEq Diamond LtEq GtEq Lt Gt Plus Minus Star Slash Percent AmpOp Op \
+            AndAnd OrOr EqEq NotEq Diamond LtEq GtEq Lt Gt PlusPlus Plus Minus Star Slash Percent AmpOp Op \
             QuestionQuestion Question LtQuestion QuestionGt LtQuestionGt Dollar Bar LParen RParen \
             LBrace RBrace LBracket RBracket Comma Eq Colon Semicolon Field LeftField RightField \
             Ident Int Float String UnterminatedString Error LetKw SourceFile ImportDecl \

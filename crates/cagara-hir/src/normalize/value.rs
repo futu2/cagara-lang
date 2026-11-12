@@ -390,6 +390,7 @@ impl<'a> Normalizer<'a, 'a> {
             Value::Stage(stage) => self.apply_stage(stage, arg),
             Value::Combine(combine) => self.apply_combine(combine, arg),
             Value::Template(template) => scalar::apply_template(self, template, arg),
+            Value::AggModifier(m) => scalar::apply_agg_modifier(self, m, arg),
             Value::Table { args, origin, .. } => self.apply_table(&args, arg, origin),
             Value::Direction {
                 ascending,
@@ -828,9 +829,10 @@ impl<'a> Normalizer<'a, 'a> {
                 // `innerJoin` is `query s -> expr (join r s) bool -> query r`,
                 // so the joined input arrives first, the predicate second, and
                 // the piped input last.
-                let (Some(Value::Query(joined)), Some(Value::Scalar(on))) =
-                    (args.first(), args.get(1))
-                else {
+                let Some(Value::Query(joined)) = args.first() else {
+                    return Err(Control::unsupported(origin, "a join takes a query"));
+                };
+                let Some(Value::Scalar(on)) = args.get(1) else {
                     return Err(Control::unsupported(
                         origin,
                         "a join takes a query and a predicate",
@@ -839,14 +841,20 @@ impl<'a> Normalizer<'a, 'a> {
                 let Some(Value::Query(input)) = args.get(2) else {
                     return Err(Control::unsupported(origin, "a join needs its piped input"));
                 };
-                let (joined, input, on) = (*joined, *input, on.clone());
+                let (joined, on, input) = (*joined, on.clone(), *input);
                 self.builder
                     .join(site, origin, kind, input, joined, on)
                     .map(Value::Query)
                     .map_err(Control::Program)
             }
             CombineFn::Set { kind, .. } => {
-                let (Some(Value::Query(left)), Some(Value::Query(right))) =
+                // Subject-last, like every other stage: `except r q` reads
+                // "except `r`, from `q`", so the *last* argument — the query
+                // the pipeline supplies — is the left operand. Taking the
+                // first argument instead made `q & except r` return the
+                // complement of what was asked for, which only `except` and
+                // `intersect` could reveal (`union` is symmetric).
+                let (Some(Value::Query(right)), Some(Value::Query(left))) =
                     (args.first(), args.get(1))
                 else {
                     return Err(Control::unsupported(
@@ -1176,6 +1184,7 @@ pub(crate) fn own(value: &Value<'_>) -> Value<'static> {
         Value::Stage(stage) => Value::Stage(stage.clone()),
         Value::Combine(combine) => Value::Combine(combine.clone()),
         Value::Template(template) => Value::Template(template.clone()),
+        Value::AggModifier(m) => Value::AggModifier(m.clone()),
         Value::Table { args, row, origin } => Value::Table {
             args: args.iter().map(own).collect(),
             row: row.clone(),
@@ -1232,6 +1241,7 @@ pub(crate) fn value_class(value: &Value<'_>) -> &'static str {
         Value::Stage(_) => "a stage",
         Value::Combine(_) => "a join or set operation",
         Value::Template(_) => "a SQL template",
+        Value::AggModifier(_) => "an aggregate modifier",
         Value::Table { .. } => "a table",
         Value::Label(_) => "a label",
         Value::Direction { .. } => "a sort direction",

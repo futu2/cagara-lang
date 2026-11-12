@@ -34,15 +34,26 @@ orders : query {
     created_at = date
   } = table "public" "orders"
 
-## Filtering, projection, ordering and paging in one pipeline. `select` renames
-## (`label`) and recomputes (`next_age`) as it projects; columns not listed are
-## dropped, which is why `select` is the projection and `update` is the merge.
+## Filtering, projection, ordering and paging in one pipeline, written with the
+## stage shorthands: `&?` is `where`, `&=` is `select`, `&.` is `order`, `&-` is
+## `limit`. They are the same calls — a shorthand is a wrapper in the prelude —
+## and they save the parentheses a named form needs, because application binds
+## tighter than every operator while `&?` sits below the comparisons:
+##
+##     users &? .age >= 18                     -- a condition, no brackets
+##     users &? .name == "ann" && .active      -- two of them, one WHERE
+##     users & where (.age >= 18)              -- the named form needs brackets
+##
+## `select` renames (`label`) and recomputes (`next_age`) as it projects;
+## columns not listed are dropped, which is why `select` is the projection and
+## `update` is the merge.
 adults =
   users
-  & where (.age >= 18 && .active)
-  & select { id = .id, label = upper .name, next_age = .age + 1 }
-  & order [asc .label]
-  & limit 10
+  &? .age >= 18
+  &? .active
+  &= { id = .id, label = upper .name, next_age = .age + 1 }
+  &. [asc .label]
+  &- 10
 
 ## Aggregation, then a filter on the aggregate's own result. A filter after an
 ## aggregate wraps a derived table, since SQL cannot filter an aggregate in the
@@ -70,24 +81,26 @@ latest =
   & select { id = .id, user_id = .user_id, rn = rowNumber spec }
   & where (.rn <= 3)
 
-## A running total per user: `sumOver` with `runningFrame`, which is the frame
+## A running total per user: `over` with `runningFrame`, which is the frame
 ## from the partition's start to the current row.
 running =
   orders
   & select {
     id = .id,
-    total =
-      sumOver { partition = [.user_id], order = [asc .created_at], frame = runningFrame } .amount
+    total = over { partition = [.user_id], order = [asc .created_at], frame = runningFrame } (
+      sum .amount
+    )
   }
 
 ## A join, read in stages: the names are made unique before the join (both
-## tables have an `id`), then the joined row is projected. `.<x` is the left
-## side of the join, `.>x` the right.
+## tables have an `id`), then the joined row is projected. `orders ? on` is
+## `innerJoin orders on`, with the piped query as the left side. `.<x` is the
+## left side of the join, `.>x` the right.
 order_names =
   orders
-  & select { .user_id, .amount, order_id = .id }
-  & innerJoin users (.<user_id == .>id)
-  & select { order_id = .order_id, name = .name, amount = .amount }
+  &= { .user_id, .amount, order_id = .id }
+  & users ? (.<user_id == .>id)
+  &= { order_id = .order_id, name = .name, amount = .amount }
 
 ## Nulls are explicit: the right side of a left join is `maybe`, and so are
 ## `sum` / `avg` / `min` / `max`. Operators take non-null values, so each one is
@@ -95,21 +108,22 @@ order_names =
 ## `count`, so that a user with no orders is 0 and not NULL.
 user_totals =
   users
-  & leftJoin orders (.<id == .>user_id)
+  & (orders &= { user_id = .user_id, amount = .amount, status = .status }) <? (.<id == .>user_id)
   & agg {
     id = group .id,
     total = coalesce 0.0 (sum (coalesce 0.0 .amount)),
     orders = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0))
   }
 
-## The same report as `user_totals`, for active users, written with the operator
-## shorthands: `&?` where, `&=` select, `&+` update, `&*` agg, `&.` order, `&-`
-## limit; joins `?` innerJoin, `<?` left, `?>` right, `<?>` full; `??` coalesce.
+## The same report as `user_totals`, for active users, written with the
+## shorthands end to end: `&?` (`where`), `&*` (`agg`), `&.` (`order`), `&-`
+## (`limit`). `??` is `coalesce`, and `<?` is `leftJoin` — the left side keeps
+## every row, so `sum .amount` stays `maybe` and the `??` is what makes it 0.
 active_totals =
   users
   &? .active
-  & (orders & select { .user_id, .amount, .status, .created_at }) <? .<id == .>user_id
-  &* { id = group .id, name = group .name, total = sum (coalesce 0.0 .amount) ?? 0.0 }
+  & (orders &= { user_id = .user_id, amount = .amount }) <? (.<id == .>user_id)
+  &* { id = group .id, name = group .name, total = sum .amount ?? 0.0 }
   &. [desc .total]
   &- 20
 

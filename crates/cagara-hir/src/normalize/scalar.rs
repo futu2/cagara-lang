@@ -14,8 +14,11 @@
 
 use cagara_syntax::ast::{Expr, ExprKind, Lit};
 
-use super::value::{stage_spec, value_class};
-use super::{frame, CombineFn, Control, Env, Normalizer, StageFn, TemplateFn, Value};
+use super::value::{own, stage_spec, value_class};
+use super::{
+    frame, AggModifierFn, CombineFn, Control, Env, ModifierKind, Normalizer, StageFn, TemplateFn,
+    Value,
+};
 use crate::check::TemplateKind;
 use crate::checked::CheckedExpr;
 use crate::core::{Origin, ScalarType};
@@ -45,6 +48,24 @@ pub(crate) fn primitive<'a>(
         return Ok(value);
     }
     match prim {
+        crate::primitive::Prim::Filtered => Ok(Value::AggModifier(AggModifierFn {
+            kind: ModifierKind::Filtered,
+            args: Vec::new(),
+            spec: None,
+            origin,
+        })),
+        crate::primitive::Prim::DistinctAgg => Ok(Value::AggModifier(AggModifierFn {
+            kind: ModifierKind::Distinct,
+            args: Vec::new(),
+            spec: None,
+            origin,
+        })),
+        crate::primitive::Prim::Over => Ok(Value::AggModifier(AggModifierFn {
+            kind: ModifierKind::Over,
+            args: Vec::new(),
+            spec: None,
+            origin,
+        })),
         crate::primitive::Prim::Join(kind) => Ok(Value::Combine(CombineFn::Join {
             kind,
             args: Vec::new(),
@@ -173,6 +194,174 @@ pub(crate) fn apply_template<'a>(
         return saturated(ev, template);
     }
     Ok(Value::Template(template))
+}
+
+/// Apply one argument to `filtered` / `distinctAgg` / `over`.
+///
+/// The aggregate is a value, so this is ordinary application: collect until the
+/// modifier has what it needs, then rewrite the aggregate's SQL. Doing the
+/// rewrite here — rather than giving every aggregate a name per modifier — is
+/// what turns 24 names into 6 aggregates and 3 combinators, and the rewrites
+/// are the two an aggregate can have:
+///
+///   * `filtered p (sum .x)` is `SUM(CASE WHEN p THEN x END)`, which every
+///     engine understands (`FILTER (WHERE ...)` is the newer spelling and not
+///     universal);
+///   * `distinctAgg (sum .x)` is `SUM(DISTINCT x)`;
+///   * `over spec (sum .x)` is the same template at window phase.
+pub(crate) fn apply_agg_modifier<'a>(
+    ev: &mut Normalizer<'a, 'a>,
+    mut m: AggModifierFn,
+    arg: Value<'a>,
+) -> Result<Value<'a>, Control> {
+    // `over`'s first argument is a window specification, not a scalar.
+    if m.kind == ModifierKind::Over && m.spec.is_none() {
+        let Value::WinSpec(spec) = window_spec(ev, ev.call_module(), ev.call_expr()?, &arg)? else {
+            unreachable!("`window_spec` builds a specification")
+        };
+        m.spec = Some(spec);
+        return if m.args.len() >= m.arity() {
+            saturated_modifier(ev, m)
+        } else {
+            Ok(Value::AggModifier(m))
+        };
+    }
+    m.args.push(own(&arg));
+    if m.args.len() >= m.arity() {
+        return saturated_modifier(ev, m);
+    }
+    Ok(Value::AggModifier(m))
+}
+
+/// The expression a saturated modifier denotes.
+fn saturated_modifier<'a>(
+    _ev: &Normalizer<'a, 'a>,
+    m: AggModifierFn,
+) -> Result<Value<'a>, Control> {
+    let origin = m.origin;
+    // The aggregate is the last argument; for `filtered` the predicate is first.
+    let aggregate =
+        m.args.last().cloned().ok_or_else(|| {
+            Control::unsupported(origin, "an aggregate modifier needs an aggregate")
+        })?;
+    let Value::Scalar(agg) = aggregate else {
+        return Err(Control::unsupported(
+            origin,
+            format!(
+                "`{}` modifies an aggregate, not {}",
+                modifier_name(m.kind),
+                value_class(&aggregate)
+            ),
+        ));
+    };
+    let (sql, args) = agg_parts(&agg, origin)?;
+    let ty = agg.ty().clone();
+    let rewrote = match m.kind {
+        ModifierKind::Filtered => {
+            let Some(Value::Scalar(p)) = m.args.first().cloned() else {
+                return Err(Control::unsupported(
+                    origin,
+                    "`filtered` needs a predicate and an aggregate",
+                ));
+            };
+            let (sql, args) = filtered_template(&sql, &args, p);
+            CheckedExpr::agg_template(sql, args, ty, origin)
+        }
+        ModifierKind::Distinct => {
+            CheckedExpr::agg_template(distinct_template(&sql), args, ty, origin)
+        }
+        ModifierKind::Over => {
+            let Some(spec) = m.spec else {
+                return Err(Control::unsupported(origin, "`over` needs a window spec"));
+            };
+            CheckedExpr::win_template(sql, args, *spec, ty, origin)
+        }
+    };
+    rewrote.map(Value::Scalar).map_err(Control::Program)
+}
+
+fn modifier_name(kind: ModifierKind) -> &'static str {
+    match kind {
+        ModifierKind::Filtered => "filtered",
+        ModifierKind::Distinct => "distinctAgg",
+        ModifierKind::Over => "over",
+    }
+}
+
+/// An aggregate's template text and its arguments.
+fn agg_parts(agg: &CheckedExpr, origin: Origin) -> Result<(String, Vec<CheckedExpr>), Control> {
+    match agg.node() {
+        crate::checked::CheckedExprNode::AggTemplate { sql, args } => {
+            Ok((sql.clone(), args.clone()))
+        }
+        _ => Err(Control::unsupported(
+            origin,
+            "only an aggregate can be filtered, made distinct or windowed",
+        )),
+    }
+}
+
+/// `SUM($1)` with `p` filtering it becomes `SUM(CASE WHEN $1 THEN $2 END)`.
+///
+/// The rewrite shifts every argument reference by one and puts the predicate
+/// first, so `COUNT(DISTINCT $1)` becomes
+/// `COUNT(DISTINCT CASE WHEN $1 THEN $2 END)` — which is what SQL means by
+/// "count the distinct values among the rows the predicate keeps".
+fn filtered_template(
+    sql: &str,
+    args: &[CheckedExpr],
+    p: CheckedExpr,
+) -> (String, Vec<CheckedExpr>) {
+    // An aggregate with no argument is `COUNT(*)`: there is nothing to wrap, so
+    // the filter goes where the `*` is — `COUNT(CASE WHEN p THEN 1 END)` counts
+    // the rows the predicate keeps, which is what filtering `COUNT(*)` means.
+    if args.is_empty() {
+        if let (Some(open), Some(close)) = (sql.find('('), sql.rfind(')')) {
+            let rewritten = format!(
+                "{}(CASE WHEN $1 THEN 1 END){}",
+                &sql[..open],
+                &sql[close + 1..]
+            );
+            return (rewritten, vec![p]);
+        }
+    }
+    let mut out = String::with_capacity(sql.len() + 24);
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        let mut n = String::new();
+        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            n.push(chars.next().expect("peeked a digit"));
+        }
+        match n.parse::<usize>() {
+            Ok(k) if k >= 1 => {
+                out.push_str(&format!("CASE WHEN $1 THEN ${} END", k + 1));
+            }
+            // A `$` that is not a placeholder keeps its place.
+            _ => {
+                out.push('$');
+                out.push_str(&n);
+            }
+        }
+    }
+    let mut new_args = Vec::with_capacity(args.len() + 1);
+    new_args.push(p);
+    new_args.extend(args.iter().cloned());
+    (out, new_args)
+}
+
+/// `SUM($1)` becomes `SUM(DISTINCT $1)`; an aggregate that is already distinct
+/// is left alone, so `distinctAgg (distinctAgg a)` is `a`.
+fn distinct_template(sql: &str) -> String {
+    match sql.find('(') {
+        Some(i) if !sql[i..].to_ascii_uppercase().starts_with("(DISTINCT") => {
+            format!("{}(DISTINCT {}", &sql[..i], &sql[i + 1..])
+        }
+        _ => sql.to_string(),
+    }
 }
 
 /// Build the checked expression a saturated template denotes.

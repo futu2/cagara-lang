@@ -28,6 +28,16 @@ pub enum Prim {
     Distinct,
     In,
     Join(JoinKind),
+    /// `filtered p agg`: the aggregate over only the rows the predicate keeps.
+    Filtered,
+    /// `distinctAgg agg`: the aggregate over distinct arguments.
+    DistinctAgg,
+    /// `over spec agg`: the aggregate as a window function.
+    Over,
+    /// A join whose right side is declared by a `joinspec { on, take }` record
+    /// instead of a bare predicate: `take` says which right columns the output
+    /// keeps, and under what names. That is what makes an overlapping join
+    /// expressible without renaming both sides first.
     Set(SetKind),
     Group,
     Asc,
@@ -66,6 +76,9 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__offset", Prim::Offset),
     ("__distinct", Prim::Distinct),
     ("__in", Prim::In),
+    ("__filtered", Prim::Filtered),
+    ("__distinctAgg", Prim::DistinctAgg),
+    ("__over", Prim::Over),
     ("__innerJoin", Prim::Join(JoinKind::Inner)),
     ("__leftJoin", Prim::Join(JoinKind::Left)),
     ("__rightJoin", Prim::Join(JoinKind::Right)),
@@ -138,6 +151,8 @@ impl Prim {
             Distinct => 1,
             In => 2,
             Join(_) => 3,
+            Filtered | Over => 2,
+            DistinctAgg => 1,
             Set(_) => 2,
         }
     }

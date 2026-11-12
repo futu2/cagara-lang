@@ -9,20 +9,20 @@ function signature means a non-null type, so `expr r a` does not accept
 | A column declared `maybe int` | Reads as a nullable expression |
 | The possibly absent side of a left, right, or full join | Its output columns become `maybe` |
 | `sum`, `avg`, `min`, `max` and their `*Filter` forms | Return `maybe`, including for empty/all-null input |
-| `sumMaybe`, `avgMaybe`, `minMaybe`, `maxMaybe` | Return `maybe`, including for empty/all-null input |
-| `lag`, `lead`, `sumOver`, `avgOver` | Return `maybe` |
-| `count`, `countOf`, `countDistinct`, `countOver`; `countFilter`, `countOfFilter`, `countDistinctFilter` | Return non-null `int` |
+| `lag`, `lead`, `over` | Return `maybe` |
+| `count`, `countOf`, `countDistinct`; `over spec count`, `filtered p count` | Return non-null `int` |
 | `countOfMaybe`, `countDistinctMaybe` | Return non-null `int` |
 
 The filtered aggregate helpers take a non-null `bool` predicate over the
 aggregate's input rows. Their result type is the same as the unfiltered
-aggregate, so `sumFilter`/`avgFilter`/`minFilter`/`maxFilter` are `maybe` and
-`countFilter`/`countOfFilter`/`countDistinctFilter` are non-null `int`.
+aggregate, so a filtered `sum`/`avg`/`min`/`max` is `maybe` and a filtered
+`count`/`countOf`/`countDistinct` is non-null `int`.
 
-The `*Maybe` aggregates are how a nullable column reaches an aggregate without
-changing its meaning. SQL already skips `NULL` in `SUM`/`AVG`/`MIN`/`MAX`/
-`COUNT(x)`, so `sumMaybe .amount` emits `SUM(amount)`. Coalescing first is a
-different query: over `[NULL, 5]`, `avgMaybe` is `5` but
+A nullable column reaches an aggregate under the *same* name: `sum`, `avg`,
+`min` and `max` accept `maybe` and pass it through unchanged, which is how a
+nullable column keeps its meaning. SQL already skips `NULL` in `SUM`/`AVG`/
+`MIN`/`MAX`/`COUNT(x)`, so `sum .amount` emits `SUM(amount)`. Coalescing first
+is a different query: over `[NULL, 5]`, `avg .amount` is `5` but
 `avg (coalesce 0 .amount)` is `2.5`.
 
 Use these helpers to handle nullable values:
@@ -33,17 +33,16 @@ Use these helpers to handle nullable values:
 - `nullIf value other` produces `NULL` when two non-null values are equal.
 - `isNull value` and `isNotNull value` test nullability and return non-null `bool`.
 - `isTrue value` treats a nullable boolean `NULL` as false.
-- `whereTrue predicate` applies that `NULL`-as-false rule while filtering.
 - `eqMaybe left right` compares nullable values and treats two `NULL`s as equal.
 
-Operators require non-null expressions, and the ordinary aggregate signatures
-do too. Use a `*Maybe` form for an aggregate input; handle a nullable value with
-`coalesce` when a missing value should have a default. After a left join, for
-example, `sumMaybe .amount` keeps SQL's `SUM(amount)` meaning, while
+Operators require non-null expressions. A `where` takes a `maybe bool`
+directly — its `NULL` condition drops the row — and a nullable value elsewhere
+is handled with `coalesce` when a missing value should have a default. After a
+left join, for example, `sum .amount` keeps SQL's `SUM(amount)` meaning, while
 `sum (coalesce 0.0 .amount)` treats a missing amount as zero:
 
 ```haskell
-total = coalesce 0.0 (sumMaybe .amount)
+total = coalesce 0.0 (sum .amount)
 ```
 
 `countOf` follows the same non-null argument rule, even though SQL `COUNT(x)`

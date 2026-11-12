@@ -566,7 +566,18 @@ impl Lowerer {
                 });
             }
         }
-        st.order_by = order;
+        // A second `order` sorts rows that are already sorted, so its own keys
+        // lead and the earlier ones become tiebreakers: `order [a] & order [b]`
+        // is `ORDER BY b, a`. Replacing them instead made the first `order`
+        // silently dead — the same shape as `limit` and `offset` disagreeing
+        // about which one runs first.
+        let mut merged = order;
+        for key in st.order_by.drain(..) {
+            if !merged.iter().any(|k| k.expr == key.expr) {
+                merged.push(key);
+            }
+        }
+        st.order_by = merged;
         Ok(st)
     }
 
@@ -592,6 +603,24 @@ impl Lowerer {
         let mut st = self.rel(r)?;
         if st.needs_barrier(Fuse::Distinct, false) {
             st = self.wrap(st);
+        }
+        // A pending sort whose key the projection dropped cannot survive a
+        // `DISTINCT`: SQL refuses `SELECT DISTINCT a … ORDER BY b`, and
+        // carrying `b` into the select list would dedupe on `(a, b)` — a
+        // different query whose answer keeps rows the user asked to merge.
+        // Both readings are wrong, so the pair is refused rather than quietly
+        // resolved one way.
+        if st
+            .order_by
+            .iter()
+            .any(|k| !st.items.iter().any(|(_, e)| *e == k.expr))
+        {
+            return Err(concat!(
+                "`distinct` cannot follow an `order` on an expression the output row no ",
+                "longer has: order the deduplicated result instead, or keep that expression ",
+                "in the projection"
+            )
+            .to_string());
         }
         st.distinct = true;
         if !st.order_by.is_empty() {
@@ -693,6 +722,10 @@ impl Lowerer {
             Side::Right => item(&r.items, n),
             Side::Single => Err(format!("join predicates need `.<{n}` or `.>{n}`")),
         })?;
+        // The output is the left columns plus the right ones the left does not
+        // already have. Reshaping a side before the join (`select`, `update`) is
+        // what makes an overlapping name expressible; the join itself is not a
+        // place to rename columns.
         let items = cagara_hir::rules::join_columns(&l.items, &r.items);
         let mut wheres = l.wheres;
         // Only an inner join can have extracted filters to place, and

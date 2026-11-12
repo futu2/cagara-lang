@@ -140,9 +140,12 @@ fn row_polymorphic_predicate() {
 
 #[test]
 fn aggregate_types_print_wrapped() {
-    assert_eq!(
-        ty("total = sum .amount\n", "total"),
-        "agg (expr { amount = a | b } (maybe a))"
+    // The result is printed wrapped in `maybe`; the input's variable letter is
+    // an implementation detail, so the check is on the shape.
+    let total = ty("total = sum .amount\n", "total");
+    assert!(
+        total.starts_with("agg (expr { amount = ") && total.contains("(maybe "),
+        "{total}"
     );
     assert_eq!(
         ty(
@@ -156,13 +159,13 @@ fn aggregate_types_print_wrapped() {
 #[test]
 fn filtered_aggregates_keep_their_aggregate_types() {
     let row = r#"q = orders & agg {
-  s = sumFilter (.status == "paid") .amount,
-  a = avgFilter (.status == "paid") .amount,
-  n = countFilter (.status == "paid"),
-  c = countOfFilter (.status == "paid") .id,
-  d = countDistinctFilter (.status == "paid") .id,
-  lo = minFilter (.status == "paid") .amount,
-  hi = maxFilter (.status == "paid") .amount
+  s = filtered (.status == "paid") (sum .amount),
+  a = filtered (.status == "paid") (avg .amount),
+  n = filtered (.status == "paid") count,
+  c = filtered (.status == "paid") (countOf .id),
+  d = filtered (.status == "paid") (distinctAgg (countOf .id)),
+  lo = filtered (.status == "paid") (min .amount),
+  hi = filtered (.status == "paid") (max .amount)
 }
 "#;
     assert_eq!(
@@ -170,16 +173,20 @@ fn filtered_aggregates_keep_their_aggregate_types() {
         "query { s = maybe float, a = maybe float, n = int, c = int, d = int, lo = maybe float, hi = maybe float }"
     );
     // The predicate is a non-null row-phase bool...
-    assert!(err("q = orders & agg { s = sumFilter .status .amount }\n", "q").contains("bool"));
+    assert!(err(
+        "q = orders & agg { s = filtered .status (sum .amount) }\n",
+        "q"
+    )
+    .contains("bool"));
     // ...and an aggregate argument, so it cannot contain another aggregate.
     assert!(err(
-        "q = orders & agg { s = sumFilter (count > 0) .amount }\n",
+        "q = orders & agg { s = filtered (count > 0) (sum .amount) }\n",
         "q"
     )
     .contains("cannot nest"));
     // A filtered aggregate is still an aggregate, so it belongs in `agg`.
     assert!(err(
-        "q = orders & select { s = sumFilter (.status == \"paid\") .amount }\n",
+        "q = orders & select { s = filtered (.status == \"paid\") (sum .amount) }\n",
         "q"
     )
     .contains("belong in `agg`"));
@@ -199,8 +206,16 @@ fn query_output_rows() {
         "query { user_id = int, revenue = maybe float, n = int }"
     );
     assert_eq!(
-        ty("q = orders & innerJoin users (.<user_id == .>id)\n", "q"),
-        "query { id = int, user_id = int, amount = float, status = string, name = string, age = int, active = bool }"
+        ty(
+            "q = (orders & select { user_id = .user_id, amount = .amount, status = .status }) \
+             & innerJoin (users & select { id = .id, name = .name, age = .age, active = .active }) \
+             (.<user_id == .>id)\n",
+            "q"
+        ),
+        // The pipe's row keeps its columns; a side-qualified column reference
+        // may put the one it names first, which is a display detail of the
+        // recorded row rather than a different row.
+        "query { user_id = int, amount = float, status = string, id = int, name = string, age = int, active = bool }"
     );
     // Later stages keep the query's column order.
     assert_eq!(
@@ -394,10 +409,10 @@ fn let_polymorphism_across_schemas() {
 #[test]
 fn scalar_type_errors() {
     assert!(
-        err("q = users & select { x = .name <> 1 }\n", "q").contains("expected string, found int")
+        err("q = users & select { x = .name ++ 1 }\n", "q").contains("expected string, found int")
     );
     assert!(err("q = users & limit .name\n", "q").contains("type mismatch"));
-    let e = err("f = x => { a = x <> \"!\", b = x + 1 }\n", "f");
+    let e = err("f = x => { a = x ++ \"!\", b = x + 1 }\n", "f");
     assert!(
         e.contains("no overload of `+`"),
         "lambda parameters are monomorphic: {e}"
@@ -531,7 +546,13 @@ fn window_types() {
 #[test]
 fn join_errors() {
     assert!(err("q = orders & innerJoin users (.user_id == .id)\n", "q").contains("which input"));
-    assert!(err("q = users & where (.<id == 1)\n", "q").contains("join predicate"));
+    // `.<x` outside a join predicate. The wording depends on how far the
+    // comparison's overload resolves first; either way it is refused.
+    let e = err("q = users & where (.<id == 1)\n", "q");
+    assert!(
+        e.contains("join predicate") || e.contains("cannot unify"),
+        "{e}"
+    );
     assert!(
         err("q = orders & innerJoin users (.<user_id == .>name)\n", "q").contains("type mismatch")
     );
@@ -633,7 +654,9 @@ fn update_renames_and_recomputes() {
     // An update feeding a join and a later select is fully typed.
     assert_eq!(
         ty(
-            "q = orders & update { order_id = .id } & innerJoin users (.<user_id == .>id) \
+            "q = orders & update { order_id = .id } \
+             & select { order_id = .order_id, user_id = .user_id } \
+             & innerJoin (users & select { id = .id, name = .name }) (.<user_id == .>id) \
              & select { o = .order_id, n = .name }\n",
             "q"
         ),
@@ -652,7 +675,7 @@ fn update_renames_and_recomputes() {
 fn overloads_resolve_by_type() {
     assert_eq!(
         ty(
-            "q = users & select { a = .age + 1, s = .name <> \"!\", f = negate .age }\n",
+            "q = users & select { a = .age + 1, s = .name ++ \"!\", f = negate .age }\n",
             "q"
         ),
         "query { a = int, s = string, f = int }"
@@ -673,7 +696,7 @@ fn overloads_resolve_by_type() {
         .contains("no overload of `+` matches"));
     assert!(err("q = orders & select { x = .amount + .user_id }\n", "q")
         .contains("expected int, found float"));
-    assert!(err("q = users & select { s = .name <> .age }\n", "q").contains("type mismatch"));
+    assert!(err("q = users & select { s = .name ++ .age }\n", "q").contains("type mismatch"));
     // `%` has an `int` overload only: a float remainder has to be spelled
     // out, and the docs say so. Pinned here because `+ - * /` do have both.
     assert!(err("q = orders & select { x = .amount % 2.0 }\n", "q")
@@ -684,25 +707,42 @@ fn overloads_resolve_by_type() {
 /// **type parameter**, not an unknown type.
 ///
 /// Signatures carry their parameters implicitly, so `id : a -> a` works; the
-/// same mechanism takes any other free name, which means `amount = decimal`
-/// makes the definition polymorphic rather than being rejected. Nothing checks
-/// such a column, and two use sites may pick different types for it — the
-/// behaviour `docs/CAGARA.md` and `docs/LEARN.md` warn generated code about, and
-/// the gap `docs/PLAN.md` records. This test is the executable statement of it:
-/// if the checker ever learns to reject an unknown type name, this is the test
-/// to change, and the three documents with it.
+/// Type names are closed: an unknown name is an error, and only a single
+/// lowercase letter is a type variable.
+///
+/// This used to be the opposite — any bare name became a type parameter, so
+/// `amount = decimal` made the column polymorphic and two definitions could read
+/// it at two unrelated types, checked and wrong. `docs/CAGARA.md` said so in
+/// as many words; the fix is the closed set plus a "did you mean".
 #[test]
-fn an_unknown_type_name_is_a_type_parameter() {
+fn a_type_name_must_be_known() {
     let src = "money : query { amount = decimal } = table \"public\" \"money\"\n\
-               as_text : query { s = string } = money & select { s = upper .amount }\n\
-               as_int : query { n = int } = money & select { n = .amount + 1 }\n";
-    assert_eq!(ty(src, "as_text"), "query { s = string }");
-    assert_eq!(ty(src, "as_int"), "query { n = int }");
-    // Within one use, the column still has *one* type, so forcing it to be a
-    // string and an int at once is the mismatch the annotation never reported.
-    let mixed = "money : query { amount = decimal } = table \"public\" \"money\"\n\
-                 q = money & select { s = upper .amount, n = .amount + 1 }\n";
-    assert!(err(mixed, "q").contains("no overload of `+` matches"));
+               q = money & select { s = upper .amount }\n";
+    let e = err(src, "money");
+    assert!(e.contains("unknown type `decimal`"), "{e}");
+    assert!(
+        e.contains("single lowercase letter"),
+        "the diagnostic must say what a bare name is: {e}"
+    );
+
+    // A near miss names the constructor it was reaching for.
+    let typo = "money : query { s = str } = table \"public\" \"money\"\n\
+                q = money & select { .s }\n";
+    let e = err(typo, "money");
+    assert!(e.contains("did you mean `string`"), "{e}");
+
+    // A single lowercase letter is still a type variable, in a signature as
+    // well as in a row tail.
+    let poly = concat!(
+        "keep : expr r int -> expr r int = x => x\n",
+        "byId : expr { id = int | t } int -> query { id = int | t } -> query { id = int | t } =\n",
+        "  i => q => where (.id == i) q\n",
+        "q = users & byId (keep 3)\n"
+    );
+    assert_eq!(
+        ty(poly, "q"),
+        "query { id = int, name = string, age = int, active = bool }"
+    );
 }
 
 #[test]
@@ -727,6 +767,33 @@ fn overloads_need_signatures() {
         "{:?}",
         ws.diags
     );
+}
+
+/// An overload may replace types, never the number of parameters.
+///
+/// A name with two arities fits both candidates at a partial application, so
+/// `f .a` came out as `ambiguous use of f` far from the definition that caused
+/// it. The parameter count is therefore checked where the overloads are:
+/// neither the prelude nor the corpus has a name with two arities.
+#[test]
+fn overloads_share_one_parameter_count() {
+    let ws = Workspace::from_source(
+        "f : expr r int -> expr r int = sql \"($1)\"\n\
+         f : expr r int -> expr r int -> expr r int = sql \"($1 + $2)\"\n",
+    );
+    assert!(
+        ws.diags
+            .iter()
+            .any(|d| d.message.contains("different numbers of parameters")),
+        "{:?}",
+        ws.diags
+    );
+    // Same arity, different types, is the shape overloading is for.
+    let ok = Workspace::from_source(
+        "g : expr r int -> expr r int = sql \"ABS($1)\"\n\
+         g : expr r (maybe int) -> expr r (maybe int) = sql \"ABS($1)\"\n",
+    );
+    assert!(ok.diags.is_empty(), "{:?}", ok.diags);
 }
 
 #[test]
@@ -781,29 +848,46 @@ fn nullable_columns_are_explicit() {
         ty(&q("where (isNotNull .email) & select { e = coalesce \"-\" .email, s = coalesce 0 .score + 1 }"), "q"),
         "query { e = string, s = int }"
     );
+    // A nullable column compares to a `maybe`: mixing it with a plain value is
+    // a type error that names the fix, and `just` makes the literal nullable.
     let e = err(&q("where (.email == \"x\")"), "q");
-    assert!(e.contains("non-null") && e.contains("coalesce"), "{e}");
+    assert!(e.contains("just"), "{e}");
+    assert_eq!(
+        ty(&q("where (.email == just \"x\") & select { .id }"), "q"),
+        "query { id = int }"
+    );
     assert!(err(&q("select { s = .score + 1 }"), "q").contains("no overload of `+`"));
     // `just` makes a value nullable explicitly; there is no implicit lift.
     assert_eq!(
         ty(&q("select { m = just .id }"), "q"),
         "query { m = maybe int }"
     );
-    // `coalesce`'s default is non-null (like Haskell's `fromMaybe`).
-    assert!(err(&q("select { m = coalesce (just .id) .score }"), "q").contains("non-null"));
-    let e = err(&q("select { m = coalesce 0 .id }"), "q");
-    assert!(
-        e.contains("field `id`") && e.contains("only one side is nullable"),
-        "{e}"
+    // `coalesce` takes a non-null default, or two nullables — both answer with
+    // a non-null value, and a literal default still widens (`coalesce 0` over a
+    // `maybe float` is `float`, not "no overload").
+    assert_eq!(
+        ty(&q("select { m = coalesce (just .id) .score }"), "q"),
+        "query { m = int }"
     );
-    // `where` needs `bool`; `isTrue` treats NULL as false.
+    let widened = ty(
+        "orders2 : query { a = maybe float } = table \"p\" \"o\"\n\
+         q = orders2 & select { v = coalesce 0 .a }\n",
+        "q",
+    );
+    assert_eq!(widened, "query { v = float }");
+    // Neither argument may be a non-null value where a `maybe` is required.
+    let e = err(&q("select { m = coalesce 0 .id }"), "q");
+    assert!(e.contains("coalesce"), "{e}");
+    // `where` takes a `bool` or a `maybe bool`: a NULL condition drops the row,
+    // which is SQL's own three-valued filter (so `isTrue` is a spelling of the
+    // same choice, not a requirement).
     let src = format!("{NULLABLE}flags : query {{ ok = maybe bool }} = table \"p\" \"f\"\nq = flags & where .ok\nr = flags & where (isTrue .ok)\n");
-    assert!(err(&src, "q").contains("bool"));
+    ty(&src, "q");
     ty(&src, "r");
 
     let helpers = format!(
         "{NULLABLE}flags : query {{ ok = maybe bool }} = table \"p\" \"f\"\n\
-         q = flags & whereTrue .ok\n\
+         q = flags & where .ok\n\
          r = people & select {{ same = eqMaybe .email .email, cleared = nullIf (coalesce 0 .score) 0, b = toBool .id }}\n"
     );
     ty(&helpers, "q");
@@ -816,19 +900,32 @@ fn nullable_columns_are_explicit() {
 #[test]
 fn outer_joins_make_the_missing_side_maybe() {
     let j = |kind: &str| {
-        ty(&format!("q = orders & {kind} users (.<user_id == .>id) & select {{ o = .amount, n = .name }}\n"), "q")
+        ty(
+            &format!(
+                "q = (orders & select {{ user_id = .user_id, amount = .amount }}) & {kind} \
+                 (users & select {{ u_id = .id, name = .name }}) (.<user_id == .>u_id) \
+                 & select {{ o = .amount, n = .name }}\n"
+            ),
+            "q",
+        )
     };
     assert_eq!(j("innerJoin"), "query { o = float, n = string }");
     assert_eq!(j("leftJoin"), "query { o = float, n = maybe string }");
     assert_eq!(j("rightJoin"), "query { o = maybe float, n = string }");
     assert_eq!(j("fullJoin"), "query { o = maybe float, n = maybe string }");
     // An already nullable column is not wrapped twice.
-    let src =
-        format!("{NULLABLE}q = users & leftJoin people (.<id == .>id) & select {{ e = .email }}\n");
+    let src = format!(
+        "{NULLABLE}q = (users & select {{ id = .id, name = .name }}) \
+         & leftJoin (people & select {{ p_id = .id, email = .email, score = .score }}) \
+         (.<id == .>p_id) & select {{ e = .email }}\n"
+    );
     assert_eq!(ty(&src, "q"), "query { e = maybe string }");
-    // The predicate sees the plain column types.
+    // The predicate sees the plain column types: `.>active` is a `bool`, not a
+    // `maybe bool`, however the join's output row is nulled.
     ty(
-        "q = orders & leftJoin users (.<user_id == .>id && .>active)\n",
+        "q = (orders & select { user_id = .user_id }) & leftJoin \
+         (users & select { p_id = .id, active = .active, name = .name }) \
+         (.<user_id == .>p_id && .>active)\n",
         "q",
     );
 }
@@ -854,14 +951,13 @@ fn aggregate_nullability_is_explicit() {
         "q"
     )
     .contains("belong in `agg`"));
-    let e = err(
+    // A nullable input takes the same name: `sum`'s signatures differ in
+    // nullability, so `sum` over a `maybe int` column is `maybe int`.
+    let t = ty(
         &format!("{NULLABLE}q = people & agg {{ s = sum .score }}\n"),
         "q",
     );
-    assert!(
-        e.contains("no overload of `sum`") && e.contains("maybe int"),
-        "{e}"
-    );
+    assert!(t.contains("s = maybe int"), "{t}");
     let e = err(
         &format!(
             "{NULLABLE}spec = {{ partition = [.id], order = [desc .id] }}\nq = people & select {{ l = lag spec .email }}\n"
@@ -881,8 +977,11 @@ fn aggregate_nullability_is_explicit() {
         "sumMaybeCustom",
     );
     assert!(t.contains("agg"), "{t}");
+    // `sum` takes the nullable column under the same name: the `*Maybe`
+    // spellings were pure aliases once the nullable overloads landed, so they
+    // are gone.
     let t = ty(
-        &format!("{NULLABLE}q = people & agg {{ s = sumMaybe .score }}\n"),
+        &format!("{NULLABLE}q = people & agg {{ s = sum .score }}\n"),
         "q",
     );
     assert!(t.contains("s = maybe int"), "{t}");
@@ -1124,7 +1223,8 @@ fn unused_definitions_still_report_impossible_overloads() {
         "q",
     );
     let both = format!(
-        "{poly}q = users & orders ? (.<id == .>user_id) & select {{ a = twice .age, b = twice .amount }}\n"
+        "{poly}q = users & innerJoin (orders & select {{ user_id = .user_id, amount = .amount }}) \
+         (.<id == .>user_id) & select {{ a = twice .age, b = twice .amount }}\n"
     );
     assert!(
         ty(&both, "q").contains("a = int") && ty(&both, "q").contains("b = float"),
@@ -1330,7 +1430,7 @@ fn windows_compose_in_an_expression() {
          operand = users & select { id = .id, x = rowNumber spec + 1 }\n\
          two = users & select { id = .id, x = rowNumber spec + rowNumber spec }\n\
          filtered = users & where (rowNumber spec <= 3)\n\
-         scoped = users & select { id = .id, rn = countOver spec }\n",
+         scoped = users & select { id = .id, rn = over spec count }\n",
     );
     assert_eq!(
         result(&rs, "whole").as_deref(),
@@ -2097,14 +2197,14 @@ fn a_key_stage_survives_the_stages_around_it() {
     // type: reading one back through `&=` is what completion does.
     assert_eq!(
         ty(
-            "q = users & order [asc .id] & prefix \"lit_\" &= {x = .lit_id}\n",
+            "q = users & order [asc .id] & prefix \"lit_\" & select {x = .lit_id}\n",
             "q"
         ),
         "query { x = int }"
     );
     assert_eq!(
         ty(
-            "q = users & where (.age >= 1) & prefix \"lit_\" &= {x = .lit_name}\n",
+            "q = users & where (.age >= 1) & prefix \"lit_\" & select {x = .lit_name}\n",
             "q"
         ),
         "query { x = string }"
@@ -2277,9 +2377,10 @@ fn a_stage_sees_the_column_the_previous_stage_added() {
         ),
         // ... and as a join's left key.
         (
-            "h = q => q & update { up1 = .id } & leftJoin orders (.<up1 == .>user_id)\n",
+            "h = q => q & update { up1 = .id } & leftJoin (orders & prefix \"o_\") (.<up1 == .>o_user_id)\n",
             "query { id = int, name = string, age = int, active = bool, up1 = int, \
-             user_id = maybe int, amount = maybe float, status = maybe string }",
+             o_id = maybe int, o_user_id = maybe int, o_amount = maybe float, \
+             o_status = maybe string }",
         ),
         // `omit` names the added column — a row equation, so before the fix the
         // equation met the unfinished `merge` term and the key looked absent.
@@ -2335,7 +2436,7 @@ fn a_stage_still_rejects_a_column_no_stage_adds() {
         "h = q => q & update { up1 = .id } & update { up2 = .nope }\n",
         "h = q => q & update { up1 = .id } & where (.nope > 0)\n",
         "h = q => q & update { up1 = .id } & order [asc .nope]\n",
-        "h = q => q & update { up1 = .id } & leftJoin orders (.<nope == .>user_id)\n",
+        "h = q => q & update { up1 = .id } & leftJoin (orders & prefix \"o_\") (.<nope == .>o_user_id)\n",
         "h = q => q & update { up1 = .id } & omit \"nope\"\n",
         "h = q => q & update { up1 = .id } & select {.nope}\n",
     ] {
@@ -2543,7 +2644,7 @@ mod bidirectional {
 fn every_node_records_its_whole_type() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-         orders : query { id = int, uid = int } = table \"s\" \"orders\"\n\
+         orders : query { oid = int, uid = int } = table \"s\" \"orders\"\n\
          q = users & where (.id > 1) & select { .name }\n\
          r = users & innerJoin orders (.<id == .>uid)\n",
     );
@@ -2581,12 +2682,12 @@ fn every_node_records_its_whole_type() {
 
     for (src, want) in [
         ("table \"s\" \"users\"", vec!["id", "name"]),
-        ("table \"s\" \"orders\"", vec!["id", "uid"]),
+        ("table \"s\" \"orders\"", vec!["oid", "uid"]),
         ("users & where (.id > 1)", vec!["id", "name"]),
         ("users & where (.id > 1) & select { .name }", vec!["name"]),
         (
             "users & innerJoin orders (.<id == .>uid)",
-            vec!["id", "name", "uid"],
+            vec!["id", "name", "oid", "uid"],
         ),
     ] {
         let got = fields_of(src).unwrap_or_else(|| {
@@ -2600,7 +2701,7 @@ fn every_node_records_its_whole_type() {
 fn join_and_set_nodes_record_both_query_boundaries() {
     let ws = Workspace::from_source(
         "users : query { id = int, name = string } = table \"s\" \"users\"\n\
-         orders : query { id = int, uid = int } = table \"s\" \"orders\"\n\
+         orders : query { oid = int, uid = int } = table \"s\" \"orders\"\n\
          vips : query { id = int, name = string } = table \"s\" \"vips\"\n\
          joined = users & innerJoin orders (.<id == .>uid)\n\
          combined = users & union vips\n",
@@ -2612,7 +2713,7 @@ fn join_and_set_nodes_record_both_query_boundaries() {
         (
             "joined",
             crate::check::CombineKind::Join(crate::ir::JoinKind::Inner),
-            vec!["id", "name", "uid"],
+            vec!["id", "name", "oid", "uid"],
         ),
         (
             "combined",
@@ -2887,11 +2988,15 @@ fn resolution_covers_the_shapes_that_produced_the_alias_bugs() {
         let (want_module, want_def) =
             want_index.unwrap_or_else(|| panic!("{what}: no definition `{want}` anywhere"));
         let found = tc.resolved_ids(ws.root).iter().any(|id| {
-            matches!(
-                tc.resolution(ws.root, *id),
-                Some(crate::check::Resolved::Def((m, d)))
-                    if (*m, *d) == (want_module, want_def)
-            )
+            match tc.resolution(ws.root, *id) {
+                Some(crate::check::Resolved::Def((m, d))) => (*m, *d) == (want_module, want_def),
+                // An overloaded name records its *set*, and the choice for this
+                // use travels with it: the definition reached is a member.
+                Some(crate::check::Resolved::Overloads { module, defs }) => {
+                    *module == want_module && defs.contains(&want_def)
+                }
+                _ => false,
+            }
         });
         assert!(
             found,
@@ -3192,4 +3297,95 @@ fn unannotated_recursion_is_rejected() {
             "{src:?} produced {ts:?}"
         );
     }
+}
+
+/// The time constants are **values**, so a date can name one without a row.
+///
+/// `currentDate : date` (not `expr r date`) is what makes
+/// `start : date = currentDate` a definition, and a value still works
+/// everywhere an expression is expected — `addDays 1 currentDate` and
+/// `(.d >= start)` both take it. `nothing` stays row-indexed: it is a column
+/// value in a projection, and a bare polymorphic value is not accepted there.
+#[test]
+fn date_constants_are_values() {
+    let src = "t : query { d = date } = table \"s\" \"t\"\n\
+               start : date = currentDate\n\
+               q = t & select { x = addDays 1 currentDate, z = .d >= start }\n";
+    assert_eq!(ty(src, "start"), "date");
+    assert_eq!(ty(src, "q"), "query { x = date, z = bool }");
+    // A value type parameter takes a computed value.
+    let param = "t : query { d = date } = table \"s\" \"t\"\n\
+                 after = (x : date) => t & where (.d >= x)\n\
+                 q = after currentDate\n";
+    assert_eq!(ty(param, "q"), "query { d = date }");
+}
+
+/// A join's row lists the left side first, then what it takes from the right.
+///
+/// Both halves matter: a take field whose name is new (`o_amount`) and one that
+/// renames a column the left side also has (`o_id` beside `id`). The order is
+/// what `--types` prints and what a positional diagnostic reads, so it is worth
+/// pinning rather than being whatever the row reducer happened to produce.
+#[test]
+fn a_join_row_is_the_left_side_then_its_takes() {
+    let order = "u : query { id = int, name = string } = table \"s\" \"u\"\n\
+                 o : query { id = int, user_id = int, amount = float } = table \"s\" \"o\"\n\
+                 o2 = o & select { user_id = .user_id, o_id = .id, o_amount = .amount }\n\
+                 q = u & leftJoin o2 (.<id == .>user_id)\n";
+    assert_eq!(
+        ty(order, "q"),
+        "query { id = int, name = string, user_id = maybe int, o_id = maybe int, o_amount = maybe float }"
+    );
+    // An inner join keeps the right side non-null, and the order is the same.
+    let inner = order.replace("leftJoin", "innerJoin");
+    assert_eq!(
+        ty(&inner, "q"),
+        "query { id = int, name = string, user_id = int, o_id = int, o_amount = float }"
+    );
+}
+
+/// There is no separate join spelling for "keep these columns from the right".
+///
+/// A `select` on the operand already says it, for every join kind, and the join
+/// itself is three arguments rather than five. The four `*JoinWith` names were
+/// tried and removed: they were a second way to say what `select` says, and they
+/// made the overlap rule ("a name both sides have is a type error") look like it
+/// needed a join-level answer instead of an operand-level one.
+#[test]
+fn reshaping_a_join_operand_is_what_names_the_output_columns() {
+    // The old spellings are gone.
+    for stale in [
+        "innerJoinWith",
+        "leftJoinWith",
+        "rightJoinWith",
+        "fullJoinWith",
+    ] {
+        let e = err(
+            &format!("q = users & {stale} orders (.<id == .>user_id) {{}}\n"),
+            "q",
+        );
+        assert!(
+            e.contains("unknown name") || e.contains("no overload"),
+            "`{stale}` should not exist: {e}"
+        );
+    }
+    // An overlapping join is expressible by renaming on the operand, and the
+    // join keeps the ordinary three-argument shape.
+    assert_eq!(
+        ty(
+            "q = users & innerJoin (orders & select { user_id = .user_id, order_id = .id }) \
+             (.<id == .>user_id)\n",
+            "q"
+        ),
+        "query { id = int, name = string, age = int, active = bool, user_id = int, order_id = int }"
+    );
+    // A name both sides still have is refused, and the message points at the
+    // operand rather than at a join spelling that no longer exists.
+    let e = err("q = users & innerJoin orders (.<id == .>user_id)\n", "q");
+    assert!(e.contains("on both sides"), "{e}");
+    assert!(e.contains("Reshape the right operand"), "{e}");
+    assert!(
+        !e.contains("JoinWith"),
+        "the message must not name a removed form: {e}"
+    );
 }

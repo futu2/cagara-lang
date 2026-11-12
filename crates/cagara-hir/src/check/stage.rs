@@ -135,10 +135,9 @@ impl RowStage {
             Limit => RowStage::Limit,
             Offset => RowStage::Offset,
             Distinct => RowStage::Distinct,
-            Table | Merge | In | Join(_) | Set(_) | Group | Asc | Desc | Rows
-            | UnboundedPreceding | UnboundedFollowing | CurrentRow | Preceding | Following => {
-                return None
-            }
+            Table | Merge | In | Join(_) | Set(_) | Group | Asc | Desc | Rows | Filtered
+            | DistinctAgg | Over | UnboundedPreceding | UnboundedFollowing | CurrentRow
+            | Preceding | Following => return None,
         })
     }
 

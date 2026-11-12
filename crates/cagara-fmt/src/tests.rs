@@ -17,7 +17,8 @@ fn check(src: &str, expected: &str) {
 }
 
 const SOURCES: &[(&str, &str)] = &[
-    ("prelude", include_str!("../../../prelude.cagara")),
+    ("prelude/core", include_str!("../../../prelude/core.cagara")),
+    ("prelude/std", include_str!("../../../prelude/std.cagara")),
     ("report", include_str!("../../../examples/report.cagara")),
     ("public", include_str!("../../../examples/public.cagara")),
     ("schema", include_str!("../../../examples/schema.cagara")),
@@ -157,13 +158,14 @@ fn pipelines_break_per_stage() {
     );
     // Continuation lines are re-indented.
     check(
-        "a = q\n      & where .x\n        &- 10\n",
-        "a =\n  q\n  & where .x\n  &- 10\n",
+        "a = q\n      & where .x\n        & limit 10\n",
+        "a =\n  q\n  & where .x\n  & limit 10\n",
     );
-    // `&+` is a stage like any other, and is spaced like its siblings.
+    // A stage's argument is spaced like a call's: `& update {…}` keeps one
+    // space, and a stage after it starts its own line.
     check(
-        "a = q &+{ age = .age + 1 } &= {.id}\n",
-        "a =\n  q\n  &+ { age = .age + 1 }\n  &= { .id }\n",
+        "a = q & update{ age = .age + 1 } & select {.id}\n",
+        "a =\n  q\n  & update { age = .age + 1 }\n  & select { .id }\n",
     );
     // A pipeline in a record field moves down the same way, so a head that
     // starts a line always has its stages beside it rather than under it.
@@ -510,7 +512,7 @@ fn a_long_let_moves_its_block_to_an_indented_line() {
     + toInt (substring 15 1 value) * 67
     + toInt (substring 16 1 value) * 71
     + toInt (substring 17 1 value) * 73
-  in value <> lpad 2 \"0\" (toString (97 - weighted % 97))
+  in value ++ lpad 2 \"0\" (toString (97 - weighted % 97))
 ",
         "account_no_with_check_digit = value =>
   let weighted =
@@ -531,7 +533,7 @@ fn a_long_let_moves_its_block_to_an_indented_line() {
       + toInt (substring 15 1 value) * 67
       + toInt (substring 16 1 value) * 71
       + toInt (substring 17 1 value) * 73
-    in value <> lpad 2 \"0\" (toString (97 - weighted % 97))
+    in value ++ lpad 2 \"0\" (toString (97 - weighted % 97))
 ",
     );
     // A binding that fits is left alone, whether or not the whole `let` fits:
@@ -764,8 +766,7 @@ struct Gen {
 }
 
 const OPS: &[&str] = &[
-    "&", "&=", "&?", "&+", "&*", "&.", "&-", "?", "<?", "?>", "<?>", "$", ">>>", "<<<", "||", "&&",
-    "==", "!=", "<", "<=", ">", ">=", "<>", "+", "-", "*", "/", "%", "??",
+    "&", ">>>", "||", "&&", "==", "!=", "<", "<=", ">", ">=", "++", "+", "-", "*", "/", "%", "??",
 ];
 const NAMES: &[&str] = &["a", "users", "f", "_x1", "where", "select", "count"];
 
@@ -1028,7 +1029,7 @@ fn token_soup_never_panics_and_stays_lossless() {
         "&",
         "+",
         "-",
-        "<>",
+        "++",
         ".a",
         "m.b",
         "1",

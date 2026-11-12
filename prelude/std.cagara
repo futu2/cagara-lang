@@ -1,0 +1,497 @@
+# Cagara standard library — the functions a query reaches for, not the ones
+# the language needs.
+#
+# String and math functions, casts, date arithmetic and the nullable-aggregate
+# helpers. They are ordinary definitions (`sql "..."` templates or lambdas),
+# which is the whole point: the compiler does not know any of these names.
+# `core.cagara` is what it cannot do without; this file is what you cannot do
+# without.
+
+# ── scalar SQL expressions ─────────────────────────────────────────────────
+
+## Typed conditional: `ifThenElse p a b` is a searched `CASE WHEN p THEN a ELSE b`.
+##
+## Both branches are checked at the same expression phase, so it also works
+## after `agg` or `select` when the surrounding stage permits that phase.
+ifThenElse : expr r bool -> expr r a -> expr r a -> expr r a =
+  sql "CASE WHEN $1 THEN $2 ELSE $3 END"
+
+## Case-style alias of `ifThenElse`, for reading a chain as if/else. Multi-way
+## conditionals are written with the `case { p => a; ... }` form instead.
+caseWhen : expr r bool -> expr r a -> expr r a -> expr r a = ifThenElse
+
+## `countOf` for a nullable column: `COUNT(x)` already skips NULLs, so this is
+## the same aggregate with a signature that accepts `maybe a`.
+countOfMaybe : expr r (maybe a) -> agg (expr r int) = sql "COUNT($1)"
+
+## `countDistinct` for a nullable column; NULLs are skipped by SQL.
+countDistinctMaybe : expr r (maybe a) -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
+
+# Filtered aggregates apply a predicate to the aggregate's *input* rows, the
+# portable spelling of SQL's `agg(x) FILTER (WHERE p)`. The predicate is a
+# non-null row-phase `bool` and cannot contain an aggregate or window. The
+# `CASE` omits `ELSE`, so a group with no matching row is NULL for the value
+# aggregates and 0 for the counts, exactly as `FILTER` gives. When every
+# aggregate in a stage shares one predicate, prefer `where` before `agg`: it
+# filters the rows once instead of once per aggregate.
+#
+# The count forms use `COUNT(...)`, not `SUM(1)`: `SUM` is NULL when nothing
+# matches, while `COUNT(*) FILTER` is 0.
+
+## String concatenation, right-associative and looser than arithmetic, so
+## `"a" <> .b <> "c"` groups as `"a" <> (.b <> "c")` and `x + 1 <> "!"` needs
+## no parentheses. NULL if either side is NULL.
+_++_ : expr r string -> expr r string -> expr r string = sql "$1 || $2"
+
+## `concat a b` is `a ++ b`, for a call site where an operator reads worse.
+concat : expr r string -> expr r string -> expr r string = _++_
+
+## The same concatenation in the spelling Haskell uses: `a <> b` is `a ++ b`.
+## Both spell the SQL `||`, and which one a file writes is a matter of taste.
+_<>_ : expr r string -> expr r string -> expr r string = _++_
+
+## Boolean negation.
+not : expr r bool -> expr r bool = sql "NOT $1"
+
+## Arithmetic negation, overloaded on `int` and `float`.
+negate : expr r int -> expr r int = sql "-$1"
+negate : expr r float -> expr r float = sql "-$1"
+
+## Uppercase a string, in the database's collation.
+upper : expr r string -> expr r string = sql "UPPER($1)"
+
+## Lowercase a string, in the database's collation.
+lower : expr r string -> expr r string = sql "LOWER($1)"
+
+## Strip leading and trailing whitespace.
+trim : expr r string -> expr r string = sql "TRIM($1)"
+
+## Strip leading whitespace.
+ltrim : expr r string -> expr r string = sql "LTRIM($1)"
+
+## Strip trailing whitespace.
+rtrim : expr r string -> expr r string = sql "RTRIM($1)"
+
+## `lpad 12 "0" s`: `s` padded on the left to width 12 with copies of `"0"`.
+##
+## The width comes first, then what to pad with, then the string — the same
+## argument order as `left` / `right` / `substring`, which take their position
+## or length before the string, so `lpad 12 "0"` is a reusable "pad to twelve".
+## It is the reverse of SQL's own `LPAD(s, 12, '0')`, which is what the
+## template below rearranges.
+##
+## A value already at least `n` wide is returned whole, not truncated.
+##
+## Unlike `length`, this needs no `CAGARA_*` rewrite: sqlglot passes `LPAD`
+## through unchanged for every dialect. SQLite has no `LPAD` and will reject it
+## at run time, which is the same gap `try*` has there — emitting the call is
+## more honest than guessing at a `substr`/`printf` spelling, and the engine
+## says so loudly.
+lpad : expr r int -> expr r string -> expr r string -> expr r string = sql "LPAD($2, $1, $3)"
+
+## `rpad 12 "0" s`: `s` padded on the right, the mirror of `lpad`.
+rpad : expr r int -> expr r string -> expr r string -> expr r string = sql "RPAD($2, $1, $3)"
+
+## The number of characters in a string — characters, not bytes, in every
+## dialect (`CAGARA_LENGTH`).
+length : expr r string -> expr r int = sql "CAGARA_LENGTH($1)"
+
+## `like "%foo%" .name`: SQL `LIKE`, so `%` and `_` are wildcards. The pattern
+## comes first to keep the subject last; for a plain substring test use
+## `contains`.
+like : expr r string -> expr r string -> expr r bool = sql "$2 LIKE $1"
+
+## Case-insensitive `like`. Not every engine has `ILIKE`; sqlglot rewrites it
+## where it can.
+ilike : expr r string -> expr r string -> expr r bool = sql "$2 ILIKE $1"
+
+## `substring start len s`, 1-based as in SQL and `len` characters long.
+substring : expr r int -> expr r int -> expr r string -> expr r string = sql "SUBSTRING($3, $1, $2)"
+
+## `left n s`: the first `n` characters.
+left : expr r int -> expr r string -> expr r string = sql "CAGARA_LEFT($2, $1)"
+
+## `right n s`: the last `n` characters.
+right : expr r int -> expr r string -> expr r string = sql "CAGARA_RIGHT($2, $1)"
+
+## `replaceAll from to s`: every occurrence of `from` in `s` replaced by `to`.
+## (SQL's `REPLACE`, not column renaming — use `update` for that.)
+replaceAll : expr r string -> expr r string -> expr r string -> expr r string =
+  sql "REPLACE($3, $1, $2)"
+
+## `strpos sub s`: the 1-based position of the first `sub` in `s`, or 0 when it
+## is absent.
+strpos : expr r string -> expr r string -> expr r int = sql "CAGARA_STRPOS($2, $1)"
+
+## `contains "@" .email`: whether `s` contains `sub`. A plain substring test —
+## `%` and `_` are not wildcards here, which is the difference from `like`.
+contains : expr r string -> expr r string -> expr r bool = sql "CAGARA_STRPOS($2, $1) > 0"
+
+## `startsWith "@" .domain`: whether `s` begins with `prefix`.
+startsWith : expr r string -> expr r string -> expr r bool =
+  sql "CAGARA_LEFT($2, CAGARA_LENGTH($1)) = $1"
+
+## `endsWith ".com" .domain`: whether `s` ends with `suffix`.
+endsWith : expr r string -> expr r string -> expr r bool =
+  sql "CAGARA_RIGHT($2, CAGARA_LENGTH($1)) = $1"
+
+# Math is scalar and non-null.
+
+## Absolute value, overloaded on `int` and `float`.
+abs : expr r int -> expr r int = sql "ABS($1)"
+abs : expr r float -> expr r float = sql "ABS($1)"
+
+## Round to the nearest integer, keeping the `float` type. Engines round ties
+## differently; this leaves that to the target rather than pretending one rule
+## is universal.
+round : expr r float -> expr r float = sql "ROUND($1)"
+
+## `roundTo 2 .amount`: round to `digits` decimal places. Digits first, subject
+## last, so `roundTo 2` is a reusable transformation.
+roundTo : expr r int -> expr r float -> expr r float = sql "ROUND($2, $1)"
+
+## Round down to the nearest integer, as a `float`.
+floor : expr r float -> expr r float = sql "FLOOR($1)"
+
+## Round up to the nearest integer, as a `float`.
+ceil : expr r float -> expr r float = sql "CEILING($1)"
+
+## Square root. A negative input is the engine's error or NULL, not a
+## documented value of this function.
+sqrt : expr r float -> expr r float = sql "SQRT($1)"
+
+## `power exponent base`: `base` raised to `exponent`. Subject last, so
+## `power 2` squares its argument.
+power : expr r float -> expr r float -> expr r float = sql "POWER($2, $1)"
+
+## Sign of a number: -1, 0 or 1. Overloaded on `int` and `float`.
+sign : expr r int -> expr r int = sql "SIGN($1)"
+sign : expr r float -> expr r float = sql "SIGN($1)"
+
+## `greatest a b`: the larger of two non-null values, of any ordered type.
+## SQLite has no `GREATEST`, so the `CASE` spelling is the portable one; with
+## non-null arguments no NULL has to be resolved.
+greatest : expr r a -> expr r a -> expr r a = sql "CASE WHEN $1 >= $2 THEN $1 ELSE $2 END"
+
+## `least a b`: the smaller of two non-null values. Portable for the same
+## reason as `greatest`.
+least : expr r a -> expr r a -> expr r a = sql "CASE WHEN $1 <= $2 THEN $1 ELSE $2 END"
+
+## Render a value as a string, overloading `int`, `float`, `date`, `timestamp`
+## and `bool`. The bool form is a `CASE` giving `'true'` / `'false'`, because
+## engines disagree about how they print a boolean.
+toString : expr r int -> expr r string = sql "CAGARA_TO_STRING($1)"
+toString : expr r float -> expr r string = sql "CAGARA_TO_STRING($1)"
+toString : expr r date -> expr r string = sql "CAGARA_TO_STRING($1)"
+toString : expr r timestamp -> expr r string = sql "CAGARA_TO_STRING($1)"
+toString : expr r bool -> expr r string = sql "CASE WHEN $1 THEN 'true' ELSE 'false' END"
+
+# Casts are named for the type they produce. Overloading picks the one that
+# fits, so `toInt` applied to a `float` is a narrowing and `toInt` applied to a
+# `string` is a parse -- the same destination reached from different sources.
+
+## Convert to `int`: from a `float` it truncates toward zero, in every dialect
+## (`CAGARA_TRUNC_INT`); from a `string` it parses an integer and fails on a
+## value that is not one (`tryInt` yields NULL instead).
+toInt : expr r float -> expr r int = sql "CAGARA_TRUNC_INT($1)"
+toInt : expr r string -> expr r int = sql "CAGARA_TO_INT($1)"
+
+## Convert to `float`, a 64-bit IEEE double: from an `int` exactly, from a
+## `string` by parsing.
+toFloat : expr r int -> expr r float = sql "CAGARA_TO_FLOAT($1)"
+toFloat : expr r string -> expr r float = sql "CAGARA_TO_FLOAT($1)"
+
+## Convert to `bool` from a number: zero is false, everything else true.
+toBool : expr r int -> expr r bool = sql "CAST($1 AS BOOLEAN)"
+toBool : expr r float -> expr r bool = sql "CAST($1 AS BOOLEAN)"
+
+## `toDecimal precision scale x` gives a value an exact SQL type. Money is the
+## reason: plain `FLOAT` is binary floating point, so sums of it drift, while
+## `DECIMAL(18, 2)` is exact. The *language* type stays `float` — there is no
+## separate decimal scalar — so this changes the SQL type without adding one.
+## Usable from `string`, `int` and `float` sources.
+toDecimal : expr r int -> expr r int -> expr r string -> expr r float =
+  sql "CAGARA_TO_DECIMAL($3, $1, $2)"
+toDecimal : expr r int -> expr r int -> expr r int -> expr r float =
+  sql "CAGARA_TO_DECIMAL($3, $1, $2)"
+toDecimal : expr r int -> expr r int -> expr r float -> expr r float =
+  sql "CAGARA_TO_DECIMAL($3, $1, $2)"
+
+# A `from*` name says where the value came from rather than where it is going,
+# which is the more useful reading at a call site: `fromString .man_grade` says
+# the column is text and is being read as a number. Each is the `to*` above,
+# so there is one implementation and two ways to name it.
+
+## `fromString` reads a `string` as the type the context asks for — `int`,
+## `float` or `date`. The `to*` cast with the direction named from the source.
+fromString : expr r string -> expr r int = x => toInt x
+fromString : expr r string -> expr r float = x => toFloat x
+fromString : expr r string -> expr r date = x => toDate x
+
+## `fromInt` reads an `int` as a `float`: `toFloat` with the direction named
+## from the source.
+fromInt : expr r int -> expr r float = x => toFloat x
+
+## `fromFloat` reads a `float` as an `int`, truncating toward zero.
+fromFloat : expr r float -> expr r int = x => toInt x
+
+# The casts above fail on a value they cannot convert. For a column typed
+# `string` that holds a code -- and `icbase` has tens of thousands of those --
+# one bad row would otherwise fail the whole query, so the `try*` forms yield
+# NULL instead. They return `maybe`, because that NULL has to be handled
+# somewhere: `coalesce 0 (tryInt .x)`.
+
+## `tryInt` parses a `string` as an `int`, giving NULL where `toInt` would
+## fail. Always `maybe`, so the caller decides what a bad row means.
+tryInt : expr r string -> expr r (maybe int) = sql "CAGARA_TRY_INT($1)"
+
+## `tryFloat` parses a `string` as a `float`, NULL on failure.
+tryFloat : expr r string -> expr r (maybe float) = sql "CAGARA_TRY_FLOAT($1)"
+
+## `tryDate` parses a `string` as a `date`, NULL on failure.
+tryDate : expr r string -> expr r (maybe date) = sql "CAGARA_TRY_DATE($1)"
+
+## `tryTimestamp` parses a `string` as a `timestamp`, NULL on failure.
+tryTimestamp : expr r string -> expr r (maybe timestamp) = sql "CAGARA_TRY_TIMESTAMP($1)"
+
+## `tryDecimal precision scale x`: `toDecimal` for a `string` that may not be a
+## number, NULL on failure.
+tryDecimal : expr r int -> expr r int -> expr r string -> expr r (maybe float) =
+  sql "CAGARA_TRY_DECIMAL($3, $1, $2)"
+
+# ── dates and timestamps ───────────────────────────────────────────────────
+# String literals widen to `date` / `timestamp`: `.created_at >= "2024-01-01"`.
+# Weeks start on Monday (ISO). `dayOfWeek` is 0 for Sunday.
+
+## Today, as a `date`.
+currentDate : date = sql "CURRENT_DATE"
+
+## The current instant, to the engine's precision.
+currentTimestamp : timestamp = sql "CAGARA_NOW()"
+
+## Alias of `currentTimestamp`, under the shorter name.
+now : expr r timestamp = currentTimestamp
+
+## The day before today. The most common partition date there is: a table
+## partitioned by day is read for the day that has finished, and `yesterday`
+## says that in one word at a use site where `addDays (-1) currentDate` is a
+## parenthesised expression in the middle of a pipeline.
+yesterday : expr r date = addDays (-1) currentDate
+
+## Convert to `date`: from a `timestamp` it truncates to the day, from a
+## `string` it parses one.
+toDate : expr r timestamp -> expr r date = sql "CAGARA_TO_DATE($1)"
+toDate : expr r string -> expr r date = sql "CAGARA_TO_DATE($1)"
+
+## Convert to `timestamp`: from a `date` (midnight) or from a `string`.
+toTimestamp : expr r date -> expr r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
+toTimestamp : expr r string -> expr r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
+
+## `addDays 7 .created_at`: move a date or timestamp by whole days; negative
+## counts go back. Overloaded on `date` and `timestamp`, returning the type it
+## was given.
+##
+## The week, quarter and year shifts below are defined from this one: 7 days,
+## 3 months, 1 year. So the core needs only `DAY` and `MONTH`.
+addDays : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'DAY', $2, $1)"
+addDays : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'DAY', $2, $1)"
+
+## `addWeeks 2 .d`: move by whole weeks, spelled as `addDays` of `n * 7`.
+addWeeks : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'DAY', $2, $1 * 7)"
+addWeeks : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'DAY', $2, $1 * 7)"
+
+## `addMonths 1 .d`: move by calendar months. The engine decides what the 31st
+## of a month without a 31st becomes.
+addMonths : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'MONTH', $2, $1)"
+addMonths : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'MONTH', $2, $1)"
+
+## `addQuarters 1 .d`: move by quarters, spelled as `addMonths` of `n * 3`.
+addQuarters : expr r int -> expr r date -> expr r date =
+  sql "CAGARA_ADD('DATE', 'MONTH', $2, $1 * 3)"
+addQuarters : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'MONTH', $2, $1 * 3)"
+
+## `addYears 1 .d`: move by calendar years.
+addYears : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'YEAR', $2, $1)"
+addYears : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'YEAR', $2, $1)"
+
+## `addHours 2 .t`: move a timestamp by whole hours. Timestamps only — a `date`
+## has no hour to move.
+addHours : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'HOUR', $2, $1)"
+
+## `addMinutes 30 .t`: move a timestamp by whole minutes.
+addMinutes : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'MINUTE', $2, $1)"
+
+## `addSeconds 30 .t`: move a timestamp by whole seconds.
+addSeconds : expr r int -> expr r timestamp -> expr r timestamp =
+  sql "CAGARA_ADD('TIMESTAMP', 'SECOND', $2, $1)"
+
+# date_trunc: the start of the period containing the value, same type.
+
+## `truncYear .d`: the first instant of the containing year, in the input's own
+## type.
+truncYear : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'YEAR', $1)"
+truncYear : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'YEAR', $1)"
+
+## `truncQuarter .d`: the first day of the containing quarter.
+truncQuarter : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'QUARTER', $1)"
+truncQuarter : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'QUARTER', $1)"
+
+## `truncMonth .d`: the first day of the containing month — the usual spelling
+## of a monthly bucket.
+truncMonth : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'MONTH', $1)"
+truncMonth : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'MONTH', $1)"
+
+## `truncWeek .d`: the Monday of the containing week.
+truncWeek : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'WEEK', $1)"
+truncWeek : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'WEEK', $1)"
+
+## `truncDay .t`: midnight of the containing day, as a timestamp.
+truncDay : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'DAY', $1)"
+
+## `truncHour .t`: the start of the containing hour.
+truncHour : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'HOUR', $1)"
+
+## `truncMinute .t`: the start of the containing minute.
+truncMinute : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'MINUTE', $1)"
+
+# Fields as integers.
+
+## The year of a date or timestamp: `year .created_at`.
+year : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'YEAR', $1)"
+year : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'YEAR', $1)"
+
+## The quarter, 1–4.
+quarter : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'QUARTER', $1)"
+quarter : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'QUARTER', $1)"
+
+## The month, 1–12.
+month : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'MONTH', $1)"
+month : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'MONTH', $1)"
+
+## The day of the month, 1–31.
+day : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'DAY', $1)"
+day : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'DAY', $1)"
+
+## The day of the week, 0 for Sunday — the numbering SQL engines use, not
+## ISO's.
+dayOfWeek : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'DOW', $1)"
+dayOfWeek : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'DOW', $1)"
+
+## The day of the year, 1–366.
+dayOfYear : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'DOY', $1)"
+dayOfYear : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'DOY', $1)"
+
+## The hour, 0–23, of a timestamp.
+hour : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'HOUR', $1)"
+
+## The minute, 0–59, of a timestamp.
+minute : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'MINUTE', $1)"
+
+## `daysBetween start end`: whole days from `start` to `end`, negative if `end`
+## is earlier. Subject last, so `daysBetween .created_at` is a function of the
+## end — an age in days.
+daysBetween : expr r date -> expr r date -> expr r int = sql "CAGARA_DAYS_BETWEEN($1, $2)"
+
+## `nullIf a b`: NULL when `a` equals `b`, `a` otherwise — how a sentinel value
+## is turned into a real NULL.
+nullIf : expr r a -> expr r a -> expr r (maybe a) = sql "NULLIF($1, $2)"
+
+## Equality that treats two NULL values as equal, and never returns NULL — so
+## it can be used directly in `where` and in join predicates, where a plain
+## `==` between two nullables would filter everything out.
+eqMaybe : expr r (maybe a) -> expr r (maybe a) -> expr r bool =
+  sql "COALESCE(($1 = $2) OR ($1 IS NULL AND $2 IS NULL), FALSE)"
+
+# ── value level ────────────────────────────────────────────
+#
+# A one-argument function that has a *single* row form is also available over a
+# plain value: `upper : string -> string` beside `upper : expr r string -> expr
+# r string`. A value is what a constant or a parameter is, so a value-level
+# function can be applied to `currentDate` or to a parameter. The form follows
+# the context: a column selects the row form, a value selects this one, and both
+# emit the same SQL.
+#
+# A name overloaded by *source type* (`truncYear` over `date` and `timestamp`,
+# `toInt` over `float` and `string`) deliberately has no value form: with two
+# value forms the checker would have to rank a source type and a phase at once,
+# and `ambiguous use` would be worse than the row form, which a value argument
+# reaches by lifting.
+
+## `not` at value level: `bool -> bool`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+not : bool -> bool = sql "NOT $1"
+
+## `upper` at value level: `string -> string`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+upper : string -> string = sql "UPPER($1)"
+
+## `lower` at value level: `string -> string`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+lower : string -> string = sql "LOWER($1)"
+
+## `trim` at value level: `string -> string`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+trim : string -> string = sql "TRIM($1)"
+
+## `ltrim` at value level: `string -> string`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+ltrim : string -> string = sql "LTRIM($1)"
+
+## `rtrim` at value level: `string -> string`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+rtrim : string -> string = sql "RTRIM($1)"
+
+## `length` at value level: `string -> int`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+length : string -> int = sql "CAGARA_LENGTH($1)"
+
+## `round` at value level: `float -> float`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+round : float -> float = sql "ROUND($1)"
+
+## `floor` at value level: `float -> float`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+floor : float -> float = sql "FLOOR($1)"
+
+## `ceil` at value level: `float -> float`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+ceil : float -> float = sql "CEILING($1)"
+
+## `sqrt` at value level: `float -> float`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+sqrt : float -> float = sql "SQRT($1)"
+
+## `fromInt` at value level: `int -> float`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+fromInt : int -> float = sql "CAGARA_TO_FLOAT($1)"
+
+## `fromFloat` at value level: `float -> int`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+fromFloat : float -> int = sql "CAGARA_TO_INT($1)"
+
+## `truncDay` at value level: `timestamp -> timestamp`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+truncDay : timestamp -> timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'DAY', $1)"
+
+## `truncHour` at value level: `timestamp -> timestamp`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+truncHour : timestamp -> timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'HOUR', $1)"
+
+## `truncMinute` at value level: `timestamp -> timestamp`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+truncMinute : timestamp -> timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'MINUTE', $1)"
+
+## `hour` at value level: `timestamp -> int`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+hour : timestamp -> int = sql "CAGARA_PART('TIMESTAMP', 'HOUR', $1)"
+
+## `minute` at value level: `timestamp -> int`. Same SQL as the row form,
+## for a constant or a parameter rather than a column.
+minute : timestamp -> int = sql "CAGARA_PART('TIMESTAMP', 'MINUTE', $1)"

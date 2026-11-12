@@ -1,0 +1,574 @@
+#! Cagara core — the part of the prelude the language itself needs.
+#!
+#! Everything here is either a `primitive "..."` (a relational operator, a
+#! window frame) or a definition the type checker relies on: the pipeline, the
+#! stages, the joins and set operations, the aggregates and windows, the
+#! comparison and arithmetic operators, and null handling (`coalesce`, `just`,
+#! `isNull`). Without these a query cannot be written at all.
+#!
+#! Anything that is merely *useful* — string functions, date arithmetic, casts —
+#! lives in `std.cagara`, which is imported right after this file. The split is
+#! about what the language owes you, not about what a program may use: both are
+#! in scope everywhere, and `cagara doc --prelude` prints them in order.
+
+# ── combinators ────────────────────────────────────────────────────────────
+
+# The fixities are Haskell's, where these are the standard combinators: `$` is
+# the loosest operator of all, application with its arguments reversed; `&` is
+# `Data.Function.(&)`, reverse application; and `>>>` / `<<<` are the two
+# directions of composition (`Control.Category`), which bind tighter than every
+# other operator so `f >>> g $ x` is `(f >>> g) $ x`.
+#
+# The fixities themselves live in the core (`cagara-syntax`'s `ops`), not here:
+# precedence is a parsing fact and has to be known before a file is read, so it
+# is not something a module — this one included — can declare. What this file
+# provides is each operator's *meaning*, as the `_&_` / `_$_` definitions below.
+
+## Reverse application, `Data.Function.(&)`: `x & f` is `f x`.
+##
+## This is also the query pipeline. A stage is an operator at this same level
+## (see the stage shorthands below), so `q & where p & select {.a}` is ordinary
+## application written left to right: the query first, then what to do with it.
+_&_ : a -> (a -> b) -> b = x => f => f x
+
+## Forward composition: `f >>> g` is `g` after `f`.
+##
+## The natural spelling in a left-to-right pipeline — `.name & trim >>> lower` —
+## and it binds tighter than every other operator, so `f >>> g $ x` parses as
+## `(f >>> g) $ x`.
+_>>>_ : (a -> b) -> (b -> c) -> a -> c = f => g => x => g (f x)
+
+## Reverse composition: `f <<< g` is `x => f (g x)`.
+##
+## The mirror of `>>>`, for reading a pipeline right to left:
+## `upper <<< trim` is `trim` then `upper`.
+_<<<_ : (b -> c) -> (a -> b) -> a -> c = f => g => x => f (g x)
+
+## Application, loosest of all operators: `f $ x` is `f x`.
+##
+## It exists so a trailing argument can be written without a closing run of
+## parentheses — `q & where $ .age > 18` is `q & where (.age > 18)`.
+_$_ : (a -> b) -> a -> b = f => x => f x
+
+# One shorthand per stage. Each is a one-line wrapper around the named stage,
+# which is what keeps a shorthand honest: the SQL, the phases and the nullability
+# all come from the named definition, so `&?` cannot accept a predicate the
+# `where` it spells would refuse. A shorthand written as its own `primitive`
+# could — and did — drift away from the stage it spelled, and that drift is why
+# these were once deleted; the fix is the wrapper, not the absence.
+#
+# The argument order is **subject first**, because that is what an infix operator
+# gets: `q &? p` desugars to `_&?_ q p`. The named stage takes its query last, so
+# every wrapper below puts it there — `q => p => where p q`.
+#
+# Being at `&`'s level is the whole of the syntax: the fixed table in
+# `cagara-syntax`'s `ops` puts every spelling here, so `q &? p & select {.a}`
+# parses as the same chain as `q & where p & select {.a}`.
+
+## `q &? p` — `q & where p`. A `maybe bool` predicate is the stage's own
+## nullable signature, not a second meaning.
+_&?_ : query r -> expr r bool -> query r = q => p => where p q
+_&?_ : query r -> expr r (maybe bool) -> query r = q => p => where p q
+
+## `q &= f` — `q & select f`.
+_&=_ : query r -> expr r (row s) -> query s = q => f => select f q
+
+## `q &+ f` — `q & update f`.
+_&+_ : query r -> expr r (row s) -> query (merge r s) = q => f => update f q
+
+## `q &* f` — `q & agg f`.
+_&*_ : query r -> agg (expr r (row s)) -> query s = q => f => agg f q
+
+## `q &. keys` — `q & order keys`.
+_&._ : query r -> list (sortkey r) -> query r = q => ks => order ks q
+
+## `q &- n` — `q & limit n`.
+_&-_ : query r -> expr r int -> query r = q => n => limit n q
+
+## `q &| r` — `q & union r`.
+_&|_ : query r -> query r -> query r = q => r => union r q
+
+## `q &! r` — `q & unionAll r`.
+_&!_ : query r -> query r -> query r = q => r => unionAll r q
+
+## `q &^ r` — `q & intersect r`.
+_&^_ : query r -> query r -> query r = q => r => intersect r q
+
+## `q &~ r` — `q & except r`.
+_&~_ : query r -> query r -> query r = q => r => except r q
+
+## The identity function: `id x` is `x`. Useful where a function is expected
+## and there is nothing to do, such as a fold's initial value.
+id : a -> a = x => x
+
+# Explicit casts are deliberately named by their result type. There is no
+# implicit conversion between ordinary expressions.
+
+# ── query pipeline ─────────────────────────────────────────────────────────
+
+## A table: `table "schema" "name"` (the schema may be `""`). The row type is
+## inferred from use — the projection stages decide the columns — so a
+## definition of a table usually carries a signature naming them.
+table : string -> string -> query r = primitive "__table"
+
+## Filter rows: `where (.age >= 18)`. The predicate is non-null `bool`; a
+## nullable condition goes through `whereTrue` or `isTrue`.
+where : expr r bool -> query r -> query r = primitive "__where"
+where : expr r (maybe bool) -> query r -> query r = primitive "__where"
+
+## Project a result row: `select { id = .id, label = upper .name }`, or
+## `select {.a, .b}` for the plain projection. Columns not listed are dropped;
+## `update` keeps them.
+select : expr r (row s) -> query r -> query s = primitive "__select"
+
+## `update {..}` is `select` merged over the input row: a name the input
+## already has keeps its position and takes the new expression, and a name it
+## does not have is appended. Columns not listed are passed through.
+update : expr r (row s) -> query r -> query (merge r s) = primitive "__update"
+
+## `omit "k"` drops one column: the row equation `input ~ { k : t | output }`,
+## solved by the unifier's generic leftover rule rather than by a rule of its
+## own.
+##
+## The two rows are spelled `r` and `s` — seemingly unrelated — because the
+## relation between them *cannot* be written in a type. Which column is dropped
+## is read from the application (`omit "a"` vs `omit "b"`), so both calls have
+## the same type and no type-level former could tell them apart. Compare
+## `prefix`, which can say `keyMap m r` precisely because its affix is carried
+## in the type. `select` and `agg` are spelled the same way for the same
+## reason: their result row is built from an expression, not from the input.
+##
+## The relation is enforced, not assumed — `t & omit "a" & select { .a }` is
+## rejected with `no column `a`; available: b`.
+##
+## Unlike the projection stages, this signature is *not* compared against the
+## primitive's internal type: `omit` is not a projection, so the annotation is
+## descriptive. The constraint above is what actually types the stage, which is
+## why writing something weaker here (or even wrong) changes no result.
+omit : symbol k -> query r -> query (removeKey k r) = primitive "__omit"
+
+## `mapValue "w"` transforms all field types using a wrapper:
+## `"nullable"` wraps each in `maybe`, `"list"` wraps each in `list`.
+##
+## The wrapper is a label, like `omit`'s column name: `valueLabel w` is the
+## parameter, the literal at the application binds `w`, and the result names the
+## type-level term `mapValue w r` — the same binding on both sides, so the
+## operation travels in the type and a stage's output row cannot come from an
+## unrelated wrapper.
+mapValue : valueLabel w -> query r -> query (mapValue w r) = primitive "__mapValue"
+
+## `prefix "s"` prepends a literal string to every column name.
+##
+## The affix is a label, not an ordinary expression: `symbol k` is the same
+## parameter `omit` takes, and the literal at the application is what binds `k`.
+## That one binding reaches both sides of the signature — `removeKey k r` here,
+## and the label-driven mapper `prependSym k` in the result. The checker decodes
+## that mapper into the type-level witness `keyMap (prefix "s") r` and reduces it
+## against the input row: `users & prefix "u_"` gives
+##
+##     query (keyMap (prefix "u_") { id = int, name = string })
+##   ⟹ query { u_id = int, u_name = string }
+##
+## The witness in the result is the same label the argument named, so a stage's
+## output row cannot come from an unrelated mapping. When the input row is still
+## open — or the affix is a lambda parameter, as in `addPrefix = p => q => q &
+## prefix p` — the term is *retained* rather than rejected, and reduces once the
+## row and the label are known.
+prefix : symbol k -> query r -> query (keyMap (prependSym k) r) = primitive "__prefix"
+
+## `suffix "s"` appends a literal string to every column name. It shares the
+## label-driven witness with its result in the same way as `prefix`.
+suffix : symbol k -> query r -> query (keyMap (appendSym k) r) = primitive "__suffix"
+
+## Group and aggregate: `agg { n = count, total = sum .amount }`. Inside an
+## `agg` the argument is at depth 1 — a row expression, not a scalar — which is
+## where the aggregate functions in this file apply.
+agg : agg (expr r (row s)) -> query r -> query s = primitive "__agg"
+
+## `filtered p a`: the aggregate `a` over only the rows `p` keeps.
+##
+## `agg { paid = filtered (.status == "paid") (sum .amount) }` is
+## `SUM(CASE WHEN status = 'paid' THEN amount END)`. A combinator rather than a
+## name per aggregate: `sumFilter`, `avgFilter`, `countFilter` and their
+## siblings were seven spellings of one idea, and they could not compose —
+## `filtered p (distinctAgg (sum .x))` has no name and needs none.
+filtered : expr r bool -> agg (expr r a) -> agg (expr r a) = primitive "__filtered"
+filtered : expr r bool -> agg (expr r (maybe a)) -> agg (expr r (maybe a)) =
+  primitive "__filtered"
+
+## `distinctAgg a`: the aggregate over distinct arguments —
+## `distinctAgg (sum .x)` is `SUM(DISTINCT x)`, and `distinctAgg (countOf .x)`
+## is `COUNT(DISTINCT x)`. Applying it twice is the same as applying it once.
+distinctAgg : agg (expr r a) -> agg (expr r a) = primitive "__distinctAgg"
+distinctAgg : agg (expr r (maybe a)) -> agg (expr r (maybe a)) = primitive "__distinctAgg"
+
+## `over spec a`: the aggregate as a window function, over `spec`'s partition,
+## order and frame. `over { partition = [.user_id] } (sum .amount)` is a
+## per-user total on every row, where the same aggregate inside `agg` would
+## collapse the rows.
+over : winspec r -> agg (expr r a) -> win (expr r a) = primitive "__over"
+over : winspec r -> agg (expr r (maybe a)) -> win (expr r (maybe a)) = primitive "__over"
+
+## Sort: `order [asc .x, desc .y]`. NULLs sort last in either direction.
+## Ties on the listed keys keep no particular order, since SQL does not promise
+## one.
+order : list (sortkey r) -> query r -> query r = primitive "__order"
+
+## Keep the first `n` rows: `limit 10`. Applied to an unordered query the rows
+## are whichever the engine returns first; order first if it matters.
+limit : expr r int -> query r -> query r = primitive "__limit"
+
+## Skip the first `n` rows: `q & offset 20 & limit 10`.
+offset : expr r int -> query r -> query r = primitive "__offset"
+
+## Drop duplicate rows: `SELECT DISTINCT`.
+distinct : query r -> query r = primitive "__distinct"
+
+## Membership: `inList [1, 2, 3] .id` is `id IN (1, 2, 3)`. The list comes
+## first and the subject last, like every other predicate here.
+inList : list a -> expr r a -> expr r bool = primitive "__in"
+
+## `in` is `inList`, under the name a use site reads better with:
+## `in [1, 2, 3] .status`.
+in : list a -> expr r a -> expr r bool = inList
+
+## Sort key, ascending — `asc .name` inside an `order` list.
+asc : expr r a -> sortkey r = primitive "__asc"
+asc : expr r (maybe a) -> sortkey r = primitive "__asc"
+
+## Sort key, descending — `desc .created_at` inside an `order` list.
+desc : expr r a -> sortkey r = primitive "__desc"
+desc : expr r (maybe a) -> sortkey r = primitive "__desc"
+
+## The grouping key: `agg { user_id = group .user_id, n = count }`. Every
+## non-aggregate expression in the same `agg` is grouped by it.
+group : expr r a -> agg (expr r a) = primitive "__group"
+group : expr r (maybe a) -> agg (expr r (maybe a)) = primitive "__group"
+
+# Set-operation stages: `union`, `unionAll`, `intersect`, `except`. Every stage
+# takes its subject **last**, and for a set operation the subject is the left
+# operand, so `except vips users` and `users & except vips` are the same query:
+# both mean `users EXCEPT vips`. `except` and `intersect` are the two where the
+# order is observable; `union` and `unionAll` are symmetric.
+
+## Inner join: `users & innerJoin orders (.<id == .>user_id)`.
+##
+## The left side is the piped query. The predicate is a `bool` over the joined
+## row, whose columns are `.x` for the left side and `.>x` for the right.
+##
+## The output has the left input's columns, then the right input's that the
+## left does not have. A name both sides have is a *type error*, because the
+## right one would vanish and nothing could read it back afterwards — rename or
+## drop it on the operand first: `orders & select { user_id, order_id = .id }`.
+innerJoin : query s -> expr (join r s) bool -> query r -> query (merge r s) =
+  primitive "__innerJoin"
+
+## Left outer join: every left row survives, and the right side's columns
+## become `maybe` — they are NULL for the unmatched rows.
+##
+## The predicate is a join condition, not a `where`: a condition on the right
+## side written after the join would drop the unmatched rows and turn the outer
+## join back into an inner one.
+leftJoin : query s -> expr (join r s) bool -> query r -> query (merge r (mapValue (AsNullable) s)) =
+  primitive "__leftJoin"
+
+## Right outer join: the mirror of `leftJoin`, with the left side's columns
+## nullable instead.
+rightJoin : query s -> expr (join r s) bool ->
+  query r -> query (merge (mapValue (AsNullable) r) s) =
+  primitive "__rightJoin"
+
+## Full outer join: both sides survive, so both sides' columns become `maybe`.
+fullJoin : query s -> expr (join r s) bool ->
+  query r -> query (merge (mapValue (AsNullable) r) (mapValue (AsNullable) s)) =
+  primitive "__fullJoin"
+
+## Semi join: the left rows that have a match on the right, with the left row
+## unchanged. `EXISTS` rather than a join, so a right row can never duplicate a
+## left one.
+semiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__semiJoin"
+
+## Anti join: the left rows that have *no* match on the right — `semiJoin`
+## negated, and the idiomatic "rows without children".
+antiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__antiJoin"
+
+# The join shorthands: one operator per join kind, each an alias of the named
+# form. `_?_` and `innerJoin` have the same signature, so the operator adds a
+# spelling and nothing else — and because the alias carries the named stage's
+# type, which side survives an outer join is still the type's business, not the
+# spelling's. An earlier version deleted these, on the grounds that named stages
+# were used far more often; that measured frequency, not the defect. The defect
+# was that each shorthand was its own `primitive`, so it could drift from the
+# stage it spelled — which the wrapper fixes, and which deleting the spelling
+# did not.
+
+## `orders ? on` — `innerJoin orders on`, awaiting the piped query.
+_?_ : query s -> expr (join r s) bool -> query r -> query (merge r s) = innerJoin
+
+## `orders <? on` — `leftJoin orders on`: every left row survives.
+_<?_ : query s -> expr (join r s) bool -> query r -> query (merge r (mapValue (AsNullable) s)) =
+  leftJoin
+
+## `orders ?> on` — `rightJoin orders on`: every right row survives.
+_?>_ : query s -> expr (join r s) bool -> query r -> query (merge (mapValue (AsNullable) r) s) =
+  rightJoin
+
+## `orders <?> on` — `fullJoin orders on`: both sides survive.
+_<?>_ : query s
+    -> expr (join r s) bool
+    -> query r
+    -> query (merge (mapValue (AsNullable) r) (mapValue (AsNullable) s)) = fullJoin
+
+## Union, deduplicated: `users & union vips`, or `union vips users`. Both
+## queries must have the same row; the columns and their order come from the
+## subject — the last argument, which is the query the pipeline supplies.
+union : query r -> query r -> query r = primitive "__union"
+
+## Union keeping duplicates: `users &! vips`, SQL `UNION ALL`.
+unionAll : query r -> query r -> query r = primitive "__unionAll"
+
+## Rows in both queries: `users &^ vips`, SQL `INTERSECT`.
+intersect : query r -> query r -> query r = primitive "__intersect"
+
+## The rows of the subject that the argument does not have: `users & except
+## vips` is `except vips users`, SQL `EXCEPT`, and it means `users EXCEPT vips`
+## — the subject is the left operand, so the piped form reads in the order it
+## runs. Not commutative.
+except : query r -> query r -> query r = primitive "__except"
+
+# Join operators, between `&` and every expression operator:
+# `users & teachers ? .<user_name == .>teacher_name`. The `<` / `>` mark the
+# side whose rows are all kept: `<?` left, `?>` right, `<?>` both. Their
+# spellings are in the core table like every other operator; being at level 3
+# rather than `&`'s level 1 is what makes them ordinary operators that build a
+# query rather than stages.
+
+# `select {a = .a, b = .b}` is written `select {.a, .b}`. To recompute or
+# rename a column use `update`, which keeps the row and merges over it.
+#
+# Reshaping a join operand is done with those two stages, not with a join of its
+# own: `users & leftJoin (orders & select { user_id, order_id = .id })` joins on
+# `user_id` and keeps `orders.id` as `order_id`, and a `select` after the join
+# drops whatever the predicate needed and the output does not. A dedicated
+# "join and take these columns" spelling was tried and removed: it was a second
+# way to say what `select` already says, and it made every join a five-argument
+# primitive.
+
+# ── aggregates (depth 1: arguments must be row expressions) ───────────────
+# Type variables in signatures are non-null; nullable inputs must be handled
+# explicitly. The `*Maybe` forms are the explicit spelling for a nullable
+# aggregate input: SQL's own aggregate functions already skip NULLs, so these
+# pass the column through unchanged (`SUM(x)`, `COUNT(x)`) rather than
+# coalescing it first. That matters for `avg`/`min`/`max`, where a sentinel
+# would change the answer: over `[NULL, 5]`, `avgMaybe` is 5 while
+# `avg (coalesce 0 .x)` is 2.5.
+# `sum` / `avg` / `min` / `max` are NULL for an all-NULL or empty input, so
+# they return `maybe`: write `coalesce 0 (sum .x)` for a number.
+
+## `count` counts the rows of the group, NULLs included (`COUNT(*)`). A count
+## is never NULL: an empty group counts 0.
+count : agg (expr r int) = sql "COUNT(*)"
+
+## `countOf .x` counts the rows where `x` is not NULL (`COUNT(x)`) — the
+## difference from `count` is exactly the NULLs.
+countOf : expr r a -> agg (expr r int) = sql "COUNT($1)"
+
+## `countDistinct .x` counts the distinct non-NULL values of `x`.
+countDistinct : expr r a -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
+
+## Sum of a column, overloading `int` and `float`. NULL for an all-NULL or
+## empty group, so the result is `maybe`: `coalesce 0 (sum .amount)`.
+sum : expr r int -> agg (expr r (maybe int)) = sql "SUM($1)"
+sum : expr r float -> agg (expr r (maybe float)) = sql "SUM($1)"
+sum : expr r (maybe int) -> agg (expr r (maybe int)) = sql "SUM($1)"
+sum : expr r (maybe float) -> agg (expr r (maybe float)) = sql "SUM($1)"
+
+## Arithmetic mean, overloading `int` and `float`; always a `float`, NULL for
+## an empty group.
+avg : expr r int -> agg (expr r (maybe float)) = sql "AVG($1)"
+avg : expr r float -> agg (expr r (maybe float)) = sql "AVG($1)"
+avg : expr r (maybe int) -> agg (expr r (maybe float)) = sql "AVG($1)"
+avg : expr r (maybe float) -> agg (expr r (maybe float)) = sql "AVG($1)"
+
+## Smallest value in the group; NULL for an empty group.
+min : expr r a -> agg (expr r (maybe a)) = sql "MIN($1)"
+min : expr r (maybe a) -> agg (expr r (maybe a)) = sql "MIN($1)"
+
+## Largest value in the group; NULL for an empty group.
+max : expr r a -> agg (expr r (maybe a)) = sql "MAX($1)"
+max : expr r (maybe a) -> agg (expr r (maybe a)) = sql "MAX($1)"
+
+# ── window functions (depth 1) ────────────────────────────────────────────
+# spec = { partition = [..], order = [asc .x, desc .y], frame = .. }
+
+## Row number within the partition, 1-based, in the `order` the spec gives.
+## Distinct rows get distinct numbers even when the sort keys tie.
+rowNumber : winspec r -> win (expr r int) = sql "ROW_NUMBER()"
+
+## Rank within the partition: tied rows share a rank, and the next rank skips
+## the tie (1, 2, 2, 4).
+rank : winspec r -> win (expr r int) = sql "RANK()"
+
+## Dense rank: tied rows share a rank and the next rank does not skip
+## (1, 2, 2, 3).
+denseRank : winspec r -> win (expr r int) = sql "DENSE_RANK()"
+
+## The value of `x` on the row `n` rows before this one in the partition —
+## `lag spec 1 .x` for the previous row. NULL at the partition edge.
+lag : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LAG($1)"
+
+## The value of `x` on the row `n` rows after this one. NULL at the partition
+## edge.
+lead : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LEAD($1)"
+
+## The first value of `x` in the window's frame. With the default frame this is
+## the partition's first row; with a moving frame it is the frame's first row —
+## which is why a `lastValue` of a running frame is not the partition's last
+## value unless the frame is `wholePartition`.
+firstValue : winspec r -> expr r a -> win (expr r (maybe a)) = sql "FIRST_VALUE($1)"
+
+## The last value of `x` in the window's frame; NULL when the frame is empty.
+## See `firstValue` about the frame's effect.
+lastValue : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LAST_VALUE($1)"
+
+## `ntile spec 4` numbers the partition's rows 1..4, as evenly as the row count
+## allows — a quartile bucket per row.
+ntile : winspec r -> expr r int -> win (expr r int) = sql "NTILE($1)"
+
+## The relative rank of the row as a fraction strictly below 1: 0 for the first
+## row.
+percentRank : winspec r -> win (expr r float) = sql "PERCENT_RANK()"
+
+## The cumulative distribution: the proportion of the partition's rows at or
+## before this one, in (0, 1].
+cumeDist : winspec r -> win (expr r float) = sql "CUME_DIST()"
+
+# ── window frames ─────────────────────────────────────────────────────────
+
+## `rows start end`: a frame counted in rows rather than in peer groups —
+## `rows unboundedPreceding currentRow` is the running total. The spec's
+## `frame` field is where the two bounds go.
+rows : bound -> bound -> frame = primitive "__rows"
+
+## Frame bound: the start of the partition, with no limit.
+unboundedPreceding : bound = primitive "__unboundedPreceding"
+
+## Frame bound: the end of the partition, with no limit.
+unboundedFollowing : bound = primitive "__unboundedFollowing"
+
+## Frame bound: the current row.
+currentRow : bound = primitive "__currentRow"
+
+## Frame bound `n` rows before the current row: `rows (preceding 7) currentRow`
+## is a seven-row trailing window.
+preceding : expr r int -> bound = primitive "__preceding"
+
+## Frame bound `n` rows after the current row, for a centred window.
+following : expr r int -> bound = primitive "__following"
+
+## The whole partition as a frame. Needed when a window aggregate should cover
+## the partition rather than accumulate over it.
+wholePartition : frame = rows unboundedPreceding unboundedFollowing
+
+## The frame from the partition's start to the current row: the running total,
+## spelled out because writing it is how a running aggregate is meant.
+runningFrame : frame = rows unboundedPreceding currentRow
+
+# ── scalar operators and functions ────────────────────────────────────────
+
+## `a == b`, SQL `=`. NULL if either side is NULL: a comparison with NULL is
+## never true, which is what `isNull` and `eqMaybe` are for.
+_==_ : expr r a -> expr r a -> expr r bool = sql "$1 = $2"
+_==_ : expr r (maybe a) -> expr r (maybe a) -> expr r (maybe bool) = sql "$1 = $2"
+
+## `a != b`, SQL `<>`.
+_!=_ : expr r a -> expr r a -> expr r bool = sql "$1 <> $2"
+_!=_ : expr r (maybe a) -> expr r (maybe a) -> expr r (maybe bool) = sql "$1 <> $2"
+
+## `a < b`. NULL if either side is NULL.
+_<_ : expr r a -> expr r a -> expr r bool = sql "$1 < $2"
+_<_ : expr r (maybe a) -> expr r (maybe a) -> expr r (maybe bool) = sql "$1 < $2"
+
+## `a <= b`. NULL if either side is NULL.
+_<=_ : expr r a -> expr r a -> expr r bool = sql "$1 <= $2"
+_<=_ : expr r (maybe a) -> expr r (maybe a) -> expr r (maybe bool) = sql "$1 <= $2"
+
+## `a > b`. NULL if either side is NULL.
+_>_ : expr r a -> expr r a -> expr r bool = sql "$1 > $2"
+_>_ : expr r (maybe a) -> expr r (maybe a) -> expr r (maybe bool) = sql "$1 > $2"
+
+## `a >= b`. NULL if either side is NULL.
+_>=_ : expr r a -> expr r a -> expr r bool = sql "$1 >= $2"
+_>=_ : expr r (maybe a) -> expr r (maybe a) -> expr r (maybe bool) = sql "$1 >= $2"
+
+## Boolean AND. Both sides are non-null `bool`, so SQL's three-valued logic
+## does not apply here; a nullable predicate is made non-null first
+## (`isTrue`, `coalesce`).
+_&&_ : expr r bool -> expr r bool -> expr r bool = sql "$1 AND $2"
+
+## Boolean OR. Non-null `bool` on both sides, like `&&`.
+_||_ : expr r bool -> expr r bool -> expr r bool = sql "$1 OR $2"
+
+# Arithmetic is overloaded on int and float (no implicit conversions). On
+# ints, `/` truncates toward zero and `%` keeps the dividend's sign, in every
+# dialect.
+
+## Addition, overloaded on `int` and `float`.
+_+_ : expr r int -> expr r int -> expr r int = sql "$1 + $2"
+_+_ : expr r float -> expr r float -> expr r float = sql "$1 + $2"
+
+## Subtraction, overloaded on `int` and `float`.
+_-_ : expr r int -> expr r int -> expr r int = sql "$1 - $2"
+_-_ : expr r float -> expr r float -> expr r float = sql "$1 - $2"
+
+## Multiplication, overloaded on `int` and `float`.
+_*_ : expr r int -> expr r int -> expr r int = sql "$1 * $2"
+_*_ : expr r float -> expr r float -> expr r float = sql "$1 * $2"
+
+## Division, overloaded on `int` and `float`.
+##
+## Integer division truncates toward zero in every dialect — `7 / 2` is 3 and
+## `-7 / 2` is -3. The `CAGARA_IDIV` rewrite is what makes that uniform: SQL
+## engines disagree about integer division, and SQLite returns a float.
+_/_ : expr r int -> expr r int -> expr r int = sql "CAGARA_IDIV($1, $2)"
+_/_ : expr r float -> expr r float -> expr r float = sql "$1 / $2"
+
+## Remainder, `int` only. The result keeps the dividend's sign — `-7 % 2` is
+## -1 — in every dialect, which `CAGARA_MOD` guarantees.
+_%_ : expr r int -> expr r int -> expr r int = sql "CAGARA_MOD($1, $2)"
+
+# ── nulls: operators need non-null arguments, so nulls are handled here ────
+
+## `coalesce default x`, like Haskell's `fromMaybe`: `x` if it is not NULL, the
+## default otherwise. Default first and subject last, so `coalesce 0` is a
+## reusable "or zero".
+##
+## The infix form is `x ?? default` (right-associative, tighter than arithmetic:
+## `.a ?? .b ?? 0`, `.n ?? 0 + 1`).
+coalesce : expr r a -> expr r (maybe a) -> expr r a = sql "COALESCE($2, $1)"
+coalesce : expr r (maybe a) -> expr r (maybe a) -> expr r a = sql "COALESCE($2, $1)"
+
+## `x ?? default` is `coalesce default x`, written with the nullable value
+## first. Right-associative, so `.a ?? .b ?? 0` chains.
+_??_ : expr r (maybe a) -> expr r a -> expr r a = sql "COALESCE($1, $2)"
+
+## Lift a non-null value into `maybe`. It does not create NULL — that is
+## `nothing` — so `just x` is the "this one is present" spelling in a record of
+## optional fields.
+just : expr r a -> expr r (maybe a) = sql "$1"
+
+## A SQL NULL at any nullable type, in any phase. The only way to write NULL:
+## every other expression is non-null by its signature.
+nothing : expr r (maybe a) = sql "NULL"
+
+## Whether a nullable value is NULL. The result is non-null `bool`, which is
+## what makes it usable in `where`.
+isNull : expr r (maybe a) -> expr r bool = sql "$1 IS NULL"
+
+## Whether a nullable value is not NULL; non-null `bool`.
+isNotNull : expr r (maybe a) -> expr r bool = sql "$1 IS NOT NULL"
+
+## A nullable `bool` as a plain one, with NULL read as false — the same choice
+## `where` makes, stated where the value is used rather than where it is
+## filtered.
+isTrue : expr r (maybe bool) -> expr r bool = sql "COALESCE($1, FALSE)"

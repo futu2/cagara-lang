@@ -34,6 +34,10 @@ pub(crate) type Res<T> = Result<T, Box<dyn Error + Send + Sync>>;
 struct Doc {
     path: PathBuf,
     text: String,
+    /// The `version` the client last sent. It goes back out with the
+    /// diagnostics, so a client can tell a stale publish from a current one
+    /// when they arrive out of order.
+    version: Option<i32>,
 }
 
 struct State {
@@ -157,7 +161,13 @@ pub fn run(build: &str) -> Res<()> {
 /// one, of the text the user is actually looking at.
 fn serve(conn: &Connection, build: &str) -> Res<()> {
     let caps = ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        // Incremental: the client sends the range it changed, not the whole
+        // document. A 2000-line file costs a few dozen bytes per keystroke
+        // instead of the file, and the server applies the edit to the text it
+        // already has — see `apply_change`.
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(
+            TextDocumentSyncKind::INCREMENTAL,
+        )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
@@ -402,6 +412,54 @@ fn doc_key(uri: &Uri) -> String {
     uri.as_str().to_string()
 }
 
+/// Apply one LSP range edit to `text`.
+///
+/// Positions are UTF-16 line/character pairs, which is what the protocol
+/// counts and not what Rust strings count: a column is a number of `u16` code
+/// units, so a character outside the basic plane counts as two. The conversion
+/// is done here rather than by editing bytes, because a byte offset computed
+/// from a UTF-16 column lands inside a character and panics on the next slice.
+///
+/// A range that does not fit the text — a client and server that disagree
+/// about the version — replaces nothing rather than panicking: the next
+/// `didOpen` (or a full-document change) resynchronises, and an editor must not
+/// be able to end the session with a stale offset.
+fn apply_change(text: &str, range: lsp_types::Range, replacement: &str) -> String {
+    let offset = |p: lsp_types::Position| -> Option<usize> {
+        let line_start = text
+            .split('\n')
+            .take(p.line as usize)
+            .map(|l| l.len() + 1)
+            .sum::<usize>();
+        if p.line as usize > text.split('\n').count() {
+            return None;
+        }
+        let line = text.split('\n').nth(p.line as usize)?;
+        let mut units = 0u32;
+        for (i, c) in line.char_indices() {
+            if units == p.character {
+                return Some(line_start + i);
+            }
+            units += c.len_utf16() as u32;
+            if units > p.character {
+                // The position points inside a character.
+                return None;
+            }
+        }
+        (units == p.character).then_some(line_start + line.len())
+    };
+    match (offset(range.start), offset(range.end)) {
+        (Some(a), Some(b)) if a <= b && b <= text.len() => {
+            let mut out = String::with_capacity(text.len() - (b - a) + replacement.len());
+            out.push_str(&text[..a]);
+            out.push_str(replacement);
+            out.push_str(&text[b..]);
+            out
+        }
+        _ => text.to_string(),
+    }
+}
+
 fn request(
     state: &mut State,
     method: &str,
@@ -521,6 +579,7 @@ fn notification(sender: &Sender<Message>, state: &mut State, n: Notification) ->
                 Doc {
                     path: path.clone(),
                     text: text.clone(),
+                    version: Some(p.text_document.version),
                 },
             );
             // Opening a document adds it to the graph that is already loaded.
@@ -535,14 +594,21 @@ fn notification(sender: &Sender<Message>, state: &mut State, n: Notification) ->
         }
         DidChangeTextDocument::METHOD => {
             let p: lsp_types::DidChangeTextDocumentParams = serde_json::from_value(n.params)?;
-            let Some(change) = p.content_changes.into_iter().last() else {
-                return Ok(());
-            };
             let key = doc_key(&p.text_document.uri);
             let Some(doc) = state.docs.get_mut(&key) else {
                 return Ok(());
             };
-            doc.text = change.text;
+            doc.version = Some(p.text_document.version);
+            // The client sends each change against the text *it* has already
+            // applied, so they are applied in order to the text we have. A
+            // change with no range is a whole-document replacement, which is
+            // what a client that ignores the incremental capability sends.
+            for change in p.content_changes {
+                doc.text = match change.range {
+                    None => change.text,
+                    Some(range) => apply_change(&doc.text, range, &change.text),
+                };
+            }
             // A keystroke usually does not change imports: patch that module
             // in place so salsa's memoized checks survive, and rebuild the
             // whole graph from disk only when they do.
@@ -639,7 +705,8 @@ fn publish_doc(sender: &Sender<Message>, state: &mut State, key: &str) -> Res<()
     let uri: Uri = key
         .parse()
         .map_err(|e| format!("invalid document URI: {e}"))?;
-    publish(sender, uri, &state.ws)?;
+    let version = state.docs.get(key).and_then(|d| d.version);
+    publish(sender, uri, &state.ws, version)?;
     // These diagnostics were computed from the workspace as it is now, so this
     // root has nothing outstanding.
     let root = state.ws.root;
@@ -680,26 +747,31 @@ fn publish_dirty(sender: &Sender<Message>, state: &mut State) -> Res<()> {
         let uri: Uri = key
             .parse()
             .map_err(|e| format!("invalid document URI: {e}"))?;
-        publish(sender, uri, &state.ws)?;
+        let version = state.docs.get(&key).and_then(|d| d.version);
+        publish(sender, uri, &state.ws, version)?;
     }
     Ok(())
 }
 
-fn publish(sender: &Sender<Message>, uri: Uri, ws: &Workspace) -> Res<()> {
+fn publish(sender: &Sender<Message>, uri: Uri, ws: &Workspace, version: Option<i32>) -> Res<()> {
     let diagnostics: Vec<Diagnostic> = analysis::diagnostics(ws)
         .into_iter()
-        .map(|(range, message)| Diagnostic {
-            range,
-            severity: Some(DiagnosticSeverity::ERROR),
-            source: Some("cagara".into()),
-            message,
-            ..Default::default()
+        .map(|(range, message)| {
+            let code = analysis::diagnostic_code(&message);
+            Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(lsp_types::NumberOrString::String(code.into())),
+                source: Some("cagara".into()),
+                message,
+                ..Default::default()
+            }
         })
         .collect();
     let params = PublishDiagnosticsParams {
         uri,
         diagnostics,
-        version: None,
+        version,
     };
     sender.send(Message::Notification(Notification::new(
         PublishDiagnostics::METHOD.into(),
@@ -878,6 +950,118 @@ mod tests {
         out
     }
 
+    /// Collect every diagnostic message the client was sent.
+    fn messages(client: &Connection, quiet: Duration) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(message) = client.receiver.recv_timeout(quiet) {
+            let Message::Notification(n) = message else {
+                continue;
+            };
+            if n.method != PublishDiagnostics::METHOD {
+                continue;
+            }
+            let params: PublishDiagnosticsParams = serde_json::from_value(n.params).unwrap();
+            assert!(
+                params.version.is_some(),
+                "the document version is echoed back, so a stale publish is recognisable"
+            );
+            for d in params.diagnostics {
+                assert!(d.code.is_some(), "every diagnostic carries a code: {d:?}");
+                out.push(d.message);
+            }
+        }
+        out
+    }
+
+    /// A ranged `didChange` is an *edit*, not a whole-document replacement.
+    ///
+    /// The session advertises incremental sync, so this is the path every
+    /// keystroke takes. A server that ignored the range would keep only the
+    /// replacement text — a file of one word — and the next publish would say
+    /// so; a server that applied it to the wrong offset would report a
+    /// different error. Both are visible here.
+    #[test]
+    fn a_ranged_change_edits_the_document() {
+        let dir = std::env::temp_dir().join("cagara-lsp-incremental");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("q.cagara");
+        let src = "t : query { a = int } = table \"s\" \"t\"\nq = t & where (.a > 1)\n";
+        std::fs::write(&f, src).unwrap();
+
+        let (server, client) = Connection::memory();
+        let t =
+            std::thread::spawn(move || serve(&server, "0.3.1 (test)").map_err(|e| e.to_string()));
+        client
+            .sender
+            .send(request(1, "initialize", json!({ "capabilities": {} })))
+            .unwrap();
+        let _ = response(&client, 1);
+        client
+            .sender
+            .send(notify("initialized", json!({})))
+            .unwrap();
+        let _ = client.receiver.recv_timeout(Duration::from_secs(30));
+        let uri = format!("file://{}", f.display());
+        client
+            .sender
+            .send(notify(
+                "textDocument/didOpen",
+                json!({ "textDocument": {
+                    "uri": uri, "languageId": "cagara", "version": 1, "text": src
+                } }),
+            ))
+            .unwrap();
+        let quiet = Duration::from_millis(600);
+        assert!(messages(&client, quiet).is_empty(), "the file checks");
+
+        // Replace `(.a > 1)` with `(.nope > 1)`: line 1, columns 13..21.
+        client
+            .sender
+            .send(notify(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": { "uri": uri, "version": 2 },
+                    "contentChanges": [{
+                        "range": {
+                            "start": { "line": 1, "character": 13 },
+                            "end": { "line": 1, "character": 21 }
+                        },
+                        "text": "(.nope > 1)"
+                    }]
+                }),
+            ))
+            .unwrap();
+        let found = messages(&client, quiet);
+        assert!(
+            found.iter().any(|m| m.contains("no column `nope`")),
+            "the edited text was not checked: {found:?}"
+        );
+        // A whole-document change still works, which is what a client that
+        // ignores the capability sends.
+        client
+            .sender
+            .send(notify(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": { "uri": uri, "version": 3 },
+                    "contentChanges": [{ "text": src }]
+                }),
+            ))
+            .unwrap();
+        assert!(
+            messages(&client, quiet).is_empty(),
+            "a full replacement with the original text checks again"
+        );
+
+        client
+            .sender
+            .send(request(2, "shutdown", serde_json::Value::Null))
+            .unwrap();
+        let _ = response(&client, 2);
+        let _ = t.join().unwrap();
+    }
+
     /// A save republishes the documents whose modules changed, and no others.
     ///
     /// Every save used to publish every open document, three times over: once
@@ -988,5 +1172,68 @@ mod tests {
             .send(notify("exit", serde_json::Value::Null))
             .unwrap();
         t.join().unwrap().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod incremental_tests {
+    use super::apply_change;
+    use lsp_types::{Position, Range};
+
+    fn range(sl: u32, sc: u32, el: u32, ec: u32) -> Range {
+        Range {
+            start: Position {
+                line: sl,
+                character: sc,
+            },
+            end: Position {
+                line: el,
+                character: ec,
+            },
+        }
+    }
+
+    /// A range edit replaces exactly the text between the two UTF-16
+    /// positions, and nothing else.
+    #[test]
+    fn a_range_edit_replaces_what_it_covers() {
+        let text = "q = users & where (.age > 18)\n";
+        // `users` -> `people`.
+        let out = apply_change(text, range(0, 4, 0, 9), "people");
+        assert_eq!(out, "q = people & where (.age > 18)\n");
+        // An insertion (empty range) at the end of a line: after `)`.
+        let out = apply_change(text, range(0, 29, 0, 29), " & limit 1");
+        assert_eq!(out, "q = users & where (.age > 18) & limit 1\n");
+        // A deletion.
+        let out = apply_change(text, range(0, 3, 0, 9), "");
+        assert_eq!(out, "q = & where (.age > 18)\n");
+        // Across lines: everything from the end of the first line to the end
+        // of the second is one range, and replacing it joins the text.
+        let text = "a = 1\nb = 2\n";
+        let out = apply_change(text, range(0, 5, 1, 5), " & 1");
+        assert_eq!(out, "a = 1 & 1\n");
+    }
+
+    /// Columns are UTF-16 code units, not bytes: an emoji before the edit point
+    /// is two columns wide, and the edit still lands where the client meant.
+    #[test]
+    fn columns_count_utf16_units() {
+        let text = "s = \"🎉\" & upper \"x\"\n";
+        // `upper` starts at column 11 (the emoji counts as two).
+        let out = apply_change(text, range(0, 11, 0, 16), "lower");
+        assert_eq!(out, "s = \"🎉\" & lower \"x\"\n");
+    }
+
+    /// A position that does not fit the text leaves it alone rather than
+    /// panicking or slicing inside a character: a client and server that
+    /// disagree about the version must not end the session.
+    #[test]
+    fn a_stale_range_changes_nothing() {
+        let text = "q = 1\n";
+        assert_eq!(apply_change(text, range(9, 0, 9, 3), "x"), text);
+        assert_eq!(apply_change(text, range(0, 10, 0, 12), "x"), text);
+        // Inside the emoji: column 5 is the low half of the surrogate pair.
+        let text = "s = \"🎉\"\n";
+        assert_eq!(apply_change(text, range(0, 6, 0, 7), "x"), text);
     }
 }

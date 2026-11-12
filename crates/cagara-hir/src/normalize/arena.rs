@@ -103,6 +103,9 @@ pub(crate) enum Payload {
     Predicate(CheckedExpr),
     /// `select`/`update`/`agg` fields, in source order.
     Fields(Vec<(String, CheckedExpr)>),
+    /// A join predicate, plus the fields a `joinspec` takes from the right
+    /// side (empty when the predicate is all the join was given).
+    On(CheckedExpr),
     /// `order` keys, in source order.
     Keys(Vec<(CheckedExpr, bool)>),
     /// `prefix "s"` / `suffix "s"`.
@@ -114,7 +117,6 @@ pub(crate) enum Payload {
     /// `limit n` / `offset n`.
     Count(i64),
     /// A join's `on`.
-    On(CheckedExpr),
     /// A set operation and a distinct carry no payload.
     None,
 }
@@ -284,9 +286,9 @@ impl Builder {
         let (kind, payload) = match kept {
             Kept::Filter(pred) => {
                 crate::checked::place(Place::Where, &pred, origin)?;
-                if !pred.ty().is_bool() {
+                if !pred.ty().is_condition() {
                     return Err(Error::new(format!(
-                        "a `where` predicate must be bool, found {}",
+                        "a `where` predicate must be bool or maybe bool, found {}",
                         pred.ty()
                     ))
                     .at(origin));

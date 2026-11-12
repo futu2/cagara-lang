@@ -2,7 +2,7 @@
 //!
 //! `docs/LEARN.md` teaches the stage shorthands with a table, and every
 //! shorthand in it is a claim about two things: that the symbol is in the
-//! compiler's fixed operator table, and that `prelude.cagara` defines it as the
+//! compiler's fixed operator table, and that the prelude defines it as the
 //! stage the table names. Both halves were wrong at once and nothing noticed.
 //!
 //! `&^` was documented as `offset` for several releases. It had been accurate
@@ -101,7 +101,7 @@ fn documented() -> BTreeMap<String, String> {
 /// The stage shorthands in the fixed table and their prelude meanings, as
 /// `symbol -> stage`.
 ///
-/// The symbol comes from `ops.rs`; the definition in `prelude.cagara` is
+/// The symbol comes from `ops.rs`; the definition in the prelude is
 /// `_&X_ : ... = body`. The stage is read from the **body's final call**, which
 /// is the only place it appears:
 ///
@@ -119,18 +119,21 @@ fn documented() -> BTreeMap<String, String> {
 /// names the stage.
 ///
 /// The search is for a line that *starts* with the definition name, because
-/// `prelude.cagara` also contains a commented-out example of exactly this form —
+/// the prelude also contains a commented-out example of exactly this form —
 /// a plain `find` over the text matches the comment first, which is how the
 /// `&^` row was read as `...` on the first attempt.
 ///
 /// The shorthands the language has, and what each means.
 ///
 /// The **symbols** come from the core's fixed table, which is the only place a
-/// shorthand's spelling lives. The **meaning** comes from `prelude.cagara`, as
+/// shorthand's spelling lives. The **meaning** comes from the prelude, as
 /// the `_&^_` definition — spelling and meaning are two different facts and
 /// live in two places.
 fn shorthands() -> BTreeMap<String, String> {
-    let text = std::fs::read_to_string(repo_root().join("prelude.cagara")).expect("prelude.cagara");
+    let text = ["prelude/core.cagara", "prelude/std.cagara"]
+        .iter()
+        .map(|p| std::fs::read_to_string(repo_root().join(p)).expect(p))
+        .collect::<String>();
     let ops = std::fs::read_to_string(repo_root().join("crates/cagara-syntax/src/ops.rs"))
         .expect("ops.rs");
     let mut symbols: Vec<String> = Vec::new();
@@ -166,57 +169,33 @@ fn shorthands() -> BTreeMap<String, String> {
             out.insert(sym.clone(), stage.to_string());
         }
     }
-    assert!(
-        out.len() >= 10,
-        "read {} shorthand(s) from the fixity table and the prelude: {out:?}",
-        out.len()
-    );
     out
 }
 
-/// Every shorthand the guide lists means what the prelude says it means.
+/// The guide's operator table and the language's fixed table must agree.
 #[test]
-fn the_guide_shorthand_table_matches_the_prelude() {
-    let doc = documented();
-    let shorthands = shorthands();
-
-    for (sym, stage) in &doc {
-        let Some(actual) = shorthands.get(sym) else {
-            panic!(
-                "docs/LEARN.md documents `{sym}` as `{stage}`, but the fixed operator \
-                 table does not contain `{sym}`. Remove the row — a row for an \
-                 unknown symbol is what `&~` was when the guide used it as its \
-                 example of an unknown operator."
-            );
-        };
-        assert_eq!(
-            actual, stage,
-            "docs/LEARN.md documents `{sym}` as `{stage}`, but the prelude defines \
-             it as `{actual}`. This is the `&^` bug: the symbol was documented as \
-             `offset` while the prelude bound it to `intersect`, so a reader \
-             copying the guide got a type error."
+fn the_guide_teaches_every_operator_the_language_has() {
+    // The guide's operator table is prose, and prose drifts. Compare it with
+    // the shipped table in both directions: a shorthand the language has but
+    // the guide never mentions is a missing page, and a shorthand the guide
+    // teaches but the parser does not have is a lie. Both are quiet failures
+    // without this test — the first leaves a useful spelling undocumented, the
+    // second makes every copied example a syntax error.
+    let guide = documented();
+    let table = shorthands();
+    for (op, named) in &table {
+        match guide.get(op) {
+            Some(taught) => assert_eq!(
+                taught, named,
+                "the guide pairs `{op}` with `{taught}`, the table with `{named}`"
+            ),
+            None => panic!("`{op}` is in the table but the guide never mentions it"),
+        }
+    }
+    for op in guide.keys() {
+        assert!(
+            table.contains_key(op),
+            "the guide teaches `{op}`, which the parser does not have"
         );
     }
-}
-
-/// The guide's table is not missing any shorthand in the fixed table.
-///
-/// The completeness half, and the one that would have caught the `&^` bug
-/// sooner: an incomplete table gives a reader no reason to doubt the rows it
-/// does have.
-#[test]
-fn the_guide_lists_every_table_shorthand() {
-    let doc = documented();
-    let shorthands = shorthands();
-
-    let missing: Vec<&String> = shorthands
-        .keys()
-        .filter(|s| !doc.contains_key(*s))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "the fixed table contains {missing:?} but docs/LEARN.md does not list them. \
-         An incomplete table is how a wrong entry hides — the guide omitted the \
-         four set operations while documenting `&^` as the wrong stage."
-    );
 }

@@ -6,7 +6,7 @@ use crate::db::{Database, DefAst, DefInput, ModuleInput, SourceFile};
 use crate::incremental::CachedCompilation;
 use crate::lower::{parse_module, ParsedModule};
 use crate::resolve::{module_own, module_scope};
-use cagara_syntax::ast::{Def, Import, Module, Span};
+use cagara_syntax::ast::{Def, Import, Module, Span, TypeExpr};
 use salsa::Setter;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -14,7 +14,14 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub const PRELUDE_SRC: &str = include_str!("../../../prelude.cagara");
+/// The prelude, in two files: the language's own core and the standard
+/// library. One string, because the checker sees one module — the split is a
+/// fact about where the definitions live, not about how they are resolved.
+pub const PRELUDE_SRC: &str = concat!(
+    include_str!("../../../prelude/core.cagara"),
+    "\n",
+    include_str!("../../../prelude/std.cagara")
+);
 pub(crate) const PRELUDE_PATH: &str = "<prelude>";
 
 /// Where the speculative probe module of [`Workspace::probe_fields`] is filed.
@@ -1045,7 +1052,186 @@ fn file_diags(
             msg,
         ));
     }
+    // An overload may replace *types*, never the number of parameters.
+    //
+    // A name with two arities poisons every partial application: `f .a` fits
+    // the one-parameter candidate and the two-parameter one that is still
+    // waiting for its second argument, so the checker reports `ambiguous use`
+    // at some call site instead of the definition that caused it.
+    let mut uneven: Vec<(usize, &str, usize, usize)> = Vec::new();
+    for (name, b) in own {
+        if let Binding::Overloads(_, is) = b {
+            let mut first: Option<usize> = None;
+            for &i in is {
+                let Some(ty) = &parsed.module.defs[i].ty else {
+                    continue;
+                };
+                let n = params_of(ty);
+                match first {
+                    None => first = Some(n),
+                    Some(m) if m != n => uneven.push((i, name.as_str(), n, m)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    // Two definitions of one name with the *same* signature: the second can
+    // never be selected, so it is a mistake rather than an overload.
+    let mut duplicates: Vec<(usize, &str, usize)> = Vec::new();
+    for (name, b) in own {
+        if let Binding::Overloads(_, is) = b {
+            for (k, &i) in is.iter().enumerate() {
+                let Some(ti) = &parsed.module.defs[i].ty else {
+                    continue;
+                };
+                for &j in &is[k + 1..] {
+                    let Some(tj) = &parsed.module.defs[j].ty else {
+                        continue;
+                    };
+                    if same_signature(ti, tj) {
+                        duplicates.push((j, name.as_str(), i));
+                    }
+                }
+            }
+        }
+    }
+    duplicates.sort();
+    for (j, name, i) in duplicates {
+        let first = line_of(text, parsed.module.defs[i].span.start as usize);
+        let msg = format!(
+            "`{name}` has two definitions with the same signature, so this one can never be \
+             chosen: every use that fits it fits the one at line {}. An overload must replace a \
+             type (`int` for `float`, `maybe a` for `a`), not repeat it",
+            first
+        );
+        out.push(make_diag_indexed(
+            path,
+            text,
+            &starts,
+            parsed.module.defs[j].span.start as usize,
+            parsed.module.defs[j].span.start as usize,
+            msg,
+        ));
+    }
+    uneven.sort();
+    for (i, name, n, want) in uneven {
+        let msg = format!(
+            "`{name}` is overloaded with different numbers of parameters: this definition takes \
+             {n}, the others take {want}. An overload may replace types, not parameters, because \
+             `{name} x` must have exactly one meaning"
+        );
+        out.push(make_diag_indexed(
+            path,
+            text,
+            &starts,
+            parsed.module.defs[i].span.start as usize,
+            parsed.module.defs[i].span.start as usize,
+            msg,
+        ));
+    }
     out
+}
+
+/// The 1-based line a byte offset falls on.
+fn line_of(text: &str, offset: usize) -> usize {
+    1 + text
+        .as_bytes()
+        .iter()
+        .take(offset.min(text.len()))
+        .filter(|b| **b == b'\n')
+        .count()
+}
+
+/// Two signatures that are the same up to the names of their type variables.
+///
+/// This is the *duplicate* case, not every overlap. `sum : expr r int -> …`
+/// next to `sum : expr r float -> …` is two different types; `asc : expr r a ->
+/// sortkey r` next to `asc : expr r (maybe a) -> sortkey r` differs by a
+/// constructor. Both are intended. Two definitions whose signatures normalize
+/// to the same string are not: the second can never be chosen, because every
+/// use that fits it fits the first, so the only thing it adds is a call site
+/// that reports `ambiguous use`.
+///
+/// A stronger rule — "one signature is an instance of the other, so it is
+/// dead" — is what §11.13 of the design asked for, and it is *wrong* here for
+/// exactly the reason the nullable overloads work: `a` cannot be instantiated
+/// with a `maybe`, so `a` does not subsume `maybe a`. Deciding that needs the
+/// checker's nullability policy, which this syntactic pass does not have; the
+/// duplicate rule is the part that is true either way.
+fn same_signature(a: &TypeExpr, b: &TypeExpr) -> bool {
+    fn normalize(t: &TypeExpr, vars: &mut Vec<String>, out: &mut String) {
+        match t {
+            TypeExpr::Fun(p, r) => {
+                out.push('(');
+                normalize(p, vars, out);
+                out.push_str(" -> ");
+                normalize(r, vars, out);
+                out.push(')');
+            }
+            TypeExpr::App { head, args, .. } => {
+                // A bare single lowercase letter is a type variable; naming it by
+                // first appearance makes `a -> a` and `b -> b` the same string.
+                if args.is_empty() && head.len() == 1 && head.as_bytes()[0].is_ascii_lowercase() {
+                    let n = match vars.iter().position(|v| v == head) {
+                        Some(i) => i,
+                        None => {
+                            vars.push(head.clone());
+                            vars.len() - 1
+                        }
+                    };
+                    out.push_str(&format!("v{n}"));
+                    return;
+                }
+                out.push_str(head);
+                if !args.is_empty() {
+                    out.push('(');
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        normalize(a, vars, out);
+                    }
+                    out.push(')');
+                }
+            }
+            TypeExpr::Record { fields, tail, .. } => {
+                out.push('{');
+                for (i, f) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&f.name);
+                    out.push_str(" = ");
+                    normalize(&f.ty, vars, out);
+                }
+                if let Some(t) = tail {
+                    out.push_str(" | ");
+                    out.push_str(t);
+                }
+                out.push('}');
+            }
+            TypeExpr::Str(s, _) => {
+                out.push('"');
+                out.push_str(s);
+                out.push('"');
+            }
+            TypeExpr::Error(_) => out.push('?'),
+        }
+    }
+    let mut ka = Vec::new();
+    let mut kb = Vec::new();
+    let (mut sa, mut sb) = (String::new(), String::new());
+    normalize(a, &mut ka, &mut sa);
+    normalize(b, &mut kb, &mut sb);
+    sa == sb
+}
+
+/// How many parameters a signature declares.
+fn params_of(ty: &TypeExpr) -> usize {
+    match ty {
+        TypeExpr::Fun(_, r) => 1 + params_of(r),
+        _ => 0,
+    }
 }
 
 fn make_diag(path: &Path, text: &str, offset: usize, message: String) -> Diag {

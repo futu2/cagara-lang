@@ -72,11 +72,23 @@ impl ScalarType {
         ScalarType::maybe(self)
     }
 
-    /// Is a value of this type usable as a condition? A `maybe bool` is not:
-    /// the language requires `coalesce` first, the same way its operators
-    /// refuse nullable arguments.
+    /// Is this type a `bool`?
     pub fn is_bool(&self) -> bool {
         matches!(self, ScalarType::Bool)
+    }
+
+    /// Is a value of this type usable as a **filter condition**?
+    ///
+    /// `bool` and `maybe bool`: SQL's `WHERE` already drops a NULL predicate,
+    /// so a three-valued condition means exactly what the stage means. Every
+    /// other consumer of a `bool` (a join predicate, `&&`, `ifThenElse`'s
+    /// condition) still requires the non-null one.
+    pub fn is_condition(&self) -> bool {
+        match self {
+            ScalarType::Bool => true,
+            ScalarType::Maybe(t) => matches!(**t, ScalarType::Bool),
+            _ => false,
+        }
     }
 }
 
@@ -406,6 +418,8 @@ mod tests {
     fn only_bool_is_a_condition() {
         assert!(ScalarType::Bool.is_bool());
         assert!(!ScalarType::Maybe(Box::new(ScalarType::Bool)).is_bool());
+        assert!(ScalarType::Bool.is_condition());
+        assert!(ScalarType::Maybe(Box::new(ScalarType::Bool)).is_condition());
         assert!(!ScalarType::Int.is_bool());
     }
 

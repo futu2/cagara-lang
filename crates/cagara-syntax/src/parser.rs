@@ -1382,27 +1382,14 @@ mod tests {
         assert!(p.syntax().descendants().any(|n| n.kind() == K::SqlExpr));
     }
 
+    /// A stage argument is one expression, and `&` chains left, so a record
+    /// argument and the next stage both parse — and arithmetic inside a stage
+    /// stays inside it, because `&` is looser than `+`.
     #[test]
-    fn join_binds_between_pipe_and_expressions() {
-        // `a & (b ? (x == y))`, then the stage shorthand applies to the join.
+    fn a_stage_takes_one_expression_at_a_time() {
         assert_eq!(
-            body("q = a & b ? .<x == .>y &= r"),
-            "(BinExpr (BinExpr (NameRef a) (BinExpr (NameRef b) (BinExpr (FieldExpr) (FieldExpr)))) (NameRef r))"
-        );
-        // Stage shorthands are left-assoc at the level of `&`.
-        assert_eq!(
-            body("q = a &? p && r &- 3"),
-            "(BinExpr (BinExpr (NameRef a) (BinExpr (NameRef p) (NameRef r))) (Literal 3))"
-        );
-    }
-
-    /// `&+` is one token and chains like the other stage shorthands, so a
-    /// record argument and a following shorthand both parse.
-    #[test]
-    fn update_shorthand_parses_like_its_siblings() {
-        assert_eq!(
-            body("q = a &+ {x = 1} &= {.x}"),
-            "(BinExpr (BinExpr (NameRef a) (RecordExpr (RecordField x (Literal 1)))) (RecordExpr (RecordField .x)))"
+            body("q = a & update {x = 1} & select {.x}"),
+            "(BinExpr (BinExpr (NameRef a) (App (NameRef update) (RecordExpr (RecordField x (Literal 1))))) (App (NameRef select) (RecordExpr (RecordField .x))))"
         );
         assert_eq!(
             body("q = a & b + c"),
@@ -1503,10 +1490,11 @@ mod tests {
         }
     }
 
-    /// Pipeline shorthands use the same expression budget as the long form.
+    /// A long pipeline stays within the same expression budget with the one
+    /// spelling the language has.
     #[test]
-    fn pipeline_shorthands_share_the_expression_budget() {
-        for op in ["&", "&?", "&=", "&+", "&*", "&.", "&-"] {
+    fn a_long_pipeline_stays_within_the_expression_budget() {
+        for op in ["&"] {
             let mut src = String::from("q = users");
             for i in 0..150 {
                 src.push_str(&format!(" {op} (.age > {i})"));
@@ -1604,7 +1592,8 @@ mod tests {
     /// `toInt >>> (toString == "5")`.
     #[test]
     fn combinators_bind_the_way_haskell_declares_them() {
-        for op in [">>>", "<<<"] {
+        {
+            let op = ">>>";
             // Composition is tighter than every other operator…
             assert_eq!(
                 body(&format!("q = a {op} b == c")),
@@ -1630,20 +1619,6 @@ mod tests {
                 "{op}"
             );
         }
-        // `$` is the loosest, so it applies a whole pipeline-shaped thing, and
-        // `&` sits just above it.
-        assert_eq!(
-            body("q = a $ b & c"),
-            "(BinExpr (NameRef a) (BinExpr (NameRef b) (NameRef c)))"
-        );
-        assert_eq!(
-            body("q = a & b $ c"),
-            "(BinExpr (BinExpr (NameRef a) (NameRef b)) (NameRef c))"
-        );
-        assert_eq!(
-            body("q = a $ b $ c"),
-            "(BinExpr (NameRef a) (BinExpr (NameRef b) (NameRef c)))"
-        );
     }
 
     #[test]
@@ -1794,11 +1769,11 @@ mod tests {
     #[test]
     fn concat_is_looser_than_arithmetic() {
         assert_eq!(
-            body("x = a <> b + c <> d"),
+            body("x = a ++ b + c ++ d"),
             "(BinExpr (NameRef a) (BinExpr (BinExpr (NameRef b) (NameRef c)) (NameRef d)))"
         );
         assert_eq!(
-            body("x = a == b <> c"),
+            body("x = a == b ++ c"),
             "(BinExpr (NameRef a) (BinExpr (NameRef b) (NameRef c)))"
         );
     }

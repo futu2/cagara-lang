@@ -3,7 +3,7 @@
 //! An operator is a *spelling* (`+`, `&?`, `~>`). The lexer produces the
 //! spelling and this table says what the parser should do with it. Meaning is
 //! never here: `a + b` desugars to the application `_+_ a b`, and `_+_` is an
-//! ordinary definition in `prelude.cagara`. So the core knows spellings and
+//! ordinary definition in the prelude. So the core knows spellings and
 //! precedence and nothing else.
 //!
 //! There is one kind of thing here. `+`, `&` and `&+` are all infix operators
@@ -26,7 +26,10 @@ use std::sync::OnceLock;
 /// The prelude defines the language's *meanings* (`_+_`, `_&^_`, …), so this
 /// crate reads it to check that the table and the definitions agree. Every
 /// other use of the prelude is in `cagara-hir`, which loads it as module 0.
-pub const PRELUDE_SRC: &str = include_str!("../../../prelude.cagara");
+pub const PRELUDE_SRC: &str = concat!(
+    include_str!("../../../prelude/core.cagara"),
+    include_str!("../../../prelude/std.cagara")
+);
 
 /// Tightest level the table could use. Binding powers are compared as `u8` and
 /// an operator at level `n` spends `n + 1` on one of its two binding powers,
@@ -82,27 +85,33 @@ impl Fixity {
 ///
 /// Ordering here is for reading only; [`Ops::find`] is the lookup.
 const FIXITY: &[(&str, Fixity)] = &[
-    // Loosest: function application, reversed.
+    // Loose application: `f $ x` is `f x`, and it binds loosest so a pipeline
+    // can be the argument of an operator without parentheses.
     ("$", Fixity::right(0)),
-    // The pipeline, and every stage shorthand beside it. An operator is a
-    // stage because it sits at `&`'s level, so adding one here is what makes
-    // `&^` a stage rather than an ordinary operator.
+    // The pipeline. Every stage shorthand sits at this same level, which is the
+    // whole of what "shorthand" means here: `q &? p` and `q & where p` are the
+    // same operator at the same precedence, differing only in spelling. The
+    // shorthands are *aliases* in the prelude, so they carry the named stage's
+    // signatures — including its nullable one — instead of being a second
+    // definition that can drift away from it.
+    //
+    // The join shorthands (`?`, `<?`, `?>`, `<?>`) are one level looser, so
+    // `q & orders ? on` reads as the pipeline it is.
     ("&", Fixity::left(1)),
-    ("&!", Fixity::left(1)),
-    ("&*", Fixity::left(1)),
-    ("&+", Fixity::left(1)),
-    ("&-", Fixity::left(1)),
-    ("&.", Fixity::left(1)),
-    ("&=", Fixity::left(1)),
-    ("&?", Fixity::left(1)),
-    ("&^", Fixity::left(1)),
-    ("&|", Fixity::left(1)),
-    ("&~", Fixity::left(1)),
-    // Joins, between the pipeline and every expression operator.
-    ("?", Fixity::left(3)),
-    ("<?", Fixity::left(3)),
-    ("?>", Fixity::left(3)),
-    ("<?>", Fixity::left(3)),
+    ("&?", Fixity::left(1)),  // where
+    ("&=", Fixity::left(1)),  // select
+    ("&+", Fixity::left(1)),  // update
+    ("&*", Fixity::left(1)),  // agg
+    ("&.", Fixity::left(1)),  // order
+    ("&-", Fixity::left(1)),  // limit
+    ("&|", Fixity::left(1)),  // union
+    ("&!", Fixity::left(1)),  // unionAll
+    ("&^", Fixity::left(1)),  // intersect
+    ("&~", Fixity::left(1)),  // except
+    ("?", Fixity::left(3)),   // innerJoin
+    ("<?", Fixity::left(3)),  // leftJoin
+    ("?>", Fixity::left(3)),  // rightJoin
+    ("<?>", Fixity::left(3)), // fullJoin
     // Logic.
     ("||", Fixity::left(9)),
     ("&&", Fixity::left(11)),
@@ -113,7 +122,8 @@ const FIXITY: &[(&str, Fixity)] = &[
     ("<=", Fixity::left(13)),
     (">", Fixity::left(13)),
     (">=", Fixity::left(13)),
-    ("<>", Fixity::right(15)), // string concatenation
+    ("++", Fixity::right(15)), // string concatenation
+    ("<>", Fixity::right(15)), // the same, in the spelling Haskell uses
     // Arithmetic.
     ("+", Fixity::left(17)),
     ("-", Fixity::left(17)),
@@ -246,7 +256,7 @@ mod tests {
         // Left-assoc, right-assoc, and the tightest expression operator.
         assert_eq!(ops.find("+").unwrap().precedence(), (17, 18));
         assert_eq!(ops.find("??").unwrap().precedence(), (22, 21));
-        assert_eq!(ops.find("<>").unwrap().precedence(), (16, 15));
+        assert_eq!(ops.find("++").unwrap().precedence(), (16, 15));
         // `+` is an ordinary operator, not a stage.
         assert!(!ops.is_stage("+"));
     }
@@ -263,79 +273,68 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
     }
 
-    /// The function combinators carry Haskell's fixities: `$` is right at
-    /// level 0, `&` is left at level 1 (`Data.Function`), and the two
-    /// directions of composition are right at level 23, tighter than every
-    /// other operator the way `(.)` is in Haskell.
+    /// The pipeline is the loosest operator but one, and composition is the
+    /// tightest: `f >>> g` composes before anything else sees it.
+    ///
+    /// Every stage shorthand sits *at the pipe level* — that is all a shorthand
+    /// is — while the join operators sit one level looser, so `q & orders ? on`
+    /// reads as the pipeline it is.
     #[test]
-    fn the_combinators_follow_haskell() {
+    fn the_pipeline_and_composition_keep_their_places() {
         let ops = ops();
-        assert_eq!(ops.find("$").unwrap().precedence(), (1, 0));
         assert_eq!(ops.find("&").unwrap().precedence(), (1, 2));
         assert_eq!(ops.find(">>>").unwrap().precedence(), (24, 23));
-        // The two directions of composition are a mirror pair: same fixity.
-        assert_eq!(
-            ops.find("<<<").unwrap(),
-            ops.find(">>>").unwrap(),
-            "`>>>` and `<<<` are the same operator in two directions"
-        );
-        // `$` is the loosest operator there is, application excluded.
-        for s in ops.spellings() {
-            if s != "$" {
-                assert!(
-                    ops.find(s).unwrap().l_bp >= ops.find("$").unwrap().l_bp,
-                    "`{s}` is looser than `$`"
-                );
-            }
-        }
-        // Composition is the tightest, so `f >>> g $ x` composes first, and
-        // `a & f >>> g` composes inside the stage.
+        assert_eq!(ops.find("<<<").unwrap().precedence(), (24, 23));
         assert!(ops.find(">>>").unwrap().l_bp > ops.find("??").unwrap().l_bp);
         assert!(ops.find(">>>").unwrap().l_bp > ops.find("*").unwrap().l_bp);
         assert!(ops.find(">>>").unwrap().l_bp > ops.find("==").unwrap().l_bp);
-        // None of them is a stage: only `&`'s exact fixity is.
-        assert!(ops.is_stage("&"));
-        assert!(!ops.is_stage("$"));
-        assert!(!ops.is_stage(">>>"));
-        assert!(!ops.is_stage("<<<"));
+        // `$` is the only thing looser than the pipe.
+        assert_eq!(ops.find("$").unwrap().precedence(), (1, 0));
+        assert!(ops.find("$").unwrap().r_bp < ops.find("&").unwrap().l_bp);
+        // The joins are between the pipeline and logic.
+        for j in ["?", "<?", "?>", "<?>"] {
+            assert_eq!(ops.find(j).unwrap().precedence(), (3, 4), "`{j}`");
+            assert!(!ops.is_stage(j), "`{j}` is a join, not a stage");
+        }
     }
 
-    /// The fixed table contains the pipeline and every stage shorthand, all
-    /// at the level `&` sits at.
+    /// Every stage shorthand is a stage in exactly the sense `&` is: an
+    /// operator at the pipe level. Nothing declares a shorthand anywhere else —
+    /// the table is the list.
     #[test]
-    fn the_fixed_table_places_the_pipeline() {
+    fn the_stage_shorthands_sit_at_the_pipe_level() {
         let ops = ops();
-        assert_eq!(ops.pipe_fixity().unwrap().precedence(), (1, 2));
+        let pipe = ops.find("&").expect("`&`");
         for s in [
             "&", "&?", "&=", "&+", "&*", "&.", "&-", "&|", "&!", "&^", "&~",
         ] {
-            let f = ops.find(s).unwrap_or_else(|| panic!("`{s}` is undeclared"));
-            assert_eq!(f.precedence(), (1, 2), "`{s}` must sit at the pipe level");
-            assert!(ops.is_stage(s), "`{s}` must be a stage");
+            assert_eq!(ops.find(s), Some(pipe), "`{s}` must sit at the pipe level");
+            assert!(ops.is_stage(s), "`{s}` is a stage");
         }
-        // The joins are in the table at their own level, so they are not
-        // stages despite building a query.
-        for s in ["?", "<?", "?>", "<?>"] {
-            let f = ops.find(s).unwrap_or_else(|| panic!("`{s}` is undeclared"));
-            assert_eq!(f.precedence(), (3, 4));
-            assert!(!ops.is_stage(s), "`{s}` is a join, not a stage");
-        }
-        // Every operator at the pipe level is a stage, and this list is the
-        // whole of them. Keeping it exact is the point: the stage set is what
-        // source elaboration uses to recognise `q & stage`, so a new entry at
-        // this level changes how a pipeline is located for diagnostics.
         assert_eq!(
             ops.stages(),
-            ["&", "&!", "&*", "&+", "&-", "&.", "&=", "&?", "&^", "&|", "&~"]
+            ["&", "&!", "&*", "&+", "&-", "&.", "&=", "&?", "&^", "&|", "&~"],
+            "every shorthand and nothing else sits at the pipe level"
         );
+        // A stage shorthand writes the same SQL as the stage it spells; that is
+        // asserted end to end in `cagara-sql`'s
+        // `every_stage_shorthand_writes_the_same_sql`. Here we only pin that
+        // every one of them has a *meaning* in the prelude, so a spelling can
+        // never parse into an unknown name.
+        for s in ops.stages() {
+            let name = op_name(s);
+            assert!(
+                PRELUDE_SRC.contains(&format!("{name} :")),
+                "`{s}` parses but the prelude does not define `{name}`"
+            );
+        }
     }
 
     #[test]
     fn names_round_trip() {
-        assert_eq!(op_name("&?"), "_&?_");
-        assert_eq!(op_spelling("_&?_"), Some("&?"));
+        assert_eq!(op_name("??"), "_??_");
+        assert_eq!(op_spelling("_??_"), Some("??"));
         assert_eq!(op_spelling("_+_"), Some("+"));
-        assert_eq!(op_spelling("_$_"), Some("$"));
         assert_eq!(op_spelling("foo"), None);
         assert_eq!(op_spelling("__"), None);
         assert_eq!(op_spelling("_"), None);
@@ -359,9 +358,8 @@ mod tests {
             );
         }
         assert!(ops.is_stage("&"));
-        assert!(!ops.is_stage("?"));
         assert!(!ops.is_stage("*"));
-        assert!(!ops.is_stage("$"));
+        assert!(!ops.is_stage("??"));
     }
 
     /// Every operator spelling must survive lexing as a single token, or the

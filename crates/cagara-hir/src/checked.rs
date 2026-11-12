@@ -83,6 +83,13 @@ impl CheckedExpr {
 
     /// The scalar type this expression has, for a consumer that needs it
     /// without the node.
+    /// The node, for the few places that rewrite an expression rather than
+    /// read its type: the aggregate modifiers turn `SUM($1)` into
+    /// `SUM(CASE WHEN ... THEN ... END)` and need the template.
+    pub(crate) fn node(&self) -> &CheckedExprNode {
+        &self.node
+    }
+
     pub fn ty(&self) -> &ScalarType {
         &self.ty
     }

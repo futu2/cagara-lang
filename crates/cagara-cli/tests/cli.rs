@@ -363,7 +363,7 @@ fn the_dialect_changes_the_sql() {
     let f = dir.write(
         "t.cagara",
         "t : query { a = int, b = string } = table \"s\" \"t\"\n\
-         q = t & select { s = .b <> \"x\" }\n",
+         q = t & select { s = .b ++ \"x\" }\n",
     );
     let ansi = stdout(&run_with(&f, &["--only", "q"]));
     let mysql = stdout(&run_with(&f, &["--only", "q", "--dialect", "mysql"]));
@@ -641,4 +641,325 @@ fn lsp_help_succeeds() {
         assert!(stdout(&out).contains("cagara lsp"), "{}", stdout(&out));
         assert!(stderr(&out).is_empty(), "{}", stderr(&out));
     }
+}
+
+/// `--list` prints every root query, and `--arg` applies a definition to
+/// literals — both are ways to read a file of many definitions.
+///
+/// `--arg` needs no compiler support: it builds one more definition,
+/// `__cagara_args = <selected> <literal> …`, and compiles that, so a wrong
+/// argument type is reported by the ordinary checker and the output is labelled
+/// with the definition the user asked for, not the wrapper.
+#[test]
+fn list_prints_every_query_and_arg_applies_literals() {
+    let dir = TempDir::new("list-arg");
+    let path = dir.write(
+        "q.cagara",
+        "t : query { id = int, d = date } = table \"s\" \"t\"\n\
+         a = t & where (.id > 1)\n\
+         b = t & select { .id }\n",
+    );
+    let out = run_with(&path, &["--list"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("-- a\n"), "{text}");
+    assert!(text.contains("-- b\n"), "{text}");
+    assert!(text.contains("WHERE (id > 1)"), "{text}");
+
+    // A definition applied to a literal: a string literal widens to `date`.
+    let path = dir.write(
+        "since.cagara",
+        "t : query { id = int, d = date } = table \"s\" \"t\"\n\
+         since = (day : date) => t & where (.d >= day)\n",
+    );
+    let out = run_with(&path, &["--only", "since", "--arg", "2024-01-01"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.starts_with("-- since\n"), "{text}");
+    assert!(text.contains("(d >= '2024-01-01')"), "{text}");
+
+    // A number stays a number, and `main` may itself be the function.
+    let path = dir.write(
+        "n.cagara",
+        "t : query { id = int } = table \"s\" \"t\"\n\
+         main = (n : int) => t & where (.id > n)\n",
+    );
+    let out = run_with(&path, &["--arg", "5"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("(id > 5)"), "{}", stdout(&out));
+
+    // A value the definition cannot take fails like any other call.
+    let out = run_with(&path, &["--arg", "2024-01-01"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(!stderr(&out).is_empty(), "expected a diagnostic");
+}
+
+/// `--only alias.name` reads a definition out of an imported module, and asks
+/// for `--arg` when that definition is a function.
+///
+/// Both go through the same one-line wrapper (`__cagara_args = <name> …`), so
+/// an unknown module member is the ordinary "module `s` has no definition"
+/// error rather than a CLI-specific one.
+#[test]
+fn only_reaches_into_an_imported_module() {
+    let dir = TempDir::new("only-import");
+    std::fs::create_dir_all(dir.0.path().join("lib")).expect("lib dir");
+    dir.write(
+        "lib/s.cagara",
+        "users : query { id = int, name = string } = table \"p\" \"u\"\n\
+         byId = (i : int) => users & where (.id == i)\n",
+    );
+    let path = dir.write(
+        "top.cagara",
+        "import \"lib/s.cagara\" as s\nmain = s.users\n",
+    );
+
+    let out = run_with(&path, &["--only", "s.byId", "--arg", "3"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.starts_with("-- s.byId\n"), "{text}");
+    assert!(text.contains("WHERE (id = 3)"), "{text}");
+
+    // A function with no arguments supplied says what to do.
+    let out = run_with(&path, &["--only", "s.byId"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("is a function of 1 argument(s)") && stderr(&out).contains("--arg"),
+        "{}",
+        stderr(&out)
+    );
+
+    // An unknown member is the ordinary module error.
+    let out = run_with(&path, &["--only", "s.nope"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("has no definition `nope`"),
+        "{}",
+        stderr(&out)
+    );
+
+    // `--types` labels the result with the name that was asked for.
+    let out = run_with(&path, &["--only", "s.byId", "--types"]);
+    let text = stdout(&out);
+    assert!(text.starts_with("s.byId : "), "{text}");
+}
+
+/// `cagara check` answers "is this tree sound", one file per run, and says so
+/// in a machine-readable form with `--json`.
+///
+/// It checks each file as a *library*, so a directory of table declarations is
+/// reportable without one of them being `main`. Exit codes distinguish "found a
+/// diagnostic" (1) from "you called me wrong" (2), which is what a hook needs.
+#[test]
+fn check_reports_a_whole_tree() {
+    let dir = TempDir::new("check-tree");
+    dir.write(
+        "good.cagara",
+        "t : query { id = int } = table \"s\" \"t\"\nq = t & select { .id }\n",
+    );
+    std::fs::create_dir_all(dir.0.path().join("sub")).expect("sub dir");
+    dir.write(
+        "sub/bad.cagara",
+        "t : query { id = int } = table \"s\" \"t\"\nq = t & select { .nope }\n",
+    );
+    // A dot directory is an artifact or a cache, not part of the tree.
+    std::fs::create_dir_all(dir.0.path().join(".cache")).expect("cache dir");
+    dir.write(".cache/ignored.cagara", "q = .nope\n");
+
+    let out = cagara([std::ffi::OsString::from("check"), dir.0.path().into()]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("bad.cagara:2:9: error:"), "{err}");
+    assert!(err.contains("no column `nope`"), "{err}");
+    assert!(
+        !err.contains("ignored.cagara"),
+        "dot dirs are skipped: {err}"
+    );
+
+    // JSON: one object per line, with the words a consumer needs.
+    let out = cagara([
+        std::ffi::OsString::from("check"),
+        std::ffi::OsString::from("--json"),
+        dir.0.path().into(),
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    let line = lines[0];
+    assert!(line.starts_with('{') && line.ends_with('}'), "{line}");
+    assert!(line.contains("\"severity\":\"error\""), "{line}");
+    assert!(
+        line.contains("\"line\":2") && line.contains("\"column\":9"),
+        "{line}"
+    );
+    assert!(line.contains("no column `nope`"), "{line}");
+
+    // A clean file exits 0 and says nothing.
+    let out = cagara([
+        std::ffi::OsString::from("check"),
+        dir.0.path().join("good.cagara").into_os_string(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).is_empty() && stderr(&out).is_empty());
+}
+
+/// `--param name=value` supplies a definition the file leaves to its caller.
+///
+/// A parameter is an ordinary definition written at the end of the file, so the
+/// value is part of the compilation: it is checked against every use, and a
+/// wrong type is a type error at the *flag* rather than an SQL surprise. The
+/// literal is written the way `--arg` writes one — a number, `true`/`false`, or
+/// a quoted string, which widens to `date` where the signature says so.
+#[test]
+fn param_supplies_a_definition_the_file_leaves_open() {
+    let dir = TempDir::new("param");
+    let path = dir.write(
+        "q.cagara",
+        "orders : query { id = int, amount = float, created_at = date } = table \"s\" \"o\"\n\
+         main = orders & where (.created_at >= since) & where (.amount > floor_amount)\n",
+    );
+
+    // Without the flags the names do not exist: running the file alone says so.
+    let out = run(&path);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("unknown name `since`"),
+        "{}",
+        stderr(&out)
+    );
+
+    // A string literal widens to `date`; a number is a number.
+    let out = run_with(
+        &path,
+        &[
+            "--param",
+            "since=2024-01-01",
+            "--param",
+            "floor_amount=10.5",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("(created_at >= '2024-01-01')"), "{text}");
+    assert!(text.contains("(amount > 10.5)"), "{text}");
+
+    // A signature can be given when the literal alone is too vague.
+    let out = run_with(
+        &path,
+        &[
+            "--param",
+            "since:date=2024-01-01",
+            "--param",
+            "floor_amount:float=10",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("(amount > 10)"), "{}", stdout(&out));
+
+    // A value that does not fit is reported against the flag, not against a
+    // line of a file the user did not write.
+    let out = run_with(
+        &path,
+        &[
+            "--param",
+            "since:int=2024-01-01",
+            "--param",
+            "floor_amount=1",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    assert!(err.contains("`--param since:int=2024-01-01`"), "{err}");
+    assert!(err.contains("expected int, found string"), "{err}");
+
+    // A malformed flag is a usage error, exit 2.
+    let out = run_with(&path, &["--param", "since"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("--param name=value"),
+        "{}",
+        stderr(&out)
+    );
+    let out = run_with(&path, &["--param", "1x=2"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+/// The editor and the command line report the same thing, in the same place.
+///
+/// Both read `compile_diagnostics`, but the two paths differ after it: the CLI
+/// prints 1-based line and column and the server converts byte offsets to
+/// UTF-16 positions. A test where the two agree is the only thing that keeps a
+/// column off-by-one or a dropped diagnostic from reaching users twice — once
+/// in CI and once under the cursor, saying different things.
+#[test]
+fn the_editor_and_the_command_line_agree() {
+    let dir = TempDir::new("parity");
+    // A non-BMP character before the errors makes a byte column and a UTF-16
+    // column differ, which is exactly the case the conversion can get wrong.
+    let src = "t : query { id = int, name = string } = table \"s\" \"t\"\n\
+               # 🎉🎉\n\
+               a = t & select { .nope }\n\
+               b = t & select { x = upper .id }\n\
+               c = t & select { .id } & where (.id)\n";
+    let path = dir.write("p.cagara", src);
+
+    // What the command line says.
+    let out = cagara([
+        std::ffi::OsString::from("check"),
+        std::ffi::OsString::from("--json"),
+        path.clone().into_os_string(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let mut from_cli: Vec<(u32, u32, String)> = stdout(&out)
+        .lines()
+        .map(|line| {
+            // The objects are written by hand, so a field lookup is enough.
+            let get = |k: &str| -> String {
+                let at = line
+                    .find(&format!("\"{k}\":"))
+                    .unwrap_or_else(|| panic!("{k}: {line}"));
+                let rest = &line[at + k.len() + 3..];
+                let end = rest.find([',', '}']).unwrap_or(rest.len());
+                rest[..end].trim_matches('"').to_string()
+            };
+            // The message is last, so it is read from its own delimiter to the
+            // end rather than up to the next comma — these messages contain
+            // commas, and a diff-style one contains newlines too.
+            let start = line.find("\"message\":\"").expect("message") + "\"message\":\"".len();
+            let end = line.rfind("\"}").expect("end");
+            let message = line[start..end].replace("\\n", "\n").replace("\\\"", "\"");
+            (
+                get("line").parse().expect("line"),
+                get("column").parse().expect("column"),
+                message,
+            )
+        })
+        .collect();
+    from_cli.sort();
+
+    // What the editor is told.
+    let ws = cagara_hir::workspace::Workspace::open(&path);
+    let mut from_lsp: Vec<(u32, u32, String)> = cagara_lsp::analysis::diagnostics(&ws)
+        .into_iter()
+        .map(|(range, message)| {
+            // 0-based line and UTF-16 column, which is what the protocol counts.
+            (range.start.line + 1, range.start.character + 1, message)
+        })
+        .collect();
+    from_lsp.sort();
+
+    assert_eq!(
+        from_lsp, from_cli,
+        "the two must report the same diagnostics"
+    );
+    assert_eq!(from_cli.len(), 3, "{from_cli:?}");
+    // The emoji line is why the columns are converted at all: a byte column
+    // would be one higher than a UTF-16 column after `# 🎉🎉`.
+    assert!(
+        from_cli
+            .iter()
+            .all(|(line, _, _)| *line == 3 || *line == 4 || *line == 5),
+        "{from_cli:?}"
+    );
 }

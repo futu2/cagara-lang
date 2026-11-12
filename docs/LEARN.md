@@ -177,12 +177,16 @@ query; `select` takes a query and a record of fields and returns a query.
 subject comes last — the same convention as the whole prelude, and the reason
 partial application works so well (see [section 12](#12-functions-types-and-the-prelude)).
 
-### Shorthands
+### Two spellings per stage, and one meaning
 
-Every common stage has a one-token shorthand at the same precedence as `&`:
+A stage can be written by name — `q & where p` — or with its shorthand —
+`q &? p`. They are the same call: the shorthand is a one-line wrapper in the
+prelude (`_&?_ : query r -> expr r bool -> query r = q => p => where p q`), not a
+second implementation, so it carries `where`'s signatures (including its `maybe
+bool` one), its phases, and its SQL. Nothing can drift.
 
-| Shorthand | Long form |
-|---|---|
+| Shorthand | Named form |
+| --- | --- |
 | `&?` | `where` |
 | `&=` | `select` |
 | `&+` | `update` |
@@ -194,108 +198,48 @@ Every common stage has a one-token shorthand at the same precedence as `&`:
 | `&^` | `intersect` |
 | `&~` | `except` |
 
-This table is the whole set: there is no shorthand for `offset`, `distinct`,
-`omit`, `prefix` or `suffix`. The symbols are **mnemonic rather than initial** —
-`?` for a filter, `=` for replacing the row, `*` for grouping, and the four set
-operations taking the arithmetic-looking `|`, `!`, `^`, `~` — so a symbol cannot
-be inferred from the stage's name and this table is the only place they are all
-listed. That matters because an incomplete table is how a wrong entry hides:
-`&^` was documented as `offset` for several releases, and a reader copying it got
-a type error.
+The joins have their own level, one looser than the pipe, so `q & orders ? on`
+keeps the join on the right:
 
-These are equivalent pairs:
+| Shorthand | Named form | Keeps |
+| --- | --- | --- |
+| `?` | `innerJoin` | matching rows only |
+| `<?` | `leftJoin` | all left rows |
+| `?>` | `rightJoin` | all right rows |
+| `<?>` | `fullJoin` | all rows from both |
 
-```haskell
-a = users &? (.age > 1) &+ {age = .age + 1} &= {.id, .age} &. [asc .age] &- 2
-b = users & where (.age > 1) & update {age = .age + 1} & select {.id, .age} & order [asc .age] & limit 2
-```
+And four expression operators besides arithmetic and comparison:
 
-Both produce:
+| Operator | Named form | Meaning |
+| --- | --- | --- |
+| `&` | — | the pipeline: `x & f` is `f x` |
+| `>>>` / `<<<` | — | composition, forwards / backwards: `f >>> g` is `g` after `f` |
+| `$` | — | application, loosest of all: `f $ x` is `f x` |
+| `??` | `coalesce default x` | the value, or a fallback |
+| `++` / `<>` | `concat a b` | string concatenation |
 
-```sql
-SELECT id, age + 1 AS age FROM public.users
-WHERE (age > 1) ORDER BY age + 1 NULLS LAST LIMIT 2;
-```
+An earlier version of the language deleted the shorthands. The reason given was
+that they were used far less often than the named stages — which was true — but
+the reason they were *untrustworthy* was different: each one was its own
+`primitive`, so a shorthand could accept a predicate the stage it spelled would
+refuse, and one of them quietly meant the wrong join. The fix is the wrapper
+above, and `every_stage_shorthand_writes_the_same_sql` in `cagara-sql` now pins
+each spelling to its named form by compiling both and comparing the SQL.
 
-Note that `&=` and `&+` are not interchangeable. `&=` **replaces** the row with
-the fields you list; `&+` **merges** over it, keeping every column you did not
-mention:
+#### Why the operator table still exists
 
-```haskell
-keeps = users &+ {age = .age + 1}   # id, name, age (new), active
-drops = users &= {age = .age + 1}   # only age
-```
-
-Stage order follows from that: `&+` cannot update a column a previous `&=` has
-already dropped. See
-[section 5](#5-choosing-columns-select-and-update).
-
-The long names are the easiest to learn first, and they are what the compiler
-prints in error messages. Use the shorthands once a pipeline is long enough that
-the punctuation reads better.
-
-#### Where the shorthands come from
-
-A shorthand is one line in `prelude.cagara`, which says what it *means*:
+Precedence is a property of the language, not of a module: it has to be known
+before a file is read, so no `infixl` line can declare it. The table in
+`cagara-syntax`'s `ops` is fixed, and a spelling that is not in it is a compile
+error pointing at the operator rather than a silently different parse:
 
 ```haskell
-_&=_ : query r -> expr r (row s) -> query s = q => fields => select fields q
+bad = users &? 5   # type error: `5` is not a predicate
+bad = users &~ 5   # type error: `5` is not a query
 ```
 
-The *symbol* is in the compiler's operator table, which is where every
-operator's precedence lives. Spelling and meaning are two different facts and
-live in two different places: precedence has to be known before a file is
-read, so it cannot come from source, while what `&=` does is an ordinary
-definition like any other.
-
-There is no special form for a stage. `&`, `&+` and `+` are the same kind of
-thing — an infix operator with a precedence and an associativity — and the
-table covers all of them:
-
-```
-&     left  1     the pipeline
-&+    left  1     a stage shorthand, at the pipeline's own level
-?     left  3     the join operators, at their own level
-+     left  17    arithmetic
-```
-
-The shorthand list is not arbitrary: `&` is the pipe, and a symbol after it
-names the stage it stands for. `&^` in particular means **intersect**, not
-`offset` — the set operations take the symbols `&|`, `&!`, `&^` and `&~`, and
-`offset` has no shorthand. Passing a number to `&^` is a type error, because it
-combines two queries.
-
-What makes a shorthand a *pipeline stage* is only where it sits: an operator
-at `&`'s precedence and associativity is a stage, and one at any other level —
-the joins at 3, or `+` at 17 — is an ordinary operator. That is why `q &+ {..}`
-chains like `q &` while `q ? on` does not, and it is the only reason: nothing
-has to mark an operator as a stage, so nothing can disagree with the level.
-
-A symbol may be any operator spelling — `&?`, `~=`, `>>`. Every operator you
-*write* has to be in the table, so a typo is a compile error pointing at the
-operator rather than a silently different parse:
-
-```haskell
-bad = users &>> 5   # unknown operator `&>>`
-```
-
-`&>>` is deliberately not in the table. The example used to use `&~`, which
-*is* — it is `except` — so the snippet demonstrated a type error while claiming
-to show an unknown operator.
-
-`infixl` and `infixr` are not part of the language: precedence is a property of
-the language, so it is fixed in the compiler and no module can declare or
-re-fix an operator. There is no `infixl 1 &^` line to write. Defining `_&^_`
-gives `&^` a meaning; the table gives it its place in the grammar.
-
-Note the spelling boundary. A shorthand is `&` followed by operator
-punctuation, and an ordinary operator is a run of operator characters, so both
-follow from a character class rather than a list of names. Those classes are
-`&` plus any of `= ! < > * / % | ? $ ^ ~ + - .`, and `= ! < > * / % | ? $ ^ ~`
-on their own. A shorthand built from characters already in the classes needs
-one line in the table; a character never used in an operator before needs one
-line in the lexer as well, after which every spelling made of those characters
-is free too.
+What each operator *means* is an ordinary prelude definition (`_&&_`, `_++_`,
+`_??_`), so spelling and meaning live in the two places they belong.
 
 ---
 
@@ -696,6 +640,12 @@ whatever each dialect needs to achieve it (`NULLS LAST`, or a leading
 page2 = orders & order [asc .id] & limit 20 & offset 20
 ```
 
+The two are **one clause** in the SQL they produce (`LIMIT 20 OFFSET 20`), so their
+order in the pipeline does not matter: `& offset 20 & limit 20` is the same page.
+A `distinct` cannot follow an `order` whose key the projection dropped — that
+pair is an error, because the sort key is neither sortable under `DISTINCT` nor
+safe to carry into it.
+
 `asc` / `desc` take an expression, not another sort key: `asc (desc .x)` is a
 type error.
 
@@ -810,47 +760,58 @@ error: field `s` is an aggregate; aggregates belong in `agg`, not `select`
 
 `sum`, `avg`, `min`, and `max` return `maybe` because SQL produces `NULL` for an
 all-`NULL` or empty input. `count`, `countOf`, and `countDistinct` return a
-non-null `int`. The filtered forms follow the same rule: `sumFilter`,
-`avgFilter`, `minFilter`, and `maxFilter` are `maybe`, while `countFilter`,
-`countOfFilter`, and `countDistinctFilter` are non-null `int`. See the next
-section.
+non-null `int`. A *filtered* aggregate keeps its own result type: `filtered p
+(sum .x)` is still `maybe`, and `filtered p count` is still non-null `int`. See
+the next section.
 
 ### Nullable aggregate inputs
 
 A column declared `maybe` is not accepted by `sum`, `avg`, `min`, `max`,
-`countOf`, or `countDistinct`: those signatures say non-null. The explicit
-spelling is a `*Maybe` helper, which passes the column straight to the SQL
-aggregate because SQL already skips `NULL`:
+`countOf`, or `countDistinct`: those signatures say non-null. The value
+aggregates take both: `sum`, `avg`, `min` and `max` accept a `maybe` column
+under the same name and pass it straight to the SQL aggregate, because SQL
+already skips `NULL`:
 
 ```haskell
 q = t & agg {
-  total = coalesce 0 (sumMaybe .amount),
-  average = avgMaybe .amount,
+  total = coalesce 0 (sum .amount),
+  average = avg .amount,
   n = countOfMaybe .code
 }
 ```
 
-This is not the same as coalescing first. Over `[NULL, 5]`, `avgMaybe` is `5`,
-while `avg (coalesce 0 .amount)` is `2.5`; `minMaybe` over `[NULL, 5]` is `5`,
-while the coalesced form is `0`. Use `coalesce` when a missing value should
-count as a default; use `*Maybe` when SQL's null-skipping meaning is what you
-want. The value forms still return `maybe` for an all-`NULL` or empty input;
+This is not the same as coalescing first. Over `[NULL, 5]`, `avg .amount` is
+`5`, while `avg (coalesce 0 .amount)` is `2.5`; `min .amount` over `[NULL, 5]`
+is `5`, while the coalesced form is `0`. Use `coalesce` when a missing value
+should count as a default; use the nullable overload when SQL's null-skipping
+meaning is what you want. The value forms still return `maybe` for an all-`NULL` or empty input;
 the count forms return non-null `int`. There are no `*MaybeFilter` forms yet —
 filter the rows with `where` first, or combine the predicate and null test.
 
 ### Filtered aggregates
 
-A predicate on an aggregate's **input rows** is written with the `*Filter`
-functions. They are the portable spelling of SQL's
-`SUM(x) FILTER (WHERE p)`: the filter changes which rows reach each aggregate,
-not which groups are kept.
+An aggregate is a value — `agg (expr r a)` is a type — so the three ways to
+modify one are *applications of it*, not more names:
+
+| Combinator | Meaning | Example |
+| --- | --- | --- |
+| `filtered p a` | the rows `p` keeps | `filtered (.status == "paid") (sum .amount)` |
+| `distinctAgg a` | distinct arguments | `distinctAgg (countOf .user_id)` |
+| `over spec a` | the aggregate as a window | `over { partition = [.user_id] } (sum .amount)` |
+
+They compose, which a name per function could not:
+`distinctAgg (filtered p (sum .x))` is `SUM(DISTINCT CASE WHEN p THEN x END)`.
+
+A predicate on an aggregate's **input rows** is `filtered`, the portable
+spelling of SQL's `SUM(x) FILTER (WHERE p)`: the filter changes which rows reach
+each aggregate, not which groups are kept.
 
 ```haskell
 sales = orders & agg {
   user_id = group .user_id,
-  paid = sumFilter (.status == "paid") .amount,
-  refunded = sumFilter (.status == "refunded") .amount,
-  n_paid = countFilter (.status == "paid")
+  paid = filtered (.status == "paid") (sum .amount),
+  refunded = filtered (.status == "refunded") (sum .amount),
+  n_paid = filtered (.status == "paid") count
 }
 ```
 
@@ -866,8 +827,8 @@ GROUP BY user_id;
 The predicate is a non-null `bool` over the input row and cannot contain an
 aggregate or window. It is evaluated before grouping, so it may name a column
 that is not a group key (`status` above). The `CASE` has no `ELSE`: a group with
-no matching rows is `NULL` for `sumFilter`, `avgFilter`, `minFilter`, and
-`maxFilter`, and `0` for the count forms — the same results `FILTER` gives. Do
+no matching rows is `NULL` for a filtered `sum`/`avg`/`min`/`max`, and `0` for
+a filtered count — the same results `FILTER` gives. Do
 not add `ELSE 0` yourself; for `avg` it changes the denominator, and for the
 other value aggregates it changes an empty group from `NULL` to `0`.
 
@@ -897,9 +858,8 @@ Where nullability comes from:
 | A column declared `maybe int` | reads as nullable |
 | The possibly-absent side of a left, right, or full join | its columns become `maybe` |
 | `sum`, `avg`, `min`, `max` and their `*Filter` forms | `maybe` |
-| `sumMaybe`, `avgMaybe`, `minMaybe`, `maxMaybe` | `maybe` |
-| `lag`, `lead`, `sumOver`, `avgOver` | `maybe` |
-| `count`, `countOf`, `countDistinct`, `countOver`; `countFilter`, `countOfFilter`, `countDistinctFilter` | non-null `int` |
+| `lag`, `lead`, `over` | `maybe` |
+| `count`, `countOf`, `countDistinct`; `over spec count`, `filtered p count` | non-null `int` |
 | `countOfMaybe`, `countDistinctMaybe` | non-null `int` |
 | `isNull`, `isNotNull`, `isTrue` | non-null `bool` |
 
@@ -914,7 +874,6 @@ Handling nulls explicitly:
 | `nullIf x y` | return `NULL` when `x` equals `y` |
 | `isNull x` / `isNotNull x` | test for `NULL`, returning non-null `bool` |
 | `isTrue x` | treat a nullable boolean `NULL` as false |
-| `whereTrue p` | filter with a nullable predicate, treating `NULL` as false |
 | `eqMaybe x y` | compare nullable values, treating two `NULL`s as equal |
 
 `nothing` has type `maybe a`; a surrounding use fixes `a` (`coalesce 0 nothing`
@@ -963,9 +922,10 @@ matches =
   & agg { id = group .id, n = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0)) }
 ```
 
-The `*Maybe` value aggregates (`sumMaybe`, `avgMaybe`, `minMaybe`, `maxMaybe`)
-similarly preserve SQL's null-skipping semantics instead of treating a missing
-value as zero.
+The nullable overloads of `sum`/`avg`/`min`/`max` similarly preserve SQL's
+null-skipping semantics instead of treating a missing value as zero, and a
+`where` takes a `maybe bool` directly — `where .flag` drops the rows whose
+condition is `NULL`.
 
 For a full treatment, see the [nullability reference](NULLABILITY.md).
 
@@ -1084,8 +1044,8 @@ bad3 = users & select {.id, rn = rowNumber [asc .age]}
 | `rowNumber spec` | `int` |
 | `rank spec`, `denseRank spec` | `int` |
 | `lag spec expr`, `lead spec expr` | `maybe` (NULL at the edge) |
-| `sumOver spec expr`, `avgOver spec expr` | `maybe` |
-| `countOver spec` | `int` |
+| `over spec (sum expr`), `over spec (avg expr`) | `maybe` |
+| `over spec count` | `int` |
 
 ```haskell
 ranked =
@@ -1105,7 +1065,7 @@ running =
   orders
   & select {
       .id,
-      total = sumOver {partition = [.user_id], order = [asc .created_at], frame = runningFrame} .amount
+      total = over {partition = [.user_id], order = [asc .created_at], frame = runningFrame} (sum .amount)
     }
 ```
 
@@ -1184,20 +1144,21 @@ rest     = users &~ vips        # except
 allUsers = users &! vips        # unionAll
 ```
 
-Each one also has a named function, which is exactly equivalent:
+Each one also has a named function. A stage takes its subject **last**, and for
+a set operation the subject is the left operand:
 
 ```haskell
-everyone = union users vips
-both     = intersect users vips
-rest     = except users vips
-allUsers = unionAll users vips
+everyone = union vips users          # users UNION vips
+both     = intersect vips users      # users INTERSECT vips
+rest     = except vips users         # users EXCEPT vips
+allUsers = unionAll vips users       # users UNION ALL vips
 ```
 
-The result keeps the columns and order of the left input, and *both spellings
-agree*: `users &~ vips` is `users EXCEPT vips`, the same query as
-`except users vips`. Only `except` and `intersect` can tell the two operands
-apart — `union` and `unionAll` are commutative, so their order is not
-observable.
+The result keeps the columns and order of the subject — the query the pipeline
+supplies — and *both spellings agree*: `users &~ vips` is `users EXCEPT vips`,
+the same query as `except vips users`. Only `except` and `intersect` can tell the
+two operands apart — `union` and `unionAll` are commutative, so their order is
+not observable.
 
 `union` removes duplicate rows, while `unionAll` preserves them.
 
@@ -1230,7 +1191,8 @@ elements are still homogeneous, so `inList [1, 2.0] .id` is a type error.
 
 ## 12. Functions, types, and the prelude
 
-`prelude.cagara` is imported into every module automatically. It is ordinary
+The prelude — `prelude/core.cagara` and `prelude/std.cagara` — is imported into
+every module automatically. It is ordinary
 Cagara — you can read it, and it is the best reference for what is available.
 It is built on the `sql "..."` and `primitive "..."` **body forms**, which are
 the whole of what the Rust core provides:
@@ -1296,7 +1258,7 @@ These are Haskell's own fixities: `$` is `infixr 0` and `&` is `infixl 1` from
 in Haskell binds tighter than everything (as `(.)` does). Keeping composition
 tight is what makes `trim >>> lower >>> replaceAll "-" ""` read left to right
 and `f >>> g $ x` mean `(f >>> g) $ x`. The fixed table gives them these
-levels; `prelude.cagara` defines what they mean, like every other operator.
+levels; the prelude defines what they mean, like every other operator.
 
 Composition with `>>>` is why subject-last matters:
 
@@ -1395,16 +1357,15 @@ byId : expr { id = int | r } int -> query { id = int | r } -> query { id = int |
 `power exponent base` `sign` `greatest a b` `least a b`
 
 **Aggregates:** `count` `countOf` `countDistinct` `sum` `avg` `min` `max`;
-`sumFilter` `avgFilter` `minFilter` `maxFilter` `countFilter` `countOfFilter`
-`countDistinctFilter`; nullable inputs use `sumMaybe` `avgMaybe` `minMaybe`
-`maxMaybe` `countOfMaybe` `countDistinctMaybe`
+`filtered` `distinctAgg` `over`; `sum`/`avg`/`min`/`max` also accept a `maybe`
+column, and the nullable counts are `countOfMaybe` `countDistinctMaybe`
 
 **Nulls:** `nothing` `coalesce` `??` `just` `nullIf` `isNull` `isNotNull` `isTrue`
-`whereTrue` `eqMaybe`
+`eqMaybe`
 
 **Casts:** `toInt` `toFloat` `toBool` `toString` `toDecimal` `tryInt` `tryFloat` `tryDate` `tryTimestamp` `tryDecimal` (`from*` spellings: `fromString`, `fromInt`, `fromFloat`)
 
-**Windows:** `rowNumber` `rank` `denseRank` `lag` `lead` `sumOver` `avgOver`
+**Windows:** `rowNumber` `rank` `denseRank` `lag` `lead` `over` `avgOver`
 `countOver` `firstValue` `lastValue` `ntile spec n` `percentRank` `cumeDist`
 
 **Conditionals:** `ifThenElse` (alias `caseWhen`), `case { cond => value; ...; true => default }`
@@ -2129,7 +2090,7 @@ the computation one stage earlier.
   in depth.
 - [SQL dialect support](SQL-DIALECTS.md) — what each target guarantees, and why
   the date and string intrinsics are spelled in Rust.
-- [`prelude.cagara`](../prelude.cagara) — the whole standard library, in
+- [`prelude/core.cagara` (and `prelude/std.cagara`)](../prelude.cagara) — the whole standard library, in
   Cagara, with comments.
 - [`docs/PLAN.md`](PLAN.md) — design and architecture, including the type
   system and the lowering rules.

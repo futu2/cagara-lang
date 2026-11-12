@@ -368,8 +368,7 @@ impl Descent<'_> {
             return At::Here(input);
         };
         let name = head_name(callee);
-        // `q & st`, and the shorthands that carry the stage inline (`q &? pred`,
-        // `q &= fields`, `q &| r`): the piped query decides the row, and every
+        // `q & st`: the piped query decides the row, and every
         // later argument is an expression over that row.
         if is_pipeline(name) {
             let Some(q) = args.first() else {
@@ -449,11 +448,6 @@ impl Descent<'_> {
                         let keeps = keeps_columns(args.get(1)?);
                         keeps.then(|| self.source_at(module, q, owner, depth))?
                     }
-                    // The shorthands, and the set operations that keep the left
-                    // row: everything `&…` that does not rebuild the columns.
-                    Some("_&?_" | "_&._" | "_&-_" | "_&|_" | "_&!_" | "_&^_" | "_&~_") => {
-                        self.source_at(module, args.first()?, owner, depth)
-                    }
                     // `union a b` and friends: the left query's row, unchanged.
                     Some("union" | "unionAll" | "intersect" | "except") => {
                         self.source_at(module, args.first()?, owner, depth)
@@ -511,25 +505,43 @@ fn declares_record(ws: &Workspace, m: usize, i: usize) -> bool {
     !Docs::new(&md.text).record_fields(ty).is_empty()
 }
 
-/// Whether an expression is a pipeline step: `&`, or one of its shorthand
-/// spellings, all of which take the query first.
+/// A stable slug for a diagnostic, so a client can filter or link on it.
+///
+/// The *message* is the language's wording and is meant to change as the
+/// wording improves; the code is the identity. The mapping is deliberately
+/// coarse — one code per kind of mistake, not per sentence — because a code
+/// that changes whenever a message is reworded is worse than none.
+pub(crate) fn diagnostic_code(message: &str) -> &'static str {
+    let lower = message;
+    if lower.contains("no column") || lower.contains("has no column") {
+        "unknown-column"
+    } else if lower.contains("unknown name") || lower.contains("unknown type") {
+        "unknown-name"
+    } else if lower.contains("type mismatch") {
+        "type-mismatch"
+    } else if lower.contains("ambiguous use") || lower.contains("no overload") {
+        "overload"
+    } else if lower.contains("must be") && lower.contains("bool") {
+        "not-a-condition"
+    } else if lower.contains("aggregate") {
+        "aggregate-placement"
+    } else if lower.contains("on both sides") || lower.contains("`take` names") {
+        "join-overlap"
+    } else if lower.contains("only be used in a join predicate") {
+        "join-side"
+    } else if lower.contains("syntax error") {
+        "syntax"
+    } else if lower.contains("refers to itself") {
+        "recursion"
+    } else {
+        "error"
+    }
+}
+
+/// Whether an expression is a pipeline step. `&` is the only spelling — the
+/// per-stage shorthands were removed, so this is one name and not eleven.
 fn is_pipeline(name: Option<&str>) -> bool {
-    matches!(
-        name,
-        Some(
-            "_&_"
-                | "_&?_"
-                | "_&=_"
-                | "_&+_"
-                | "_&*_"
-                | "_&._"
-                | "_&-_"
-                | "_&|_"
-                | "_&!_"
-                | "_&^_"
-                | "_&~_"
-        )
-    )
+    matches!(name, Some("_&_"))
 }
 
 /// Whether a stage expression (`where p`, `order keys`, …) leaves every column
@@ -546,7 +558,6 @@ fn keeps_columns(st: &Expr) -> bool {
         head_name(callee),
         Some(
             "where"
-                | "whereTrue"
                 | "order"
                 | "limit"
                 | "offset"
@@ -1248,7 +1259,7 @@ mod tests {
         "users : query { id = int, name = string, age = int } = table \"p\" \"users\"\n\
                        adult = .age >= 18\n\
                        q = users & where adult & agg { s = sum .age }\n\
-                       bad = users & select { x = \"é\" <> .age }\n\
+                       bad = users & select { x = \"é\" ++ .age }\n\
                        twice = x => x + x\n\
                        shadow = users => users & where adult\n";
 
@@ -1344,6 +1355,38 @@ mod tests {
         assert!(format(&again).unwrap().is_empty());
     }
 
+    /// The code is the diagnostic's identity while the message is its wording:
+    /// a client may filter or link on it, and rewording a message must not
+    /// change it.
+    #[test]
+    fn every_diagnostic_kind_has_a_stable_code() {
+        for (message, code) in [
+            ("field `x`: no column `x`; available: id", "unknown-column"),
+            ("unknown name `nope`", "unknown-name"),
+            ("type mismatch: expected int, found string", "type-mismatch"),
+            ("ambiguous use of `sum` at type …", "overload"),
+            ("no overload of `sum` matches …", "overload"),
+            ("this join has `id` on both sides", "join-overlap"),
+            (
+                "`take` names `id`, which the left input already has",
+                "join-overlap",
+            ),
+            ("syntax error: unknown operator `&?`", "syntax"),
+            (
+                "`q` refers to itself; recursion is not supported",
+                "recursion",
+            ),
+            ("something nobody classified", "error"),
+        ] {
+            assert_eq!(diagnostic_code(message), code, "{message}");
+        }
+        // The same shape of mistake gets the same code however it is worded.
+        assert_eq!(
+            diagnostic_code("the left join input has no column `nope`; available: id"),
+            diagnostic_code("field `x`: no column `x`; available: id")
+        );
+    }
+
     #[test]
     fn diagnostics_have_utf16_ranges() {
         let ds = diagnostics(&ws());
@@ -1376,7 +1419,11 @@ mod tests {
             here.contains("sum : expr { age = int, id = int, name = string } int -> "),
             "{h}"
         );
-        assert_eq!(general.matches("sum : ").count(), 2, "{h}");
+        // Every signature of the set is listed: the numeric pair and the
+        // nullable pair (which is why `sum` over a `maybe` column needs no
+        // `sumMaybe`).
+        assert_eq!(general.matches("sum : ").count(), 4, "{h}");
+        assert!(general.contains("(maybe int) -> agg"), "{h}");
         // Operators hover at their symbol, under their definition name.
         let h = hover(&ws, at("x + x", 2)).unwrap();
         assert!(h.contains("_+_ : "), "{h}");
@@ -1494,15 +1541,15 @@ mod tests {
         let src = "## T.\nusers : query {\n    ## Age.\n    age = int\n  } = table \"p\" \"t\"\n\n\
                    alias = users\n\
                    via_alias = alias & where (.age > 0)\n\
-                   shorthand = users &? (.age > 0)\n\
-                   sorted = users &. [asc .age]\n\
-                   unioned = users &| users & where (.age > 0)\n";
+                   shorthand = users & where (.age > 0)\n\
+                   sorted = users & order [asc .age]\n\
+                   unioned = union users users & where (.age > 0)\n";
         let ws = Workspace::open_with(Path::new("/nonexistent/alias.cagara"), src.to_string());
         for needle in [
             "via_alias = alias & where (.age > 0)",
-            "shorthand = users &? (.age > 0)",
-            "sorted = users &. [asc .age]",
-            "unioned = users &| users & where (.age > 0)",
+            "shorthand = users & where (.age > 0)",
+            "sorted = users & order [asc .age]",
+            "unioned = union users users & where (.age > 0)",
         ] {
             let h = hover(
                 &ws,
@@ -1831,13 +1878,13 @@ mod tests {
         let src = "users : query { id = int, name = string, age = int } = table \"p\" \"users\"\n\
                    orders : query { oid = int, user_id = int } = table \"p\" \"orders\"\n\
                    a = users & where (.ag >= 18)\n\
-                   b = users & orders ? .<id == .>u\n\
+                   b = users & innerJoin orders (.<id == .>u)\n\
                    c = .age >= 18 && .\n";
         // A partial name inside a stage: the table's columns, in order.
         assert_eq!(fields(src, pos(2, 22)), ["id", "name", "age"]);
-        // Join sides.
-        assert_eq!(fields(src, pos(3, 24)), ["id", "name", "age"]);
-        assert_eq!(fields(src, pos(3, 32)), ["oid", "user_id"]);
+        // Join sides: `.<` reads the left input, `.>` the right one.
+        assert_eq!(fields(src, pos(3, 33)), ["id", "name", "age"]);
+        assert_eq!(fields(src, pos(3, 41)), ["oid", "user_id"]);
         // An open predicate knows the columns used next to it.
         assert_eq!(fields(src, pos(4, 22)), ["age"]);
     }
@@ -1940,7 +1987,7 @@ mod tests {
     #[test]
     fn column_completion_through_a_key_stage() {
         let tail = "  & prefix \"lit_\"\n\
-                    &= {id = .lit_id, id44 = .lit_label <> .lit_label <> .}\n";
+                    & select {id = .lit_id, id44 = .lit_label ++ .lit_label ++ .}\n";
         let head = "users : query { id = int, name = string, age = int, active = bool } = \
                     table \"public\" \"users\"\n\
                     adults = users\n\

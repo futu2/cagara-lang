@@ -1,4 +1,5 @@
-//! `cagara <file.cagara|-> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]`
+//! `cagara <file.cagara|-> [--dialect NAME] [--only DEF|alias.DEF] [--arg VALUE]…
+//! [--pretty] [--optimize] [--types] [--list]`
 //! `cagara fmt [--check] <files...|->`
 //! `cagara doc <files...|-> [--json] | --prelude | --check`
 //! `cagara lsp`
@@ -48,11 +49,14 @@ const BUILD: &str = concat!(
 );
 
 const USAGE: &str =
-    "usage: cagara <file.cagara|-> [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
+    "usage: cagara <file.cagara|-> [--dialect NAME] [--only DEF|alias.DEF] [--arg VALUE]…
+                                   [--param NAME[=VALUE]|NAME:TYPE=VALUE]… [--pretty] [--optimize]
+                                   [--types] [--list]
        cagara fmt [--check] <files...>   format files in place (`-` for stdin to stdout)
        cagara doc <files...|-> [--json]  the reference a file carries in `##` comments
        cagara doc --prelude              the built-in prelude, documented
        cagara doc <files...> --check     list definitions with no doc comment (warns only)
+       cagara check [--json] <path>...    report every file under `path` that does not check
        cagara lsp    run the language server over stdio
        cagara --version";
 
@@ -66,6 +70,9 @@ pub(crate) const STDIN_PATH: &str = "<stdin>";
 /// `main` is the entry point by convention, and the only definition whose SQL
 /// is printed by default. A file that does not define one prints nothing.
 const ENTRY_POINT: &str = "main";
+
+/// The definition `--arg` builds: the selected definition applied to literals.
+const ARG_ENTRY: &str = "__cagara_args";
 
 fn main() -> ExitCode {
     match main_inner() {
@@ -95,6 +102,9 @@ fn main_inner() -> std::io::Result<ExitCode> {
     }
     if first.as_deref() == Some(OsStr::new("doc")) {
         return doc::run(rest);
+    }
+    if first.as_deref() == Some(OsStr::new("check")) {
+        return check_tree(rest);
     }
     if first.as_deref() == Some(OsStr::new("lsp")) {
         let rest: Vec<OsString> = rest.collect();
@@ -135,6 +145,17 @@ struct Options {
     pretty: bool,
     types: bool,
     optimize: bool,
+    /// Print every root query, not only the entry point.
+    list: bool,
+    /// Literal arguments for the selected definition, applied in order.
+    values: Vec<String>,
+    /// `--param name=value` (or `name:type=value`): definitions the file leaves
+    /// to its caller. Written into the file as ordinary definitions, so a
+    /// parameter is a name like any other.
+    params: Vec<String>,
+    /// The name to label the output with when `--arg` built a call: the
+    /// definition the user asked for, not the wrapper.
+    label: Option<String>,
 }
 
 /// What parsing `cagara FILE`'s arguments produced.
@@ -156,6 +177,9 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Parsed {
     let mut pretty = false;
     let mut types = false;
     let mut optimize = false;
+    let mut list = false;
+    let mut values: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
 
     while let Some(a) = args.next() {
         match a.to_str() {
@@ -183,6 +207,34 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Parsed {
                 },
                 None => return Parsed::Usage("--only needs a definition name".into()),
             },
+            Some("--arg") => match args.next() {
+                Some(d) => match d.into_string() {
+                    Ok(d) => values.push(d),
+                    Err(d) => {
+                        return Parsed::Usage(format!(
+                            "`--arg` is not valid UTF-8: `{}`",
+                            display(&d)
+                        ))
+                    }
+                },
+                None => return Parsed::Usage("--arg needs a value".into()),
+            },
+            Some("--param") => match args.next() {
+                Some(d) => match d.into_string() {
+                    Ok(d) => match parse_param(&d) {
+                        Ok(_) => params.push(d),
+                        Err(e) => return Parsed::Usage(e),
+                    },
+                    Err(d) => {
+                        return Parsed::Usage(format!(
+                            "`--param` is not valid UTF-8: `{}`",
+                            display(&d)
+                        ))
+                    }
+                },
+                None => return Parsed::Usage("--param needs name=value".into()),
+            },
+            Some("--list") => list = true,
             Some("--pretty") => pretty = true,
             Some("--types") => types = true,
             Some("--optimize") => optimize = true,
@@ -214,6 +266,10 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Parsed {
         pretty,
         types,
         optimize,
+        list,
+        values,
+        params,
+        label: None,
     })
 }
 
@@ -227,6 +283,35 @@ fn compile(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
         Parsed::Usage(message) => return Ok(usage(&message)),
     };
 
+    let mut opts = opts;
+    // Two requests need a definition that is not in the file: arguments for a
+    // definition (`--arg`), and a definition in an imported module
+    // (`--only alias.name`). Both are one more line at the end of the file —
+    // `__cagara_args = <qualified name> <literal> …` — which needs no compiler
+    // support: it is compiled like any other definition, so a bad argument or
+    // an unknown name is reported by the ordinary checker.
+    let qualified = opts.only.clone().unwrap_or_else(|| ENTRY_POINT.to_string());
+    let mut params = String::new();
+    for flag in &opts.params {
+        match param_definition(flag) {
+            Ok(def) => params.push_str(&def),
+            // `parse_param` already validated the shape when the flag was read.
+            Err(e) => return Ok(usage(&e)),
+        }
+    }
+    if !opts.values.is_empty() || !opts.params.is_empty() || qualified.contains('.') {
+        let body = call_with_literals(&qualified, &opts.values);
+        opts.only = Some(ARG_ENTRY.to_string());
+        opts.label = Some(qualified);
+        let ws = match open_with_wrapper(&opts.file, &body, &params) {
+            Ok(ws) => ws,
+            Err(e) => {
+                eprintln!("{STDIN_PATH}: {e}");
+                return Ok(ExitCode::FAILURE);
+            }
+        };
+        return run(&ws, &opts);
+    }
     let ws = match open_source(&opts.file) {
         Ok(ws) => ws,
         Err(e) => {
@@ -234,6 +319,12 @@ fn compile(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
             return Ok(ExitCode::FAILURE);
         }
     };
+    run(&ws, &opts)
+}
+
+/// Check and report a loaded workspace. Shared by the plain path and the
+/// `--arg` path, so the two cannot drift.
+fn run(ws: &Workspace, opts: &Options) -> std::io::Result<ExitCode> {
     if !ws.diags.is_empty() {
         for d in &ws.diags {
             eprintln!("{d}");
@@ -243,17 +334,37 @@ fn compile(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
 
     // Errors in imported modules are always reported; root errors are
     // reported per definition below (so `--only` applies to them).
-    let tc = check(&ws);
+    let tc = check(ws);
     let mut failed = false;
     for e in tc.errors().iter().filter(|e| e.module != ws.root) {
         eprintln!("{}", e.diag);
         failed = true;
     }
+    // A parameter that does not check is the *flag's* problem, not the file's:
+    // the definition it came from is not in the file, so its line number would
+    // point past the end of what the user wrote.
+    for flag in &opts.params {
+        let Ok((name, _, _)) = parse_param(flag) else {
+            continue;
+        };
+        let Some(i) = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .position(|d| d.name == name)
+        else {
+            continue;
+        };
+        if let Some(e) = tc.error_for(ws.root, i) {
+            eprintln!("error: `--param {flag}`: {}", e.message);
+            failed = true;
+        }
+    }
 
     if opts.types {
-        report_types(&ws, &tc, &opts, failed)
+        report_types(ws, &tc, opts, failed)
     } else {
-        report_sql(&ws, &tc, &opts, failed)
+        report_sql(ws, &tc, opts, failed)
     }
 }
 
@@ -269,6 +380,125 @@ pub(crate) fn open_source(path: &Path) -> std::io::Result<Workspace> {
     let mut text = String::new();
     std::io::stdin().read_to_string(&mut text)?;
     Ok(Workspace::open_with(path, text))
+}
+
+/// Open `path` with one more definition that applies `selected` to `values`.
+///
+/// Each value is written as the literal it looks like — a number, a `true`/
+/// `false`, otherwise a quoted string — because a definition's parameters are
+/// ordinary values and the checker decides what fits (`date` accepts a string
+/// literal, `string` accepts a string).
+fn open_with_wrapper(path: &Path, body: &str, params: &str) -> std::io::Result<Workspace> {
+    let mut text = String::new();
+    if path == Path::new(STDIN_PATH) {
+        std::io::stdin().read_to_string(&mut text)?;
+    } else {
+        text = std::fs::read_to_string(path)?;
+    }
+    // Parameters first: the wrapper calls a definition, and that definition may
+    // read one. Cagara resolves forward references, so the order is for reading.
+    text.push_str(params);
+    text.push_str(&format!("\n{ARG_ENTRY} = {body}\n"));
+    Ok(Workspace::open_with(path, text))
+}
+
+/// What a `--param` flag writes: `name = value`, or `name : type = value`.
+///
+/// A parameter is a **definition the file leaves to its caller**. That keeps
+/// the language as it is — no new syntax, no new kind — while making the value
+/// part of the compilation: it is checked against every use, and a wrong type
+/// is a type error rather than a runtime surprise. `--param d:date=2024-01-01`
+/// carries a signature when the literal alone would be too vague (a string
+/// literal widens to `date`, but nothing widens to `decimal(18,2)`).
+fn param_definition(flag: &str) -> Result<String, String> {
+    let (name, ty, value) = parse_param(flag)?;
+    Ok(match ty {
+        Some(ty) => format!("{name} : {ty} = {value}\n"),
+        None => format!("{name} = {value}\n"),
+    })
+}
+
+/// `name=value` or `name:type=value`, as the flag spells it.
+///
+/// The value is written the way `--arg` writes one: as the literal it looks
+/// like. Validated here so a typo is a usage error at the flag rather than a
+/// syntax error in a file the user did not write.
+fn parse_param(flag: &str) -> Result<(String, Option<String>, String), String> {
+    let Some((lhs, value)) = flag.split_once('=') else {
+        return Err(format!(
+            "`--param {flag}` needs a value: write `--param name=value`"
+        ));
+    };
+    let (name, ty) = match lhs.split_once(':') {
+        Some((n, t)) => (n.to_string(), Some(t.to_string())),
+        None => (lhs.to_string(), None),
+    };
+    let ident = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if !ident(&name) {
+        return Err(format!(
+            "`--param` needs a definition name, and `{name}` is not one"
+        ));
+    }
+    if let Some(t) = &ty {
+        if t.is_empty() {
+            return Err("`--param name:type=value` needs a type".into());
+        }
+    }
+    Ok((name, ty, literal(value)))
+}
+
+/// A value written as the literal it looks like: a number, `true`/`false`, or a
+/// quoted string (which widens to `date`/`timestamp` where the signature says
+/// so).
+fn literal(v: &str) -> String {
+    let numeric = v.parse::<i64>().is_ok() || v.parse::<f64>().is_ok();
+    if numeric || v == "true" || v == "false" {
+        return v.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in v.chars() {
+        match c {
+            '\\' | '"' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The call `--arg` writes: `definition value value …`, each value as the
+/// literal it looks like.
+fn call_with_literals(selected: &str, values: &[String]) -> String {
+    let mut call = String::from(selected);
+    for v in values {
+        call.push(' ');
+        let numeric = v.parse::<i64>().is_ok() || v.parse::<f64>().is_ok();
+        if numeric || v == "true" || v == "false" {
+            call.push_str(v);
+        } else {
+            call.push('"');
+            for c in v.chars() {
+                match c {
+                    '\\' | '"' => {
+                        call.push('\\');
+                        call.push(c);
+                    }
+                    _ => call.push(c),
+                }
+            }
+            call.push('"');
+        }
+    }
+    call
 }
 
 /// The printed type of `main` when it exists, is well typed, and is not a
@@ -308,8 +538,14 @@ fn report_types(
                 eprintln!("{e}");
                 failed = true;
             }
-            (None, Some(t)) => out(&format!("{} : {t}", d.name))?,
-            (None, None) => out(&format!("{} : ?", d.name))?,
+            (None, Some(t)) => {
+                let name = opts.label.clone().unwrap_or_else(|| d.name.clone());
+                out(&format!("{name} : {t}"))?
+            }
+            (None, None) => {
+                let name = opts.label.clone().unwrap_or_else(|| d.name.clone());
+                out(&format!("{name} : ?"))?
+            }
         }
     }
     if opts.only.is_some() && !selected {
@@ -360,7 +596,7 @@ fn report_sql(
     // `main` compiled cleanly and printed nothing, which looks like success.
     // `--only` is an explicit request for another definition, so it can still
     // inspect a scalar helper in such a file.
-    if opts.only.is_none() {
+    if opts.only.is_none() && !opts.list {
         if let Some(ty) = main_that_is_not_a_query(ws, tc) {
             eprintln!(
                 "{shown}: error: `main` must be a query, found `{ty}`; a file without a query \
@@ -389,7 +625,7 @@ fn report_sql(
     }
     for query in compiled.queries {
         let name = query.name;
-        if name != wanted {
+        if !opts.list && name != wanted {
             continue;
         }
         // Already reported above, in the same words.
@@ -411,7 +647,11 @@ fn report_sql(
                 // Nothing separates it from anything, because there is nothing
                 // else — the blank line this used to print between queries has
                 // no second query to sit between.
-                out(&format!("-- {name}\n{sql};"))?;
+                if printed {
+                    out("")?;
+                }
+                let label = opts.label.clone().unwrap_or_else(|| name.clone());
+                out(&format!("-- {label}\n{sql};"))?;
                 printed = true;
             }
             Err(e) => {
@@ -425,7 +665,30 @@ fn report_sql(
     // A file without a `main` is a library and says nothing. Asking for a
     // definition by name is a request that can be missed, so that is reported.
     if let (Some(o), false, false) = (&opts.only, printed, failed) {
-        eprintln!("no query definition named `{o}`");
+        if o == ARG_ENTRY {
+            // The wrapper exists but is not a query: either the definition
+            // takes arguments that were not supplied, or it is a helper.
+            let name = opts.label.clone().unwrap_or_else(|| o.clone());
+            let arity = ws.modules[ws.root]
+                .module
+                .defs
+                .iter()
+                .enumerate()
+                .find(|(_, d)| d.name == ARG_ENTRY)
+                .and_then(|(i, _)| tc.type_of(ws.root, i))
+                .map(|t| t.matches("->").count())
+                .unwrap_or(0);
+            if arity > 0 {
+                eprintln!(
+                    "`{name}` is a function of {arity} argument(s), so it is not a query: pass \
+                     them with `--arg VALUE` (repeatable)"
+                );
+            } else {
+                eprintln!("`{name}` is not a query");
+            }
+        } else {
+            eprintln!("no query definition named `{o}`");
+        }
         failed = true;
     }
     Ok(done(failed))
@@ -624,4 +887,164 @@ pub(crate) fn done(failed: bool) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+// ── `cagara check` ───────────────────────────────────────────────────────────
+//
+// One answer for a tree of files: which of them do not check, and why. The
+// single-file path above answers "what SQL does this program mean"; this
+// answers "is this directory sound", which is what a pre-commit hook and an
+// editor's project mode need. It compiles nothing to SQL: a file is checked as
+// a *library*, so a directory of table declarations is reportable without one
+// of them being `main`.
+
+/// A diagnostic in the form `check` prints.
+struct Found {
+    path: String,
+    line: usize,
+    col: usize,
+    message: String,
+}
+
+impl Found {
+    fn text(&self) -> String {
+        format!(
+            "{}:{}:{}: error: {}",
+            self.path, self.line, self.col, self.message
+        )
+    }
+
+    /// One JSON object per line, so a consumer can read the stream without a
+    /// parser for the whole document, and a truncated run still yields the
+    /// diagnostics it got to.
+    fn json(&self) -> String {
+        fn esc(s: &str) -> String {
+            let mut o = String::with_capacity(s.len() + 2);
+            for c in s.chars() {
+                match c {
+                    '"' => o.push_str("\\\""),
+                    '\\' => o.push_str("\\\\"),
+                    '\n' => o.push_str("\\n"),
+                    '\r' => o.push_str("\\r"),
+                    '\t' => o.push_str("\\t"),
+                    c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+                    c => o.push(c),
+                }
+            }
+            o
+        }
+        format!(
+            "{{\"severity\":\"error\",\"path\":\"{}\",\"line\":{},\"column\":{},\"message\":\"{}\"}}",
+            esc(&self.path),
+            self.line,
+            self.col,
+            esc(&self.message)
+        )
+    }
+}
+
+/// Every `*.cagara` file under `path`, in a stable order. A file path is itself.
+fn sources_under(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    if !path.is_dir() {
+        out.push(path.to_path_buf());
+        return Ok(out);
+    }
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
+        entries.sort();
+        for entry in entries {
+            if entry.is_dir() {
+                // A dot directory is a build artifact or an editor's cache,
+                // not part of the tree being checked.
+                if entry
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('.'))
+                {
+                    continue;
+                }
+                stack.push(entry);
+            } else if entry.extension().is_some_and(|e| e == "cagara") {
+                out.push(entry);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// `cagara check [--json] <path>...`: report every file that does not check.
+///
+/// Exit codes: `0` all files check, `1` at least one diagnostic, `2` a usage
+/// error. The distinction is what lets a hook say "this is broken" and "you
+/// called me wrong" differently.
+fn check_tree(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
+    let mut json = false;
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for a in args {
+        match a.to_str() {
+            Some("--json") => json = true,
+            Some("-h") | Some("--help") => {
+                out(USAGE)?;
+                return Ok(ExitCode::SUCCESS);
+            }
+            _ if a.to_string_lossy().starts_with("--") => {
+                return Ok(usage(&format!(
+                    "unexpected argument `{}` for `cagara check`",
+                    display(&a)
+                )))
+            }
+            _ => paths.push(PathBuf::from(a)),
+        }
+    }
+    if paths.is_empty() {
+        return Ok(usage("`cagara check` needs a file or a directory"));
+    }
+    let mut files = Vec::new();
+    for p in &paths {
+        match sources_under(p) {
+            Ok(found) => files.extend(found),
+            Err(e) => {
+                eprintln!("{}: {e}", p.display());
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+    }
+    let mut failed = false;
+    for file in &files {
+        let ws = Workspace::open(file);
+        let mut found: Vec<Found> = Vec::new();
+        for d in &ws.diags {
+            found.push(Found {
+                path: d.path.clone(),
+                line: d.line,
+                col: d.col,
+                message: d.message.clone(),
+            });
+        }
+        if ws.diags.is_empty() {
+            let tc = check(&ws);
+            for e in tc.errors() {
+                found.push(Found {
+                    path: e.diag.path.clone(),
+                    line: e.diag.line,
+                    col: e.diag.col,
+                    message: e.diag.message.clone(),
+                });
+            }
+        }
+        for f in found {
+            if json {
+                out(&f.json())?;
+            } else {
+                eprintln!("{}", f.text());
+            }
+            failed = true;
+        }
+    }
+    Ok(done(failed))
 }

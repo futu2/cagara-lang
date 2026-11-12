@@ -1,16 +1,13 @@
 # Every set operation, in both spellings.
 #
 # The examples had no set operation at all, which is why a reversed `except`
-# reached users: none of the golden files exercised the piped form, so swapping
-# the operands was invisible to the entire suite. The paired forms below keep
-# that behavior covered.
+# reached users: none of the golden files exercised the piped form.
 #
-# The two spellings deliberately put the piped query on **opposite sides** —
-# `users & union admins` passes `[admins, users]`, while `users &| admins`
-# passes `[users, admins]` — because `union` is curried at the pipe's own level
-# and `&|` re-binds in its body. Both are correct, and for `except` the
-# difference is observable. Each pair is here so a snapshot pins that the two
-# do not silently converge.
+# A stage takes its subject last, and for a set operation the subject is the
+# left operand, so `users & except admins` and `except admins users` are the
+# same query — `users EXCEPT admins`. Both spellings are kept here so a
+# snapshot pins that they agree; `except` is the only one where a disagreement
+# would be observable, because `union` and `intersect` are symmetric.
 users : query { id = int, name = string } = table "public" "users"
 admins : query { id = int, name = string } = table "public" "admins"
 
@@ -21,6 +18,6 @@ union_direct = union users admins
 union_all = users & unionAll admins
 intersect_named = users & intersect admins
 
-# The one where order is observable: these two are different queries.
+# The one where order is observable: these two are the same query.
 except_named = users & except admins
 except_op = users &~ admins

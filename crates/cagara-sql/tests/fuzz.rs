@@ -295,7 +295,7 @@ fn stage(rng: &mut Rng, row: &Row) -> Option<(String, Row)> {
             } else {
                 format!("{{ order = [{}] }}", sort_order(rng, row))
             };
-            let f = rng.pick(&["rowNumber", "rank", "denseRank", "countOver"]);
+            let f = rng.pick(&["rowNumber", "rank", "denseRank"]);
             let mut out = row.clone();
             out.0.push(("w".into(), Ty::Int));
             Some((format!("update {{ w = {f} {spec} }}"), out))

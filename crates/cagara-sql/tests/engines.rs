@@ -86,13 +86,13 @@ const CASES: &[(&str, &[&str])] = &[
     // Nullable columns from the missing side are handled explicitly before
     // aggregation; the match count excludes the synthetic unmatched row.
     (
-        "ljagg = users & leftJoin orders (.<id == .>user_id) & agg { id = group .id, total = coalesce 0.0 (sum (coalesce 0.0 .amount)), n = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0)) } & order [asc .id]",
+        "ljagg = users & leftJoin (orders & select { user_id = .user_id, amount = .amount }) (.<id == .>user_id) & agg { id = group .id, total = coalesce 0.0 (sum (coalesce 0.0 .amount)), n = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0)) } & order [asc .id]",
         &["1|10.0|2", "2|0.0|0", "3|1.0|1"],
     ),
-    // `countFilter` replaces the indicator sum: the synthetic unmatched row
+    // `filtered p count` is the count, and replaces the indicator sum: the synthetic unmatched row
     // fails the predicate, so the count is 0 rather than NULL.
     (
-        "ljcount = users & leftJoin orders (.<id == .>user_id) & agg { id = group .id, n = countFilter (isNotNull .user_id) } & order [asc .id]",
+        "ljcount = users & leftJoin (orders & select { user_id = .user_id, amount = .amount }) (.<id == .>user_id) & agg { id = group .id, n = filtered (isNotNull .user_id) count } & order [asc .id]",
         &["1|2", "2|0", "3|1"],
     ),
     // A constant group key groups everything, and nothing from nothing.
@@ -143,7 +143,7 @@ const CASES: &[(&str, &[&str])] = &[
     // and 3, neither of which has an order, so both survive with NULL order
     // columns and user 1 must not appear.
     (
-        "rj = orders & rightJoin (users & where (.id > 1)) (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc (coalesce 2147483647 .oid)]",
+        "rj = orders & rightJoin ((users & where (.id > 1)) & select { u_id = .id, name = .name }) (.<user_id == .>u_id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc (coalesce 2147483647 .oid)]",
         &["NULL|NULL|bob", "12|1.0|it's a\\b "],
     ),
     // Hoisting a filter to WHERE would drop the null-extended rows. For a
@@ -151,7 +151,7 @@ const CASES: &[(&str, &[&str])] = &[
     // still leave every right row: users 2 and 3 have no matching order and
     // must survive as NULL.
     (
-        "rjonleft = (orders & where (.amount > 4.5)) & rightJoin users (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc (coalesce 2147483647 .oid)]",
+        "rjonleft = (orders & where (.amount > 4.5)) & rightJoin (users & select { u_id = .id, name = .name }) (.<user_id == .>u_id) & select { oid = .id, amount = .amount, n = .name } & order [asc .n, asc (coalesce 2147483647 .oid)]",
         &[
             "10|5.5|ann",
             "NULL|NULL|bob",
@@ -161,7 +161,7 @@ const CASES: &[(&str, &[&str])] = &[
     // A full join preserves both sides, so a filter on either input keeps a
     // derived table.
     (
-        "fj = orders & fullJoin (users & where (.id > 2)) (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc (coalesce \"~\" .n), asc (coalesce 2147483647 .oid)]",
+        "fj = orders & fullJoin ((users & where (.id > 2)) & select { u_id = .id, name = .name }) (.<user_id == .>u_id) & select { oid = .id, amount = .amount, n = .name } & order [asc (coalesce \"~\" .n), asc (coalesce 2147483647 .oid)]",
         &[
             "12|1.0|it's a\\b ",
             "10|5.5|NULL",
@@ -169,30 +169,30 @@ const CASES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "fj2 = (orders & where (.amount > 4.5)) & fullJoin (users & where (.id > 2)) (.<user_id == .>id) & select { oid = .id, amount = .amount, n = .name } & order [asc (coalesce \"~\" .n), asc (coalesce 2147483647 .oid)]",
+        "fj2 = (orders & where (.amount > 4.5)) & fullJoin ((users & where (.id > 2)) & select { u_id = .id, name = .name }) (.<user_id == .>u_id) & select { oid = .id, amount = .amount, n = .name } & order [asc (coalesce \"~\" .n), asc (coalesce 2147483647 .oid)]",
         &["NULL|NULL|it's a\\b ", "10|5.5|NULL"],
     ),
     // The mirror case on the other side: a left join filtered on its
     // preserved (left) input, and one filtered on its null-extended input.
     (
-        "ljonleft = (users & where (.id > 2)) & leftJoin orders (.<id == .>user_id) & select { n = .name, amount = .amount } & order [asc .n]",
+        "ljonleft = (users & where (.id > 2)) & leftJoin (orders & select { user_id = .user_id, amount = .amount }) (.<id == .>user_id) & select { n = .name, amount = .amount } & order [asc .n]",
         &["it's a\\b |1.0"],
     ),
     (
-        "ljonright = users & leftJoin (orders & where (.amount > 4.5)) (.<id == .>user_id) & select { n = .name, amount = .amount } & order [asc .n, asc (coalesce 2147483647 .amount)]",
+        "ljonright = users & leftJoin ((orders & where (.amount > 4.5)) & select { user_id = .user_id, amount = .amount }) (.<id == .>user_id) & select { n = .name, amount = .amount } & order [asc .n, asc (coalesce 2147483647 .amount)]",
         &["ann|5.5", "bob|NULL", "it's a\\b |NULL"],
     ),
     // An inner join is the exception: both sides may hoist their filters to
     // WHERE, since the filter only decides which rows match. No order is
     // placed by a user above 1, so this returns nothing.
     (
-        "ij = (orders & where (.amount > 4.5)) & innerJoin (users & where (.id > 1)) (.<user_id == .>id) & select { oid = .id, n = .name } & order [asc .n]",
+        "ij = (orders & where (.amount > 4.5)) & innerJoin ((users & where (.id > 1)) & select { u_id = .id, name = .name }) (.<user_id == .>u_id) & select { oid = .id, n = .name } & order [asc .n]",
         &[],
     ),
     // The same filters without excluding the matching user, so the inner
     // join does return rows.
     (
-        "ij2 = (orders & where (.amount > 4.5)) & innerJoin (users & where (.id > 0)) (.<user_id == .>id) & select { oid = .id, n = .name } & order [asc .oid]",
+        "ij2 = (orders & where (.amount > 4.5)) & innerJoin ((users & where (.id > 0)) & select { u_id = .id, name = .name }) (.<user_id == .>u_id) & select { oid = .id, n = .name } & order [asc .oid]",
         &["10|ann"],
     ),
     // A lone `offset` needs a "no limit" that the engine accepts: SQLite
@@ -254,13 +254,13 @@ const CASES: &[(&str, &[&str])] = &[
     (
         "fagg = nums & select { k = ifThenElse (.a > 0) \"pos\" \"neg\", a = .a } & agg {
            k = group .k,
-           total = sumFilter (.a > 0) .a,
-           mean = avgFilter (.a > 0) .a,
-           n = countFilter (.a > 0),
-           n_of = countOfFilter (.a > 0) .a,
-           n_distinct = countDistinctFilter (.a > 0) .a,
-           lo = minFilter (.a > 0) .a,
-           hi = maxFilter (.a > 0) .a
+           total = filtered (.a > 0) (sum .a),
+           mean = filtered (.a > 0) (avg .a),
+           n = filtered (.a > 0) count,
+           n_of = filtered (.a > 0) (countOf .a),
+           n_distinct = filtered (.a > 0) (distinctAgg (countOf .a)),
+           lo = filtered (.a > 0) (min .a),
+           hi = filtered (.a > 0) (max .a)
          } & order [asc .k]",
         &[
             "neg|NULL|NULL|0|0|0|NULL|NULL",
@@ -268,9 +268,9 @@ const CASES: &[(&str, &[&str])] = &[
         ],
     ),
     // On an empty input a global filtered aggregate still has one row:
-    // `countFilter` is 0 and `sumFilter` is NULL.
+    // `filtered p count` is 0 and a filtered `sum` is NULL.
     (
-        "fagg_empty = empty & agg { n = countFilter true, total = sumFilter true .id }",
+        "fagg_empty = empty & agg { n = filtered true count, total = filtered true (sum .id) }",
         &["0|NULL"],
     ),
 ];

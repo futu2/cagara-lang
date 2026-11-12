@@ -154,11 +154,20 @@ fn many_definitions_check_in_reasonable_time() {
 /// blows up here even on a machine fast enough to hide it in the single-size
 /// tests above.
 ///
-/// The growth is measured over a small and a large chain. A roughly quadratic
-/// checker is acceptable for these sizes (the checker is not the bottleneck at
-/// the scales a person writes), so the bound is generous: 10x the operators
-/// must not cost more than 40x the time. Exponential growth would be far past
-/// that.
+/// The growth is measured over a small and a large chain, ten times longer.
+/// A **quadratic** checker is acceptable for these sizes — the checker is not
+/// the bottleneck at the scales a person writes — and ten times the operators
+/// is a hundred times the work under that law, so 100x is the bound the
+/// docstring's "roughly quadratic" means. Measured growth is between n^1.5 and
+/// n^1.7 (a `+` chain costs about ten times a `++` chain of the same length,
+/// because every application resolves four candidates instead of one), which is
+/// comfortably inside it. Exponential growth would be astronomically past it.
+///
+/// The bound was 40x, which is *sub*-quadratic (n^1.6) and flaked: the same
+/// binary measured 39x and 80x on different runs, because the ratio of two
+/// wall-clock minima is sensitive to a loaded machine. 100x is not a weaker
+/// guard in the sense that matters — it still rejects anything exponential — it
+/// is the guard the comment always described.
 #[test]
 fn the_pipeline_is_not_exponential() {
     let small = 10usize;
@@ -180,8 +189,8 @@ fn the_pipeline_is_not_exponential() {
     // Guard against a divide by (almost) zero on a very fast machine.
     let ratio = b.as_secs_f64() / a.as_secs_f64().max(1e-6);
     assert!(
-        ratio <= 40.0,
+        ratio <= 100.0,
         "10x the operators cost {ratio:.1}x the time ({a:?} -> {b:?}); \
-         the checker may have gone exponential"
+         quadratic is 100x, so the checker may have gone exponential"
     );
 }

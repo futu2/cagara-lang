@@ -641,15 +641,15 @@ mod tests {
 
     #[test]
     fn diamond_is_right_associative() {
-        let ExprKind::App(f, args) = body("s = .a <> .b <> .c") else {
+        let ExprKind::App(f, args) = body("s = .a ++ .b ++ .c") else {
             panic!()
         };
-        assert_eq!(name(&f), "_<>_");
+        assert_eq!(name(&f), "_++_");
         assert_eq!(args[0].kind, ExprKind::Field(Side::Single, "a".into()));
         let ExprKind::App(g, _) = &args[1].kind else {
-            panic!("expected .b <> .c on the right")
+            panic!("expected .b ++ .c on the right")
         };
-        assert_eq!(name(g), "_<>_");
+        assert_eq!(name(g), "_++_");
         // `<` and `<>` stay distinct.
         let ExprKind::App(lt, _) = body("p = .a < .b") else {
             panic!()

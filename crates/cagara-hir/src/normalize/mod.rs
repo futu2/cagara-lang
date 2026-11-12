@@ -169,6 +169,9 @@ pub(crate) enum Value<'a> {
     Combine(CombineFn),
     /// A `sql` template awaiting its arguments.
     Template(TemplateFn),
+    /// `filtered`, `distinctAgg` or `over`, awaiting the aggregate (and, for
+    /// `over`, the window spec) it modifies.
+    AggModifier(AggModifierFn),
     /// `table "s" "t"`, awaiting its two name arguments.
     Table {
         args: Vec<Value<'static>>,
@@ -332,6 +335,44 @@ pub(crate) struct TemplateFn {
     ty: crate::core::ScalarType,
     args: Vec<crate::checked::CheckedExpr>,
     origin: Origin,
+}
+
+/// An aggregate modifier awaiting its arguments.
+///
+/// The aggregate is a *value* (`agg (expr r a)` is a type), so modifying one is
+/// ordinary application: the arguments arrive one at a time and the rewrite
+/// happens when the last one does. Storing them as `Value`s rather than as
+/// finished expressions is what lets `over`'s first argument be a window spec.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AggModifierFn {
+    pub(crate) kind: ModifierKind,
+    pub(crate) args: Vec<Value<'static>>,
+    /// `over`'s specification, once it has arrived.
+    pub(crate) spec: Option<Box<crate::checked::WinSpecChecked>>,
+    pub(crate) origin: Origin,
+}
+
+/// Which modifier this is. Three, not a name per aggregate function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModifierKind {
+    Filtered,
+    Distinct,
+    Over,
+}
+
+impl AggModifierFn {
+    /// How many *expression* arguments it takes. `over`'s window spec is not
+    /// one: it arrives as its own value (`Value::WinSpec`) and is held apart,
+    /// which is what lets `over { … }` be partially applied.
+    pub(crate) fn arity(&self) -> usize {
+        match self.kind {
+            // `filtered p agg`.
+            ModifierKind::Filtered => 2,
+            ModifierKind::Distinct => 1,
+            // `over spec agg`.
+            ModifierKind::Over => 1,
+        }
+    }
 }
 
 /// The state of one definition's normalization.

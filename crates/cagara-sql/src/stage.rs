@@ -224,7 +224,7 @@ impl Stage {
     /// | aggregate | aggregate, window, distinct, limit, offset |
     /// | sort | limit, offset, distinct |
     /// | limit | limit |
-    /// | offset | limit, offset |
+    /// | offset | offset |
     /// | distinct | limit, offset |
     ///
     /// `new_window` is the "the projection adds a window" part of the project
@@ -240,7 +240,13 @@ impl Stage {
             Fuse::Aggregate => paged || self.distinct || self.has_agg || self.has_win,
             Fuse::Sort => paged || self.distinct,
             Fuse::Limit => self.limit.is_some(),
-            Fuse::Offset => paged,
+            // A limit and an offset are one clause in SQL (`LIMIT n OFFSET
+            // m`), so they must fold together whatever order the pipeline
+            // applies them in. Refusing that fold put the LIMIT inside a
+            // derived table and the OFFSET outside it — which returns no rows
+            // at all, since the offset then skips past everything the limit
+            // kept.
+            Fuse::Offset => self.offset.is_some(),
             Fuse::Distinct => paged,
         }
     }
@@ -385,6 +391,7 @@ const ARG: &str = "cagara_arg_";
 pub fn template(sql: &str, args: Vec<Expr>) -> Result<Expr, String> {
     let b = sql.as_bytes();
     let mut text = String::new();
+    let mut written = 0usize;
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'$' && b.get(i + 1).is_some_and(u8::is_ascii_digit) {
@@ -393,6 +400,7 @@ pub fn template(sql: &str, args: Vec<Expr>) -> Result<Expr, String> {
                 .unwrap_or(b.len());
             text.push_str(ARG);
             text.push_str(&sql[i + 1..j]);
+            written += 1;
             i = j;
         } else {
             let c = sql[i..].chars().next().unwrap();
@@ -400,8 +408,34 @@ pub fn template(sql: &str, args: Vec<Expr>) -> Result<Expr, String> {
             i += c.len_utf8();
         }
     }
+    // The parser silently ignores trailing tokens: `$1 +` parses as `$1`.
+    // A template ending in an operator or a comma therefore means something
+    // the author did not write, so refuse the shapes that cannot end an
+    // expression instead of shipping the shorter one.
+    let trimmed = text.trim_end();
+    if let Some(last) = trimmed.chars().last() {
+        if ",+-*/%=<>&|~^(".contains(last) {
+            return Err(format!(
+                "SQL template `{sql}` ends with `{last}`, which cannot end an expression; \
+                 the SQL parser would silently drop it"
+            ));
+        }
+    }
     let parsed = sqlglot_rust::parse_expr(&text)
         .ok_or_else(|| format!("cannot parse SQL template `{sql}`"))?;
+    // Every placeholder must come back out of the parser as its own term.
+    // Two ways it does not, both silent before this check: a placeholder in a
+    // *type* position (`CAST(id AS $1)`) parses as a name and reaches the
+    // database as `CAST(id AS CAGARA_ARG_1)`, and a placeholder the parser
+    // discards (`$1 +`) disappears, so the template means something else.
+    let survived = count_placeholder(&parsed);
+    if survived != written {
+        return Err(format!(
+            "SQL template `{sql}`: only {survived} of its {written} `$n` placeholder(s) \
+             survive parsing — each must stand alone as an expression, not inside a name, a \
+             string, or a type position"
+        ));
+    }
     // Every placeholder must be a whole term naming an argument: `x$1` or
     // `'$1'` would be left in the SQL instead of substituted.
     let n = args.len();
@@ -428,7 +462,25 @@ pub fn template(sql: &str, args: Vec<Expr>) -> Result<Expr, String> {
         }
     })?;
     let args: Vec<Expr> = args.into_iter().map(atomic).collect();
-    Ok(subst(parsed, &args))
+    let out = subst(parsed, &args);
+    let left = count_placeholder(&out);
+    if left != 0 {
+        return Err(format!(
+            "SQL template `{sql}`: {left} `$n` placeholder(s) are not in an expression \
+             position, so they would reach the database as text"
+        ));
+    }
+    Ok(out)
+}
+
+/// How many placeholders the parsed tree still mentions.
+///
+/// The walk is over the tree's debug form because a placeholder can survive in
+/// positions the expression visitor does not reach — a data type inside
+/// `CAST(x AS $1)`, for one — and a placeholder that stayed behind is exactly
+/// what this counts.
+fn count_placeholder(e: &Expr) -> usize {
+    format!("{e:?}").to_ascii_lowercase().matches(ARG).count()
 }
 
 /// Replace placeholder columns with arguments. `Expr::transform` does not
@@ -609,6 +661,25 @@ fn lit(l: &ir::Lit) -> Expr {
     }
 }
 
+/// Does a window's frame change its answer?
+///
+/// `SUM`/`AVG`/`COUNT`/`MIN`/`MAX` aggregate over the frame, so the default
+/// frame decides whether `over { partition = […], order = […] } (sum .x)` is a
+/// running total (one row at a time) or a partition total. SQL's own default
+/// with an `ORDER BY` is `RANGE … CURRENT ROW`, which folds *peer* rows into
+/// the same value: two rows with equal order keys share a total, so a running
+/// sum is wrong per row. The lowerer therefore writes the `ROWS` frame out.
+///
+/// Ranking functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `NTILE`,
+/// `PERCENT_RANK`, `CUME_DIST`) and `LAG`/`LEAD` ignore the frame, so they stay
+/// frameless and their SQL stays short.
+fn frame_sensitive(sql: &str) -> bool {
+    let head = sql.trim_start().to_ascii_uppercase();
+    ["SUM(", "AVG(", "COUNT(", "MIN(", "MAX("]
+        .iter()
+        .any(|f| head.starts_with(f))
+}
+
 fn bound(b: Bound) -> String {
     match b {
         Bound::UnboundedPreceding => "UNBOUNDED PRECEDING".into(),
@@ -682,7 +753,17 @@ pub fn lower_expr(e: &ir::Expr, r: &Resolver) -> Result<Expr, String> {
                     .collect::<Result<_, String>>()?;
                 over.push(format!("ORDER BY {}", os.join(", ")));
             }
-            if let Some(f) = spec.frame {
+            // An ordered aggregate window without an explicit frame gets the
+            // running frame. Leaving it to SQL means `RANGE … CURRENT ROW`,
+            // whose peer-inclusion makes a running total wrong whenever the
+            // order key repeats.
+            let frame = spec.frame.or_else(|| {
+                (!spec.order.is_empty() && frame_sensitive(sql)).then_some(ir::Frame {
+                    start: Bound::UnboundedPreceding,
+                    end: Bound::CurrentRow,
+                })
+            });
+            if let Some(f) = frame {
                 over.push(format!(
                     "ROWS BETWEEN {} AND {}",
                     bound(f.start),

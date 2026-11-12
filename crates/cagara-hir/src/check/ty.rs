@@ -272,6 +272,10 @@ pub(crate) enum Cons {
     JoinOut {
         left: Ty,
         right: Ty,
+        /// The right operand is a `take` record, not the joined input: its
+        /// names are chosen by the query, so an overlap with the left row is
+        /// the query's mistake rather than a silent left-wins.
+        take: bool,
         out: Ty,
         nullable: (bool, bool),
         left_only: bool,
@@ -594,12 +598,14 @@ impl Cons {
             Cons::JoinOut {
                 left,
                 right,
+                take,
                 out,
                 nullable,
                 left_only,
             } => Cons::JoinOut {
                 left: f(left),
                 right: f(right),
+                take: *take,
                 out: f(out),
                 nullable: *nullable,
                 left_only: *left_only,

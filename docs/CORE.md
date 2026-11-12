@@ -130,7 +130,7 @@ constructor, and that is the only place a relational node is made.
 **Identity.** `id : a -> a = x => x` needs no rule of its own. Where it is
 applied, β-reduction removes it. Where it is a *value* — the right operand of a
 composition — the composition is itself an ordinary lambda: `_>>>_` is
-`f => g => x => g (f x)` (`prelude.cagara`), so `trim >>> id` reduces to a
+`f => g => x => g (f x)` (`prelude/core.cagara`), so `trim >>> id` reduces to a
 closure that applies `id`, and applying it is the same β-reduction. There is no
 syntactic identity clause to keep in step with that definition.
 
@@ -195,13 +195,13 @@ so `expr r a` does not accept `expr r (maybe a)`. Where nullability arises:
 - a column declared `maybe`; the nullable side of a left/right/full join, whose
   types the checker writes as `mapValue (AsNullable) s` and the arena as
   `RowType::map_value_nullable`;
-- `sum`, `avg`, `min`, `max`, `sumMaybe`, `avgMaybe`, `minMaybe`, `maxMaybe`,
-  `lag`, `lead` and the `*Over` windows return `maybe`, because SQL returns
+- `sum`, `avg`, `min`, `max`, `lag`, `lead` and the `*Over` windows return
+  `maybe`, because SQL returns
   `NULL` for an empty or all-null input; `count`/`countOf`/`countDistinct` and
   their `*Maybe` count forms return non-null `int`. The `*Filter` aggregate
   helpers keep the same result type as their unfiltered forms.
 
-Filtered aggregates are not an IR construct: `sumFilter p x`, for example, is
+Filtered aggregates are not an IR construct: `filtered p (sum x`), for example, is
 the ordinary prelude template `SUM(CASE WHEN p THEN x END)`. Omitting `ELSE`
 is what preserves SQL `FILTER`'s empty-group behaviour (`NULL` for the value
 aggregates, `0` for the counts), and the `CASE` spelling needs no
@@ -209,8 +209,9 @@ dialect-specific lowering.
 
 Nullable values are not silently coerced. The prelude provides the operators:
 `coalesce d x` (`sql "COALESCE($2, $1)"`) and infix `x ?? d`, `just`,
-`nullIf`, `isNull`/`isNotNull`, `isTrue` (treats a nullable `NULL` as false), `whereTrue` (a filter whose
-predicate is `isTrue`), `eqMaybe` (two `NULL`s count as equal). These are
+`nullIf`, `isNull`/`isNotNull`, `isTrue` (treats a nullable `NULL` as false),
+`eqMaybe` (two `NULL`s count as equal). A `where` takes a `maybe bool` directly,
+and its `NULL` condition drops the row, which is SQL's own filter. These are
 ordinary templates, so their null behaviour is the SQL they name. A plain
 comparison requires non-null operands, and the ordinary aggregate signatures do
 too; the prelude's explicit `*Maybe` aggregates opt a nullable input into SQL's

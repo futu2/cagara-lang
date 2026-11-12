@@ -421,8 +421,12 @@ impl<'w> Checker<'w> {
                             ExprKind::Primitive(name)
                                 if matches!(
                                     name.as_str(),
-                                    "__innerJoin" | "__leftJoin" | "__rightJoin"
-                                        | "__fullJoin" | "__semiJoin" | "__antiJoin"
+                                    "__innerJoin"
+                                        | "__leftJoin"
+                                        | "__rightJoin"
+                                        | "__fullJoin"
+                                        | "__semiJoin"
+                                        | "__antiJoin"
                                 )
                         ) {
                             return Ok(internal);
@@ -484,31 +488,15 @@ impl<'w> Checker<'w> {
             Some(Binding::Overloads(module, _)) if *module == self.module
         );
         if candidate || matches!(self.resolve(&t), Ty::Con("query", _)) {
-            // A query is normalized, so its overloads must be resolved:
-            // default leftover literals, then report what is still open.
+            // A query is normalized, so its overloads must be resolved. Rank
+            // them *before* leftover literals are defaulted: `coalesce 0
+            // .amount` still has a polymorphic `0`, and defaulting it to `int`
+            // can leave no candidate where the nullable signature fits.
+            self.arbitrate_pending(false)?;
+            self.solve()?;
             self.default_lits();
             self.solve()?;
-            for (c, sp) in self.pending.clone() {
-                if let Cons::Overload {
-                    name,
-                    module,
-                    cands,
-                    target,
-                    ..
-                } = c
-                {
-                    let fits = self.fitting(module, &cands, &target);
-                    let shown: Vec<String> =
-                        fits.iter().map(|&i| self.cand_shown(module, i)).collect();
-                    let msg = format!(
-                        "ambiguous use of `{}` at type {}; candidates: {}",
-                        op_name(&name),
-                        self.show(&target),
-                        shown.join(", ")
-                    );
-                    return Err(TyErr { span: sp, msg });
-                }
-            }
+            self.arbitrate_pending(true)?;
         } else {
             // A non-query definition is not normalized, so its overloads may
             // stay open for its users. One that no candidate can satisfy is an
@@ -527,18 +515,78 @@ impl<'w> Checker<'w> {
                 sp,
             )) = self.first_unsatisfiable()
             {
-                let shown: Vec<String> =
-                    cands.iter().map(|&i| self.cand_shown(module, i)).collect();
-                let msg = format!(
-                    "no overload of `{}` matches {}; candidates: {}",
-                    op_name(&name),
-                    self.show(&target),
-                    shown.join(", ")
-                );
+                let msg = self.no_overload_message(module, &name, &cands, &target);
                 return Err(TyErr { span: sp, msg });
+            }
+            // What is still open is a choice the definition leaves to its
+            // users. Ranking it now keeps the *signature* honest — `adult =
+            // .age >= 18` is `expr { age = a | b } bool`, not a result type
+            // nobody can name — while the argument types stay as open as they
+            // were.
+            for (c, sp) in self.pending.clone() {
+                if let Cons::Overload {
+                    name,
+                    module,
+                    cands,
+                    target,
+                    origin,
+                } = c
+                {
+                    let fits = self.fitting(module, &cands, &target);
+                    let ranked = self.prefer(module, &fits, &target, false);
+                    if ranked.len() == 1 {
+                        self.choose(module, ranked[0], &target, &origin, &name, sp)
+                            .map_err(|msg| TyErr { span: sp, msg })?;
+                    }
+                }
             }
         }
         Ok(t)
+    }
+
+    /// Choose the overloads that this definition can still resolve, ranking
+    /// the survivors by the shape of their arguments.
+    ///
+    /// With `raise` false a tie is left pending — it may still be broken by a
+    /// literal's default or by a later constraint. With `raise` true the
+    /// definition cannot wait any more, and a tie is the `ambiguous use` error.
+    fn arbitrate_pending(&mut self, raise: bool) -> Result<(), TyErr> {
+        for (c, sp) in self.pending.clone() {
+            let Cons::Overload {
+                name,
+                module,
+                cands,
+                target,
+                origin,
+            } = c
+            else {
+                continue;
+            };
+            let fits = self.fitting(module, &cands, &target);
+            if fits.is_empty() {
+                // Some literals may still be waiting for their default; the
+                // arbitrary-arity message comes from the final pass.
+                continue;
+            }
+            let ranked = self.prefer(module, &fits, &target, false);
+            if let [winner] = ranked.as_slice() {
+                self.choose(module, *winner, &target, &origin, &name, sp)
+                    .map_err(|msg| TyErr { span: sp, msg })?;
+                continue;
+            }
+            if !raise {
+                continue;
+            }
+            let shown: Vec<String> = ranked.iter().map(|&i| self.cand_shown(module, i)).collect();
+            let msg = format!(
+                "ambiguous use of `{}` at type {}; candidates: {}",
+                op_name(&name),
+                self.show(&target),
+                shown.join(", ")
+            );
+            return Err(TyErr { span: sp, msg });
+        }
+        Ok(())
     }
 
     /// The first open overload with no candidates left once leftover
@@ -651,7 +699,18 @@ impl<'w> Checker<'w> {
                         return self.conv_with_kind(&args[0], phase, names, Kind::Row);
                     }
                     if args.is_empty() {
-                        return Ok(self.rigid(head, names));
+                        // A bare name in a type position is a *type variable*
+                        // only when it cannot be mistaken for a type name: one
+                        // lowercase letter, which is how every signature here
+                        // spells `r`, `s`, `a`, `k`. Anything longer is a type
+                        // name, and type names are closed. Accepting any bare
+                        // name made `amount = decimal` a fresh variable per
+                        // use, so one column was an `int` in one definition and
+                        // a `string` in another — checked, and wrong.
+                        if is_type_variable(head) {
+                            return Ok(self.rigid(head, names));
+                        }
+                        return Err(unknown_type_name(head));
                     }
                     return Err(format!("unknown type constructor `{head}`"));
                 };
@@ -1397,6 +1456,12 @@ impl<'w> Checker<'w> {
                     msg: format!("field `{name}` appears twice"),
                 });
             }
+            // The field's expectation comes from the expected row when it has
+            // one. A *stage*'s record is checked against
+            // `record_expr(phase, row, fields, output)`, whose field types are
+            // not named yet, so a field the expectation does not mention gets a
+            // fresh variable; the projection's own constraint unifies those
+            // with the input row once the row is known.
             let field_ty = expected_fields
                 .iter()
                 .find(|(n, _)| n == name)
@@ -1738,6 +1803,7 @@ impl<'w> Checker<'w> {
         if let Some(kind) = combine_kind {
             let expected = match kind {
                 CombineKind::Join(_) => 3,
+
                 CombineKind::Set(_) => 2,
             };
             if args.len() == expected && combine_inputs.len() == 2 {
@@ -2074,6 +2140,18 @@ impl<'w> Checker<'w> {
             (Ty::Row(..) | Ty::Empty, Ty::Con("record_expr", ea)) if ea.len() == 4 => {
                 self.unify(&ea[2], &a)
             }
+            // The other direction: a signature declares `expr r (row s)` and the
+            // argument is a record literal. Its fourth slot is the row the
+            // record produces, which is what `s` names — for a `select` that is
+            // also computed by the stage constraint, and for a join's `take` it
+            // is the only place the row is named at all.
+            (Ty::Con("record_expr", ra), Ty::Con("expr", ea)) if ra.len() == 4 => {
+                let (p, r) = (ra[0].clone(), ra[1].clone());
+                let (out, want) = (ra[3].clone(), ea[2].clone());
+                self.unify(&p, &ea[0])?;
+                self.unify(&r, &ea[1])?;
+                self.unify(&out, &want)
+            }
             (Ty::Con(s, sa), Ty::Con("expr", ea)) if sa.is_empty() && SCALARS.contains(s) => {
                 let v = ea[2].clone();
                 self.lift(s, &v)
@@ -2131,7 +2209,29 @@ impl<'w> Checker<'w> {
         self.unify(&tail, &Ty::Empty)?;
         for (k, t) in fs {
             let want = match k.as_str() {
-                rules::winspec::PARTITION | rules::winspec::ORDER => list(sortkey(r.clone())),
+                // A partition key is a row expression, *not* a sort key: the two
+                // differ in key phase, and `sortkey` here made a partition
+                // element that was still a hole become a sort key — so
+                // `partition = [year .at]` asked `year` for a `sortkey`.
+                rules::winspec::PARTITION => {
+                    let a = self.fresh();
+                    let want = list(expr(con("row"), r.clone(), a.clone()));
+                    // A partition key ignores a direction marker: `[asc .x]` is
+                    // `[.x]` here. Accepting it *only* in this position keeps
+                    // `asc (desc .x)` an error.
+                    if let (Ty::Con("list", xs), Ty::Con("list", _)) = (self.resolve(&t), &want) {
+                        for x in xs {
+                            let e = expr(con("row"), r.clone(), a.clone());
+                            match self.resolve(&x) {
+                                Ty::Con("sortkey", ka) => self.unify(&ka[0], r)?,
+                                other => self.coerce(&other, &e)?,
+                            }
+                        }
+                        continue;
+                    }
+                    want
+                }
+                rules::winspec::ORDER => list(sortkey(r.clone())),
                 rules::winspec::FRAME => con("frame"),
                 o => {
                     return Err(format!(
@@ -2144,6 +2244,36 @@ impl<'w> Checker<'w> {
                 .map_err(|m| format!("window spec field `{k}`: {m}"))?;
         }
         Ok(())
+    }
+
+    /// The `no overload` diagnostic, with each candidate's first disagreement.
+    ///
+    /// Listing the signatures alone makes the reader compare three of them
+    /// against one use by hand, and the use is the part that is usually wrong.
+    /// Saying *where* each candidate parts company turns that into one line per
+    /// candidate: `argument 1 expects int, the use has string`.
+    fn no_overload_message(
+        &mut self,
+        module: usize,
+        name: &str,
+        cands: &[usize],
+        target: &Ty,
+    ) -> String {
+        let mut msg = format!(
+            "no overload of `{}` matches {}",
+            op_name(name),
+            self.show(target)
+        );
+        for &i in cands {
+            let sig = self.cand_shown(module, i);
+            match self.divergence(module, i, target) {
+                Some(why) => msg.push_str(&format!("\n  `{sig}`: {why}")),
+                // Nothing concrete to compare: the candidate is not *ruled out*
+                // by a type, so say that rather than inventing a difference.
+                None => msg.push_str(&format!("\n  `{sig}`: differs elsewhere")),
+            }
+        }
+        msg
     }
 
     // ── primitives ─────────────────────────────────────────────────────────
@@ -2310,12 +2440,34 @@ impl<'w> Checker<'w> {
                 let c = Cons::JoinOut {
                     left: l.clone(),
                     right: r.clone(),
+                    take: false,
                     out: out.clone(),
                     nullable,
                     left_only: matches!(kind, JoinKind::Semi | JoinKind::Anti),
                 };
                 self.pending.push((c, sp));
                 fun(query(r), fun(pred, fun(query(l), query(out))))
+            }
+            Filtered | DistinctAgg | Over => {
+                // `filtered p a`, `distinctAgg a`, `over spec a`: the aggregate
+                // keeps its own result type, so the signature says what it
+                // says and the arena rewrites the SQL. `agg (expr r a)` is the
+                // type of an aggregate whose argument is one row expression —
+                // every aggregate here is one.
+                let (r, a) = (self.fresh_row(), self.fresh());
+                let agg = Ty::Con("agg", vec![expr(con("row"), r.clone(), a.clone())]);
+                match p {
+                    Filtered => fun(expr(con("row"), r, con("bool")), fun(agg.clone(), agg)),
+                    DistinctAgg => fun(agg.clone(), agg),
+                    Over => {
+                        let w = self.fresh();
+                        fun(
+                            Ty::Con("winspec", vec![w.clone()]),
+                            fun(agg, Ty::Con("win", vec![expr(con("win"), w, a)])),
+                        )
+                    }
+                    _ => unreachable!("dispatched on the three aggregate modifiers"),
+                }
             }
             Set(_) => {
                 let (l, r, out) = (self.fresh(), self.fresh(), self.fresh());
@@ -2438,36 +2590,106 @@ impl<'w> Checker<'w> {
             unreachable!("dispatched on Cons::Overload")
         };
         let fits = self.fitting(*module, cands, target);
+        // While the *result* is still unknown, which form is wanted depends on
+        // the context: `just "x"` is the value form in `v : maybe string = …`
+        // and the row form inside `(.email == just "x")`, where the comparison
+        // expects `expr r (maybe string)`. Waiting lets the context decide; a
+        // definition that never pins the result is finalized by `prefer`.
+        if self.result_is_open(target) && self.results_disagree(*module, &fits) {
+            return Ok(false);
+        }
+        // Several candidates can fit while an argument is still open; rank
+        // them by the shape they expect rather than by declaration order.
+        let fits = self.prefer(*module, &fits, target, true);
         match fits.as_slice() {
-            [] => {
-                let shown: Vec<String> =
-                    cands.iter().map(|&i| self.cand_shown(*module, i)).collect();
-                Err(format!(
-                    "no overload of `{}` matches {}; candidates: {}",
-                    op_name(name),
-                    self.show(target),
-                    shown.join(", ")
-                ))
-            }
+            [] => Err(self.no_overload_message(*module, name, cands, target)),
             [i] => {
-                let s = self.cand_scheme(*module, *i);
-                if s.failed {
-                    return Err(self.failed_use(*module, *i));
-                }
-                let t = self.instantiate(&s, sp, None)?;
-                self.unify(&t, target)?;
-                let Origin::Site(site) = *origin else {
-                    return Err(format!(
-                        "internal error: unresolved hole of `{}`",
-                        op_name(name)
-                    ));
-                };
-                let (use_site, k) = decode(site);
-                let key = *self.active.last().expect("solving inside a definition");
-                self.record(key, use_site, k, Choice::Def(*module, *i));
+                self.choose(*module, *i, target, origin, name, sp)?;
                 Ok(true)
             }
             _ => Ok(false),
+        }
+    }
+
+    /// Commit to candidate `i` of an overload constraint: instantiate its
+    /// scheme, unify it with the target, and record the choice for
+    /// elaboration.
+    fn choose(
+        &mut self,
+        module: usize,
+        i: usize,
+        target: &Ty,
+        origin: &Origin,
+        name: &str,
+        sp: Span,
+    ) -> Result<(), String> {
+        let s = self.cand_scheme(module, i);
+        if s.failed {
+            return Err(self.failed_use(module, i));
+        }
+        let t = self.instantiate(&s, sp, None)?;
+        self.unify(&t, target)?;
+        let Origin::Site(site) = *origin else {
+            return Err(format!(
+                "internal error: unresolved hole of `{}`",
+                op_name(name)
+            ));
+        };
+        let (use_site, k) = decode(site);
+        let key = *self.active.last().expect("solving inside a definition");
+        self.record(key, use_site, k, Choice::Def(module, i));
+        Ok(())
+    }
+
+    /// Do the surviving candidates answer with different kinds of result — a
+    /// row-indexed expression on one side, a plain value on the other?
+    ///
+    /// That is the value/row twin pair, and while the context has not said
+    /// which it wants, choosing is a guess: `just "x"` is a value on its own
+    /// and a row expression inside `(.email == just "x")`.
+    /// Whether the candidates that fit disagree about the result being a row
+    /// expression or a plain value.
+    ///
+    /// When they do, the *context* decides which form is wanted (`just "x"` is
+    /// the value form in `v : maybe string = …` and the row form inside
+    /// `(.email == just "x")`), so the constraint waits. Ranking the candidates
+    /// here instead — which an earlier version did, to stop a value twin from
+    /// deferring a decision — cost enough to show up in the scaling test
+    /// (`perf::the_pipeline_is_not_exponential`), and it was solving the wrong
+    /// problem: the window-spec case it was written for turned out to be a
+    /// sort-key confusion in `winspec`, fixed where it belongs.
+    fn results_disagree(&mut self, module: usize, fits: &[usize]) -> bool {
+        let mut expr = false;
+        let mut value = false;
+        for &i in fits {
+            let s = self.cand_scheme(module, i);
+            let mut t = s.ty.clone();
+            loop {
+                match self.resolve(&t) {
+                    Ty::Fun(_, r) => t = (*r).clone(),
+                    tail => {
+                        if matches!(tail, Ty::Con("expr", _)) {
+                            expr = true;
+                        } else {
+                            value = true;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        expr && value
+    }
+
+    /// Is the tail of this arrow spine still a variable?
+    fn result_is_open(&self, t: &Ty) -> bool {
+        let mut t = self.resolve(t);
+        loop {
+            match t {
+                Ty::Fun(_, r) => t = self.resolve(&r),
+                Ty::Var(_) => return true,
+                _ => return false,
+            }
         }
     }
 
@@ -2488,9 +2710,28 @@ impl<'w> Checker<'w> {
                     return Ok(false);
                 }
                 self.unify(row, &r)?;
-                self.unify(&v, &con("bool")).map_err(|_| {
-                    format!("`where` needs a bool condition, found {}", self.show(&v))
-                })?;
+                // `bool` or `maybe bool`. SQL's `WHERE` already drops a NULL
+                // predicate, so a three-valued condition is exactly what this
+                // stage means; requiring `bool` forced every filter over a
+                // nullable column — or over an aggregate, which is `maybe` —
+                // to spell a `coalesce` sentinel, and the sentinel changes
+                // which rows survive (`SUM` NULL vs `COALESCE(SUM, 0)`).
+                let v = self.resolve(&v);
+                match &v {
+                    // The predicate's own type is still open — the row it reads
+                    // may not have closed yet (`where .ok` over a column the
+                    // annotation declares `maybe bool`). Defaulting it to
+                    // `bool` here would then contradict that column, so wait.
+                    Ty::Var(_) => return Ok(false),
+                    Ty::Con("bool", _) => {}
+                    Ty::Con("maybe", a) if matches!(self.resolve(&a[0]), Ty::Con("bool", _)) => {}
+                    _ => {
+                        return Err(format!(
+                            "`where` needs a bool or maybe bool condition, found {}",
+                            self.show(&v)
+                        ))
+                    }
+                }
                 Ok(true)
             }
             o => Err(format!(
@@ -2545,6 +2786,8 @@ impl<'w> Checker<'w> {
                 Ty::Con(s, sa) if sa.is_empty() && SCALARS.contains(&s) => out.push((l, t)),
                 Ty::Con("expr", a) => {
                     let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
+                    // A projection's field is a `select`/`agg` field, so a
+                    // side-qualified name is the join-predicate mistake.
                     if is_join(&self.resolve(&r)) {
                         return Err(format!("field `{l}`: {}", rules::JOIN_ONLY));
                     }
@@ -2805,6 +3048,7 @@ impl<'w> Checker<'w> {
         let Cons::JoinOut {
             left,
             right,
+            take,
             out,
             nullable,
             left_only,
@@ -2835,6 +3079,41 @@ impl<'w> Checker<'w> {
         if *left_only {
             self.unify(&row(lf, Ty::Empty), out)?;
             return Ok(true);
+        }
+        // A `take` record names the columns the join keeps from the right side.
+        // A name the left row already has would keep the left one and drop the
+        // right — the very thing the record exists to prevent — so it is a type
+        // error rather than a silent overwrite.
+        let shared: Vec<&str> = rf
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .filter(|k| lf.iter().any(|(n, _)| n == k))
+            .collect();
+        if !shared.is_empty() {
+            let names = shared
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let first = shared[0];
+            return Err(if *take {
+                format!(
+                    "`take` names {names}, which the left input already has; give it a different \
+                     name (`{first} = .>…`) or drop it"
+                )
+            } else {
+                // An anonymous merge on a shared name keeps the left value and
+                // drops the right one, and nothing can read the right column
+                // back afterwards: `.<x`/`.>x` name the inputs only inside the
+                // join predicate. That is a silent wrong answer, so it is a type
+                // error that names both ways out — say what the right side
+                // contributes, or rename it before joining.
+                format!(
+                    "this join has {names} on both sides: the merged row keeps the left one, so \
+                     the right side's would be lost. Reshape the right operand before joining: \
+                     `& innerJoin (q & select {{ other_{first} = .{first}, … }}) (.<a == .>b)`"
+                )
+            });
         }
         let wrap = |this: &Self, on: bool, (k, t): (String, Ty)| match this.resolve(&t) {
             Ty::Con("maybe", _) => (k, t),
@@ -2915,4 +3194,64 @@ impl<'w> Checker<'w> {
             None => self.unify(p, &con("row")),
         }
     }
+}
+
+/// A type variable is a single lowercase letter.
+///
+/// The language has no `forall`, so variables are implicit; restricting them to
+/// one letter is what keeps an unknown *type name* from silently becoming one.
+fn is_type_variable(name: &str) -> bool {
+    name.len() == 1 && name.as_bytes()[0].is_ascii_lowercase()
+}
+
+/// The diagnostic for a type name the language does not have.
+fn unknown_type_name(name: &str) -> String {
+    const KNOWN: &[&str] = &[
+        "int",
+        "float",
+        "string",
+        "bool",
+        "date",
+        "timestamp",
+        "maybe",
+        "list",
+        "expr",
+        "agg",
+        "win",
+        "query",
+        "row",
+    ];
+    let near = KNOWN
+        .iter()
+        .map(|k| (*k, edit_distance(name, k)))
+        .filter(|(k, d)| *d <= 2 || k.starts_with(name) || name.starts_with(*k))
+        .min_by_key(|(_, d)| *d);
+    match near {
+        Some((k, _)) => format!(
+            "unknown type `{name}`: did you mean `{k}`? Type names are closed, and a bare name \
+             is a type variable only when it is a single lowercase letter"
+        ),
+        None => format!(
+            "unknown type `{name}`: type names are closed ({}); a bare name is a type variable \
+             only when it is a single lowercase letter",
+            KNOWN.join(", ")
+        ),
+    }
+}
+
+/// Levenshtein distance, for the "did you mean" in [`unknown_type_name`].
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }

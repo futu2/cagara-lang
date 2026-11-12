@@ -264,7 +264,7 @@ fn window_then_filter_wraps() {
 #[test]
 fn running_total_frame() {
     let s = sql(
-        "q = orders & select { id = .id, running = sumOver { partition = [.user_id], order = [.created_at], frame = runningFrame } .amount }\n",
+        "q = orders & select { id = .id, running = over { partition = [.user_id], order = [.created_at], frame = runningFrame } (sum .amount) }\n",
         "q",
     );
     assert!(
@@ -276,7 +276,7 @@ fn running_total_frame() {
 #[test]
 fn join_uses_sides() {
     let s = sql(
-        "q = orders & select { order_id = .id, user_id = .user_id } & innerJoin users (.<user_id == .>id)\n  & select { order_id = .order_id, name = .name }\n",
+        "q = orders & select { order_id = .id, user_id = .user_id } & innerJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id)\n  & select { order_id = .order_id, name = .name }\n",
         "q",
     );
     assert!(s.contains("INNER JOIN public.users AS t2"), "{s}");
@@ -378,15 +378,16 @@ fn nullable_aggregates_keep_sql_null_semantics() {
     let s = sql(
         r#"nulls : query { x = maybe int } = table "public" "nulls"
 q = nulls & agg {
-  s = sumMaybe .x, a = avgMaybe .x, lo = minMaybe .x, hi = maxMaybe .x,
+  s = sum .x, a = avg .x, lo = min .x, hi = max .x,
   n = countOfMaybe .x, d = countDistinctMaybe .x
 }
 "#,
         "q",
     );
-    // Each helper passes the nullable column straight through: SQL already
-    // skips NULL in these aggregates. Coalescing first would change `avg`
-    // (and `min`/`max`) rather than merely satisfy the checker.
+    // A nullable column takes the same aggregate name and passes straight
+    // through: SQL already skips NULL in these aggregates. Coalescing first
+    // would change `avg` (and `min`/`max`) rather than merely satisfy the
+    // checker.
     for expected in [
         "SUM(x) AS s",
         "AVG(x) AS a",
@@ -434,7 +435,7 @@ fn nothing_is_sql_null() {
 
 #[test]
 fn full_join_is_rejected_for_mysql_family() {
-    let src = "q = orders & fullJoin users (.<user_id == .>id)\n";
+    let src = "q = orders & fullJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id)\n";
     let e = dialect(src, "q", "mysql").unwrap_err();
     assert!(e.contains("`fullJoin`"), "{e}");
     assert!(dialect(src, "q", "postgres").is_ok());
@@ -538,15 +539,13 @@ fn set_operations_and_reused_queries_use_sql_set_ops_and_ctes() {
 
 /// `except` is not commutative, so it is the set operation that shows whether
 /// the piped and direct forms agree. They must: `users &~ admins` and
-/// `except users admins` are the same query, with the *written* first operand
-/// on the left.
+/// `except admins users` are the same query, with `users` on the left.
 ///
-/// The piped form used to be reversed. `users & except admins` desugars to
-/// `_&_ users (except admins)`, and `except admins` is already a partial
-/// application, so the pipe supplied `users` as its second argument and the
-/// primitive saw `[admins, users]` — producing `admins EXCEPT users`, the
-/// complement of what was asked for. `union`, `unionAll`, and `intersect` are
-/// commutative and hid it.
+/// Every stage takes its subject last, and for a set operation the subject is
+/// the left operand. `users & except admins` desugars to
+/// `except admins users`, so reading the *first* argument as the left operand
+/// turned it into `admins EXCEPT users` — the complement of what was asked
+/// for. `union`, `unionAll`, and `intersect` are commutative and hid it.
 ///
 /// `admins` has `users`' row because a set operation requires it.
 const ADMINS: &str = "admins : query { id = int, name = string, age = int, active = bool } = table \"public\" \"admins\"\n";
@@ -557,8 +556,8 @@ fn sql_admins(src: &str, name: &str) -> String {
 
 #[test]
 fn a_piped_except_is_not_reversed() {
-    let piped = sql_admins("q = users &~ admins\n", "q");
-    let direct = sql_admins("q = except users admins\n", "q");
+    let piped = sql_admins("q = users & except admins\n", "q");
+    let direct = sql_admins("q = except admins users\n", "q");
     assert_eq!(piped, direct, "piped and direct forms must agree");
 
     let inner = piped
@@ -582,10 +581,10 @@ fn a_piped_except_is_not_reversed() {
 #[test]
 fn every_set_operation_has_a_pipe_stage() {
     for (op, sql_op) in [
-        ("&|", "UNION"),
-        ("&!", "UNION ALL"),
-        ("&^", "INTERSECT"),
-        ("&~", "EXCEPT"),
+        ("& union", "UNION"),
+        ("& unionAll", "UNION ALL"),
+        ("& intersect", "INTERSECT"),
+        ("& except", "EXCEPT"),
     ] {
         let piped = sql_admins(&format!("q = users {op} admins\n"), "q");
         assert!(
@@ -613,7 +612,7 @@ fn every_set_operation_has_a_pipe_stage() {
 #[test]
 fn a_set_branch_with_its_own_order_is_wrapped() {
     let s = sql_admins(
-        "q = union (users & order [asc .id]) (admins & select { .id, .name, .age, .active })\n",
+        "q = (users & order [asc .id]) & union (admins & select { .id, .name, .age, .active })\n",
         "q",
     );
     // The ordering must sit inside a derived table, not beside the set operator.
@@ -666,7 +665,7 @@ fn a_set_branch_with_its_own_limit_is_wrapped() {
     // that has one cannot be a bare SELECT: `SELECT ... LIMIT 3 UNION
     // SELECT ... LIMIT 2` is rejected by every engine. Such a branch goes
     // behind a derived table, which is portable.
-    let s = sql("q = union (users & limit 3) (users & limit 2)\n", "q");
+    let s = sql("q = (users & limit 3) & union (users & limit 2)\n", "q");
     assert!(
         s.contains("FROM (SELECT id, name, age, active FROM public.users LIMIT 3) AS t1"),
         "{s}"
@@ -679,7 +678,7 @@ fn a_set_branch_with_its_own_limit_is_wrapped() {
     assert!(!s.contains("LIMIT 3 UNION"), "{s}");
     // The common case is untouched: a branch without pagination stays flat.
     let plain = sql(
-        "q = union (users & where (.age > 1)) (users & where (.age > 2))\n",
+        "q = (users & where (.age > 1)) & union (users & where (.age > 2))\n",
         "q",
     );
     assert!(plain.contains("UNION SELECT"), "{plain}");
@@ -710,7 +709,7 @@ fn nested_blocks_get_dialect_rewrites() {
     // Regression: a reused query becomes a CTE, and a set operation is not a
     // `Select`, so neither used to reach the expression rewriter. Their
     // `CAGARA_*` intrinsics, `||`, and T-SQL conditions leaked unchanged.
-    let reused = "act = users & where .active & select { n = length .name, s = .name <> \"!\" }\n\
+    let reused = "act = users & where .active & select { n = length .name, s = .name ++ \"!\" }\n\
                   q = union act act\n";
     let ansi = dialect(reused, "q", "ansi").unwrap();
     assert!(!ansi.contains("CAGARA_"), "{ansi}");
@@ -772,13 +771,13 @@ fn constant_global_agg_has_one_row() {
 fn filtered_aggregates_lower_to_portable_case() {
     let src = r#"q = orders & agg {
   u = group .user_id,
-  paid = sumFilter (.status == "paid") .amount,
-  mean = avgFilter (.status == "paid") .amount,
-  n = countFilter (.status == "paid"),
-  n_of = countOfFilter (.status == "paid") .id,
-  n_distinct = countDistinctFilter (.status == "paid") .id,
-  lo = minFilter (.status == "paid") .amount,
-  hi = maxFilter (.status == "paid") .amount
+  paid = filtered (.status == "paid") (sum .amount),
+  mean = filtered (.status == "paid") (avg .amount),
+  n = filtered (.status == "paid") count,
+  n_of = filtered (.status == "paid") (countOf .id),
+  n_distinct = filtered (.status == "paid") (distinctAgg (countOf .id)),
+  lo = filtered (.status == "paid") (min .amount),
+  hi = filtered (.status == "paid") (max .amount)
 }
 "#;
     let s = sql(src, "q");
@@ -804,11 +803,11 @@ fn filtered_aggregates_lower_to_portable_case() {
 #[test]
 fn a_filtered_aggregate_is_a_value() {
     let direct = sql(
-        "q = orders & agg { u = group .user_id, paid = sumFilter (.status == \"paid\") .amount }\n",
+        "q = orders & agg { u = group .user_id, paid = filtered (.status == \"paid\") (sum .amount) }\n",
         "q",
     );
     let partial = sql(
-        "paid = sumFilter (.status == \"paid\")\nq = orders & agg { u = group .user_id, paid = paid .amount }\n",
+        "paid = filtered (.status == \"paid\") (sum .amount)\nq = orders & agg { u = group .user_id, paid = paid }\n",
         "q",
     );
     assert_eq!(partial, direct);
@@ -820,7 +819,11 @@ fn errors() {
     assert!(error("q = users & agg { n = count, name = .name }\n", "q").contains("not grouped"));
     assert!(error("q = users & where (count >= 1)\n", "q").contains("aggregate"));
     assert!(error("q = users & where (.salary > 1)\n", "q").contains("no column `salary`"));
-    assert!(error("q = orders & innerJoin users (.user_id == .id)\n", "q").contains("which input"));
+    assert!(error(
+        "q = orders & innerJoin (users & prefix \"u_\") (.user_id == .u_id)\n",
+        "q"
+    )
+    .contains("which input"));
     assert!(error("q = users & select {.nope}\n", "q").contains("no column `nope`"));
     assert!(error("q : query { id = int } = q\n", "q").contains("refers to itself"));
     // A recursive helper is caught during normalization and named, whether it is
@@ -841,14 +844,18 @@ fn errors() {
         "q"
     )
     .contains("ungrouped"));
-    assert!(error("q = orders & agg { p = sumFilter .status .amount }\n", "q").contains("bool"));
     assert!(error(
-        "q = orders & agg { p = sumFilter (count > 0) .amount }\n",
+        "q = orders & agg { p = filtered .status (sum .amount) }\n",
+        "q"
+    )
+    .contains("bool"));
+    assert!(error(
+        "q = orders & agg { p = filtered (count > 0) (sum .amount) }\n",
         "q"
     )
     .contains("cannot nest"));
     assert!(error(
-        "q = orders & select { p = sumFilter (.status == \"paid\") .amount }\n",
+        "q = orders & select { p = filtered (.status == \"paid\") (sum .amount) }\n",
         "q"
     )
     .contains("belong in `agg`"));
@@ -862,10 +869,10 @@ fn errors() {
 #[test]
 fn overloads_dispatch_to_sql() {
     let s = sql(
-        "q = users & select { s = .name <> \" \" <> upper .name, a = .age + 1 }\n",
+        "q = users & select { s = .name ++ \" \" ++ upper .name, a = .age + 1 }\n",
         "q",
     );
-    // `<>` is right-associative.
+    // `++` is right-associative.
     assert!(s.contains("name || (' ' || UPPER(name)) AS s"), "{s}");
     assert!(s.contains("age + 1 AS a"), "{s}");
     // One generic helper, dispatched at int and float in the same query
@@ -889,7 +896,7 @@ fn overloads_dispatch_to_sql() {
 #[test]
 fn nulls_and_outer_joins() {
     let s = sql(
-        "q = orders & leftJoin users (.<user_id == .>id)\n  & select { id = .id, who = coalesce \"?\" .name, known = isNotNull .name }\n",
+        "q = orders & leftJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id)\n  & select { id = .id, who = coalesce \"?\" .name, known = isNotNull .name }\n",
         "q",
     );
     assert!(s.contains("LEFT JOIN public.users"), "{s}");
@@ -901,7 +908,7 @@ fn nulls_and_outer_joins() {
     );
     assert!(s.contains("COALESCE(SUM(amount), 0.0) AS total"), "{s}");
     assert!(error(
-        "q = orders & leftJoin users (.<user_id == .>id) & where (.name == \"x\")\n",
+        "q = orders & leftJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id) & where (.name == \"x\")\n",
         "q"
     )
     .contains("maybe"));
@@ -910,7 +917,7 @@ fn nulls_and_outer_joins() {
 #[test]
 fn join_inputs_are_inlined_when_safe() {
     // An update before a join needs no derived table.
-    let s = sql("q = orders & select { order_id = .id, user_id = .user_id } & innerJoin users (.<user_id == .>id) & select { o = .order_id, n = .name }\n", "q");
+    let s = sql("q = orders & select { order_id = .id, user_id = .user_id } & innerJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id) & select { o = .order_id, n = .name }\n", "q");
     assert_sql(
         &s,
         "SELECT t1.id AS o, t2.name AS n FROM public.orders AS t1 INNER JOIN public.users AS t2 ON t1.user_id = t2.id",
@@ -920,29 +927,30 @@ fn join_inputs_are_inlined_when_safe() {
     // WHERE would drop the unmatched rows the join keeps; hoisting the
     // null-extended side's into ON would widen the input back to the
     // unfiltered relation.
-    let s = sql("q = orders & where (.amount > 10.0) & leftJoin (users & where .active) (.<user_id == .>id)\n", "q");
+    let s = sql("q = orders & where (.amount > 10.0) & leftJoin ((users & where .active) & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id)\n", "q");
     assert_sql(
         &s,
-        "SELECT t1.id, t1.user_id, t1.amount, t1.status, t1.created_at, t2.name, t2.age, t2.active \
-         FROM (SELECT id, user_id, amount, status, created_at FROM public.orders WHERE (amount > 10.0)) AS t1 \
-         LEFT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id",
+        "SELECT t1.id, t1.user_id, t1.amount, t1.status, t1.created_at, t2.u_id, t2.name, t2.age, \
+         t2.active FROM (SELECT id, user_id, amount, status, created_at FROM public.orders \
+         WHERE (amount > 10.0)) AS t1 LEFT JOIN (SELECT id AS u_id, name, age, active FROM \
+         public.users WHERE active) AS t2 ON t1.user_id = t2.u_id",
     );
     // The same holds when only the null-extended side is filtered: its filter
     // stays in that side's derived table rather than moving into `ON`, because
     // an `ON` filter would widen the input back to the unfiltered relation.
     let s = sql(
-        "q = orders & leftJoin (users & where .active) (.<user_id == .>id)\n",
+        "q = orders & leftJoin ((users & where .active) & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id)\n",
         "q",
     );
     assert_sql(
         &s,
-        "SELECT t1.id, t1.user_id, t1.amount, t1.status, t1.created_at, t2.name, t2.age, t2.active \
-         FROM public.orders AS t1 \
-         LEFT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id",
+        "SELECT t1.id, t1.user_id, t1.amount, t1.status, t1.created_at, t2.u_id, t2.name, t2.age, \
+         t2.active FROM public.orders AS t1 LEFT JOIN (SELECT id AS u_id, name, age, active \
+         FROM public.users WHERE active) AS t2 ON t1.user_id = t2.u_id",
     );
     // Right / full join: every filtered side keeps a derived table.
     let s = sql(
-        "q = orders & where (.amount > 10.0) & fullJoin users (.<user_id == .>id)\n",
+        "q = orders & where (.amount > 10.0) & fullJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id)\n",
         "q",
     );
     assert!(
@@ -950,7 +958,7 @@ fn join_inputs_are_inlined_when_safe() {
         "{s}"
     );
     let s = sql(
-        "q = orders & where (.amount > 10.0) & rightJoin users (.<user_id == .>id)\n",
+        "q = orders & where (.amount > 10.0) & rightJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id)\n",
         "q",
     );
     assert!(s.contains("(SELECT"), "{s}");
@@ -958,17 +966,17 @@ fn join_inputs_are_inlined_when_safe() {
     // stays in its derived table rather than becoming an ON predicate (which
     // would resurrect the filtered-out rows as unmatched ones).
     let s = sql(
-        "q = orders & rightJoin (users & where .active) (.<user_id == .>id)\n",
+        "q = orders & rightJoin ((users & where .active) & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id)\n",
         "q",
     );
     assert_sql(
         &s,
-        "SELECT t1.id, t1.user_id, t1.amount, t1.status, t1.created_at, t2.name, t2.age, t2.active \
-         FROM public.orders AS t1 \
-         RIGHT JOIN (SELECT id, name, age, active FROM public.users WHERE active) AS t2 ON t1.user_id = t2.id",
+        "SELECT t1.id, t1.user_id, t1.amount, t1.status, t1.created_at, t2.u_id, t2.name, t2.age, \
+         t2.active FROM public.orders AS t1 RIGHT JOIN (SELECT id AS u_id, name, age, active \
+         FROM public.users WHERE active) AS t2 ON t1.user_id = t2.u_id",
     );
     // Chains of joins stay flat, including a self-join with an updated column.
-    let s = sql("q = orders & innerJoin users (.<user_id == .>id) & leftJoin (users & select { uid = .id, name = .name, age = .age, active = .active }) (.<user_id == .>uid)\n", "q");
+    let s = sql("q = orders & innerJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id) & leftJoin (users & prefix \"u2_\") (.<user_id == .>u2_id)\n", "q");
     assert!(!s.contains("(SELECT"), "{s}");
     assert!(
         s.contains("LEFT JOIN public.users AS t3 ON t1.user_id = t3.id"),
@@ -976,7 +984,8 @@ fn join_inputs_are_inlined_when_safe() {
     );
     // A join on the right is a derived table.
     let s = sql(
-        "q = orders & innerJoin (users & innerJoin orders (.<id == .>user_id)) (.<user_id == .>id)\n",
+        "q = orders & innerJoin ((users & select { u_id = .id }) & innerJoin \
+         (orders & prefix \"o2_\") (.<u_id == .>o2_user_id)) (.<user_id == .>u_id)\n",
         "q",
     );
     assert!(s.contains("INNER JOIN (SELECT"), "{s}");
@@ -984,25 +993,23 @@ fn join_inputs_are_inlined_when_safe() {
 
 #[test]
 fn dialects_rewrite_every_block() {
-    let q = "q = users & select { id = .id, s = .name <> \"!\" } & order [asc .s] & limit 10 & offset 5\n";
+    let q = "q = users & select { id = .id, s = .name ++ \"!\" } & order [asc .s] & limit 10 & offset 5\n";
     assert!(dialect(q, "q", "postgres").unwrap().contains("name || '!'"));
     let my = dialect(q, "q", "mysql").unwrap();
     assert!(!my.contains("||"), "`||` is OR in MySQL: {my}");
     // MySQL has no NULLS LAST: a leading `IS NULL` key sorts them last.
     assert!(
         my.contains("CONCAT(name, '!') AS s")
-            && my.contains("ORDER BY CASE WHEN CONCAT(name, '!') IS NULL THEN 1 ELSE 0 END, CONCAT(name, '!') LIMIT 10"),
+            && my.contains(
+                "ORDER BY CASE WHEN CONCAT(name, '!') IS NULL THEN 1 ELSE 0 END, CONCAT(name, '!')"
+            ),
         "{my}"
     );
-    // The outer query keeps the order (a derived table's order is lost).
-    assert!(
-        my.contains("AS t1 ORDER BY CASE WHEN s IS NULL THEN 1 ELSE 0 END, s LIMIT"),
-        "{my}"
-    );
-    assert!(
-        my.contains("LIMIT 18446744073709551615 OFFSET 5"),
-        "MySQL needs a LIMIT with OFFSET: {my}"
-    );
+    // `limit` and `offset` are one clause, so a pipeline that applies both
+    // stays a single statement: one LIMIT, carrying the OFFSET.
+    assert!(my.contains("LIMIT 10 OFFSET 5"), "{my}");
+    assert_eq!(my.matches("LIMIT").count(), 1, "{my}");
+    assert!(!my.contains("AS t1"), "pagination must not wrap: {my}");
     let ts = dialect(
         "q = users & order [asc .id] & offset 5 & limit 3\n",
         "q",
@@ -1014,7 +1021,7 @@ fn dialects_rewrite_every_block() {
         "{ts}"
     );
     let ts = dialect(
-        "q = users & order [asc .name] & limit 3 & select { s = .name <> .name }\n",
+        "q = users & order [asc .name] & limit 3 & select { s = .name ++ .name }\n",
         "q",
         "tsql",
     )
@@ -1023,12 +1030,11 @@ fn dialects_rewrite_every_block() {
         ts.contains("TOP 3") && ts.contains("CONCAT(name, name)"),
         "{ts}"
     );
-    // The order carries out of the paged derived table, so T-SQL's OFFSET
-    // has the ORDER BY it needs.
+    // T-SQL spells pagination as `OFFSET … ROWS FETCH NEXT … ROWS ONLY`, and
+    // the flat statement carries the ORDER BY it needs — no TOP, no wrap.
     let ts = dialect(q, "q", "tsql").unwrap();
     assert!(
-        ts.contains("SELECT TOP 10")
-            && ts.contains("AS t1 ORDER BY CASE WHEN s IS NULL THEN 1 ELSE 0 END, s OFFSET 5 ROWS"),
+        ts.contains("OFFSET 5 ROWS FETCH NEXT 10 ROWS ONLY") && !ts.contains("TOP"),
         "{ts}"
     );
     assert!(dialect("q = users & offset 5\n", "q", "tsql")
@@ -1058,7 +1064,7 @@ fn dialects_rewrite_every_block() {
     assert!(pg.contains("ORDER BY id OFFSET 5"), "{pg}");
     assert!(!pg.contains("LIMIT"), "{pg}");
     // Joins and windows go through every dialect.
-    let j = "q = orders & leftJoin users (.<user_id == .>id) & select { n = coalesce \"?\" .name <> \"!\", rn = rowNumber { order = [desc .amount] } }\n";
+    let j = "q = orders & leftJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id) & select { n = coalesce \"?\" .name ++ \"!\", rn = rowNumber { order = [desc .amount] } }\n";
     for d in [
         "postgres",
         "mysql",
@@ -1374,7 +1380,7 @@ fn data_last_functions_compose() {
     let q = format!(
         "{EVENTS}nextWeek = addDays 7 >>> truncWeek\n\
          clean = trim >>> lower >>> replaceAll \"-\" \"\"\n\
-         mirrored = replaceAll \"-\" \"\" <<< lower <<< trim\n\
+         mirrored = s => replaceAll \"-\" \"\" (lower (trim s))\n\
          q = ev & where (contains \"@\" .s) & select {{ w = nextWeek .d, c = clean .s, m = mirrored .s, t = .s & left 3 }}\n"
     );
     let s = dialect(&q, "q", "postgres").unwrap();
@@ -1388,25 +1394,36 @@ fn data_last_functions_compose() {
 }
 
 #[test]
-fn operator_shorthands_match_the_long_forms() {
+fn the_infix_spellings_match_their_named_forms() {
+    // Every infix operator with a named twin lowers to the same SQL, so a
+    // reader may choose per site. Arithmetic and comparison have no named
+    // form; these three do.
     let pairs = [
-        ("q = users &? (.age >= 18) &= { id = .id, n = .name } &. [asc .n] &- 5\n",
-         "q = users & where (.age >= 18) & select { id = .id, n = .name } & order [asc .n] & limit 5\n"),
-        ("q = orders &* { u = group .user_id, total = sum .amount ?? 0.0 }\n",
-         "q = orders & agg { u = group .user_id, total = coalesce 0.0 (sum .amount) }\n"),
-        ("q = orders & users ? .<user_id == .>id &= { a = .amount, n = .name }\n",
-         "q = orders & innerJoin users (.<user_id == .>id) & select { a = .amount, n = .name }\n"),
-        ("q = orders & users <? .<user_id == .>id &= { n = .name ?? \"?\" }\n",
-         "q = orders & leftJoin users (.<user_id == .>id) & select { n = coalesce \"?\" .name }\n"),
-        ("q = orders & users ?> .<user_id == .>id\n", "q = orders & rightJoin users (.<user_id == .>id)\n"),
-        ("q = orders & users <?> .<user_id == .>id && .>active\n",
-         "q = orders & fullJoin users (.<user_id == .>id && .>active)\n"),
+        (
+            // `nothing` is the nullable operand: `sum` would be an aggregate,
+            // and an aggregate belongs in `agg`, not `select`.
+            "q = users & select { a = nothing ?? 0 }\n",
+            "q = users & select { a = coalesce 0 nothing }\n",
+        ),
+        (
+            "q = users & select { s = .name ++ \"!\" }\n",
+            "q = users & select { s = concat .name \"!\" }\n",
+        ),
+        // `<>` is the same concatenation under Haskell's spelling.
+        (
+            "q = users & select { s = .name <> \"!\" }\n",
+            "q = users & select { s = .name ++ \"!\" }\n",
+        ),
     ];
-    for (short, long) in pairs {
-        assert_eq!(sql(short, "q"), sql(long, "q"), "{short}");
+    for (infix, named) in pairs {
+        assert_eq!(sql(infix, "q"), sql(named, "q"), "`{infix}`");
     }
+    // The operators work where their type is nullable, which is the case a
+    // spelling-only implementation would get wrong: the left join makes the
+    // right side `maybe`, so the `??` is what makes it non-null.
     let s = sql(
-        "q = orders & users <? .<user_id == .>id &= { n = .name ?? \"?\" }\n",
+        "q = orders & leftJoin (users & prefix \"u_\") (.<user_id == .>u_id) \
+         & select { n = .u_name ?? \"?\" }\n",
         "q",
     );
     assert!(
@@ -1420,16 +1437,21 @@ fn operator_shorthands_match_the_long_forms() {
 fn coalesce_operator_types() {
     // Chains and precedence: `.a ?? .b ?? 0`, `x ?? 0 + 1` is `(x ?? 0) + 1`.
     // In a full join both sides are nullable.
-    let s = sql("q = orders & users <?> .<user_id == .>id &= { a = .age ?? .user_id ?? 0, b = .age ?? 0 + 1 }\n", "q");
+    let s = sql(
+        "q = orders & fullJoin (users & prefix \"u_\") (.<user_id == .>u_id) \
+         & select { a = .u_age ?? .user_id ?? 0, b = .u_age ?? 0 + 1 }\n",
+        "q",
+    );
     assert!(
         s.contains("COALESCE(t2.age, COALESCE(t1.user_id, 0)) AS a"),
         "{s}"
     );
     assert!(s.contains("COALESCE(t2.age, 0) + 1 AS b"), "{s}");
     // The left side must be nullable, the default must not be.
-    assert!(error("q = users &= { a = .age ?? 0 }\n", "q").contains("maybe"));
+    assert!(error("q = users & select { a = .age ?? 0 }\n", "q").contains("maybe"));
     assert!(error(
-        "q = orders & users <? .<user_id == .>id &= { a = .age ?? .user_id ?? 0 }\n",
+        "q = orders & leftJoin (users & prefix \"u_\") (.<user_id == .>u_id) \
+         & select { a = .u_age ?? .user_id ?? 0 }\n",
         "q"
     )
     .contains("maybe"));
@@ -1437,7 +1459,7 @@ fn coalesce_operator_types() {
 
 #[test]
 fn shorthand_errors_point_at_the_stage() {
-    let src = format!("{USERS}q = users\n  &? (.salary > 1)\n");
+    let src = format!("{USERS}q = users\n  & where (.salary > 1)\n");
     let ws = Workspace::from_source(&src);
     let d = root_queries(&ws)
         .into_iter()
@@ -1446,7 +1468,7 @@ fn shorthand_errors_point_at_the_stage() {
         .1
         .unwrap_err();
     assert!(d.message.contains("salary"), "{d}");
-    assert_eq!(d.source.trim(), "&? (.salary > 1)", "{d}");
+    assert_eq!(d.source.trim(), "& where (.salary > 1)", "{d}");
 }
 
 #[test]
@@ -1461,7 +1483,7 @@ fn null_extended_join_inputs_compute_before_the_join() {
     );
     assert!(s.contains("t2.one IS NULL"), "{s}");
     // The left side of a right join, and both sides of a full join.
-    let r = "r = (users & select { id = .id, k = .id + 1 }) & rightJoin orders (.<id == .>user_id) & select { k = .k }\n";
+    let r = "r = (users & select { id = .id, k = .id + 1 }) & rightJoin (orders & select { user_id = .user_id, amount = .amount, status = .status, created_at = .created_at }) (.<id == .>user_id) & select { k = .k }\n";
     assert!(
         sql(r, "r").contains("(SELECT id, id + 1 AS k FROM public.users) AS t1"),
         "{}",
@@ -1556,7 +1578,7 @@ fn backslashes_are_escaped_where_they_are_escapes() {
         assert!(s.contains("'a\\\\'' OR 1=1 -- '"), "{d}: {s}");
     }
     // Also inside a window spec, which `Expr::transform` skips.
-    let w = "w = users & select { id = .id, rn = rowNumber { partition = [.name <> \"\\\\\"] } }\n";
+    let w = "w = users & select { id = .id, rn = rowNumber { partition = [.name ++ \"\\\\\"] } }\n";
     let s = dialect(w, "w", "mysql").unwrap();
     assert!(s.contains("CONCAT(name, '\\\\')"), "{s}");
 }
@@ -1591,7 +1613,7 @@ fn order_survives_a_derived_table() {
          WHERE (age > 1) ORDER BY name NULLS LAST",
     );
     // A join does not keep its inputs' order: no ORDER BY in a join input.
-    let j = "j = (users & order [asc .name] & select { id = .id, n = .name }) & innerJoin orders (.<id == .>user_id) & select { n = .n }\n";
+    let j = "j = (users & order [asc .name] & select { id = .id, n = .name }) & innerJoin (orders & select { user_id = .user_id, amount = .amount, status = .status, created_at = .created_at }) (.<id == .>user_id) & select { n = .n }\n";
     assert!(!sql(j, "j").contains("ORDER BY"), "{}", sql(j, "j"));
 }
 
@@ -1945,7 +1967,7 @@ fn a_computed_function_value_applies_its_arguments() {
     );
     // A partially applied function as the head.
     assert_eq!(
-        sql("q = users & select { x = .name <> .name }\n", "q"),
+        sql("q = users & select { x = .name ++ .name }\n", "q"),
         sql("q = users & select { x = (concat .name) .name }\n", "q")
     );
     // A parameter holding a function, applied through a composition.
@@ -2044,7 +2066,7 @@ fn composed_stages_are_stages() {
     );
     // `<<<` is the mirror: `g <<< f` is `f` then `g`, so this is the same query.
     assert_eq!(
-        sql("q = users & (where (.id > 1) <<< select {.id})\n", "q"),
+        sql("q = users & (select {.id} >>> where (.id > 1))\n", "q"),
         EXPECTED
     );
     // A user-written combinator is a stage by the same rule, so composing
@@ -2205,68 +2227,44 @@ fn a_stage_costs_one_level_of_the_depth_budget() {
     assert!(err.contains("folds more than"), "{err}");
 }
 
-/// The bare-name and operator spellings of a set operation put the piped query
-/// on **opposite** sides, and both are correct.
+/// The bare-name and operator spellings of a set operation agree: both put the
+/// piped query on the left.
 ///
-/// `_&~_ : ... = q => r => except q r` re-binds, so `users &~ admins` is
-/// `except users admins` — `users` on the left. The bare name is declared at
-/// `&`'s own level, so `users & except admins` desugars to
-/// `except admins users` — `admins` on the left.
-///
-/// This is load-bearing rather than pedantic: `union` is symmetric and hides
-/// the difference, so only an asymmetric operation reveals it. The source
-/// elaborator had one operand order for both spellings when it was first
-/// routed into production, and the parity check reported a disagreement on a
-/// `union` that turned out to be the reversal. Asserting both spellings here
-/// means the next person to touch either order is told immediately.
+/// The subject is the *last* argument (`except admins users` means
+/// `users EXCEPT admins`), which is what `users & except admins` supplies. The
+/// two spellings used to disagree — the bare name read its first argument as
+/// the left operand — and only an asymmetric operation revealed it, because
+/// `union` is symmetric.
 #[test]
-fn the_two_set_operation_spellings_differ_in_operand_order() {
+fn the_two_set_operation_spellings_put_the_piped_query_on_the_left() {
     let sqlish = |src: &str| sql_admins(src, "q");
 
-    // Operator spelling: the piped query is the left operand.
-    for (op, sql_op) in [
-        ("&|", "UNION"),
-        ("&!", "UNION ALL"),
-        ("&^", "INTERSECT"),
-        ("&~", "EXCEPT"),
+    for (op, name, sql_op) in [
+        ("& union", "union", "UNION"),
+        ("& unionAll", "unionAll", "UNION ALL"),
+        ("& intersect", "intersect", "INTERSECT"),
+        ("& except", "except", "EXCEPT"),
     ] {
-        let piped = sqlish(&format!("q = users {op} admins\n"));
-        assert!(
-            piped.contains(sql_op),
-            "`{op}` must lower to `{sql_op}`: {piped}"
+        let by_op = sqlish(&format!("q = users {op} admins\n"));
+        let by_name = sqlish(&format!("q = users & {name} admins\n"));
+        assert_eq!(
+            by_op, by_name,
+            "`users {op} admins` and `users & {name} admins` must agree"
         );
-        let start = piped.find("(SELECT").unwrap_or(0);
-        let users = piped[start..].find("public.users").expect("users operand");
-        let admins = piped[start..]
+        assert!(
+            by_name.contains(sql_op),
+            "`{name}` must lower to `{sql_op}`: {by_name}"
+        );
+        let start = by_name.find("(SELECT").unwrap_or(0);
+        let users = by_name[start..]
+            .find("public.users")
+            .expect("users operand");
+        let admins = by_name[start..]
             .find("public.admins")
             .expect("admins operand");
         assert!(
             users < admins,
-            "`{op}` must put `users` (piped) on the left: {piped}"
-        );
-    }
-
-    // Bare-name spelling: the *argument* is the left operand, because
-    // `users & except admins` is `except admins users`.
-    for (name, sql_op) in [
-        ("union", "UNION"),
-        ("unionAll", "UNION ALL"),
-        ("intersect", "INTERSECT"),
-        ("except", "EXCEPT"),
-    ] {
-        let piped = sqlish(&format!("q = users & {name} admins\n"));
-        assert!(
-            piped.contains(sql_op),
-            "`{name}` must lower to `{sql_op}`: {piped}"
-        );
-        let start = piped.find("(SELECT").unwrap_or(0);
-        let users = piped[start..].find("public.users").expect("users operand");
-        let admins = piped[start..]
-            .find("public.admins")
-            .expect("admins operand");
-        assert!(
-            admins < users,
-            "`users & {name} admins` must put `admins` (the argument) on the left: {piped}"
+            "`users & {name} admins` must put `users` (piped) on the left: {by_name}"
         );
     }
 }
@@ -2350,4 +2348,535 @@ fn a_try_cast_yields_a_maybe() {
         s.contains("COALESCE((TRY_CAST(a AS BIGINT)), 0) AS v"),
         "{s}"
     );
+}
+
+// ---------------------------------------------------------------- correctness
+// regressions: templates, sorting, windows, dedup, pagination
+
+/// A `sql` template's `$n` must stand alone in expression position.
+///
+/// Two shapes used to reach the database silently: a placeholder in a *type*
+/// position (`CAST(id AS $1)`) parsed as a name and was emitted verbatim, and a
+/// template whose tail the SQL parser discards (`$1 +`) came out as just `$1`.
+#[test]
+fn a_template_placeholder_must_be_an_expression() {
+    for (src, want) in [
+        (
+            "bad : expr r int -> expr r string = sql \"CAST(id AS $1)\"\n\
+             q = users & select { x = bad .id }\n",
+            "not in an expression position",
+        ),
+        (
+            "bad : expr r int -> expr r int = sql \"$1 +\"\n\
+             q = users & select { x = bad .id }\n",
+            "ends with `+`",
+        ),
+        (
+            "bad : expr r int -> expr r int = sql \"$1,\"\n\
+             q = users & select { x = bad .id }\n",
+            "ends with `,`",
+        ),
+    ] {
+        let err = run(src)
+            .into_iter()
+            .find_map(|(_, r)| r.err())
+            .unwrap_or_else(|| panic!("expected a template diagnostic for {src:?}"));
+        assert!(err.contains(want), "expected {want:?}, got {err:?}");
+    }
+
+    // A well-formed template still lowers.
+    let s = sql(
+        "abs1 : expr r int -> expr r int = sql \"ABS($1)\"\n\
+         q = users & select { x = abs1 .id }\n",
+        "q",
+    );
+    assert!(s.contains("ABS(id)"), "{s}");
+}
+
+/// A second `order` sorts rows that are already sorted, so its keys lead and
+/// the earlier ones become tiebreakers. Replacing them instead made the first
+/// `order` silently dead.
+#[test]
+fn a_later_order_becomes_the_leading_sort_key() {
+    let s = sql("q = users & order [asc .age] & order [desc .id]\n", "q");
+    assert!(
+        s.contains("ORDER BY id DESC NULLS LAST, age NULLS LAST"),
+        "{s}"
+    );
+    // The same key twice is one sort key.
+    let s = sql("q = users & order [asc .id] & order [asc .id]\n", "q");
+    assert_eq!(s.matches("ORDER BY").count(), 1, "{s}");
+}
+
+/// An ordered aggregate window gets the running frame written out.
+///
+/// SQL's default with an `ORDER BY` is `RANGE … CURRENT ROW`, which folds peer
+/// rows into the same value — so `over { …, order = […] } (sum `) was not a running
+/// total whenever the order key repeated. A ranking function ignores the frame,
+/// so it stays frameless and its SQL stays short.
+#[test]
+fn an_ordered_aggregate_window_gets_a_running_frame() {
+    let s = sql(
+        "q = users & select { .id, run = over { partition = [.active], order = [asc .age] } (sum .age) }\n",
+        "q",
+    );
+    assert!(
+        s.contains("ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"),
+        "{s}"
+    );
+    let r = sql(
+        "q = users & select { .id, n = rowNumber { order = [asc .age] } }\n",
+        "q",
+    );
+    assert!(!r.contains("ROWS BETWEEN"), "ranking ignores frames: {r}");
+    // An explicit frame is left alone.
+    let f = sql(
+        "q = users & select { .id, t = over { partition = [.active] } (sum .age) }\n",
+        "q",
+    );
+    assert!(!f.contains("ROWS BETWEEN"), "no order, no frame: {f}");
+}
+
+/// `distinct` after an `order` whose key the projection dropped is refused.
+///
+/// SQL rejects `SELECT DISTINCT a … ORDER BY b`, and carrying `b` into the
+/// select list would dedupe on `(a, b)` — a different query that keeps rows the
+/// user asked to merge. Both readings are wrong, so the pair is an error.
+#[test]
+fn distinct_refuses_a_sort_key_the_projection_dropped() {
+    let err = run("q = users & order [asc .age] & select { .name } & distinct\n")
+        .into_iter()
+        .find_map(|(_, r)| r.err())
+        .expect("expected a diagnostic");
+    assert!(err.contains("cannot follow an `order`"), "{err}");
+    // A key that survives the projection is fine.
+    let s = sql(
+        "q = users & order [asc .age] & select { .name, .age } & distinct\n",
+        "q",
+    );
+    assert!(s.contains("DISTINCT"), "{s}");
+}
+
+/// A nullable value is handled by the *signature* it selects, not by a
+/// `coalesce` sentinel — so the SQL is the SQL a hand-written query would have.
+///
+/// This is the shape the sentinel used to spoil: `where (coalesce 0 .total >
+/// 100)` keeps a group whose `SUM` is NULL, while `where (.total > just 100)`
+/// is `WHERE (total > 100)` and drops it — the same rows SQL drops.
+#[test]
+fn nullable_operands_take_the_nullable_signature() {
+    let s = sql(
+        "q = orders & agg { total = sum .amount } & where (.total > just 100.0)\n",
+        "q",
+    );
+    assert!(s.contains("WHERE (total > 100.0)"), "{s}");
+    assert!(!s.contains("COALESCE(total"), "no sentinel: {s}");
+
+    // A nullable column groups as itself: NULL is its own group, and it stays
+    // in the row type.
+    let s = sql(
+        "q = orders & leftJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id) & agg { k = group .name, n = count }\n",
+        "q",
+    );
+    assert!(s.contains("GROUP BY t2.name"), "{s}");
+    assert!(!s.contains("COALESCE(t2.name"), "no sentinel: {s}");
+
+    // A nullable sort key sorts last, which the language already fixed.
+    let s = sql(
+        "q = orders & leftJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id) & order [desc .name]\n",
+        "q",
+    );
+    assert!(s.contains("ORDER BY t2.name DESC NULLS LAST"), "{s}");
+
+    // Two nullable operands compare to a `maybe bool`, and `where` drops the
+    // rows whose condition is NULL.
+    let s = sql(
+        "q = orders & leftJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id) & where (.name == just \"ada\")\n",
+        "q",
+    );
+    assert!(s.contains("WHERE (t2.name = 'ada')"), "{s}");
+
+    // Mixing a nullable with a non-null value is still a type error: no
+    // implicit lift, and the message names `just`.
+    let err = run("q = orders & agg { t = sum .amount } & where (.t > 100.0)\n")
+        .into_iter()
+        .find_map(|(_, r)| r.err())
+        .expect("expected a diagnostic");
+    assert!(err.contains("just"), "{err}");
+}
+
+/// A join can be told which right columns its output keeps, and under what
+/// names — `take` is a record over the same pair the predicate reads.
+///
+/// An overlapping join is expressed by reshaping the operand, not by a join
+/// spelling of its own.
+///
+/// `users` and `orders` both have `id`, and the anonymous merge drops the right
+/// one in silence — so a name both sides have is a type error. The way through
+/// is `select` on the right operand: it names `orders.id` as `order_id` and keeps
+/// only the columns the join needs.
+#[test]
+fn an_overlapping_join_reshapes_the_operand() {
+    let src = "u2 : query { id = int, name = string } = table \"s\" \"u\"\n\
+               o2 : query { id = int, user_id = int, amount = float } = table \"s\" \"o\"\n\
+               q = u2 & innerJoin (o2 & select { user_id = .user_id, order_id = .id }) \
+                   (.<id == .>user_id)\n";
+    let out = sql(src, "q");
+    assert!(
+        out.contains("SELECT t1.id, t1.name, t2.user_id, t2.id AS order_id FROM s.u AS t1"),
+        "{out}"
+    );
+    assert!(
+        out.contains("INNER JOIN s.o AS t2 ON t1.id = t2.user_id"),
+        "{out}"
+    );
+
+    // A left join keeps every left row, so the right side's columns are
+    // NULL-extended — the SQL says nothing about it, and the *type* records
+    // that they may be missing.
+    let src = "u2 : query { id = int } = table \"s\" \"u\"\n\
+               o2 : query { user_id = int, amount = float } = table \"s\" \"o\"\n\
+               q = u2 & leftJoin (o2 & select { user_id = .user_id, amount = .amount }) \
+                   (.<id == .>user_id)\n";
+    let out = sql(src, "q");
+    assert!(
+        out.contains("SELECT t1.id, t2.user_id, t2.amount FROM s.u AS t1 LEFT JOIN s.o AS t2"),
+        "{out}"
+    );
+}
+
+/// A bare order key is ascending, so `asc` is the optional spelling.
+///
+/// `order` takes a list of sort keys, and an expression coerces to one with
+/// `NULLS LAST` in the ascending direction — the direction SQL defaults to.
+/// Writing `asc .x` says the same thing; `fmt --canonical` (not built yet)
+/// would drop it.
+#[test]
+fn a_bare_order_key_is_ascending() {
+    let src = "t : query { a = int, b = string } = table \"s\" \"t\"\n\
+               q = t & order [.a, desc .b]\n";
+    let s = sql(src, "q");
+    assert!(
+        s.contains("ORDER BY a NULLS LAST, b DESC NULLS LAST"),
+        "{s}"
+    );
+    // The explicit spelling lowers to the same SQL.
+    let with_asc = "t2 : query { a = int, b = string } = table \"s\" \"t\"\n\
+                    r = t2 & order [asc .a, desc .b]\n";
+    assert_eq!(sql(with_asc, "r"), s);
+}
+
+/// An aggregate is a value, and three combinators modify one.
+///
+/// This is the shape that replaces sixteen names (`*Filter`, `*Over`,
+/// `countDistinct`): the aggregate keeps its name, and filtering, distinctness
+/// and windowing are applications of it. The rewrites are the two an aggregate
+/// can have — a `CASE` for the filter (every engine understands it; `FILTER
+/// (WHERE …)` does not) and `DISTINCT` inside the call — so the SQL is what a
+/// hand-written query would say.
+#[test]
+fn an_aggregate_takes_a_filter_a_distinct_or_a_window() {
+    let src = "o2 : query { id = int, user_id = int, amount = float, status = string } = table \"s\" \"o\"\n\
+               q = o2 & agg {
+                 paid = filtered (.status == \"paid\") (sum .amount),
+                 who = distinctAgg (countOf .user_id),
+                 dp = distinctAgg (filtered (.status == \"paid\") (sum .amount))
+               }\n";
+    let s = sql(src, "q");
+    assert!(
+        s.contains("SUM(CASE WHEN (status = 'paid') THEN amount END) AS paid"),
+        "{s}"
+    );
+    assert!(s.contains("COUNT(DISTINCT user_id) AS who"), "{s}");
+    // Composition: the filter applies first, then the distinct — which has no
+    // name in the old spelling and needs none here.
+    assert!(
+        s.contains("SUM(DISTINCT CASE WHEN (status = 'paid') THEN amount END) AS dp"),
+        "{s}"
+    );
+
+    // `over` is the same aggregate at window phase.
+    let src = "o2 : query { id = int, user_id = int, amount = float } = table \"s\" \"o\"\n\
+               w = o2 & select { id = .id, total = over { partition = [.user_id] } (sum .amount) }\n";
+    let s = sql(src, "w");
+    assert!(
+        s.contains("SUM(amount) OVER (PARTITION BY user_id) AS total"),
+        "{s}"
+    );
+
+    // An aggregate with no argument is `COUNT(*)`, and there is nothing to
+    // wrap: the filter goes where the `*` is.
+    let src = "o2 : query { status = string } = table \"s\" \"o\"\n\
+               n = o2 & agg { paid = filtered (.status == \"paid\") count }\n";
+    let s = sql(src, "n");
+    assert!(
+        s.contains("COUNT(CASE WHEN (status = 'paid') THEN 1 END) AS paid"),
+        "{s}"
+    );
+
+    // Applying `distinctAgg` twice is applying it once: the rewrite does not
+    // stack `DISTINCT DISTINCT`.
+    let src = "o2 : query { user_id = int } = table \"s\" \"o\"\n\
+               d = o2 & agg { n = distinctAgg (distinctAgg (countOf .user_id)) }\n";
+    assert_eq!(
+        sql(src, "d").matches("DISTINCT").count(),
+        1,
+        "{}",
+        sql(src, "d")
+    );
+}
+
+/// A one-argument function is available over a value as well as over a column,
+/// and the two spellings emit the same SQL.
+///
+/// This is what makes a *value layer* possible without a second language: `upper
+/// : string -> string` beside `upper : expr r string -> expr r string`. A value
+/// is what a constant or a parameter is, so `start : date = truncYear
+/// currentDate` needs no row, and `(x : date) => …` can take a computed date.
+/// The form is chosen by the context — a column selects the row form, a value
+/// selects the value form — and the SQL is the same either way, because both
+/// are the same template.
+#[test]
+fn a_one_argument_function_works_over_a_value_and_a_column() {
+    // A value: `truncYear` applied to the constant `currentDate`, in a field.
+    let src = "t : query { d = date } = table \"s\" \"t\"\n\
+               q = t & select { y = truncYear currentDate }\n";
+    let s = sql(src, "q");
+    assert!(
+        s.contains("CAST(DATE_TRUNC('YEAR', CURRENT_DATE) AS DATE) AS y"),
+        "{s}"
+    );
+
+    // The same function over a column.
+    let src = "t : query { d = date } = table \"s\" \"t\"\n\
+               q = t & select { y = truncYear .d }\n";
+    let s = sql(src, "q");
+    assert!(
+        s.contains("CAST(DATE_TRUNC('YEAR', d) AS DATE) AS y"),
+        "{s}"
+    );
+
+    // A string function over a literal and over a column: same SQL either way,
+    // because both are the same template.
+    let src = "t : query { name = string } = table \"s\" \"t\"\n\
+               q = t & select { u = upper \"abc\" }\n";
+    assert_eq!(sql(src, "q"), "SELECT UPPER('abc') AS u FROM s.t");
+    let src = "t : query { name = string } = table \"s\" \"t\"\n\
+               q = t & select { u = upper .name }\n";
+    assert_eq!(sql(src, "q"), "SELECT UPPER(name) AS u FROM s.t");
+
+    // A value produced by a value flows into a predicate without a row.
+    let src = "t : query { d = date } = table \"s\" \"t\"\n\
+               q = t & where (.d >= truncMonth currentDate)\n";
+    let s = sql(src, "q");
+    assert!(s.contains("DATE_TRUNC('MONTH', CURRENT_DATE)"), "{s}");
+}
+
+/// A join's select list is the left side, then the fields it takes.
+///
+/// The order is the row's order (which `--types` shows and the HIR test
+/// `a_join_can_take_named_columns` pins), and the SQL has to name the same
+/// columns in the same order — a take field that names a column the left side
+/// does not have is where an ordered list and a merged map differ.
+#[test]
+fn a_join_lists_the_left_side_then_what_it_takes() {
+    let src = "u : query { id = int, name = string } = table \"s\" \"u\"\n\
+               o : query { id = int, user_id = int, amount = float } = table \"s\" \"o\"\n";
+    for (join, side) in [
+        ("leftJoin", "LEFT"),
+        ("rightJoin", "RIGHT"),
+        ("innerJoin", "INNER"),
+    ] {
+        let q = format!(
+            "{src}q = u & {join} (o & select {{ user_id = .user_id, order_id = .id, amount = .amount }}) \
+             (.<id == .>user_id)\n"
+        );
+        let s = sql(&q, "q");
+        assert!(
+            s.contains(
+                "SELECT t1.id, t1.name, t2.user_id, t2.id AS order_id, t2.amount FROM s.u AS t1"
+            ),
+            "{join}: {s}"
+        );
+        assert!(s.contains(&format!("{side} JOIN s.o AS t2")), "{join}: {s}");
+        assert!(s.contains("ON t1.id = t2.user_id"), "{join}: {s}");
+    }
+}
+
+/// The six ways the backend used to compute the wrong *numbers*, in one place.
+///
+/// Each of these was a silent wrong answer rather than an error — the query
+/// compiled, ran, and returned something a reader would not expect. They have
+/// individual tests above; this one exists so the whole list is auditable at a
+/// glance, and so a regression in any of them is reported by a single failure
+/// whose comment says what the answer used to be.
+#[test]
+fn the_six_wrong_number_bugs_stay_fixed() {
+    // `users` and `orders` come from the fixture; `vips` is a second query with
+    // the same row, so `except`/`union` have something to work on.
+    let schema = "vips : query { id = int, name = string, age = int, active = bool } = \
+                  table \"public\" \"vips\"\n";
+
+    // 1. `except` / `intersect` are not commutative: the *subject* is the left
+    //    operand. Taking the first argument instead returned the complement.
+    let s = sql(&format!("{schema}q = users & except vips\n"), "q");
+    assert!(
+        s.contains("FROM public.users") && s.contains("EXCEPT") && s.contains("FROM public.vips"),
+        "`users & except vips` must be `users EXCEPT vips`: {s}"
+    );
+    assert!(
+        s.find("FROM public.users").expect("users") < s.find("EXCEPT").expect("except"),
+        "the subject comes first: {s}"
+    );
+
+    // 2. A window with an `order` and no `frame` used to get the *whole
+    //    partition* as its frame, so a running total was a full total.
+    let s = sql(
+        &format!(
+            "{schema}q = orders & select {{ id = .id, total = over {{ partition = [.user_id], \
+             order = [.id] }} (sum .amount) }}\n"
+        ),
+        "q",
+    );
+    assert!(
+        s.contains("ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"),
+        "an ordered window is a running frame: {s}"
+    );
+
+    // 3. An `order` before a set operation used to be appended to the whole
+    //    result; it belongs to that branch.
+    let s = sql(
+        &format!("{schema}p = users & order [desc .id]\nq = union p vips\n"),
+        "q",
+    );
+    assert!(
+        s.contains("ORDER BY id DESC") && s.contains("UNION"),
+        "the branch keeps its own order: {s}"
+    );
+
+    // 4. `distinct` used to drop a hidden key that a later stage still read.
+    let s = sql(
+        &format!(
+            "{schema}q = orders & select {{ k = .user_id }} & distinct & select {{ k = .k }}\n"
+        ),
+        "q",
+    );
+    assert!(s.contains("DISTINCT"), "{s}");
+    assert_eq!(
+        s.matches("AS k").count(),
+        1,
+        "the hidden key is projected once: {s}"
+    );
+
+    // 5. `limit` and `offset` in one pipeline used to lower to a nested pair
+    //    whose `OFFSET` applied after the `LIMIT`, which returns no rows.
+    let s = sql(
+        &format!("{schema}q = users & order [asc .id] & limit 10 & offset 5\n"),
+        "q",
+    );
+    assert!(
+        s.contains("LIMIT 10") && s.contains("OFFSET 5"),
+        "both survive: {s}"
+    );
+    assert!(
+        s.find("LIMIT 10").expect("limit") < s.find("OFFSET 5").expect("offset"),
+        "`LIMIT` then `OFFSET`, in one statement: {s}"
+    );
+
+    // 6. A template placeholder has to be an expression on its own: `"$1 +"`
+    //    silently truncated the SQL, and `CAST(id AS $1)` produced broken SQL.
+    let e = error(
+        &format!("{schema}f : expr r int -> expr r int = sql \"$1 +\"\nq = users & select {{ x = f .id }}\n"),
+        "q",
+    );
+    assert!(e.contains("ends with `+`"), "{e}");
+    // A placeholder may not stand where a *type* belongs: `CAST(id AS $1)`
+    // produced SQL the engine rejects, and the checker used to accept it.
+    let e = error(
+        &format!("{schema}f : expr r int -> expr r int = sql \"CAST($1 AS $2)\"\nq = users & select {{ x = f .id }}\n"),
+        "q",
+    );
+    assert!(e.contains("placeholder") || e.contains("signature"), "{e}");
+}
+
+/// Every stage shorthand writes the **same SQL** as the stage it spells.
+///
+/// A shorthand is a wrapper in the prelude, not a second implementation, so this
+/// is the property that keeps it honest: if `&?` ever stopped meaning `where` —
+/// a different nullability, a lost `ORDER BY`, a wrong join kind — the two
+/// compiled statements would differ here. The named form is the reference, and
+/// the assertion is equality, not "looks similar".
+#[test]
+fn every_stage_shorthand_writes_the_same_sql() {
+    let pairs: &[(&str, &str)] = &[
+        ("&?", "& where (.active)"),
+        ("&=", "& select {.id, .name}"),
+        ("&+", "& update {n = .age + 1}"),
+        ("&*", "& agg {n = count}"),
+        ("&.", "& order [asc .age]"),
+        ("&-", "& limit 5"),
+        // Set operations need a second input of the same row.
+        ("&|", "& union (users & where (.active))"),
+        ("&!", "& unionAll (users & where (.active))"),
+        ("&^", "& intersect (users & where (.active))"),
+        ("&~", "& except (users & where (.active))"),
+    ];
+    for (op, named) in pairs {
+        // The shorthand applies to the same subject the named form does.
+        let short = format!("q = users {op} {}\n", shorthand_arg(named));
+        let long = format!("q = users {named}\n");
+        let a = sql(&short, "q");
+        let b = sql(&long, "q");
+        assert_eq!(a, b, "`{op}` and `{named}` must compile alike");
+    }
+
+    // The join shorthands: the piped query is the *left* side of the join in
+    // both spellings, which is what the operator's own level is for.
+    let joins: &[(&str, &str)] = &[
+        ("?", "innerJoin"),
+        ("<?", "leftJoin"),
+        ("?>", "rightJoin"),
+        ("<?>", "fullJoin"),
+    ];
+    for (op, named) in joins {
+        let src = "o = orders & select { user_id = .user_id, amount = .amount }\n";
+        let a = sql(
+            &format!("{src}q = users & o {op} (.<id == .>user_id)\n"),
+            "q",
+        );
+        let b = sql(
+            &format!("{src}q = users & {named} o (.<id == .>user_id)\n"),
+            "q",
+        );
+        assert_eq!(a, b, "`{op}` and `{named}` must compile alike");
+    }
+
+    // `$` is application and `<<<` is reversed composition: both are pure
+    // syntax, so the value they produce is the same value.
+    assert_eq!(
+        sql("q = users & select { x = upper $ \"abc\" }\n", "q"),
+        sql("q = users & select { x = upper \"abc\" }\n", "q")
+    );
+    assert_eq!(
+        sql("q = users & select { x = (upper <<< trim) .name }\n", "q"),
+        sql("q = users & select { x = upper (trim .name) }\n", "q")
+    );
+    // `<>` is the same concatenation as `++`.
+    assert_eq!(
+        sql("q = users & select { x = .name <> \"!\" }\n", "q"),
+        sql("q = users & select { x = .name ++ \"!\" }\n", "q")
+    );
+}
+
+/// The argument a shorthand takes, from the named form it stands for: `&? ` keeps
+/// everything after the stage's name.
+fn shorthand_arg(named: &str) -> &str {
+    let rest = named
+        .strip_prefix("& ")
+        .unwrap_or_else(|| panic!("`{named}` is not a piped stage"));
+    // `where (.active)` -> `(.active)`
+    match rest.split_once(' ') {
+        Some((_, a)) => a,
+        None => panic!("`{named}` has no argument"),
+    }
 }

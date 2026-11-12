@@ -42,7 +42,7 @@ Give this file to an agent as context, then ask for **one** `.cagara` file.
 7. **Windows live only in `select` or `update` fields.** Compute one in a stage, then filter or sort
    on the resulting column in a later stage.
 8. **Predicates and sort keys are row-phase and non-null.** Handle `maybe` with `coalesce`, `??`,
-   `isNull`/`isNotNull`, `isTrue`, `whereTrue`, `eqMaybe`.
+   `isNull`/`isNotNull`, `isTrue`, `eqMaybe`. A `where` takes a `maybe bool` directly.
 9. **Joins require side-qualified columns in the predicate:** `.<x` (left) and `.>x` (right).
    Shared output names keep the left value; outer joins make the nullable side `maybe`.
 10. **Set operations require identical rows:** same names, same order, same types.
@@ -258,7 +258,7 @@ error. `--json` prints the same content for a tool to consume.
 
 ```text
 name        := [A-Za-z_][A-Za-z0-9_]*
-operator    := '_' punctuation+ '_'        e.g. _+_, _&?_, _??_
+operator    := '_' punctuation+ '_'        e.g. _+_, _&&_, _??_
 field       := '.' name                    e.g. .id, .created_at
 left field  := '.<' name                   e.g. .<user_id   (join predicate only)
 right field := '.>' name                   e.g. .>id        (join predicate only)
@@ -352,11 +352,11 @@ parentheses: write `coalesce 0 .x`, never `coalesce(0, .x)`.
 There is no `decimal`, `uuid`, `json`, `array`, or user-declared type. `toDecimal` changes the SQL
 type while the language type stays `float`.
 
-A name in a type position that is not one of the constructors above — `decimal`, `uuid`, or a typo
-— is a **type parameter**, not a type. Signatures carry their parameters implicitly, so the
-definition becomes polymorphic in that name and each use instantiates it: a column annotated
-`amount = decimal` is a `string` where the use site says `string` and an `int` where it says `int`,
-and nothing is checked. Spell every type with a name from the table; a typo is not diagnosed.
+A bare name in a type position is a **type parameter** only when it is a single lowercase letter
+(`a`, `b`, `r`, `s`, `k` — the spelling every signature in this document uses). Any other name must
+be one of the constructors above: `amount = decimal` is a compile error naming the closed set, with a
+"did you mean" for a near miss like `str`. So a typo cannot become a silent type variable, and a
+column's type cannot differ between two definitions that read it.
 
 ### 3.2 Row and query types
 
@@ -584,6 +584,26 @@ users : query { age = int, score = float } = table "public" "users"
 main = users & select { a = double .age, b = double .score }
 ```
 
+An overload replaces **types**, and two rules keep that honest — both are reported at the
+definition, not at some call site far away:
+
+- every definition of a name takes the **same number of parameters** (`f x` must have one meaning,
+  however many definitions `f` has);
+- no two definitions have the **same signature**. A repeat is not an overload: every use that fits
+  it fits the first, so it can never be chosen. Type-variable names do not make a difference —
+  `a -> a` and `b -> b` are the same signature.
+
+The axes that *are* overloads are what the prelude uses: a narrower or wider type (`int`/`float`), a
+nullable one (`a`/`maybe a`), a source type (`string`/`int` into `toInt`), and a phase (`expr`/value).
+
+A one-argument function that has a **single** row form also has a value form, so it works on a
+constant or a parameter as well as on a column: `upper : string -> string` beside
+`upper : expr r string -> expr r string`. The context picks the form — a column selects the row
+form, a value selects the value form — and the SQL is the same either way. A name overloaded by
+*source type* (`truncYear` over `date` and `timestamp`) has no value form: ranking a source type
+and a phase at once is not something the checker does, and `ambiguous use` would be worse than the
+row form, which a value argument reaches by lifting.
+
 An alias is a definition whose body is another name; it carries overloading with it:
 
 ```cagara
@@ -666,13 +686,16 @@ main = users & where (.age >= 18 && .active)
 ```
 
 `where` sees the row produced by the previous stage. A predicate may not **construct** an aggregate or
-a window, and it must be non-null. A `maybe bool` needs `whereTrue` or `isTrue`: after `agg`, `.n` is
-an ordinary `int` column, so `where (.n > 5)` is legal.
+a window. It is a `bool`, or a `maybe bool` — which is SQL's own three-valued filter, where a NULL
+condition drops the row. That is what makes a filter over an aggregate need no sentinel: `sum` is
+`maybe`, so `.total > just 100` is a `maybe bool` and `where (.total > just 100)` is
+`WHERE (total > 100.0)`. `where (coalesce 0 .total > 100)` is a *different* query: it keeps a group
+whose sum is NULL, which `WHERE (total > 100.0)` drops.
 
 ```cagara
 t : query { id = int, flag = maybe bool } = table "public" "t"
 
-main = t & whereTrue .flag
+main = t & where .flag
 ```
 
 ### 5.3 `select` and `update`
@@ -714,11 +737,27 @@ Rules:
 - Aggregates do not nest: `sum (sum .amount)` fails. Use an earlier `agg`.
 - Aggregates belong only in `agg`; `select { x = sum .amount }` fails.
 - A later `agg` may aggregate the previous `agg`'s output; that is a separate stage, not nesting.
-- `sum`, `avg`, `min`, `max` return `maybe`. `count`, `countOf`, `countDistinct` return `int`.
-- A nullable column uses `sumMaybe`/`avgMaybe`/`minMaybe`/`maxMaybe` or
-  `countOfMaybe`/`countDistinctMaybe`; coalescing first changes `avg`/`min`/`max`.
-- Filtered aggregates apply a predicate to one aggregate's input rows:
-  `paid = sumFilter (.status == "paid") .amount`, `n = countFilter (.status == "paid")`.
+- `sum`, `avg`, `min`, `max` return `maybe`. `count`, `countOf`, `countDistinct` return `int`. A
+nullable column needs no separate name: `sum` accepts `int`, `float`, `maybe int` and `maybe float`,
+and the `*Maybe` spellings are aliases of the same SQL.
+- A nullable column goes to the same aggregate — `sum .m` is `maybe int` — or to
+  `countOfMaybe`/`countDistinctMaybe`. Coalescing first changes `avg`/`min`/`max`.
+- An aggregate is a **value**, so three combinators modify one instead of a name per
+  combination. `filtered p a` keeps only the rows `p` keeps, `distinctAgg a` makes the
+  argument distinct, and `over spec a` is the same aggregate as a window:
+
+  ```cagara
+  & agg {
+      total = sum .amount,                                    # SUM(amount)
+      paid  = filtered (.status == "paid") (sum .amount),     # SUM(CASE WHEN … THEN amount END)
+      who   = distinctAgg (countOf .user_id),                 # COUNT(DISTINCT user_id)
+    }
+  ```
+
+  They compose, which the older per-function names could not: `distinctAgg (filtered p
+  (sum .x))` is `SUM(DISTINCT CASE WHEN … END)` and needs no name of its own. Filtering
+  `count` (no argument) wraps the `*`: `filtered p count` is
+  `COUNT(CASE WHEN p THEN 1 END)`.
   The predicate is a non-null row-phase `bool` with no aggregate or window. The
   helpers compile to `CASE`, not SQL `FILTER`, so every dialect accepts them.
   When every aggregate shares one predicate, use `where` before `agg` instead.
@@ -745,9 +784,9 @@ orders : query { id = int, user_id = int, amount = float, status = string } =
 
 main = orders & agg {
     user_id = group .user_id,
-    paid = sumFilter (.status == "paid") .amount,
-    refunded = sumFilter (.status == "refunded") .amount,
-    n_paid = countFilter (.status == "paid")
+    paid = filtered (.status == "paid") (sum .amount),
+    refunded = filtered (.status == "refunded") (sum .amount),
+    n_paid = filtered (.status == "paid") count
   }
 ```
 
@@ -770,12 +809,19 @@ main =
 ```
 
 - `order` takes a list of `asc`/`desc` keys; keys are expressions over the current row.
+- A second `order` sorts rows that are already sorted, so its keys lead and the earlier ones become
+  tiebreakers: `order [asc .a] & order [desc .id]` is `ORDER BY id DESC, a`.
 - NULLs sort **last** in both directions; this is fixed by the language.
 - `limit` and `offset` take an integer literal or a definition that is an integer constant. They do
-  not order by themselves.
+  not order by themselves. The two are **one clause** (`LIMIT n OFFSET m`), so their order in the
+  pipeline does not matter: `& limit 20 & offset 40` and `& offset 40 & limit 20` are the same
+  twenty rows starting at the forty-first.
 - `distinct` deduplicates the whole row; it is the only deduplicating stage besides `union`,
-  `intersect`, and `except`.
-- `offset` has no shorthand; `&^` is **intersect**, not offset.
+  `intersect`, and `except`. A `distinct` cannot follow an `order` whose key the projection dropped
+  — `order [asc .ts] & select { .name } & distinct` is an error, because SQL refuses to sort a
+  deduplicated projection by a column it no longer has, and keeping the key to sort by it would
+  dedupe on a wider row instead.
+
 
 ### 5.6 `omit`, `prefix`, `suffix`
 
@@ -810,9 +856,15 @@ orders : query { id = int, user_id = int, amount = float } = table "public" "ord
 
 main =
   users
-  & innerJoin orders (.<id == .>user_id)
-  & select { .id, .name, .amount }
+  & innerJoin (orders & select { user_id = .user_id, order_id = .id, amount = .amount })
+      (.<id == .>user_id)
+  & select { .id, .name, .order_id, .amount }
 ```
+
+`users` and `orders` both have `id`, so the bare `innerJoin` refuses this join: the merged row would
+keep `users.id` and lose `orders.id` with no way to read it back. The way through is a `select` on
+the operand — it renames `orders.id` to `order_id` and keeps only the columns the join needs. There is
+no join spelling of its own for this: reshaping a side is what `select` and `update` are for.
 
 | Named | Operator | Keeps |
 |---|---|---|
@@ -823,19 +875,26 @@ main =
 | `semiJoin q p` | — | left rows with a match (left columns only) |
 | `antiJoin q p` | — | left rows with no match (left columns only) |
 
-Output columns: left input's columns, then the right input's columns that the left does not have. On
-a shared name the **left** value wins. To keep both, rename one side **before** joining:
+Output columns: left input's columns, then the right input's columns that the left does not have. A
+name **both** sides have is a **type error**, not a silent left-wins drop: the right one would vanish
+and nothing could read it back. Reshape the side first — `select` renames and drops, `update`
+overwrites and appends:
 
 ```cagara
 users : query { id = int, name = string } = table "public" "users"
 orders : query { id = int, user_id = int, amount = float } = table "public" "orders"
 
 main =
-  orders
-  & select { order_id = .id, .user_id, .amount }
-  & innerJoin users (.<user_id == .>id)
-  & select { .order_id, .name, .amount }
+  users
+  & innerJoin (orders & select { user_id = .user_id, order_id = .id, amount = .amount })
+      (.<id == .>user_id)
+  & select { .id, .name, .order_id }
 ```
+
+`users.id` and `orders.id` both survive because the right operand renamed one of them before the
+join. There is no separate join spelling for this: making a side say what it contributes is what
+`select` already does, and it works for any join kind — `leftJoin`, `rightJoin` and `fullJoin` take
+the same reshaped operand.
 
 After a left/right/full join, the nullable side's columns become `maybe` (never doubly so). The join
 predicate still sees the non-null input types. `.<` and `.>` are valid **only** inside the predicate;
@@ -873,30 +932,40 @@ main =
 
 ### 5.8 Set operations
 
-Both operands must have the same row: same names, same order, same types. The result keeps the left
-operand's columns and order.
+Both operands must have the same row: same names, same order, same types. The result keeps the
+**subject's** columns and order — the subject is the last argument, i.e. the query the pipeline
+supplies.
 
 ```cagara
 a : query { id = int, name = string } = table "public" "a"
 b : query { id = int, name = string } = table "public" "b"
 
-main = a &| b
+main = a & except b      # a EXCEPT b
 ```
 
-| Function | Operator | Duplicates |
+| Function | Meaning | Duplicates |
 |---|---|---|
-| `union a b` | `a &\| b` | removed |
-| `unionAll a b` | `a &! b` | preserved |
-| `intersect a b` | `a &^ b` | removed |
-| `except a b` | `a &~ b` | removed |
+| `union b a` | `a UNION b` | removed |
+| `unionAll b a` | `a UNION ALL b` | preserved |
+| `intersect b a` | `a INTERSECT b` | removed |
+| `except b a` | `a EXCEPT b` | removed |
 
+A stage takes its subject **last** (`except b a` reads "except `b`, from `a`"), and for a set
+operation the subject is the left operand, so `a & except b` and `except b a` are the same query.
 Only `except` and `intersect` make operand order observable. There is no `INTERSECT ALL` or
 `EXCEPT ALL`.
 
 ### 5.9 Stage shorthands
 
-| Shorthand | Long form |
-|---|---|
+Every stage has a named form and a one-operator shorthand. They are the *same
+call*: the shorthand is a one-line wrapper in the prelude
+(`_&?_ = q => p => where p q`), so it carries the named stage's signatures — including
+`where`'s nullable one — its phases, and its SQL. Nothing can drift between them,
+and `every_stage_shorthand_writes_the_same_sql` in `cagara-sql` pins each pair by
+compiling both and comparing the statements.
+
+| Shorthand | Named |
+| --- | --- |
 | `&?` | `where` |
 | `&=` | `select` |
 | `&+` | `update` |
@@ -908,13 +977,49 @@ Only `except` and `intersect` make operand order observable. There is no `INTERS
 | `&^` | `intersect` |
 | `&~` | `except` |
 
-The table is complete. There is no shorthand for `offset`, `distinct`, `omit`, `prefix`, or `suffix`.
-`&^` is intersect, not offset. Long names are clearer for a first attempt; shorthands are optional.
+The joins sit one level looser than the pipe, so `q & orders ? on` keeps the join
+on the right of the `&`:
 
-A shorthand *is* the stage, so it takes the stage's own arguments: `users &? (.age > 1)`, not
-`users &? where (.age > 1)` — the second form passes the partial application `where (.age > 1)`,
-which is a `query -> query`, where the shorthand wants the predicate (a type error). The
-set-operation rows take a whole query on each side: `a &| b`.
+| Shorthand | Named | Keeps |
+| --- | --- | --- |
+| `?` | `innerJoin` | matching rows only |
+| `<?` | `leftJoin` | all left rows |
+| `?>` | `rightJoin` | all right rows |
+| `<?>` | `fullJoin` | all rows from both |
+
+A shorthand needs no parentheses around its predicate, because every comparison
+and logical operator binds tighter than `&?` — while the named form does
+(`where (.a == 1)`, since application binds tightest of all):
+
+```cagara
+user : query { name = string, class_room = string, age = int } =
+  table "public" "users"
+
+# one condition per `&?`: no parentheses, no `where`
+john = user &? .name == "John" &? .class_room == "A01"
+
+# or one `&?` and `&&`: the same single WHERE
+also_john = user &? .name == "John" && .class_room == "A01"
+
+# the named form needs the parentheses
+named = user & where (.name == "John" && .class_room == "A01")
+```
+
+The column still keeps its leading dot (`.name`). A bare `name` would have to be
+a definition — the prelude alone defines 143 lowercase names, and `id`, `count`,
+`order`, `group`, `min`, `max`, `year`, `left` and `right` are all among them, so
+implicit column names would silently mean a function on the tables that matter
+most (`&? id == 1` reports `found a -> a`, which is the identity function).
+
+Three more expression operators: `$` (application, loosest of all), `<<<`
+(composition backwards), and `<>` (concatenation, the Haskell spelling of `++`).
+
+An earlier version removed the shorthands, on the grounds that named stages were
+used far more often. That measurement was right about frequency and wrong about
+cause: the shorthands were untrustworthy because each was its own `primitive`, so
+one could accept a predicate the stage it spelled would refuse and another quietly
+meant the wrong join. Wrapping the named stage fixes that; deleting the spelling
+fixed nothing that the wrapper does not.
 
 ---
 
@@ -966,8 +1071,7 @@ Where `maybe` comes from:
 | column declared `maybe` | `maybe` |
 | nullable side of left/right/full join | that side's columns `maybe` |
 | `sum`, `avg`, `min`, `max` and their `*Filter` forms | `maybe` (empty/all-null input) |
-| `sumMaybe`, `avgMaybe`, `minMaybe`, `maxMaybe` | `maybe` (empty/all-null input) |
-| `lag`, `lead`, `sumOver`, `avgOver` | `maybe` |
+| `lag`, `lead`, `over`, `avgOver` | `maybe` |
 | `count`, `countOf`, `countDistinct`, `countOver`; `countFilter`, `countOfFilter`, `countDistinctFilter` | non-null `int` |
 | `countOfMaybe`, `countDistinctMaybe` | non-null `int` |
 | `isNull`, `isNotNull`, `isTrue` | non-null `bool` |
@@ -984,9 +1088,7 @@ Handling:
 | `nullIf x y` | NULL when `x == y` |
 | `isNull x`, `isNotNull x` | tests, non-null `bool` |
 | `isTrue x` | nullable bool, NULL becomes false |
-| `whereTrue p` | filter with a nullable predicate |
 | `eqMaybe x y` | nullable equality; two NULLs are equal |
-| `sumMaybe x`, `avgMaybe x`, ... | aggregate a nullable input with SQL's null-skipping semantics |
 
 Examples:
 
@@ -999,17 +1101,21 @@ main =
   & leftJoin orders (.<id == .>user_id)
   & agg {
       id = group .id,
-      total = coalesce 0.0 (sumMaybe .amount),
+      total = coalesce 0.0 (sum .amount),
       n = countOfMaybe .user_id
     }
 ```
 
 `countOf .maybe_column` is rejected because its argument must be non-null. Use `countOfMaybe` for
-SQL `COUNT(x)` (NULLs skipped), or sum an indicator over the nullable side. `sumMaybe`/`avgMaybe`
-pass the nullable input straight through, so `avgMaybe` does not count a missing value as zero the
+SQL `COUNT(x)` (NULLs skipped), or sum an indicator over the nullable side. `sum`/`avg` over a
+nullable column pass it straight through, so `avg` does not count a missing value as zero the
 way `avg (coalesce 0 .x)` would.
 
-A nullable value also cannot be a sort key or a group key. Wrap it first:
+A nullable value **is** a usable sort key and group key: SQL already says what they mean (NULLs sort
+last, which the language fixes, and NULL forms its own group). Wrapping one in `coalesce` changes the
+answer — `group (coalesce 0 .m)` merges the NULL group into the `0` group. Only a *comparison* needs
+the nullable signature, and a nullable operand compared with a non-null one is a type error naming
+`just`:
 
 ```cagara
 users : query { id = int, score = maybe int } = table "public" "users"
@@ -1047,7 +1153,7 @@ main =
 The prelude is imported automatically. **Only these names exist** (plus the stage names in §5). If a
 function is missing, write a `sql` template (§8.4) or report it unavailable. The tables below are a
 summary: `cagara doc --prelude` prints the same catalog with each definition's own documentation,
-taken from the `##` blocks in `prelude.cagara`.
+taken from the `##` blocks in `prelude/core.cagara` (and `prelude/std.cagara`).
 
 Notation: signatures are exact for the shown overloads; `expr r a` means an expression over the
 current row. A name with several lines is overloaded.
@@ -1212,7 +1318,6 @@ nullIf     : expr r a -> expr r a -> expr r (maybe a)
 isNull     : expr r (maybe a) -> expr r bool
 isNotNull  : expr r (maybe a) -> expr r bool
 isTrue     : expr r (maybe bool) -> expr r bool
-whereTrue  : expr r (maybe bool) -> query r -> query r
 eqMaybe    : expr r (maybe a) -> expr r (maybe a) -> expr r bool
 ```
 
@@ -1240,34 +1345,33 @@ sum            : expr r float -> agg (expr r (maybe float))
 avg            : expr r int|float -> agg (expr r (maybe float))
 min max        : expr r a -> agg (expr r (maybe a))
 
-sumMaybe       : expr r (maybe int) -> agg (expr r (maybe int))
-sumMaybe       : expr r (maybe float) -> agg (expr r (maybe float))
-avgMaybe       : expr r (maybe int|float) -> agg (expr r (maybe float))
-minMaybe maxMaybe : expr r (maybe a) -> agg (expr r (maybe a))
+sum            : expr r (maybe int) -> agg (expr r (maybe int))
+sum            : expr r (maybe float) -> agg (expr r (maybe float))
+avg            : expr r (maybe int|float) -> agg (expr r (maybe float))
+min max        : expr r (maybe a) -> agg (expr r (maybe a))
 countOfMaybe   : expr r (maybe a) -> agg (expr r int)
 countDistinctMaybe : expr r (maybe a) -> agg (expr r int)
 
-countFilter          : expr r bool -> agg (expr r int)
-countOfFilter        : expr r bool -> expr r a -> agg (expr r int)
-countDistinctFilter  : expr r bool -> expr r a -> agg (expr r int)
+filtered : count expr r bool -> agg (expr r int)
+filtered : (countOf expr) r bool -> expr r a -> agg (expr r int)
+filtered : (distinctAgg (countOf expr)) r bool -> expr r a -> agg (expr r int)
 
-sumFilter      : expr r bool -> expr r int -> agg (expr r (maybe int))
-sumFilter      : expr r bool -> expr r float -> agg (expr r (maybe float))
-avgFilter      : expr r bool -> expr r int|float -> agg (expr r (maybe float))
-minFilter maxFilter : expr r bool -> expr r a -> agg (expr r (maybe a))
+filtered : (sum expr) r bool -> expr r int -> agg (expr r (maybe int))
+filtered : (sum expr) r bool -> expr r float -> agg (expr r (maybe float))
+filtered : (avg expr) r bool -> expr r int|float -> agg (expr r (maybe float))
+filtered filtered (min :) (max expr) r bool -> expr r a -> agg (expr r (maybe a))
 ```
 
 `count` is a value, not a call: write `n = count`, not `count ()`. `sum`/`avg`/`min`/`max` return
 `maybe`; `coalesce 0 (sum .x)` makes a number. `countOf`/`countDistinct` require non-null input.
 
-The `*Maybe` forms are the explicit spelling for a nullable input. SQL's aggregates skip `NULL`
-already, so they pass the column straight through: `sumMaybe .x` emits `SUM(x)`, not
-`SUM(COALESCE(x, 0))`. This matters for `avg`/`min`/`max`: over `[NULL, 5]`, `avgMaybe` is `5`,
-while `avg (coalesce 0 .x)` is `2.5`. `countOfMaybe`/`countDistinctMaybe` are `COUNT(x)` and
+The nullable overloads keep SQL's own semantics: the column passes straight through, so
+`sum .x` over a `maybe` column emits `SUM(x)`, not `SUM(COALESCE(x, 0))`. This matters for
+`avg`/`min`/`max`: over `[NULL, 5]`, `avg .x` is `5`, while `avg (coalesce 0 .x)` is `2.5`. `countOfMaybe`/`countDistinctMaybe` are `COUNT(x)` and
 `COUNT(DISTINCT x)`. For an all-NULL or empty input the value aggregates are still `maybe`.
 
 The `*Filter` forms take a non-null row-phase `bool` predicate first and apply it to that
-aggregate's input rows, so `sumFilter p .x` means `SUM(x) FILTER (WHERE p)` (compiled to the
+aggregate's input rows, so `filtered p (sum .x`) means `SUM(x) FILTER (WHERE p)` (compiled to the
 portable `SUM(CASE WHEN p THEN x END)`). They return the same type as the unfiltered form. When every
 aggregate in the stage shares one predicate, use `where` before `agg` instead.
 
@@ -1309,7 +1413,7 @@ orders : query { id = int, user_id = int, amount = float, ts = timestamp } =
 main = orders & select {
     .id,
     rn = rowNumber {partition = [.user_id], order = [desc .ts]},
-    running = sumOver {partition = [.user_id], order = [asc .ts], frame = runningFrame} .amount
+    running = over {partition = [.user_id], order = [asc .ts], frame = runningFrame} (sum .amount)
   }
 ```
 
@@ -1317,6 +1421,13 @@ A frame is not a spec: `lag wholePartition .amount` is wrong; write
 `lag {frame = wholePartition} .amount`. A spec is a record, not a list: `rowNumber [asc .id]` is
 wrong; write `rowNumber {order = [asc .id]}`. The spec comes first: `ntile {order = [asc .id]} 4`,
 not `ntile 4 {order = [asc .id]}`.
+
+An aggregating window (`over`, `avgOver`, `countOver`, and the min/max forms) that orders without
+naming a frame gets the **running** frame, `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. SQL's
+own default, `RANGE … CURRENT ROW`, folds rows with equal order keys into the same value, so a
+running total would be wrong per row whenever the key repeats. Ranking functions and `lag`/`lead`
+ignore the frame, so they stay frameless. Ask for another frame explicitly:
+`frame = wholePartition`, `rows unboundedPreceding unboundedFollowing`, `preceding 3`, and so on.
 
 ---
 
@@ -1369,8 +1480,10 @@ report = users & agg { total = coalesce 0.0 (mySum .amount) }
 main = report
 ```
 
-Placeholders are `$1` ... `$n`, 1-based, standing alone (not inside a name or a string literal), with
-no gaps. The SQL body itself is not type checked. Avoid dialect-specific spellings: templates are
+Placeholders are `$1` ... `$n`, 1-based, standing alone in **expression position** (not inside a
+name, a string literal, or a type position such as `CAST(x AS $1)`), with no gaps. A template the SQL
+parser would silently shorten — one ending in an operator or a comma, like `$1 +` — is rejected
+rather than shipped. The body itself is not type checked. Avoid dialect-specific spellings: templates are
 parsed and rewritten for the target dialect. Prefer naming a `CAGARA_*` intrinsic only in the
 prelude, not in user code.
 
@@ -1390,7 +1503,8 @@ Nullability comes from an outer join or from a `maybe` annotation.
 ### 8.6 Tooling
 
 ```text
-cagara file.cagara [--dialect NAME] [--only DEF] [--pretty] [--optimize] [--types]
+cagara file.cagara [--dialect NAME] [--only DEF|alias.DEF] [--arg VALUE]…
+                    [--pretty] [--optimize] [--types] [--list]
 cagara -                         # read source from stdin
 cagara fmt [--check] <files...>  # format in place; `-` for stdin
 cagara doc <files...|-> [--json] # the reference a file carries in `##` comments
@@ -1406,7 +1520,25 @@ cagara --version                 # also -V; exit 0
   common targets include `postgres`, `mysql`, `sqlite`, `duckdb`, `tsql`, `bigquery`, `snowflake`,
   `trino`, `spark`. SQLite and DuckDB are executed in CI; other dialects use the ANSI/Postgres
   fallback for some intrinsics.
-- `--only DEF` compiles one definition instead of `main`.
+- `--only DEF` compiles one definition instead of `main`. `--only alias.DEF` reads a definition
+  out of an imported module, e.g. `--only s.users` after `import "s.cagara" as s`.
+- `--arg VALUE` (repeatable) supplies a definition's arguments, applied in order, so a report can be
+  a function: `cagara report.cagara --only revenue --arg 2024-01-01`. Each value is the literal it
+  looks like — a number, `true`/`false`, otherwise a string (which widens to `date`/`timestamp`
+  where the parameter says so). A definition that takes arguments and is asked for without them says
+  how many it needs.
+- `--param name=value` (repeatable) supplies a definition the file **leaves to its caller**. A
+  parameter is an ordinary definition written at the end of the file, so its value is part of the
+  compilation: it is checked against every use, and it appears in the SQL as a literal
+  (`--param since=2024-01-01` → `WHERE (created_at >= '2024-01-01')`). Write a signature when the
+  literal alone is too vague: `--param since:date=2024-01-01`, `--param rate:float=2`. A value that
+  does not fit is reported against the flag, not against a line of a file the user did not write.
+- `--list` prints every root query, each labelled `-- name`, instead of only the entry point.
+- `cagara check [--json] <path>…` reports every file under a path that does not check. Each file is
+  checked as a *library*, so a directory of table declarations is reportable without one being
+  `main`; dot directories are skipped. `--json` writes one object per line
+  (`severity`, `path`, `line`, `column`, `message`) to stdout instead of text to stderr. Exit codes:
+  `0` everything checks, `1` at least one diagnostic, `2` a usage error.
 - `--types` prints inferred `name : type` lines; useful for checking a row after a stage, but do not
   depend on the printed field order.
 - `--pretty` formats the SQL; `--optimize` runs the SQL optimizer.
@@ -1438,22 +1570,22 @@ Use this to map a request, not to write SQL.
 | `RIGHT JOIN`, `FULL JOIN` | `rightJoin`, `fullJoin` |
 | `WHERE EXISTS (...)` | `t & semiJoin u (.<a == .>b)` |
 | `WHERE NOT EXISTS (...)` | `t & antiJoin u (.<a == .>b)` |
-| `UNION` / `UNION ALL` | `a &\| b` / `a &! b` |
-| `INTERSECT` / `EXCEPT` | `a &^ b` / `a &~ b` |
+| `UNION` / `UNION ALL` | `a & union b` / `a & unionAll b` |
+| `INTERSECT` / `EXCEPT` | `a & intersect b` / `a & except b` |
 | `COUNT(*)` | `count` inside `agg` |
 | `COUNT(x)` | `countOf .x` |
 | `COUNT(DISTINCT x)` | `countDistinct .x` |
 | `SUM(x)` | `sum .x` (result `maybe`) |
 | `AVG(x)` | `avg .x` (result `maybe float`) |
 | `MIN(x)` / `MAX(x)` | `min .x` / `max .x` (result `maybe`) |
-| `SUM(x) FILTER (WHERE p)` | `sumFilter p .x` |
-| `AVG(x) FILTER (WHERE p)` | `avgFilter p .x` |
-| `MIN(x)` / `MAX(x) FILTER (WHERE p)` | `minFilter p .x` / `maxFilter p .x` |
-| `COUNT(*) FILTER (WHERE p)` | `countFilter p` |
-| `COUNT(x) FILTER (WHERE p)` | `countOfFilter p .x` |
-| `COUNT(DISTINCT x) FILTER (WHERE p)` | `countDistinctFilter p .x` |
+| `SUM(x) FILTER (WHERE p)` | `filtered p (sum .x`) |
+| `AVG(x) FILTER (WHERE p)` | `filtered p (avg .x`) |
+| `MIN(x)` / `MAX(x) FILTER (WHERE p)` | `filtered p (min .x`) / `filtered p (max .x`) |
+| `COUNT(*) FILTER (WHERE p)` | `filtered p` count |
+| `COUNT(x) FILTER (WHERE p)` | `filtered p (countOf .x`) |
+| `COUNT(DISTINCT x) FILTER (WHERE p)` | `filtered p (distinctAgg (countOf .x`)) |
 | `COUNT(x)` where `x` is `maybe` | `countOfMaybe .x` |
-| `SUM/AVG/MIN/MAX(x)` where `x` is `maybe` | `sumMaybe`/`avgMaybe`/`minMaybe`/`maxMaybe` |
+| `SUM/AVG/MIN/MAX(x)` where `x` is `maybe` | `sum`/`avg`/`min`/`max .x` |
 | `COALESCE(x, 0)` | `coalesce 0 .x` or `.x ?? 0` |
 | `CASE WHEN c THEN a ELSE b END` | `ifThenElse c a b` |
 | `CASE WHEN ... WHEN ... ELSE ... END` | `case { c1 => v1; c2 => v2; true => v3 }` |
@@ -1464,7 +1596,7 @@ Use this to map a request, not to write SQL.
 | `x LIKE 'p%'` | `like "p%" .x` |
 | `x \|\| y` | `.x <> .y` |
 | `ROW_NUMBER() OVER (...)` | `rowNumber {partition = [.k], order = [desc .t]}` |
-| `SUM(x) OVER (...)` | `sumOver {partition = [.k], order = [asc .t]} .x` |
+| `SUM(x) OVER (...)` | `over {partition = [.k], order = [asc .t]} (sum .x`) |
 | `LAG(x) OVER (...)` | `lag {partition = [.k], order = [asc .t]} .x` |
 | `WITH q AS (...)` | define `q = ...`; reuse `q` (the compiler emits CTEs for repeated subtrees) |
 
@@ -1547,11 +1679,11 @@ orders : query { id = int, user_id = int, amount = float } = table "public" "ord
 
 report =
   users
-  & leftJoin orders (.<id == .>user_id)
+  & leftJoin (orders & select { user_id = .user_id, amount = .amount }) (.<id == .>user_id)
   & agg {
       id = group .id,
       name = group .name,
-      total = coalesce 0.0 (sumMaybe .amount),
+      total = coalesce 0.0 (sum .amount),
       matched = countOfMaybe .user_id
     }
   & order [desc .total]
@@ -1603,8 +1735,8 @@ main = monthly
 users : query { id = int, name = string } = table "public" "users"
 vips : query { id = int, name = string } = table "public" "vips"
 
-everyone = users &! vips
-only_vips = users &^ vips
+everyone = users & unionAll vips
+only_vips = users & intersect vips
 names = users & select { .name } & distinct
 
 main = names
@@ -1680,7 +1812,7 @@ The compiler names the column and often the fix. Match the wording, then apply t
 | `uses a column that is not grouped; wrap it in \`group\` or aggregate it` | bare column in `agg` | `x = group .x` or aggregate it |
 | `this argument contains an aggregate; aggregates cannot nest` | `sum (sum .x)` | aggregate in an earlier `agg` stage |
 | `field \`x\` is an aggregate; aggregates belong in \`agg\`, not \`select\`` | aggregate in `select`/`update` | move it into `agg` |
-| `expected a non-null value, found a \`maybe\`` | operator/aggregate/predicate on nullable | `coalesce`, `??`, `isNull`, `isTrue`, `whereTrue`; for an aggregate input use a `*Maybe` helper |
+| `expected a non-null value, found a \`maybe\`` | operator on nullable | `coalesce`, `??`, `isNull`, `isTrue`; a `where` takes a `maybe bool` directly |
 | `only one side is nullable: \`coalesce default x\` takes a \`maybe\`` | `coalesce`/`just` mismatch | `coalesce` only on `maybe`; `just` to add maybe |
 | `join predicates must say which input a column comes from` | plain `.x` in a join predicate | `.<x` / `.>x` |
 | `\`.<x\` and \`.>x\` ... only be used in a join predicate` | side field after the join | use `.x` on the output row |
@@ -1698,6 +1830,7 @@ The compiler names the column and often the fix. Match the wording, then apply t
 | `unknown operator \`&>>\`` | operator not in table | use a listed operator |
 | `the columns of table ... are unknown; give its definition a closed type` | table without annotation | add `query { ... }` |
 | `ambiguous use of ...` | overloaded name with unconstrained literal | use `toInt`/`toFloat`/`toDate`/`toTimestamp` |
+| `no overload of ... matches ...` | no candidate fits, one line per candidate | the line names the argument that disagrees, e.g. ``argument 1 expects `int`, the use has `string` `` |
 | `type mismatch: expected int, found float` | int/float mix | `toInt` / `toFloat` |
 | `cannot apply a value of type int to an argument` | juxtaposition of non-functions (e.g. `1e3`) | use a correct literal/function |
 | `field \`x\` of \`select\` must be a column expression or constant, found list int` | list as a value | lists are only keys/`inList` |

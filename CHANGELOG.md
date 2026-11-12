@@ -2,6 +2,106 @@
 
 ## Unreleased
 
+### The language
+
+- The prelude is two files, `prelude/core.cagara` and `prelude/std.cagara`:
+  208 definitions over 143 names. Core is what a query cannot be written without — the
+  pipeline, the stages, the joins, aggregates, windows, the operators and null
+  handling; std is everything merely useful — strings, dates, casts, extra
+  combinators. `cagara doc --prelude` prints them in that order, and every
+  definition still carries its `##` block.
+
+- **Stage shorthands are back, as wrappers rather than as second
+  implementations.** `q &? p` is `q & where p`, `&=` `select`, `&+` `update`,
+  `&*` `agg`, `&.` `order`, `&-` `limit`, `&|`/`&!`/`&^`/`&~` the set
+  operations; the joins have their own level — `orders ? on` is
+  `innerJoin orders on`, `<?`/`?>`/`<?>` the outer ones — so `q & orders ? on`
+  keeps the join on the right. `$`, `<<<` and `<>` are back too. Each shorthand
+  is a one-line definition that calls the named stage, so it inherits that
+  stage's signatures (including `where`'s nullable one), its phases and its SQL.
+  That is what the earlier per-operator `primitive` definitions got wrong: one
+  accepted a predicate the stage refused, and another silently meant the wrong
+  join. `every_stage_shorthand_writes_the_same_sql` compiles both spellings and
+  compares the statements, and `examples/report.cagara` runs its shorthand
+  pipelines on real SQLite and DuckDB.
+
+- A function with a single row form also has a **value form**, so it works on a
+  constant or a parameter as well as on a column: `upper : string -> string`
+  beside `upper : expr r string -> expr r string`. Eighteen functions have one.
+  A name overloaded by *source type* (`truncYear` over `date` and `timestamp`)
+  deliberately does not: ranking a source type and a phase at once is not
+  something the checker does, and `ambiguous use` would be worse than the row
+  form, which a value argument reaches by lifting.
+
+- Aggregates are values, and three combinators modify one: `filtered p a` (the
+  aggregate over the rows `p` keeps, `SUM(CASE WHEN p THEN x END)`),
+  `distinctAgg a` (`SUM(DISTINCT x)`) and `over spec a` (the same aggregate as a
+  window). They compose, so `distinctAgg (filtered p (sum .x))` is
+  `SUM(DISTINCT CASE WHEN p THEN x END)` — a shape that had no name before.
+  Sixteen per-modifier names (`sumFilter`, `countOver`, …) are gone.
+
+- Joins no longer have a `take` record. Reshaping a side is what `select` and
+  `update` already do, and doing it on the operand works for every join kind:
+  `users & leftJoin (orders & select { user_id, order_id = .id }) (.<id == .>user_id)`.
+  A name both sides have stays a type error, and the message says how to reshape
+  the operand instead of pointing at a removed form. `Rel::Join` is three
+  arguments again; `Prim::JoinSpec`, `CombineFn::Join{spec}`,
+  `Cons::JoinOut{take}`, `Payload::On(on, take)` and `join_take_row` are gone.
+
+- `where` accepts a `maybe bool` directly (NULL is not a match), so `whereTrue`
+  is gone; `sum`/`avg`/`min`/`max` accept a nullable column, so the `*Maybe`
+  duplicates are gone. `countOfMaybe`, `countDistinctMaybe`, `eqMaybe`, `isNull`,
+  `isNotNull` and `isTrue` stay: they are different functions, not aliases.
+
+### The checker
+
+- A type name must be one the language has: `decimal` is reported with a "did
+  you mean" instead of quietly becoming a type variable that two definitions can
+  read at two unrelated types.
+
+- Every overload of a name takes the **same number of parameters**, and no two
+  overloads share a **signature** — both are reported at the definition, because
+  the second can never be chosen and every use that fits it fits the first. The
+  axes that stay legal are the ones the prelude uses: width (`int`/`float`),
+  nullability (`a`/`maybe a`), source type and phase.
+
+- `no overload of … matches …` gives each candidate its own line naming the
+  first disagreement (`argument 1 expects `int`, the use has `string``), instead
+  of printing three signatures for the reader to compare by hand.
+
+- A window spec's `partition` keys are row expressions, not sort keys. They were
+  unified with `list (sortkey r)`, so an element that was still a hole became a
+  sort key and `partition = [year .at]` asked `year` for a `sortkey`. A
+  direction marker is accepted there and ignored, which is granted only in that
+  position so `asc (desc .x)` stays an error.
+
+### The tool chain
+
+- `cagara check [--json] <path>…` checks each file as a library and reports a
+  whole tree, one object per line with `severity`/`path`/`line`/`column`/
+  `message`; exit codes are 0 (clean), 1 (diagnostics), 2 (usage).
+
+- `--param name=value` (or `name:type=value`) supplies a definition the file
+  leaves to its caller. The parameter is written into the file as an ordinary
+  definition, so its value is checked against every use; a value that does not
+  fit is reported against the flag rather than against a line the user did not
+  write. `--arg`, `--only alias.DEF` and `--list` are unchanged.
+
+- The language server advertises **incremental** sync: a ranged edit is applied
+  to the text (UTF-16 columns, so a character outside the basic plane counts as
+  two) instead of replacing the document, and a stale range leaves the text
+  alone rather than ending the session. Diagnostics carry a `version` and a
+  stable `code` (`unknown-column`, `type-mismatch`, `overload`, …) so a client
+  can filter on identity rather than on wording.
+  `the_editor_and_the_command_line_agree` checks that the server and
+  `check --json` report the same diagnostics at the same positions.
+
+- Six ways the backend computed the wrong *numbers* — `except`/`intersect`
+  operands, a window's default frame, an `order` appended to the wrong level, a
+  projection dropping a key that a later stage read, `limit` and `offset`
+  nesting into "no rows", and a template placeholder that was not an expression
+  — are pinned by one audit test, `the_six_wrong_number_bugs_stay_fixed`.
+
 - `cagara fmt` moves a `let` binding down as a block instead of hugging it to
   the `=` / `=>`. Hugged,
   `account_no_with_check_digit = value => let weighted =` stayed on the arrow's

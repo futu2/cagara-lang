@@ -3,7 +3,7 @@
 # A window reaches the lowering from *inside* a `select` field rather than as a
 # stage of its own, so it is the one construct that needs a spec hook
 # (`lower_winspec`) rather than a case in the stage table. The examples used
-# `rowNumber` and `sumOver`; the frame form and the phase rule below did not
+# `rowNumber` and `over`; the frame form and the phase rule below did not
 # appear anywhere.
 orders : query { id = int, user_id = int, amount = float } = table "public" "orders"
 
@@ -11,11 +11,11 @@ orders : query { id = int, user_id = int, amount = float } = table "public" "ord
 numbered = orders & select { r = rowNumber {order = [asc .id]} }
 
 # A partition, which resets the function per group.
-per_user = orders & select { s = sumOver {partition = [.user_id]} .amount }
+per_user = orders & select { s = over {partition = [.user_id]} (sum .amount) }
 
 # A full specification, including an explicit frame.
 running = orders & select {
-  s = sumOver {partition = [.user_id], order = [asc .id], frame = runningFrame} .amount
+  s = over {partition = [.user_id], order = [asc .id], frame = runningFrame} (sum .amount)
 }
 
 # A window applied to an aggregate's *output*, not to a base table.

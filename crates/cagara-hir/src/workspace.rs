@@ -123,8 +123,36 @@ pub struct LoadedModule {
     line_starts: Vec<usize>,
 }
 
+/// How serious a diagnostic is.
+///
+/// Only two levels, because a third would be a code that can be ignored
+/// differently from another, and the language does not have that notion. A
+/// warning is something the program *means* — the query compiles and returns
+/// what its types say — but that the reader probably wants to know about;
+/// nothing in the build treats it as a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Severity {
+    /// The build fails.
+    #[default]
+    Error,
+    /// The build succeeds; the diagnostic is reported anyway.
+    Warning,
+}
+
+impl Severity {
+    /// The word used in the printed form and in `check --json`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Diag {
+    /// Whether this fails the build or only informs it.
+    pub severity: Severity,
     pub path: String,
     pub line: usize,
     /// One-based **byte** offset in `source`. The language server slices with
@@ -198,12 +226,13 @@ impl fmt::Display for Diag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // `line == 0` means "no position": the path is known but there is no
         // line to point at (a file that does not exist, say).
+        let level = self.severity.as_str();
         if self.line == 0 {
-            return write!(f, "{}: error: {}", self.path, self.message);
+            return write!(f, "{}: {level}: {}", self.path, self.message);
         }
         write!(
             f,
-            "{}:{}:{}: error: {}",
+            "{}:{}:{}: {level}: {}",
             self.path,
             self.line,
             self.display_col(),
@@ -324,6 +353,7 @@ impl Workspace {
                 // diagnostic. `1:1` would draw an empty caret under a line
                 // that was never loaded.
                 ws.import_diags.push(Diag {
+                    severity: Severity::Error,
                     path: p.display().to_string(),
                     line: 0,
                     col: 0,
@@ -1282,12 +1312,24 @@ pub(crate) fn make_diag_indexed(
     // Underline up to the end of the span or of the line, whichever is first.
     let width = text[start..end.min(line_end)].chars().count();
     Diag {
+        // Errors by default: every caller that does not say otherwise is
+        // reporting something that fails the build. `with_severity` is how the
+        // checker marks the handful that only advise.
+        severity: Severity::Error,
         path: path.display().to_string(),
         line,
         col,
         message,
         source: text[line_start..line_end].trim_end().to_string(),
         width,
+    }
+}
+
+impl Diag {
+    /// The same diagnostic, reported as a warning instead of an error.
+    pub fn as_warning(mut self) -> Self {
+        self.severity = Severity::Warning;
+        self
     }
 }
 
@@ -1299,7 +1341,7 @@ fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: S
 
 #[cfg(test)]
 mod tests {
-    use super::{Diag, Workspace};
+    use super::{Diag, Severity, Workspace};
     use crate::db::SourceFile;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -1579,6 +1621,7 @@ mod tests {
     #[test]
     fn a_rendered_column_counts_characters() {
         let diag = Diag {
+            severity: Severity::Error,
             path: "q.cagara".into(),
             line: 1,
             col: 12,
@@ -1600,6 +1643,7 @@ mod tests {
     fn a_long_diagnostic_line_is_clipped() {
         let source: String = "a".repeat(1000);
         let diag = Diag {
+            severity: Severity::Error,
             path: "q.cagara".into(),
             line: 1,
             col: 500,

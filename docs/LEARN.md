@@ -598,8 +598,10 @@ column name. Section
 [5](#5-choosing-columns-select-and-update) covers `update` in full.
 
 **Keeping both sides of a join.** Since a shared name resolves to the left
-column, rename on one side *before* joining. `.<x` / `.>x` belong to the join
-predicate only, so `.>id` is **not** available after the join:
+column — the join's output row is `merge r s` — rename on one side *before*
+joining when you need the right column too. `.<x` / `.>x` belong to the join
+predicate only, so `.>id` is **not** available after the join. The compiler warns
+about the name it drops; the warning does not fail the build:
 
 ```haskell
 order_names =

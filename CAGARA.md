@@ -875,10 +875,13 @@ no join spelling of its own for this: reshaping a side is what `select` and `upd
 | `semiJoin q p` | — | left rows with a match (left columns only) |
 | `antiJoin q p` | — | left rows with no match (left columns only) |
 
-Output columns: left input's columns, then the right input's columns that the left does not have. A
-name **both** sides have is a **type error**, not a silent left-wins drop: the right one would vanish
-and nothing could read it back. Reshape the side first — `select` renames and drops, `update`
-overwrites and appends:
+Output columns: left input's columns, then the right input's columns that the left does not have.
+
+A name **both** sides have keeps the **left** value and drops the right one: that is what the output
+row's `merge r s` says, and it is what lets two tables that both have an `id` be joined without a
+projection first. The compiler reports a **warning**, because the right column cannot be read
+afterwards — `.<x`/`.>x` name the inputs only inside the predicate. A warning does not fail the
+build; rename on the operand when you need the right column too:
 
 ```cagara
 users : query { id = int, name = string } = table "public" "users"
@@ -889,12 +892,13 @@ main =
   & innerJoin (orders & select { user_id = .user_id, order_id = .id, amount = .amount })
       (.<id == .>user_id)
   & select { .id, .name, .order_id }
+
+# Without the rename the join still works, warns once, and keeps `users.id`:
+still_joins = users & innerJoin orders (.<id == .>user_id)
 ```
 
-`users.id` and `orders.id` both survive because the right operand renamed one of them before the
-join. There is no separate join spelling for this: making a side say what it contributes is what
-`select` already does, and it works for any join kind — `leftJoin`, `rightJoin` and `fullJoin` take
-the same reshaped operand.
+`select` renames and drops, `update` overwrites and appends, and either one reshapes an operand for
+any join kind — `leftJoin`, `rightJoin` and `fullJoin` all take the same reshaped operand.
 
 After a left/right/full join, the nullable side's columns become `maybe` (never doubly so). The join
 predicate still sees the non-null input types. `.<` and `.>` are valid **only** inside the predicate;

@@ -756,11 +756,14 @@ fn publish_dirty(sender: &Sender<Message>, state: &mut State) -> Res<()> {
 fn publish(sender: &Sender<Message>, uri: Uri, ws: &Workspace, version: Option<i32>) -> Res<()> {
     let diagnostics: Vec<Diagnostic> = analysis::diagnostics(ws)
         .into_iter()
-        .map(|(range, message)| {
+        .map(|(range, message, severity)| {
             let code = analysis::diagnostic_code(&message);
             Diagnostic {
                 range,
-                severity: Some(DiagnosticSeverity::ERROR),
+                severity: Some(match severity {
+                    cagara_hir::workspace::Severity::Error => DiagnosticSeverity::ERROR,
+                    cagara_hir::workspace::Severity::Warning => DiagnosticSeverity::WARNING,
+                }),
                 code: Some(lsp_types::NumberOrString::String(code.into())),
                 source: Some("cagara".into()),
                 message,

@@ -911,7 +911,7 @@ fn the_editor_and_the_command_line_agree() {
         path.clone().into_os_string(),
     ]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    let mut from_cli: Vec<(u32, u32, String)> = stdout(&out)
+    let mut from_cli: Vec<(u32, u32, String, String)> = stdout(&out)
         .lines()
         .map(|line| {
             // The objects are written by hand, so a field lookup is enough.
@@ -932,6 +932,7 @@ fn the_editor_and_the_command_line_agree() {
             (
                 get("line").parse().expect("line"),
                 get("column").parse().expect("column"),
+                get("severity"),
                 message,
             )
         })
@@ -940,11 +941,16 @@ fn the_editor_and_the_command_line_agree() {
 
     // What the editor is told.
     let ws = cagara_hir::workspace::Workspace::open(&path);
-    let mut from_lsp: Vec<(u32, u32, String)> = cagara_lsp::analysis::diagnostics(&ws)
+    let mut from_lsp: Vec<(u32, u32, String, String)> = cagara_lsp::analysis::diagnostics(&ws)
         .into_iter()
-        .map(|(range, message)| {
+        .map(|(range, message, severity)| {
             // 0-based line and UTF-16 column, which is what the protocol counts.
-            (range.start.line + 1, range.start.character + 1, message)
+            (
+                range.start.line + 1,
+                range.start.character + 1,
+                severity.as_str().to_string(),
+                message,
+            )
         })
         .collect();
     from_lsp.sort();
@@ -959,7 +965,63 @@ fn the_editor_and_the_command_line_agree() {
     assert!(
         from_cli
             .iter()
-            .all(|(line, _, _)| *line == 3 || *line == 4 || *line == 5),
+            .all(|(line, _, _, _)| *line == 3 || *line == 4 || *line == 5),
         "{from_cli:?}"
     );
+}
+
+/// A warning is reported, and the run still succeeds.
+///
+/// Some diagnostics describe what the program *means* rather than a mistake: a
+/// join whose inputs share a column keeps the left one, which is exactly what
+/// its output row says, and the reader is told that the right one cannot be
+/// read afterwards. Failing the build over that forced a `select` on every join
+/// between two tables that both have an `id`, so it is a warning — printed with
+/// `warning:`, present in `--json` with `"severity":"warning"`, and not an exit
+/// code.
+#[test]
+fn a_warning_is_reported_and_does_not_fail_the_build() {
+    let dir = TempDir::new("warn");
+    let path = dir.write(
+        "q.cagara",
+        "users : query { id = int, name = string } = table \"s\" \"u\"\n\
+         orders : query { id = int, user_id = int } = table \"s\" \"o\"\n\
+         q = users & innerJoin orders (.<id == .>user_id)\n",
+    );
+
+    // The query compiles: `--list` prints its SQL and exits 0.
+    let out = cagara([path.clone().into_os_string()]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("warning: this join has `id` on both sides"),
+        "{err}"
+    );
+    assert!(!err.contains("error:"), "{err}");
+    // `q` is not `main`, so the SQL needs `--only`; it compiles all the same.
+    let out = cagara([
+        path.clone().into_os_string(),
+        std::ffi::OsString::from("--only"),
+        std::ffi::OsString::from("q"),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("INNER JOIN"), "{}", stdout(&out));
+
+    // And `check`, which is what a hook runs, agrees: warning out, exit 0.
+    let out = cagara([
+        std::ffi::OsString::from("check"),
+        std::ffi::OsString::from("--json"),
+        path.clone().into_os_string(),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let line = stdout(&out);
+    assert!(line.contains("\"severity\":\"warning\""), "{line}");
+    assert!(line.contains("on both sides"), "{line}");
+
+    // `check` without `--json` says `warning:` too, not `error:`.
+    let out = cagara([std::ffi::OsString::from("check"), path.into_os_string()]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains(": warning: "), "{err}");
+    assert!(!err.contains(": error: "), "{err}");
 }

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- A join whose inputs share a column name is a **warning**, not an error. The
+  merged row keeps the left value — which is what its `merge r s` type says — so
+  the query compiles and runs; the warning says the right column cannot be read
+  afterwards, and how to rename it on the operand if it is wanted. Erroring
+  forced a `select` on every join between two tables that both have an `id`,
+  which is most of them, to avoid a name collision whose behaviour was already
+  well defined.
+
+  This is the first diagnostic that does not fail the build, so severity is now
+  part of the diagnostic itself: `cagara` and `cagara check` print `warning:`,
+  `check --json` reports `"severity":"warning"` and exits 0, and the language
+  server publishes it as `DiagnosticSeverity::WARNING`. `cagara check` exits 1
+  only for errors, so a hook that gates on it is unchanged — except that it no
+  longer stops on advice.
+
 ## 0.4.0 — 2026-11-12
 
 The first release with a recorded section: entries that had accumulated under

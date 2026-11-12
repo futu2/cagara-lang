@@ -73,6 +73,17 @@ fn key_argument_message(f: &ast::Expr) -> String {
 }
 
 impl<'w> Checker<'w> {
+    /// Record advice: the program is well typed, and the reader may want to know
+    /// what it does not say.
+    ///
+    /// Reported against the definition being checked, so a warning travels the
+    /// same route to the editor and the command line as an error does, and
+    /// kept in its own list so nothing that asks "did this definition check"
+    /// has to learn about severity.
+    pub(crate) fn warn(&mut self, span: Span, message: String) {
+        self.warnings.push((span, message));
+    }
+
     // ── definitions and schemes ────────────────────────────────────────────
 
     pub(crate) fn def_scheme(&mut self, m: usize, i: usize) -> Option<Scheme> {
@@ -123,6 +134,7 @@ impl<'w> Checker<'w> {
                     span: self.defs.get(i).span,
                     message: format!("`{name}` refers to itself; recursion is not supported"),
                     kind: RawErrorKind::Def,
+                    severity: crate::workspace::Severity::Error,
                 });
             }
             let v = self.fresh();
@@ -154,6 +166,7 @@ impl<'w> Checker<'w> {
                         current.name
                     ),
                     kind: RawErrorKind::Chain,
+                    severity: crate::workspace::Severity::Error,
                 });
             }
             let v = self.fresh();
@@ -259,6 +272,7 @@ impl<'w> Checker<'w> {
                     span: e.span,
                     message: e.msg,
                     kind: RawErrorKind::Def,
+                    severity: crate::workspace::Severity::Error,
                 });
                 self.failed.insert((m, i));
                 let v = self.fresh();
@@ -2440,7 +2454,6 @@ impl<'w> Checker<'w> {
                 let c = Cons::JoinOut {
                     left: l.clone(),
                     right: r.clone(),
-                    take: false,
                     out: out.clone(),
                     nullable,
                     left_only: matches!(kind, JoinKind::Semi | JoinKind::Anti),
@@ -3044,11 +3057,10 @@ impl<'w> Checker<'w> {
         }
     }
 
-    fn step_join_out(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+    fn step_join_out(&mut self, c: &Cons, sp: Span) -> Result<bool, String> {
         let Cons::JoinOut {
             left,
             right,
-            take,
             out,
             nullable,
             left_only,
@@ -3080,10 +3092,12 @@ impl<'w> Checker<'w> {
             self.unify(&row(lf, Ty::Empty), out)?;
             return Ok(true);
         }
-        // A `take` record names the columns the join keeps from the right side.
-        // A name the left row already has would keep the left one and drop the
-        // right — the very thing the record exists to prevent — so it is a type
-        // error rather than a silent overwrite.
+        // A name both inputs have: the merge keeps the left value and drops the
+        // right, which is the shape `merge r s` describes. That is *allowed* —
+        // making it an error forced a `select` on every join whose tables share
+        // an `id`, which is most of them — but it is worth saying, because the
+        // right column cannot be read afterwards (`.<x`/`.>x` name the inputs
+        // only inside the predicate).
         let shared: Vec<&str> = rf
             .iter()
             .map(|(k, _)| k.as_str())
@@ -3096,24 +3110,12 @@ impl<'w> Checker<'w> {
                 .collect::<Vec<_>>()
                 .join(", ");
             let first = shared[0];
-            return Err(if *take {
-                format!(
-                    "`take` names {names}, which the left input already has; give it a different \
-                     name (`{first} = .>…`) or drop it"
-                )
-            } else {
-                // An anonymous merge on a shared name keeps the left value and
-                // drops the right one, and nothing can read the right column
-                // back afterwards: `.<x`/`.>x` name the inputs only inside the
-                // join predicate. That is a silent wrong answer, so it is a type
-                // error that names both ways out — say what the right side
-                // contributes, or rename it before joining.
-                format!(
-                    "this join has {names} on both sides: the merged row keeps the left one, so \
-                     the right side's would be lost. Reshape the right operand before joining: \
-                     `& innerJoin (q & select {{ other_{first} = .{first}, … }}) (.<a == .>b)`"
-                )
-            });
+            let msg = format!(
+                "this join has {names} on both sides: the merged row keeps the left one, so the \
+right side's cannot be read afterwards. Rename it on the operand to keep it: `& innerJoin (q & \
+select {{ right_{first} = .{first} }}) (.<a == .>b)`"
+            );
+            self.warn(sp, msg);
         }
         let wrap = |this: &Self, on: bool, (k, t): (String, Ty)| match this.resolve(&t) {
             Ty::Con("maybe", _) => (k, t),

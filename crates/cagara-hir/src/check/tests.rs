@@ -35,6 +35,20 @@ fn types(src: &str) -> Vec<(String, Result<String, String>)> {
         .collect()
 }
 
+/// Every warning the checker produced for `src`, as message text.
+///
+/// Warnings do not fail a definition, so `types` above never sees them: they
+/// are read here, where a test is about the advice itself.
+fn warnings(src: &str) -> Vec<String> {
+    let ws = Workspace::from_source(&format!("{TABLES}{src}"));
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    check(&ws)
+        .warnings()
+        .iter()
+        .map(|w| w.diag.message.clone())
+        .collect()
+}
+
 fn ty(src: &str, name: &str) -> String {
     let r = types(src)
         .into_iter()
@@ -3379,13 +3393,22 @@ fn reshaping_a_join_operand_is_what_names_the_output_columns() {
         ),
         "query { id = int, name = string, age = int, active = bool, user_id = int, order_id = int }"
     );
-    // A name both sides still have is refused, and the message points at the
-    // operand rather than at a join spelling that no longer exists.
-    let e = err("q = users & innerJoin orders (.<id == .>user_id)\n", "q");
-    assert!(e.contains("on both sides"), "{e}");
-    assert!(e.contains("Reshape the right operand"), "{e}");
-    assert!(
-        !e.contains("JoinWith"),
-        "the message must not name a removed form: {e}"
+    // A name both sides still have is *allowed*: the merge keeps the left one,
+    // which is what `merge r s` says, and forcing a `select` on every join
+    // whose tables share an `id` was the more expensive mistake. The join still
+    // checks, and a warning says the right column cannot be read afterwards.
+    assert_eq!(
+        ty("q = users & innerJoin orders (.<id == .>user_id)\n", "q"),
+        "query { id = int, name = string, age = int, active = bool, user_id = int, amount = float, status = string }",
+        "the left `id` survives and the right one is dropped"
     );
+    let w = warnings("q = users & innerJoin orders (.<id == .>user_id)\n");
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("on both sides"), "{w:?}");
+    assert!(w[0].contains("cannot be read afterwards"), "{w:?}");
+    // A join with nothing in common says nothing.
+    assert!(warnings(
+        "q = users & innerJoin (orders & select { user_id = .user_id }) (.<id == .>user_id)\n"
+    )
+    .is_empty());
 }

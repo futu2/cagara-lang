@@ -5,7 +5,7 @@
 
 use cagara_hir::check::{check_reachable, TypeCheck, PROBE_FIELD};
 use cagara_hir::compile_diagnostics;
-use cagara_hir::workspace::{Binding, Diag, Workspace};
+use cagara_hir::workspace::{Binding, Diag, Severity, Workspace};
 use cagara_syntax::ast::{Expr, ExprKind, Side, Span};
 use cagara_syntax::docs::Docs;
 use line_index::{LineIndex, TextRange, TextSize, WideEncoding};
@@ -18,17 +18,17 @@ use std::path::PathBuf;
 
 /// Every diagnostic in the root file: loading (syntax, imports, overloads),
 /// type errors, and compilation errors.
-pub fn diagnostics(ws: &Workspace) -> Vec<(Range, String)> {
+pub fn diagnostics(ws: &Workspace) -> Vec<(Range, String, Severity)> {
     let compilation_diagnostics = compile_diagnostics(ws);
     let root = ws.modules[ws.root].path.display().to_string();
     // Deduped through a set, not `Vec::contains`: a file being typed has as
     // many diagnostics as it has errors, and comparing each against every one
     // already collected made publishing quadratic in them. The compiler's own
     // collector dedupes the same way (`compile::push_unique`).
-    let mut out: Vec<(Range, String)> = Vec::new();
-    let mut seen: HashSet<(Range, String)> = HashSet::new();
+    let mut out: Vec<(Range, String, Severity)> = Vec::new();
+    let mut seen: HashSet<(Range, String, Severity)> = HashSet::new();
     for d in compilation_diagnostics.iter().filter(|d| d.path == root) {
-        let item = (diag_range(d), d.message.clone());
+        let item = (diag_range(d), d.message.clone(), d.severity);
         if seen.insert(item.clone()) {
             out.push(item);
         }
@@ -1391,7 +1391,8 @@ mod tests {
     fn diagnostics_have_utf16_ranges() {
         let ds = diagnostics(&ws());
         assert_eq!(ds.len(), 1, "{ds:?}");
-        let (r, msg) = &ds[0];
+        let (r, msg, severity) = &ds[0];
+        assert_eq!(*severity, Severity::Error);
         assert!(msg.contains("type mismatch"), "{msg}");
         assert_eq!(r.start.line, 3);
         // The span starts after `"é" <> ` or at the argument; either way the

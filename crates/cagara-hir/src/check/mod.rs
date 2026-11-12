@@ -123,6 +123,9 @@ pub(crate) struct RawTypeError {
     span: Span,
     message: String,
     kind: RawErrorKind,
+    /// `Warning` for a diagnostic the program is allowed to produce: the query
+    /// compiles and means what its types say, and the reader is told anyway.
+    severity: crate::workspace::Severity,
 }
 
 /// What a raw error is about, where aggregating per-definition checks has to
@@ -141,6 +144,9 @@ pub(crate) enum RawErrorKind {
 /// Result of checking every definition in a workspace.
 pub struct TypeCheck {
     errors: Vec<TypeError>,
+    /// Diagnostics that do not fail the build, kept in their own list so a
+    /// caller that asks "did this compile" never has to filter by severity.
+    warnings: Vec<TypeError>,
     /// First index into `errors` for each `(module, def)`.
     ///
     /// Elaboration asks `error_for(module, def)` once per definition, so
@@ -162,6 +168,12 @@ impl TypeCheck {
     /// Every diagnostic produced by checking, in module then definition order.
     pub fn errors(&self) -> &[TypeError] {
         &self.errors
+    }
+
+    /// The diagnostics that do not fail the build: the program compiles and
+    /// means what its types say, and the reader is told what it does not say.
+    pub fn warnings(&self) -> &[TypeError] {
+        &self.warnings
     }
 
     /// Columns (name, printed type) of the row seen by the `PROBE_FIELD`
@@ -498,9 +510,15 @@ impl TypeCheck {
         }
     }
 
+    /// The *error* at one definition, if it has one. A definition whose only
+    /// diagnostic is a warning has no error, so elaboration and `--only` do not
+    /// treat it as broken.
     pub fn error_for(&self, module: usize, def: usize) -> Option<&Diag> {
         let index = *self.by_def.get(&(module, def))?;
-        self.errors.get(index).map(|e| &e.diag)
+        self.errors
+            .get(index)
+            .filter(|e| e.diag.severity == crate::workspace::Severity::Error)
+            .map(|e| &e.diag)
     }
 }
 
@@ -536,6 +554,7 @@ fn check_modules(ws: &Workspace, only: Option<&[bool]>) -> TypeCheck {
     // edited module and the modules that (transitively) depend on it.
     let mut out = TypeCheck {
         errors: vec![],
+        warnings: vec![],
         by_def: HashMap::new(),
         modules: Vec::with_capacity(ws.inputs.len()),
     };
@@ -546,6 +565,10 @@ fn check_modules(ws: &Workspace, only: Option<&[bool]>) -> TypeCheck {
         }
         let mc = module_check(&ws.db, input);
         for e in mc.errors.iter() {
+            if e.diag.severity == crate::workspace::Severity::Warning {
+                out.warnings.push(e.clone());
+                continue;
+            }
             // One entry per definition: the checker reports at most one error
             // for a definition, and the first is the one elaboration should see.
             out.by_def
@@ -637,12 +660,14 @@ fn def_check(db: &dyn salsa::Database, input: ModuleInput, def: usize) -> Arc<De
     // attributed to *its* own definition, and that definition's check reports
     // it. Passing it on here would report it twice.
     let errors: Vec<RawTypeError> = c.errors.iter().filter(|e| e.def == def).cloned().collect();
+    let warnings: Vec<(Span, String)> = c.warnings.clone();
     Arc::new(DefCheck {
         scheme,
         failed,
         types,
         typed,
         errors,
+        warnings,
         probe_fields: c.probe_fields,
     })
 }
@@ -658,6 +683,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
     let mut schemes = HashMap::new();
     let mut types = HashMap::new();
     let mut errors = Vec::new();
+    let mut warned: Vec<(usize, Span, String)> = Vec::new();
     let mut typed = HashMap::new();
     let mut probe_fields = None;
     let mut chain_reported = false;
@@ -679,6 +705,9 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
                 chain_reported = true;
             }
             errors.push(error.clone());
+        }
+        for (span, message) in &checked.warnings {
+            warned.push((def, *span, message.clone()));
         }
         if let Some(body) = &checked.typed {
             typed.insert((m, def), body.clone());
@@ -726,15 +755,37 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
         .into_iter()
         .map(|e| {
             let (start, end) = place(e.span, e.def);
-            TypeError {
-                module: e.module,
-                def: e.def,
-                diag: crate::workspace::make_diag_indexed(
-                    path, text, &starts, start, end, e.message,
-                ),
+            {
+                let diag =
+                    crate::workspace::make_diag_indexed(path, text, &starts, start, end, e.message);
+                TypeError {
+                    module: e.module,
+                    def: e.def,
+                    diag: if e.severity == crate::workspace::Severity::Warning {
+                        diag.as_warning()
+                    } else {
+                        diag
+                    },
+                }
             }
         })
         .collect();
+    // Warnings take the same route as errors — one `TypeError` each, rendered
+    // against this module's text and carrying the span the checker reported —
+    // and are told apart by the severity on the diagnostic.
+    let mut errors: Vec<TypeError> = errors;
+    for (def, span, message) in warned {
+        let (start, end) = place(span, def);
+        errors.push(TypeError {
+            module: m,
+            def,
+            diag: crate::workspace::make_diag_indexed(path, text, &starts, start, end, message)
+                .as_warning(),
+        });
+    }
+    // Diagnostics are reported in definition order, so a warning that belongs
+    // to a definition above an error is printed above it.
+    errors.sort_by_key(|e| e.def);
     let mut typed_index: Vec<(u32, usize, usize)> = Vec::new();
     for (&(_, def), body) in &typed {
         for (at, node) in body.nodes().iter().enumerate() {
@@ -781,6 +832,9 @@ struct DefCheck {
     typed: Option<Arc<TypedBody>>,
     /// Type errors reported at this definition.
     errors: Vec<RawTypeError>,
+    /// Advice reported at this definition: kept apart from `errors` so no
+    /// reader that asks "did this check" has to filter by severity.
+    warnings: Vec<(Span, String)>,
     /// The row a `PROBE_FIELD` column saw here, if this is the definition that
     /// referenced it.
     probe_fields: Option<Vec<(String, String)>>,

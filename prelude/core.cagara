@@ -257,9 +257,12 @@ group : expr r (maybe a) -> agg (expr r (maybe a)) = primitive "__group"
 ## row, whose columns are `.x` for the left side and `.>x` for the right.
 ##
 ## The output has the left input's columns, then the right input's that the
-## left does not have. A name both sides have is a *type error*, because the
-## right one would vanish and nothing could read it back afterwards — rename or
-## drop it on the operand first: `orders & select { user_id, order_id = .id }`.
+## left does not have. A name both sides have keeps the **left** value and drops
+## the right one — that is what `merge r s` says, and it is what makes a join
+## between two tables that both have an `id` writable without a projection. The
+## compiler warns, because the right column cannot be read afterwards
+## (`.<x`/`.>x` name the inputs only inside the predicate): rename it on the
+## operand (`orders & select { user_id, order_id = .id }`) if you need it.
 innerJoin : query s -> expr (join r s) bool -> query r -> query (merge r s) =
   primitive "__innerJoin"
 

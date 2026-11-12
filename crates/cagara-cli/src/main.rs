@@ -336,6 +336,11 @@ fn run(ws: &Workspace, opts: &Options) -> std::io::Result<ExitCode> {
     // reported per definition below (so `--only` applies to them).
     let tc = check(ws);
     let mut failed = false;
+    // Warnings first, so a file that has both reads top-down: they do not fail
+    // the run, and their position in the output is the only thing that says so.
+    for w in tc.warnings() {
+        eprintln!("{}", w.diag);
+    }
     for e in tc.errors().iter().filter(|e| e.module != ws.root) {
         eprintln!("{}", e.diag);
         failed = true;
@@ -900,6 +905,8 @@ pub(crate) fn done(failed: bool) -> ExitCode {
 
 /// A diagnostic in the form `check` prints.
 struct Found {
+    /// `error` or `warning`: only the former fails the run.
+    severity: &'static str,
     path: String,
     line: usize,
     col: usize,
@@ -909,9 +916,15 @@ struct Found {
 impl Found {
     fn text(&self) -> String {
         format!(
-            "{}:{}:{}: error: {}",
-            self.path, self.line, self.col, self.message
+            "{}:{}:{}: {}: {}",
+            self.path, self.line, self.col, self.severity, self.message
         )
+    }
+
+    /// Whether this diagnostic fails the run. A warning is reported and the
+    /// run succeeds: the program compiles and means what its types say.
+    fn fails(&self) -> bool {
+        self.severity == "error"
     }
 
     /// One JSON object per line, so a consumer can read the stream without a
@@ -934,7 +947,8 @@ impl Found {
             o
         }
         format!(
-            "{{\"severity\":\"error\",\"path\":\"{}\",\"line\":{},\"column\":{},\"message\":\"{}\"}}",
+            "{{\"severity\":\"{}\",\"path\":\"{}\",\"line\":{},\"column\":{},\"message\":\"{}\"}}",
+            self.severity,
             esc(&self.path),
             self.line,
             self.col,
@@ -1020,6 +1034,7 @@ fn check_tree(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode>
         let mut found: Vec<Found> = Vec::new();
         for d in &ws.diags {
             found.push(Found {
+                severity: d.severity.as_str(),
                 path: d.path.clone(),
                 line: d.line,
                 col: d.col,
@@ -1030,10 +1045,20 @@ fn check_tree(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode>
             let tc = check(&ws);
             for e in tc.errors() {
                 found.push(Found {
+                    severity: e.diag.severity.as_str(),
                     path: e.diag.path.clone(),
                     line: e.diag.line,
                     col: e.diag.col,
                     message: e.diag.message.clone(),
+                });
+            }
+            for w in tc.warnings() {
+                found.push(Found {
+                    severity: w.diag.severity.as_str(),
+                    path: w.diag.path.clone(),
+                    line: w.diag.line,
+                    col: w.diag.col,
+                    message: w.diag.message.clone(),
                 });
             }
         }
@@ -1043,7 +1068,7 @@ fn check_tree(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode>
             } else {
                 eprintln!("{}", f.text());
             }
-            failed = true;
+            failed |= f.fails();
         }
     }
     Ok(done(failed))

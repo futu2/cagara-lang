@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-11-12
+
+The first release with a recorded section: entries that had accumulated under
+`Unreleased` from earlier 0.3.x work are included, so a few of them describe
+changes that shipped in a 0.3.x tag without a note here.
+
 ### The language
 
 - The prelude is two files, `prelude/core.cagara` and `prelude/std.cagara`:

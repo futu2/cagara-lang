@@ -21,6 +21,10 @@
             rust-analyzer
             sqlite
             duckdb
+            # The PostgreSQL differential test drives PGlite (Postgres in
+            # WebAssembly) through node; install it once with
+            # `npm install --no-save @electric-sql/pglite`.
+            nodejs
           ];
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         };

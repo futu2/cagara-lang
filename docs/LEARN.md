@@ -681,12 +681,11 @@ b = orders & agg { n = count } & where (.n > 5)
 ```
 
 ```sql
-SELECT n FROM (SELECT COUNT(*) AS n FROM public.orders) AS t1 WHERE (n > 5);
+SELECT COUNT(*) AS n FROM public.orders HAVING COUNT(*) > 5;
 ```
 
-Folding that filter into a `HAVING` on the aggregate is a query-shape
-optimization this compiler does not currently perform. See the aggregate-filter
-note under *Current boundaries* in [`PLAN.md`](PLAN.md) for why it is absent.
+The filter belongs to the group, so it is the aggregate's `HAVING` — the column
+it names (`n`) is written as the expression it stands for.
 
 A `limit` is also a boundary, and so is an `order` or `limit` sitting between
 the `agg` and the `where`: SQL cannot filter on a limited result in the same
@@ -1870,28 +1869,25 @@ t = orders & agg { user_id = group .user_id, total = coalesce 0.0 (sum .amount) 
 ```
 
 ```sql
-SELECT user_id, total
-FROM (SELECT user_id, COALESCE(SUM(amount), 0.0) AS total
-      FROM public.orders GROUP BY user_id) AS t1
-WHERE (total > 100.0);
+SELECT user_id, COALESCE(SUM(amount), 0.0) AS total
+FROM public.orders GROUP BY user_id HAVING COALESCE(SUM(amount), 0.0) > 100.0;
 ```
 
-Folding this into a `HAVING` on the aggregate is a query-shape optimization this
-compiler does not currently perform; see [`PLAN.md`](PLAN.md).
+The filter is `HAVING`: it reads the group's own values.
 
 **A derived table appears** after a window, after `limit`/`offset`, after a
-filter over an aggregate, and after an aggregate when a later stage still has to
-read the grouped rows — a second `agg`, or a filter that runs after an
-intervening `order` or `limit`:
+`distinct`, and after an aggregate when a later stage still has to read the
+grouped rows and something that runs after grouping sits in between — a second
+`agg`, a `limit`, a `distinct`:
 
 ```haskell
 u = orders & select {.id, rn = rowNumber { order = [asc .id] }} & where (.rn <= 3)
-v = orders & agg { u = group .user_id, n = count } & order [desc .n] & where (.n > 5)
+v = orders & agg { u = group .user_id, n = count } & limit 5 & where (.n > 5)
 ```
 
 ```sql
 SELECT id, rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY id NULLS LAST) AS rn FROM public.orders) AS t1 WHERE (rn <= 3);
-SELECT u, n FROM (SELECT user_id AS u, COUNT(*) AS n FROM public.orders GROUP BY user_id) AS t1 WHERE (n > 5) ORDER BY n DESC NULLS LAST;
+SELECT u, n FROM (SELECT user_id AS u, COUNT(*) AS n FROM public.orders GROUP BY user_id LIMIT 5) AS t1 WHERE (n > 5);
 ```
 
 **Order is preserved across derived tables.** SQL does not guarantee a derived

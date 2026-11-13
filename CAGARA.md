@@ -799,7 +799,9 @@ and every overload emits the same `SUM(x)`.
   The predicate is a non-null row-phase `bool` with no aggregate or window. The
   helpers compile to `CASE`, not SQL `FILTER`, so every dialect accepts them.
   When every aggregate shares one predicate, use `where` before `agg` instead.
-- A filter after `agg` is an outer `WHERE` over a derived table; there is no `HAVING` keyword.
+- A filter after `agg` is the aggregate's `HAVING` — the same `where`, in the clause where it
+  belongs. It stays an outer `WHERE` over a derived table when something that runs *after* grouping
+  sits in between: a window, `distinct`, `limit`/`offset`.
 - A window may read an aggregate's output in a later `select`; a window field in `agg` is rejected.
 
 Correct grouped report:
@@ -1661,7 +1663,8 @@ If a request needs one of these, say so or write a `sql` template; do not guess 
   comparisons, `isNull`, `like`, `semiJoin`, `antiJoin`.
 - **Subqueries:** no `FROM (SELECT ...)`, no correlated subqueries, no `LATERAL`. Compose named query
   definitions instead; a join input may be a query.
-- **Aggregation:** `HAVING` (use `where` after `agg`), `GROUPING SETS`, `DISTINCT ON`, `QUALIFY`.
+- **Aggregation:** `GROUPING SETS`, `DISTINCT ON`, `QUALIFY` (a filter after `agg` is already
+  `HAVING`).
   SQL's `FILTER (WHERE ...)` clause is not syntax; write `filtered p agg`, or spell `CASE` in a
   custom aggregate template.
 - **Functions not in §7:** `random`, more aggregates (`median`, `stddev`, `string_agg`,

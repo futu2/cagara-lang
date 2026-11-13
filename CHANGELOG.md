@@ -54,6 +54,13 @@ lists, spelled by whichever dialect can hold one.
   element, and the position that wants keys is the one that reports the missing
   direction.
 
+- A filter after `agg` is the aggregate's `HAVING`, not an outer `WHERE` over a derived table:
+  `agg { u = group .user_id, n = count } & where (.n > 5)` is one statement with
+  `GROUP BY user_id HAVING COUNT(*) > 5`. The predicate's columns are written as the expressions
+  they stand for, which is what `HAVING` may read, and consecutive filters conjoin there. It stays
+  an outer `WHERE` when something that runs after grouping sits in between — a window, `distinct`,
+  or `limit`/`offset`.
+
 - The language server answers `textDocument/codeAction` and `textDocument/inlayHint`. The quick fixes
   are the two rules that are mechanical: a bare sort key becomes `asc (…)` / `desc (…)`, and a name a
   "did you mean" already resolved is renamed. The inferred type of a definition that writes no

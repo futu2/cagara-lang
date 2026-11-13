@@ -197,55 +197,59 @@ fn filter_pipeline_over_ten_stages_compiles() {
 }
 
 #[test]
-fn a_filter_over_an_aggregate_wraps_a_derived_table() {
-    // The predicate is written against an aggregate output. It no longer folds
-    // into `HAVING`: lowering treats it as any other filter that cannot fold
-    // into its input, so it wraps. See `docs/PLAN.md` for why the fold was
-    // removed and what reinstating it properly would take.
+fn a_filter_over_an_aggregate_is_having() {
+    // The predicate is written against an aggregate output, so it belongs in
+    // `HAVING` — where every column it can name is a grouping key or an
+    // aggregate value — and the query stays one statement.
     let s = sql(
         "q = orders\n  & where (.status == \"paid\")\n  & agg { user_id = group .user_id, revenue = sum .amount, n = count }\n  & where (.n >= 5)\n",
         "q",
     );
     assert!(s.contains("GROUP BY user_id"), "{s}");
     assert!(s.contains("SUM(amount) AS revenue"), "{s}");
-    assert!(
-        s.contains(") AS t1 WHERE"),
-        "an aggregate filter should wrap a derived table: {s}"
-    );
-    assert!(!s.contains("HAVING"), "{s}");
+    assert!(s.contains("HAVING COUNT(*) >= 5"), "{s}");
+    assert!(!s.contains(") AS t1 WHERE"), "no derived table: {s}");
 }
 
 #[test]
-fn filter_after_agg_stays_outside_order_and_limit() {
-    // An intervening `order` or `limit` is not an aggregate-output filter: the
-    // predicate must run *after* paging, so it cannot become HAVING.
-    let ordered = sql(
-        "q = orders & agg { u = group .user_id, n = count } & order [desc .n] & where (.n > 3)\n",
-        "q",
-    );
-    assert!(ordered.contains("(SELECT"), "{ordered}");
-    assert!(ordered.contains(") AS t1 WHERE"), "{ordered}");
-
+fn filter_after_agg_stays_outside_paging() {
+    // A `limit` runs after grouping, so a filter written after it must run
+    // after the paging — a derived table, not `HAVING`.
     let paged = sql(
         "q = orders & agg { u = group .user_id, n = count } & limit 5 & where (.n > 3)\n",
         "q",
     );
     assert!(paged.contains(") AS t1 WHERE"), "{paged}");
+    assert!(!paged.contains("HAVING"), "{paged}");
+
+    // `DISTINCT` also changes which rows exist, so the filter stays outside.
+    let distinct = sql(
+        "q = orders & agg { u = group .user_id, n = count } & distinct & where (.n > 3)\n",
+        "q",
+    );
+    assert!(distinct.contains(") AS t1 WHERE"), "{distinct}");
+
+    // `order` does not: it runs after `HAVING`, so both stay in one statement.
+    let ordered = sql(
+        "q = orders & agg { u = group .user_id, n = count } & order [desc .n] & where (.n > 3)\n",
+        "q",
+    );
+    assert!(ordered.contains("HAVING COUNT(*) > 3"), "{ordered}");
+    assert!(ordered.contains("ORDER BY"), "{ordered}");
 }
 
 #[test]
-fn consecutive_aggregate_filters_stay_conjoined_outside() {
+fn consecutive_aggregate_filters_conjoin_in_having() {
     // Conjunction is a property of consecutive filters on the *same* stage,
-    // which still holds when they sit outside the aggregate's derived table.
+    // and the stage here is the group.
     let s = sql(
         "q = orders & agg { u = group .user_id, n = count } & where (.n > 3) & where (.n < 9)\n",
         "q",
     );
     assert!(
-        s.contains("WHERE (n > 3) AND (n < 9)"),
+        s.contains("HAVING (COUNT(*) > 3) AND (COUNT(*) < 9)"),
         "consecutive filters should conjoin: {s}"
     );
-    assert!(!s.contains("HAVING"), "{s}");
 }
 
 #[test]
@@ -1106,13 +1110,10 @@ fn optimizer_keeps_stage_boundaries() {
         "q",
         opts,
     );
-    // The boundary is the derived table now, not a `HAVING` clause.
-    assert!(s.contains(") AS t1 WHERE"), "{s}");
-    assert!(
-        s.contains("(n > 3)"),
-        "the filter should sit outside the aggregate's derived table: {s}"
-    );
-    assert!(!s.contains("HAVING"), "{s}");
+    // The boundary is the `HAVING` clause itself: the optimizer must not push
+    // the filter into the aggregate's `WHERE`, which runs before grouping.
+    assert!(s.contains("HAVING COUNT(*) > 3"), "{s}");
+    assert!(s.contains("GROUP BY user_id"), "{s}");
     let s = sql_with(
         "q = orders & where (1 + 1 == 2 && .amount > 1.0)\n",
         "q",
@@ -2469,8 +2470,8 @@ fn nullable_operands_take_the_nullable_signature() {
         "q = orders & agg { total = sum .amount } & where (.total > just 100.0)\n",
         "q",
     );
-    assert!(s.contains("WHERE (total > 100.0)"), "{s}");
-    assert!(!s.contains("COALESCE(total"), "no sentinel: {s}");
+    assert!(s.contains("HAVING SUM(amount) > 100.0"), "{s}");
+    assert!(!s.contains("COALESCE(SUM"), "no sentinel: {s}");
 
     // A nullable column groups as itself: NULL is its own group, and it stays
     // in the row type.

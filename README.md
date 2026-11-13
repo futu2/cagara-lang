@@ -27,13 +27,12 @@ main =
 `cagara your-file.cagara` compiles `main` — the file's entry point — to:
 
 ```sql
-SELECT user_id, revenue, n
-FROM (SELECT user_id, SUM(amount) AS revenue, COUNT(*) AS n
-      FROM public.orders
-      WHERE (status = 'paid')
-      GROUP BY user_id) AS t1
-WHERE (n >= 5)
-ORDER BY COALESCE(revenue, 0.0) DESC NULLS LAST;
+SELECT user_id, SUM(amount) AS revenue, COUNT(*) AS n
+FROM public.orders
+WHERE (status = 'paid')
+GROUP BY user_id
+HAVING COUNT(*) >= 5
+ORDER BY COALESCE(SUM(amount), 0.0) DESC NULLS LAST;
 ```
 
 The repository's [`examples/report.cagara`](examples/report.cagara) uses its

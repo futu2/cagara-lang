@@ -11,11 +11,8 @@ this page tracks the remaining boundaries and language work.
   removed after the corpus reached agreement.
 - Some joins need derived tables because parenthesized joins are not yet a
   first-class `Rel` shape.
-- A filter after an aggregate currently becomes an outer `WHERE` over a derived
-  table. The phase metadata a `HAVING` rewrite needs is already there (`ir::Phase`
-  with `rules::{mix, nested, place}`, and a per-stage record of the input and
-  output rows in `check/stage.rs`); what is missing is the backend rule that
-  recognises an `Agg`-phase predicate over the stage that produced it.
+- A filter after an aggregate is `HAVING`; a filter over a window, a `distinct`
+  or a `limit` still wraps a derived table, because those run after grouping.
 - Aggregates are values, modified by three combinators (`filtered`,
   `distinctAgg`, `over`) that rewrite the aggregate's template — `SUM(CASE WHEN
   … THEN x END)` and `SUM(DISTINCT x)`, which every engine accepts. A

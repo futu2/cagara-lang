@@ -14,6 +14,16 @@ use sqlglot_rust::ast::{
 };
 use std::collections::{HashMap, HashSet};
 
+/// Has this stage grouped, with nothing after grouping pending?
+///
+/// The test a filter uses to decide `HAVING` (true) from `WHERE` (false). A
+/// window, a `DISTINCT`, a limit or an offset all run *after* grouping, so a
+/// filter must stay outside them; without one, the stage's own row is exactly
+/// what `HAVING` reads.
+fn grouped(st: &Stage) -> bool {
+    st.has_agg && !st.has_win && !st.distinct && st.limit.is_none() && st.offset.is_none()
+}
+
 /// Deepest `Rel` nesting the lowerer will recurse through for stage kinds that
 /// cannot be peeled iteratively. Plain filter chains are handled without this
 /// recursion; the bound protects nested relational trees.
@@ -342,25 +352,26 @@ impl Lowerer {
                 }
             }
             let mut st = self.rel(base)?;
-            // A filter whose input is an aggregate is **not** folded into
-            // `HAVING` here; it wraps a derived table and becomes an ordinary
-            // `WHERE` outside it, like any other filter that cannot fold into
-            // its input.
+            // A filter on a stage that has already grouped is a `HAVING`: every
+            // column it can name is a grouping key or an aggregate value, and
+            // `resolve` turns each into the expression it stands for
+            // (`revenue` → `SUM(amount)`), which is what `HAVING` may read. The
+            // question is asked of the *stage* — has it grouped, and is nothing
+            // that runs after grouping (a window, `DISTINCT`, a limit) waiting —
+            // so the answer stays local, like every other fusion decision here.
             //
-            // The fold is deliberately absent rather than forgotten. It is a
-            // query-shape optimization — it removes one derived table when the
-            // filter directly follows an `agg` — and it is the only place in
-            // this file that decided a predicate's *clause* from the shape of
-            // the relation beneath it. Everything else here decides whether a
-            // stage can absorb an input, which is a local question about the
-            // stage; the fold needed `base` and `stages` together, so it read
-            // two levels of the tree to answer one.
-            //
-            // Leaving it out costs a derived table per aggregate-filtered query
-            // and buys a lowering pass whose every decision is local. It is
-            // tracked in `docs/PLAN.md` for reinstatement with the phase
-            // normalization it should have been built on.
+            // It is not only one derived table saved: `HAVING` is where a
+            // grouped filter belongs, so the SQL now says what the pipeline
+            // means instead of nesting it.
             for p in stages.into_iter().rev() {
+                if grouped(&st) {
+                    let e = st.resolve(p)?;
+                    st.having = match st.having.take() {
+                        Some(h) => and_all(vec![h, e]),
+                        None => Some(e),
+                    };
+                    continue;
+                }
                 if st.needs_barrier(Fuse::Filter, false) {
                     st = self.wrap(st);
                 }
@@ -429,6 +440,23 @@ impl Lowerer {
 
     fn lower_where(&mut self, r: &Rel, p: &IrExpr) -> Result<Stage, String> {
         let mut st = self.rel(r)?;
+        // A filter over an aggregate is that aggregate's `HAVING`: every column
+        // the predicate can name is either a grouping key or an aggregate
+        // value, and `st.resolve` turns each into the expression it stands for
+        // (`revenue` → `SUM(amount)`), which is exactly what `HAVING` may read.
+        // Emitting it here keeps one query instead of a derived table.
+        //
+        // Not when the stage has a limit, an offset, a `DISTINCT` or a window:
+        // those change which rows exist or are computed after grouping, and a
+        // `HAVING` would filter before them.
+        if grouped(&st) {
+            let e = st.resolve(p)?;
+            st.having = match st.having.take() {
+                Some(h) => and_all(vec![h, e]),
+                None => Some(e),
+            };
+            return Ok(st);
+        }
         if st.needs_barrier(Fuse::Filter, false) {
             st = self.wrap(st);
         }

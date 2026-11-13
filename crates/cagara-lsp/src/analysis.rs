@@ -2094,6 +2094,72 @@ mod severity_tests {
     }
 }
 
+#[cfg(test)]
+mod nullable_fix_tests {
+    use super::code_actions;
+    use cagara_hir::workspace::Workspace;
+    use lsp_types::{Position, Range};
+
+    /// The fixes offered for the diagnostic that covers this position.
+    fn titles_at(src: &str, line: u32, character: u32) -> Vec<String> {
+        let ws = Workspace::from_source(src);
+        let p = Position { line, character };
+        code_actions(&ws, Range { start: p, end: p })
+            .into_iter()
+            .map(|f| f.title)
+            .collect()
+    }
+
+    /// A `maybe` handed to a position that wants a present value is wrapped in
+    /// `coalesce`, with a default for the type; the other direction is `just`.
+    ///
+    /// The suggestion cannot come from the checker — the refusal is reported by
+    /// constraint resolution, where the span of the value is gone — so the rule
+    /// reads the message the way the sort-key and rename rules do. Both wrap the
+    /// *column*, not the field it sits in: `upper .s` becomes
+    /// `upper (coalesce "" .s)`.
+    #[test]
+    fn a_nullable_mismatch_offers_its_wrapper() {
+        let src = "t : query { s = maybe string, r = string } = table \"s\" \"t\"\n\
+                   q = t & select { x = upper .s }\n";
+        let titles = titles_at(src, 1, 9);
+        assert!(titles.iter().any(|t| t.contains("coalesce")), "{titles:?}");
+
+        let src = "t : query { r = string } = table \"s\" \"t\"\n\
+                   q = t & select { y = coalesce \"d\" .r }\n";
+        let titles = titles_at(src, 1, 9);
+        assert!(titles.iter().any(|t| t.contains("just")), "{titles:?}");
+    }
+
+    /// The edit wraps the column, and it type-checks once applied.
+    #[test]
+    fn the_wrapper_wraps_the_column() {
+        let src = "t : query { s = maybe string } = table \"s\" \"t\"\n\
+                   q = t & select { x = upper .s }\n";
+        let ws = Workspace::from_source(src);
+        let p = Position {
+            line: 1,
+            character: 9,
+        };
+        let fixes = code_actions(&ws, Range { start: p, end: p });
+        let fix = fixes
+            .iter()
+            .find(|f| f.title.contains("coalesce"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no coalesce fix: {:?}",
+                    fixes.iter().map(|f| &f.title).collect::<Vec<_>>()
+                )
+            });
+        let e = &fix.edits[0];
+        assert_eq!(e.new_text, "coalesce \"\" ()");
+        // `.s`, the column — not the field `x = upper .s` around it.
+        assert_eq!(e.range.start.character, 27);
+        assert_eq!(e.range.end.character, 29);
+        assert_eq!(&src.lines().nth(1).unwrap()[27..29], ".s");
+    }
+}
+
 // ── code actions and inlay hints ─────────────────────────────
 
 /// One fix the language server can offer for a diagnostic at the cursor.
@@ -2114,13 +2180,16 @@ pub struct Fix {
 ///    renamed in the operand and in the predicate — so the edit is data, not a
 ///    guess.
 /// 2. The rules that are read off the message, for the diagnostics that carry
-///    no suggestion: a sort key that does not say its direction, and a name a
+///    no suggestion: a sort key that does not say its direction, a `maybe` used
+///    where a present value is wanted (wrap it in `coalesce`), and a name a
 ///    "did you mean" already resolved.
 ///
-/// A `maybe` used where a value is needed has neither yet: the refusal comes out
-/// of constraint resolution, where the failing argument's span is no longer in
-/// hand, so a `coalesce` fix needs the constraints to carry their argument span
-/// first.
+/// A `maybe` mismatch is in the second group because its refusal comes out of
+/// constraint resolution, where the span of the value is no longer in hand. The
+/// message still names the field and both sides, and the diagnostic's line still
+/// has the column, so the rewrite is recoverable — `docs/PLAN.md` keeps the
+/// check-side version (constraints carrying their argument span) as the cheaper
+/// place to do it if the typed path ever needs the same fix.
 pub fn code_actions(ws: &Workspace, range: Range) -> Vec<Fix> {
     let md = &ws.modules[ws.root];
     let p = Positions::new(&md.text);
@@ -2160,7 +2229,7 @@ pub fn code_actions(ws: &Workspace, range: Range) -> Vec<Fix> {
         let (Some(start), Some(end)) = (p.offset(r.start), p.offset(r.end)) else {
             continue;
         };
-        let Some(text) = md.text.get(start..end) else {
+        let (Some(text), full) = (md.text.get(start..end), md.text.as_str()) else {
             continue;
         };
         if message.contains("a sort key must say its direction") {
@@ -2176,6 +2245,8 @@ pub fn code_actions(ws: &Workspace, range: Range) -> Vec<Fix> {
                     }],
                 });
             }
+        } else if let Some(fix) = nullable_wrap(&message, full, &p, &r) {
+            out.push(fix);
         } else if let Some(name) = suggested_name(&message) {
             // The message resolved the typo already; the edit renames the token
             // it means, which is the one closest to that name in the range.
@@ -2273,6 +2344,117 @@ fn suggested_name(message: &str) -> Option<String> {
 
 /// The identifier inside `text` that is closest to `target`, by Levenshtein
 /// distance, if any is close enough to be the typo rather than a coincidence.
+/// The `coalesce` / `just` fix for a nullable mismatch.
+///
+/// The message names both sides — `expected string, found maybe string` — and
+/// the column it happened at (`field \`s\``), so both the direction and the
+/// token to rewrite are in the text the diagnostic covers. The checker cannot
+/// carry this suggestion: the refusal comes out of constraint resolution, where
+/// the failing argument's span is no longer in hand (see `docs/PLAN.md`), so the
+/// rule reads the message the way the sort-key and rename rules do.
+fn nullable_wrap(message: &str, text: &str, p: &Positions<'_>, r: &Range) -> Option<Fix> {
+    if !message.contains("only one side is nullable") {
+        return None;
+    }
+    let rest = message.split("expected ").nth(1)?;
+    let (expected, found) = rest.split_once(", found ")?;
+    // A type can contain spaces (`maybe string`, `list int`): cut at the `;`
+    // that introduces the hint, not at the first space.
+    let found = found.split(';').next().unwrap_or(found).trim();
+    let expected = expected.trim();
+    // The innermost field is the last one named: the outer prefix is the field
+    // the expression sits in, the inner one is the value that would be wrapped.
+    let field = message
+        .match_indices("field `")
+        .filter_map(|(i, _)| {
+            let tail = &message[i + 7..];
+            tail.find('`').map(|j| &tail[..j])
+        })
+        .last()?;
+    let default = scalar_default(expected);
+    let (before, after, title) = match (expected.starts_with("maybe "), found.starts_with("maybe "))
+    {
+        (false, true) => {
+            let d = default?;
+            (
+                format!("coalesce {d} ("),
+                ")".to_string(),
+                format!("Wrap in `coalesce {d}`"),
+            )
+        }
+        (true, false) => (
+            "just (".to_string(),
+            ")".to_string(),
+            "Wrap in `just`".to_string(),
+        ),
+        _ => return None,
+    };
+    // The column can sit anywhere on the line, not only inside the diagnostic's
+    // range: the range covers the field the expression is in, and the type
+    // mismatch is about the value inside it.
+    let line_start = p.offset(Position {
+        line: r.start.line,
+        character: 0,
+    })?;
+    let line_end = p.offset(Position {
+        line: r.start.line,
+        character: u32::MAX,
+    })?;
+    let line = text.get(line_start..line_end)?;
+    let (at, len) = column_span(line, field)?;
+    let (from, to) = (line_start + at, line_start + at + len);
+    Some(Fix {
+        title,
+        edits: vec![TextEdit {
+            range: Range {
+                start: p.position(from),
+                end: p.position(to),
+            },
+            new_text: format!("{before}{after}"),
+        }],
+    })
+}
+
+/// The offset and length of a column reference in `text`, preferring `.name`.
+fn column_span(text: &str, name: &str) -> Option<(usize, usize)> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut bare = None;
+    let mut i = 0;
+    while let Some(j) = text[i..].find(name) {
+        let at = i + j;
+        let end = at + name.len();
+        let before_ok = at == 0 || !is_word(text[..at].chars().next_back()?);
+        let after_ok = text[end..].chars().next().is_none_or(|c| !is_word(c));
+        if before_ok && after_ok {
+            // `.name` is the reference a rewrite wants; keep looking for one.
+            if text[..at].ends_with('.') {
+                return Some((at - 1, name.len() + 1));
+            }
+            if bare.is_none() {
+                bare = Some((at, name.len()));
+            }
+        }
+        i = end;
+        if i >= text.len() {
+            break;
+        }
+    }
+    bare
+}
+
+/// A value a missing one can stand for, per scalar type.
+fn scalar_default(ty: &str) -> Option<&'static str> {
+    Some(match ty {
+        "string" => "\"\"",
+        "int" => "0",
+        "float" => "0.0",
+        "bool" => "false",
+        "date" => "currentDate",
+        "timestamp" => "now",
+        _ => return None,
+    })
+}
+
 fn closest_token(text: &str, target: &str) -> Option<(usize, usize)> {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let mut best: Option<(usize, usize, usize)> = None;

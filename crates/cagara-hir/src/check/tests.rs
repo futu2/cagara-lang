@@ -131,6 +131,25 @@ fn ty_err(src: &str, name: &str) -> Option<String> {
         .err()
 }
 
+/// A nullable mismatch is a diagnostic, and the message names both sides and the
+/// field, which is what the language server's rule reads to offer the wrapper.
+///
+/// The suggestion the checker itself can attach is limited to the errors that
+/// are re-spanned where the value is written; a projection's field reaches the
+/// diagnostic through constraint resolution, where that span is gone — see
+/// `docs/PLAN.md`. So this asserts the message, not a suggestion.
+#[test]
+fn a_nullable_mismatch_names_both_sides() {
+    let e = err(
+        "t : query { s = maybe string } = table \"s\" \"t\"\n\
+         q = t & select { x = upper .s }\n",
+        "q",
+    );
+    assert!(e.contains("only one side is nullable"), "{e}");
+    assert!(e.contains("expected string, found maybe string"), "{e}");
+    assert!(e.contains("field `s`"), "{e}");
+}
+
 /// `lift` turns a `maybe` argument into a `maybe` result, and the function it
 /// takes never sees the missing value.
 ///

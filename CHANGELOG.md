@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- A `maybe` used where a present value is wanted now comes with its fix in the editor: `coalesce ""`
+  (with a per-type default) when the value is missing, `just` when the position takes a `maybe`. It
+  wraps the column, not the field around it, so `upper .s` becomes `upper (coalesce "" .s)`.
+
 ## 0.4.2 — 2026-11-14
 
 Three threads. **Dates get one interface**: `parseDate`/`parseTimestamp` and

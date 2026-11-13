@@ -919,9 +919,80 @@ pub(crate) type U = Result<(), String>;
 pub(crate) fn at(span: Span) -> impl FnOnce(String) -> TyErr {
     move |msg| TyErr {
         span,
-        msg,
-        suggestions: Vec::new(),
+        msg: msg.clone(),
+        suggestions: nullable_fix(&msg, span),
     }
+}
+
+/// The fix a nullable mismatch asks for, when the message says one side is
+/// `maybe` and the other is not.
+///
+/// The mismatch is reported by unification, where the span of the value that
+/// would be rewritten is long gone — but every path that turns such a message
+/// into a diagnostic does so *at a span*, and that span is the value's. So the
+/// suggestion is built here, from the message, with the span the diagnostic is
+/// about: `maybe` → `coalesce <default> (…)`, plain → `just (…)`.
+///
+/// A default is a guess, and a guess that changes what a missing value means is
+/// worse than no fix, so only the scalar types get one.
+pub(crate) fn nullable_fix(msg: &str, span: Span) -> Vec<crate::workspace::Suggestion> {
+    const HINT: &str = "only one side is nullable";
+    if !msg.contains(HINT) {
+        return Vec::new();
+    }
+    let Some(rest) = msg.split("expected ").nth(1) else {
+        return Vec::new();
+    };
+    let Some((expected, found)) = rest.split_once(", found ") else {
+        return Vec::new();
+    };
+    // The type can contain spaces (`maybe string`, `list int`), so the message
+    // is cut at the `;` that introduces the hint, not at the first space.
+    let found = found.split(';').next().unwrap_or(found).trim();
+    let expected = expected.trim();
+    let (title, before, after) = match (expected.starts_with("maybe "), found.starts_with("maybe "))
+    {
+        // The value is missing and the position wants one: say what a missing
+        // value means.
+        (false, true) => {
+            let Some(default) = scalar_default(expected) else {
+                return Vec::new();
+            };
+            (
+                format!("Wrap in `coalesce {default}`"),
+                format!("coalesce {default} ("),
+                ")".to_string(),
+            )
+        }
+        // The position takes a `maybe` and the value is present.
+        (true, false) => (
+            "Wrap in `just`".to_string(),
+            "just (".to_string(),
+            ")".to_string(),
+        ),
+        _ => return Vec::new(),
+    };
+    vec![crate::workspace::Suggestion {
+        title,
+        edits: vec![crate::workspace::SuggestionEdit::Surround {
+            span,
+            before,
+            after,
+        }],
+    }]
+}
+
+/// A value a missing one can stand for, per scalar type.
+fn scalar_default(ty: &str) -> Option<&'static str> {
+    Some(match ty {
+        "string" => "\"\"",
+        "int" => "0",
+        "float" => "0.0",
+        "bool" => "false",
+        "date" => "currentDate",
+        "timestamp" => "now",
+        _ => return None,
+    })
 }
 /// An overload's origin names the use site and which hole of the used
 /// definition it is (0 for a direct use of an overload set). `site` and the

@@ -131,23 +131,53 @@ fn ty_err(src: &str, name: &str) -> Option<String> {
         .err()
 }
 
-/// A nullable mismatch is a diagnostic, and the message names both sides and the
-/// field, which is what the language server's rule reads to offer the wrapper.
+/// A nullable mismatch carries the fix on the diagnostic itself, with the span of
+/// the *value* to rewrite.
 ///
-/// The suggestion the checker itself can attach is limited to the errors that
-/// are re-spanned where the value is written; a projection's field reaches the
-/// diagnostic through constraint resolution, where that span is gone — see
-/// `docs/PLAN.md`. So this asserts the message, not a suggestion.
+/// The refusal comes out of the projection's constraint, long after the record
+/// literal is gone, so the field's span is kept in a side table keyed by the
+/// stage's application — the same pattern `join_args` uses for a join. This is
+/// what lets a client that is not this language server offer the fix.
 #[test]
-fn a_nullable_mismatch_names_both_sides() {
-    let e = err(
-        "t : query { s = maybe string } = table \"s\" \"t\"\n\
-         q = t & select { x = upper .s }\n",
-        "q",
+fn a_nullable_mismatch_carries_its_fix() {
+    use crate::workspace::SuggestionEdit;
+
+    let src = "t : query { s = maybe string } = table \"s\" \"t\"\n\
+               q = t & select { x = upper .s }\n";
+    let ws = Workspace::from_source(src);
+    let tc = check(&ws);
+    let err = tc
+        .errors()
+        .iter()
+        .find(|d| d.diag.message.contains("only one side is nullable"))
+        .unwrap_or_else(|| panic!("no nullable diagnostic: {:?}", tc.errors()));
+    let fix = err
+        .diag
+        .suggestions
+        .first()
+        .unwrap_or_else(|| panic!("no suggestion: {:?}", err.diag));
+    assert_eq!(fix.title, "Use `?? \"\"`");
+    let SuggestionEdit::Surround { span, before, .. } = &fix.edits[0] else {
+        panic!("not a surround: {:?}", fix.edits);
+    };
+    // The column, not the field it sits in.
+    assert_eq!(
+        &ws.modules[ws.root].text[span.start as usize..span.end as usize],
+        ".s"
     );
-    assert!(e.contains("only one side is nullable"), "{e}");
-    assert!(e.contains("expected string, found maybe string"), "{e}");
-    assert!(e.contains("field `s`"), "{e}");
+    assert_eq!(before, "(");
+
+    // The other direction: a present value where a `maybe` is wanted.
+    let src = "t : query { r = string } = table \"s\" \"t\"\n\
+               q = t & select { y = coalesce \"d\" .r }\n";
+    let ws = Workspace::from_source(src);
+    let tc = check(&ws);
+    let err = tc
+        .errors()
+        .iter()
+        .find(|d| d.diag.message.contains("only one side is nullable"))
+        .unwrap_or_else(|| panic!("no nullable diagnostic: {:?}", tc.errors()));
+    assert_eq!(err.diag.suggestions[0].title, "Wrap in `just`");
 }
 
 /// `lift` turns a `maybe` argument into a `maybe` result, and the function it

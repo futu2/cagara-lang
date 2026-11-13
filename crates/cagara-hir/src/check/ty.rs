@@ -751,6 +751,9 @@ impl<'w> Checker<'w> {
             errors: Vec::new(),
             warnings: Vec::new(),
             join_args: HashMap::new(),
+            field_spans: HashMap::new(),
+            field_uses: Vec::new(),
+            suggested: None,
             span: Span::default(),
             trail: Vec::new(),
             fit_cache: HashMap::new(),
@@ -821,6 +824,19 @@ pub(crate) struct Checker<'w> {
     /// application: a warning about a shared column can only offer a rename if
     /// it knows where the two operands and the predicate are written.
     pub(crate) join_args: HashMap<(u32, u32), JoinArgs>,
+    /// Where each `select`/`agg`/`update` field's *value* is written, keyed by
+    /// the span of the stage's application. The projection's types are settled
+    /// by a constraint, long after the record literal is gone, and a fix that
+    /// rewrites one field needs the field's own span — the same reason
+    /// `join_args` keeps a join's parts.
+    pub(crate) field_spans: HashMap<(u32, u32), Vec<(String, Span)>>,
+    /// Where each column access of a given name is written, in order. A
+    /// projection's refusal names the field (`field \`s\``) but the value to
+    /// rewrite is the column inside it, and the field's own span covers both.
+    pub(crate) field_uses: Vec<(String, Span)>,
+    /// The suggestion the failing constraint decided on, when it had a span to
+    /// point at. `solve` moves it onto the diagnostic it was about.
+    pub(crate) suggested: Option<crate::workspace::Suggestion>,
     /// Previous state of every variable binding, for trial unification.
     pub(crate) trail: Vec<(u32, VarInfo)>,
     pub(crate) fit_cache: HashMap<(usize, Vec<usize>, String), Vec<usize>>,

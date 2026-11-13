@@ -1647,6 +1647,9 @@ impl<'w> Checker<'w> {
         };
         // Hover shows the column's value type, not the whole row.
         self.uses.push((e.id, sp, a.clone(), None));
+        if n != PROBE_FIELD {
+            self.field_uses.push((n.clone(), sp));
+        }
         Ok(expr(phase, input, a))
     }
 
@@ -1748,6 +1751,22 @@ impl<'w> Checker<'w> {
                         span: arg.span,
                         msg: key_argument_message(f),
                     });
+                }
+                // Where each field's *value* is written, keyed by the stage's
+                // own span — which is the span its constraint is posted at.
+                // A projection's types are decided when the constraint runs,
+                // long after this record literal is gone, so a fix that has to
+                // rewrite one field needs its span kept here.
+                if matches!(
+                    stage,
+                    Some(RowStage::Select | RowStage::Agg | RowStage::Update)
+                ) {
+                    if let ExprKind::Record(fields) = &arg.kind {
+                        self.field_spans.insert(
+                            (f.span.start, f.span.end),
+                            fields.iter().map(|(n, e)| (n.clone(), e.span)).collect(),
+                        );
+                    }
                 }
                 if let Some(kind) = stage {
                     // Row stages with a key parameter are recorded at that
@@ -2763,7 +2782,7 @@ impl<'w> Checker<'w> {
                         return Err(TyErr {
                             span: sp,
                             msg,
-                            suggestions: Vec::new(),
+                            suggestions: self.suggested.take().into_iter().collect(),
                         });
                     }
                 }
@@ -3014,8 +3033,46 @@ impl<'w> Checker<'w> {
                     }
                     self.stage_phase(&p, *agg)
                         .map_err(|m| format!("field `{l}` {m}"))?;
-                    self.unify(input, &r)
-                        .map_err(|m| format!("field `{l}`: {m}"))?;
+                    if let Err(m) = self.unify(input, &r) {
+                        // A nullable mismatch names the whole value, and the
+                        // field's own span is what a rewrite must touch — so
+                        // the suggestion is built here, where the message and
+                        // that span meet.
+                        if let Some(field) = self
+                            .field_spans
+                            .get(&(_sp.start, _sp.end))
+                            .and_then(|fs| fs.iter().find(|(n, _)| *n == l))
+                            .map(|(_, sp)| *sp)
+                        {
+                            // The value to rewrite is the `maybe` inside the
+                            // field, not the field: `upper .s` is a `string`,
+                            // `.s` is the `maybe string` the position refused.
+                            // The message names the value's column: the outer
+                            // prefix is the projection's field, the inner one
+                            // is the column the record literal wrote.
+                            let column = m
+                                .match_indices("field `")
+                                .filter_map(|(i, _)| {
+                                    let tail = &m[i + 7..];
+                                    tail.find('`').map(|j| (&tail[..j], i))
+                                })
+                                .last()
+                                .map(|(n, _)| n.to_string())
+                                .unwrap_or_else(|| l.clone());
+                            let inner = self
+                                .field_uses
+                                .iter()
+                                .filter(|(n, sp)| {
+                                    *n == column && sp.start >= field.start && sp.end <= field.end
+                                })
+                                .map(|(_, sp)| *sp)
+                                .min_by_key(|sp| sp.end - sp.start)
+                                .unwrap_or(field);
+                            self.suggested =
+                                crate::check::ty::nullable_fix(&m, inner).into_iter().next();
+                        }
+                        return Err(format!("field `{l}`: {m}"));
+                    }
                     out.push((l, v));
                 }
                 o => {

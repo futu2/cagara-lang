@@ -50,13 +50,15 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
    checked before it is bound, which is the same deferral problem as item 0
    below.
 
-1. A `maybe` used where a value is needed now gets its `coalesce`/`just` fix from
-   the language server, which reads the message (`field \`s\``, `expected string,
-   found maybe string`) and the diagnostic's line. The check-side version — a
-   `Suggestion` on the diagnostic itself — still wants `Cons` to carry the span
-   of the argument it was posted for, the way `join_args` carries a join's, so
-   that a client other than this language server gets the fix too. The channel
-   exists (`Diag::suggestions`) and the join warning already uses it.
+1. A `maybe` used where a value is needed carries its `??`/`just` fix on the
+   diagnostic itself, so any client can offer it. The projection's refusal comes
+   out of its constraint, long after the record literal is gone, so the checker
+   keeps two side tables — where each field's value is written (`field_spans`,
+   keyed by the stage's span) and where each column access is written
+   (`field_uses`) — and the step builds the suggestion from the message's
+   innermost `field \`name\`` plus that column's span. The language server's
+   message rule stays as the fallback for a diagnostic that arrives without a
+   suggestion.
 
 2. Separate relational rewrites from SQL emission. A `Rel -> Rel` pass can fuse
    stages or choose derived tables while keeping dialect rules in the backend.

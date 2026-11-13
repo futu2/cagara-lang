@@ -2151,13 +2151,16 @@ mod nullable_fix_tests {
                     fixes.iter().map(|f| &f.title).collect::<Vec<_>>()
                 )
             });
-        let e = &fix.edits[0];
-        assert_eq!(e.new_text, "(.s ?? \"\")");
+        // The checker's own suggestion: two insertions around the column, so
+        // applying them leaves `.s` between `(` and ` ?? "")`.
+        let (open, close) = (&fix.edits[0], &fix.edits[1]);
+        assert_eq!(open.new_text, "(");
+        assert_eq!(close.new_text, " ?? \"\")");
         // `.s`, the column — not the field `x = upper .s` around it.
         let line = src.lines().nth(1).unwrap();
         assert_eq!(line[27..29].to_string(), ".s");
-        assert_eq!(e.range.start.character, 27);
-        assert_eq!(e.range.end.character, 29);
+        assert_eq!(open.range.start.character, 27);
+        assert_eq!(close.range.start.character, 29);
     }
 }
 
@@ -2178,19 +2181,17 @@ pub struct Fix {
 ///
 /// 1. The **suggestion the diagnostic carries** (`Diag::suggestions`). The
 ///    checker knows the span and the rewrite — a join's shared column can be
-///    renamed in the operand and in the predicate — so the edit is data, not a
-///    guess.
+///    renamed in the operand and in the predicate, and a nullable mismatch wraps
+///    the column it refused — so the edit is data, not a guess.
 /// 2. The rules that are read off the message, for the diagnostics that carry
 ///    no suggestion: a sort key that does not say its direction, a `maybe` used
 ///    where a present value is wanted (wrap it in `coalesce`), and a name a
 ///    "did you mean" already resolved.
 ///
-/// A `maybe` mismatch is in the second group because its refusal comes out of
-/// constraint resolution, where the span of the value is no longer in hand. The
-/// message still names the field and both sides, and the diagnostic's line still
-/// has the column, so the rewrite is recoverable — `docs/PLAN.md` keeps the
-/// check-side version (constraints carrying their argument span) as the cheaper
-/// place to do it if the typed path ever needs the same fix.
+/// A `maybe` mismatch is in *both*: the checker keeps the span of every column
+/// access, so the projection's refusal can name the column it refused and the
+/// suggestion arrives with the diagnostic. The message rule stays as the
+/// fallback for a diagnostic that arrives without one.
 pub fn code_actions(ws: &Workspace, range: Range) -> Vec<Fix> {
     let md = &ws.modules[ws.root];
     let p = Positions::new(&md.text);

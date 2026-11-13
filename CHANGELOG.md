@@ -2,10 +2,12 @@
 
 ## Unreleased
 
-- A `maybe` used where a present value is wanted now comes with its fix in the editor: `(.s ?? "")`
-  written with the infix fallback (the default per type) when the value is missing, `just (…)` when
-  the position takes a `maybe`. It wraps the column, not the field around it, so `upper .s` becomes
-  `upper (.s ?? "")`, and the hint on the mismatch names `??` rather than `coalesce`.
+- A `maybe` used where a present value is wanted now comes with its fix on the diagnostic itself, so
+  any client can offer it: `(.s ?? "")` with a per-type default when the value is missing, `just (…)`
+  when the position takes a `maybe`. It wraps the column, not the field around it, so `upper .s`
+  becomes `upper (.s ?? "")`, and the hint on the mismatch names `??` rather than `coalesce`. The
+  checker keeps the span of every field value and every column access for this, the way it keeps a
+  join's parts.
 
 ## 0.4.2 — 2026-11-14
 

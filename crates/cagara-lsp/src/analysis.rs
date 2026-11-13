@@ -2099,27 +2099,62 @@ mod severity_tests {
 /// One fix the language server can offer for a diagnostic at the cursor.
 pub struct Fix {
     pub title: String,
-    pub edit: TextEdit,
+    /// The edits to apply together. A rename touches two places — the operand
+    /// and every reference to the renamed column in the predicate — so a fix is
+    /// a list, not one edit.
+    pub edits: Vec<TextEdit>,
 }
 
 /// Text edits for the diagnostics that overlap `range`.
 ///
-/// Two rules are mechanical enough to fix without guessing: a sort key that
-/// does not say its direction, and a name a "did you mean" already resolved.
-/// Both are read off the diagnostic's own message and *its* range — a message
-/// that does not match produces no action rather than a wrong one.
+/// Two sources, in this order:
 ///
-/// A join's shared-column warning and a `maybe` used where a value is needed
-/// are deliberately absent: their messages name the problem but not the span to
-/// rewrite (the join's operand, the nullable expression), so an edit built from
-/// what is here would be a guess. Those need the checker to carry a fix, which
-/// is the next step.
+/// 1. The **suggestion the diagnostic carries** (`Diag::suggestions`). The
+///    checker knows the span and the rewrite — a join's shared column can be
+///    renamed in the operand and in the predicate — so the edit is data, not a
+///    guess.
+/// 2. The rules that are read off the message, for the diagnostics that carry
+///    no suggestion: a sort key that does not say its direction, and a name a
+///    "did you mean" already resolved.
+///
+/// A `maybe` used where a value is needed has neither yet: the refusal comes out
+/// of constraint resolution, where the failing argument's span is no longer in
+/// hand, so a `coalesce` fix needs the constraints to carry their argument span
+/// first.
 pub fn code_actions(ws: &Workspace, range: Range) -> Vec<Fix> {
     let md = &ws.modules[ws.root];
     let p = Positions::new(&md.text);
+    let root = md.path.display().to_string();
     let mut out = Vec::new();
+    // What the diagnostic itself knows first: a suggestion is a span and a
+    // rewrite the checker decided, so it needs no reading of the message.
+    let mut answered: HashSet<(Range, String)> = HashSet::new();
+    for d in compile_diagnostics(ws).iter().filter(|d| d.path == root) {
+        if d.suggestions.is_empty() {
+            continue;
+        }
+        let r = diag_range(d);
+        if !overlaps(&r, &range) {
+            continue;
+        }
+        for s in &d.suggestions {
+            let Some(edits) = suggestion_edits(&p, &md.text, s) else {
+                continue;
+            };
+            answered.insert((r, s.title.clone()));
+            out.push(Fix {
+                title: s.title.clone(),
+                edits,
+            });
+        }
+    }
+    // Then the rules that are read off the message, for the diagnostics that
+    // carry no suggestion.
     for (r, message, _) in diagnostics(ws) {
-        if r.end.line < range.start.line || range.end.line < r.start.line {
+        if answered.iter().any(|(ar, _)| *ar == r) {
+            continue;
+        }
+        if !overlaps(&r, &range) {
             continue;
         }
         let (Some(start), Some(end)) = (p.offset(r.start), p.offset(r.end)) else {
@@ -2135,10 +2170,10 @@ pub fn code_actions(ws: &Workspace, range: Range) -> Vec<Fix> {
             ] {
                 out.push(Fix {
                     title: title.to_string(),
-                    edit: TextEdit {
+                    edits: vec![TextEdit {
                         range: r,
                         new_text: format!("{word} ({text})"),
-                    },
+                    }],
                 });
             }
         } else if let Some(name) = suggested_name(&message) {
@@ -2147,15 +2182,86 @@ pub fn code_actions(ws: &Workspace, range: Range) -> Vec<Fix> {
             if let Some((s, e)) = closest_token(text, &name) {
                 out.push(Fix {
                     title: format!("Rename to `{name}`"),
-                    edit: TextEdit {
+                    edits: vec![TextEdit {
                         range: root_range(&p, start + s, start + e),
                         new_text: name,
-                    },
+                    }],
                 });
             }
         }
     }
     out
+}
+
+/// Do the two ranges touch? Line-only overlap is enough: the client asks about
+/// the cursor's selection, and a diagnostic one line away is not it.
+fn overlaps(a: &Range, b: &Range) -> bool {
+    a.end.line >= b.start.line && b.end.line >= a.start.line
+}
+
+/// Turn one suggestion into the edits the client applies.
+///
+/// `Retoken` is the one that reads the text: it rewrites every occurrence of a
+/// token *inside* a span, which is how a join predicate's `.<id` follows the
+/// column it was renamed to.
+fn suggestion_edits(
+    p: &Positions,
+    text: &str,
+    s: &cagara_hir::workspace::Suggestion,
+) -> Option<Vec<TextEdit>> {
+    use cagara_hir::workspace::SuggestionEdit;
+    let mut edits = Vec::new();
+    for e in &s.edits {
+        match e {
+            SuggestionEdit::Replace { span, text: new } => edits.push(TextEdit {
+                range: span_range(p, *span)?,
+                new_text: new.clone(),
+            }),
+            SuggestionEdit::Surround {
+                span,
+                before,
+                after,
+            } => {
+                let r = span_range(p, *span)?;
+                edits.push(TextEdit {
+                    range: Range {
+                        start: r.start,
+                        end: r.start,
+                    },
+                    new_text: before.clone(),
+                });
+                edits.push(TextEdit {
+                    range: Range {
+                        start: r.end,
+                        end: r.end,
+                    },
+                    new_text: after.clone(),
+                });
+            }
+            SuggestionEdit::Retoken { span, from, to } => {
+                let (start, end) = (span.start as usize, span.end as usize);
+                let body = text.get(start..end)?;
+                for (i, _) in body.match_indices(from.as_str()) {
+                    edits.push(TextEdit {
+                        range: span_range(
+                            p,
+                            Span {
+                                start: (start + i) as u32,
+                                end: (start + i + from.len()) as u32,
+                            },
+                        )?,
+                        new_text: to.clone(),
+                    });
+                }
+            }
+        }
+    }
+    (!edits.is_empty()).then_some(edits)
+}
+
+fn span_range(p: &Positions, span: Span) -> Option<Range> {
+    let (start, end) = (span.start as usize, span.end as usize);
+    (start <= end).then(|| root_range(p, start, end))
 }
 
 /// The name after "did you mean `…`?", if the message has one.

@@ -81,7 +81,17 @@ impl<'w> Checker<'w> {
     /// kept in its own list so nothing that asks "did this definition check"
     /// has to learn about severity.
     pub(crate) fn warn(&mut self, span: Span, message: String) {
-        self.warnings.push((span, message));
+        self.warnings.push((span, message, Vec::new()));
+    }
+
+    /// A warning that comes with fixes the reader can apply.
+    pub(crate) fn warn_with(
+        &mut self,
+        span: Span,
+        message: String,
+        suggestions: Vec<crate::workspace::Suggestion>,
+    ) {
+        self.warnings.push((span, message, suggestions));
     }
 
     // ── definitions and schemes ────────────────────────────────────────────
@@ -135,6 +145,7 @@ impl<'w> Checker<'w> {
                     message: format!("`{name}` refers to itself; recursion is not supported"),
                     kind: RawErrorKind::Def,
                     severity: crate::workspace::Severity::Error,
+                    suggestions: Vec::new(),
                 });
             }
             let v = self.fresh();
@@ -167,6 +178,7 @@ impl<'w> Checker<'w> {
                     ),
                     kind: RawErrorKind::Chain,
                     severity: crate::workspace::Severity::Error,
+                    suggestions: Vec::new(),
                 });
             }
             let v = self.fresh();
@@ -273,6 +285,7 @@ impl<'w> Checker<'w> {
                     message: e.msg,
                     kind: RawErrorKind::Def,
                     severity: crate::workspace::Severity::Error,
+                    suggestions: e.suggestions,
                 });
                 self.failed.insert((m, i));
                 let v = self.fresh();
@@ -530,7 +543,11 @@ impl<'w> Checker<'w> {
             )) = self.first_unsatisfiable()
             {
                 let msg = self.no_overload_message(module, &name, &cands, &target);
-                return Err(TyErr { span: sp, msg });
+                return Err(TyErr {
+                    span: sp,
+                    msg,
+                    suggestions: Vec::new(),
+                });
             }
             // What is still open is a choice the definition leaves to its
             // users. Ranking it now keeps the *signature* honest — `adult =
@@ -550,7 +567,11 @@ impl<'w> Checker<'w> {
                     let ranked = self.prefer(module, &fits, &target, false);
                     if ranked.len() == 1 {
                         self.choose(module, ranked[0], &target, &origin, &name, sp)
-                            .map_err(|msg| TyErr { span: sp, msg })?;
+                            .map_err(|msg| TyErr {
+                                span: sp,
+                                msg,
+                                suggestions: Vec::new(),
+                            })?;
                     }
                 }
             }
@@ -585,7 +606,11 @@ impl<'w> Checker<'w> {
             let ranked = self.prefer(module, &fits, &target, false);
             if let [winner] = ranked.as_slice() {
                 self.choose(module, *winner, &target, &origin, &name, sp)
-                    .map_err(|msg| TyErr { span: sp, msg })?;
+                    .map_err(|msg| TyErr {
+                        span: sp,
+                        msg,
+                        suggestions: Vec::new(),
+                    })?;
                 continue;
             }
             if !raise {
@@ -598,7 +623,11 @@ impl<'w> Checker<'w> {
                 self.show(&target),
                 shown.join(", ")
             );
-            return Err(TyErr { span: sp, msg });
+            return Err(TyErr {
+                span: sp,
+                msg,
+                suggestions: Vec::new(),
+            });
         }
         Ok(())
     }
@@ -1466,6 +1495,7 @@ impl<'w> Checker<'w> {
             // way the type flowed.
             if typed.iter().any(|(n, _)| n == name) {
                 return Err(TyErr {
+                    suggestions: Vec::new(),
                     span: e.span,
                     msg: format!("field `{name}` appears twice"),
                 });
@@ -1651,6 +1681,7 @@ impl<'w> Checker<'w> {
                             return Err(TyErr {
                                 span: sp,
                                 msg: format!("module `{n}` has no definition `{f}`"),
+                                suggestions: Vec::new(),
                             })
                         }
                     };
@@ -1675,7 +1706,22 @@ impl<'w> Checker<'w> {
         let mut ft = self.infer(env, f)?;
         let combine_kind = self.callee_combine_kind(f);
         let mut combine_inputs = Vec::new();
-        for arg in args {
+        for (index, arg) in args.iter().enumerate() {
+            // Where a join's parts are written, for the warning that offers a
+            // rename. The signature's order is `query right -> pred -> query
+            // left`, so the index names the part.
+            if matches!(combine_kind, Some(CombineKind::Join(_))) {
+                let slot = self
+                    .join_args
+                    .entry((f.span.start, f.span.end))
+                    .or_default();
+                match index {
+                    0 => slot.right = Some(arg.span),
+                    1 => slot.pred = Some(arg.span),
+                    2 => slot.left = Some(arg.span),
+                    _ => {}
+                }
+            }
             if let Ty::Fun(p, r) = self.resolve(&ft) {
                 // A key argument (`omit "k"`, `prefix "p"`, `suffix "s"`) names
                 // a column or supplies a label fragment, so its value has to be
@@ -1698,6 +1744,7 @@ impl<'w> Checker<'w> {
                 let stage = self.callee_row_stage(f);
                 if is_key_parameter(&p) && !is_key_argument(arg) {
                     return Err(TyErr {
+                        suggestions: Vec::new(),
                         span: arg.span,
                         msg: key_argument_message(f),
                     });
@@ -1797,6 +1844,7 @@ impl<'w> Checker<'w> {
                         self.show(&o)
                     );
                     return Err(TyErr {
+                        suggestions: Vec::new(),
                         span: arg.span,
                         msg,
                     });
@@ -1950,6 +1998,7 @@ impl<'w> Checker<'w> {
         for (k, v) in fs {
             if out.iter().any(|(o, _)| o == k) {
                 return Err(TyErr {
+                    suggestions: Vec::new(),
                     span: sp,
                     msg: format!("field `{k}` appears twice"),
                 });
@@ -2010,6 +2059,7 @@ impl<'w> Checker<'w> {
             span: sp,
             msg: "`sql \"...\"` must be the whole body of a definition with a type signature"
                 .into(),
+            suggestions: Vec::new(),
         })
     }
 
@@ -2037,6 +2087,7 @@ impl<'w> Checker<'w> {
                 msg: "`case` needs at least one arm: write `cond => value`, and end with \
                       `true => ...` for a default"
                     .into(),
+                suggestions: Vec::new(),
             });
         }
         // The last arm must be unconditional, so the `case` always produces a
@@ -2053,6 +2104,7 @@ impl<'w> Checker<'w> {
                     msg: "a `case` must end with a default arm, written `true => value`, so \
                           that it always produces a value"
                         .into(),
+                    suggestions: Vec::new(),
                 })
             }
         }
@@ -2093,6 +2145,7 @@ impl<'w> Checker<'w> {
             span: sp,
             msg: "`primitive \"...\"` must be the whole body of a definition with a type signature"
                 .into(),
+            suggestions: Vec::new(),
         })
     }
 
@@ -2676,7 +2729,11 @@ impl<'w> Checker<'w> {
                             continue;
                         }
                         self.pending = keep;
-                        return Err(TyErr { span: sp, msg });
+                        return Err(TyErr {
+                            span: sp,
+                            msg,
+                            suggestions: Vec::new(),
+                        });
                     }
                 }
             }
@@ -3235,7 +3292,41 @@ impl<'w> Checker<'w> {
 right side's cannot be read afterwards. Rename it on the operand to keep it: `& innerJoin (q & \
 select {{ right_{first} = .{first} }}) (.<a == .>b)`"
             );
-            self.warn(sp, msg);
+            // The rename is mechanical, so it is offered as a fix: wrap the
+            // right operand in a `select` that renames the shared columns, and
+            // rename the predicate's right-side references to match.
+            let args = self.join_args.get(&(sp.start, sp.end)).copied();
+            let fix = args.and_then(|a| {
+                let (right, pred) = (a.right?, a.pred?);
+                let fields = shared
+                    .iter()
+                    .map(|n| format!("right_{n} = .{n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut edits = vec![crate::workspace::SuggestionEdit::Surround {
+                    span: right,
+                    before: "(".to_string(),
+                    after: format!(" & select {{ {fields} }})"),
+                }];
+                for n in &shared {
+                    edits.push(crate::workspace::SuggestionEdit::Retoken {
+                        span: pred,
+                        from: format!(".>{n}"),
+                        to: format!(".>right_{n}"),
+                    });
+                }
+                Some(vec![crate::workspace::Suggestion::new(
+                    format!(
+                        "Rename the right side's {} to `right_…`",
+                        shared.join("`, `")
+                    ),
+                    edits,
+                )])
+            });
+            match fix {
+                Some(suggestions) => self.warn_with(sp, msg, suggestions),
+                None => self.warn(sp, msg),
+            }
         }
         let wrap = |this: &Self, on: bool, (k, t): (String, Ty)| match this.resolve(&t) {
             Ty::Con("maybe", _) => (k, t),

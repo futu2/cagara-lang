@@ -473,23 +473,38 @@ impl Lowerer {
     /// both call `unnest`; the output row names it `value`, which is what the
     /// checker's `merge r { value = a }` promised.
     fn lower_unnest(&mut self, r: &Rel, list: &IrExpr) -> Result<Stage, String> {
-        // The input is a derived table of its own names, qualified: the lateral
-        // reads one of them, and an unqualified name would be ambiguous once the
-        // unnested column is in scope.
-        let inner = self.rel(r)?;
-        let names = inner.names();
-        let input_alias = self.alias();
-        let mut st = Stage::new(
-            TableSource::Subquery {
-                query: Box::new(Statement::Select(inner.into_statement())),
-                alias: Some(input_alias.clone()),
-                alias_quote_style: QuoteStyle::None,
-            },
-            names
-                .iter()
-                .map(|n| (n.clone(), col(Some(&input_alias), n)))
-                .collect(),
-        );
+        let mut st = self.rel(r)?;
+        // The lateral reads the list column, so it has to be in scope of the
+        // same `FROM`: an identity projection needs no derived table, and the
+        // join is one clause cheaper. Anything that changes the rows *after*
+        // the projection — a `DISTINCT`, paging, or a grouping whose result the
+        // lateral would have to read — keeps the wrap, because the lateral then
+        // has to run after it.
+        let identity = st
+            .items
+            .iter()
+            .all(|(_, e)| matches!(e, Expr::Column { .. }))
+            && !st.distinct
+            && !st.has_agg
+            && !st.has_win
+            && st.limit.is_none()
+            && st.offset.is_none();
+        if !identity {
+            let inner = st;
+            let names = inner.names();
+            let input_alias = self.alias();
+            st = Stage::new(
+                TableSource::Subquery {
+                    query: Box::new(Statement::Select(inner.into_statement())),
+                    alias: Some(input_alias.clone()),
+                    alias_quote_style: QuoteStyle::None,
+                },
+                names
+                    .iter()
+                    .map(|n| (n.clone(), col(Some(&input_alias), n)))
+                    .collect(),
+            );
+        }
         let expr = st.resolve(list)?;
         let alias = self.alias();
         // A lateral *subquery* rather than a lateral table function: the two

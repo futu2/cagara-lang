@@ -70,13 +70,15 @@ lists, spelled by whichever dialect can hold one.
   an outer `WHERE` when something that runs after grouping sits in between — a window, `distinct`,
   or `limit`/`offset`.
 
-- The language server answers `textDocument/codeAction` and `textDocument/inlayHint`. The quick fixes
-  are the two rules that are mechanical: a bare sort key becomes `asc (…)` / `desc (…)`, and a name a
-  "did you mean" already resolved is renamed. The inferred type of a definition that writes no
-  annotation is shown as a hint after its name. A join's shared-column warning and a `maybe` used
-  where a value is needed are **not** offered: their diagnostics name the problem but not the span to
-  rewrite, so an edit built from what they carry would be a guess; that needs the checker to attach a
-  suggestion, which is the next step.
+- The language server answers `textDocument/codeAction` and `textDocument/inlayHint`. A diagnostic
+  can now carry **suggestions** — a span plus a rewrite the checker decided (`Suggestion` /
+  `SuggestionEdit` on `Diag`), which the server turns into the edits the client applies. The join's
+  shared-column warning is the first user: it offers the rename it describes, wrapping the right
+  operand in a `select` and rewriting the predicate's `.>id` references to match. The rules that are
+  read off the message still work (a bare sort key becomes `asc (…)` / `desc (…)`; a name a "did you
+  mean" resolved is renamed), and `inlayHint` shows the inferred type of a definition that writes no
+  annotation. A `maybe` used where a value is needed still gets no `coalesce` fix: that refusal comes
+  out of constraint resolution, where the failing argument's span is no longer in hand.
 
 - Every differential case runs twice per engine: once with the default lowering and once with
   `--optimize`. The optimizer rewrites the statement *after* lowering, so a case where it changes an

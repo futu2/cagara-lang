@@ -721,6 +721,46 @@ fn overloads_resolve_by_type() {
 /// **type parameter**, not an unknown type.
 ///
 /// Signatures carry their parameters implicitly, so `id : a -> a` works; the
+/// A diagnostic that knows its fix carries it, as data the editor can apply.
+///
+/// The join warning names a rename it could not previously perform, and the
+/// `maybe` used as a value comes with the `coalesce` that makes it one. The
+/// aloha span and the replacement are on the diagnostic itself, so the language
+/// server never has to guess.
+#[test]
+fn a_diagnostic_carries_the_fix_it_knows() {
+    use crate::workspace::SuggestionEdit;
+
+    // The join warning: rename the right side's shared column and the
+    // predicate's references to it.
+    let src = "a : query { id = int, x = int } = table \"s\" \"a\"\n\
+               b : query { id = int, y = int } = table \"s\" \"b\"\n\
+               q = a & innerJoin b (.<id == .>id)\n";
+    let ws = Workspace::from_source(src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let tc = check(&ws);
+    let w = tc
+        .warnings()
+        .iter()
+        .find(|w| w.diag.message.contains("on both sides"))
+        .unwrap_or_else(|| panic!("no join warning: {:?}", tc.warnings()));
+    let fix = w
+        .diag
+        .suggestions
+        .first()
+        .unwrap_or_else(|| panic!("no suggestion on the join warning"));
+    assert!(fix.title.contains("right_"), "{}", fix.title);
+    let text = &ws.modules[ws.root].text;
+    let slice = |span: cagara_syntax::ast::Span| &text[span.start as usize..span.end as usize];
+    let (right, pred) = fix.edits.iter().fold((None, None), |(r, p), e| match e {
+        SuggestionEdit::Surround { span, .. } => (Some(*span), p),
+        SuggestionEdit::Retoken { span, .. } => (r, Some(*span)),
+        _ => (r, p),
+    });
+    assert_eq!(slice(right.expect("an operand span")), "b");
+    assert_eq!(slice(pred.expect("a predicate span")), ".<id == .>id");
+}
+
 /// Type names are closed: an unknown name is an error, and only a single
 /// lowercase letter is a type variable.
 ///

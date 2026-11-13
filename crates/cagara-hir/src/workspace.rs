@@ -149,6 +149,47 @@ impl Severity {
     }
 }
 
+/// One rewrite a diagnostic offers.
+///
+/// The checker knows which span is wrong and what should be written there; the
+/// editor holds the characters at that span. So an edit is *data* — a span plus
+/// what to do with it — and the language server turns it into the text edit the
+/// client applies. `Retoken` is the one that needs the text: it rewrites each
+/// occurrence of a token inside a span (`.<id` inside a join predicate).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SuggestionEdit {
+    /// Replace the span's text.
+    Replace { span: Span, text: String },
+    /// Write `before` at the span's start and `after` at its end: `(` … `)`.
+    Surround {
+        span: Span,
+        before: String,
+        after: String,
+    },
+    /// Replace every occurrence of `from` inside the span with `to`.
+    Retoken {
+        span: Span,
+        from: String,
+        to: String,
+    },
+}
+
+/// A fix the reader can apply in one action.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Suggestion {
+    pub title: String,
+    pub edits: Vec<SuggestionEdit>,
+}
+
+impl Suggestion {
+    pub fn new(title: impl Into<String>, edits: Vec<SuggestionEdit>) -> Self {
+        Suggestion {
+            title: title.into(),
+            edits,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Diag {
     /// Whether this fails the build or only informs it.
@@ -163,6 +204,9 @@ pub struct Diag {
     pub source: String,
     /// Characters to underline, starting at the column shown in the display.
     pub width: usize,
+    /// Fixes this diagnostic offers, in the order they should be shown. Empty
+    /// for most: a fix exists only where the fix is mechanical.
+    pub suggestions: Vec<Suggestion>,
 }
 
 /// The widest source excerpt a diagnostic prints.
@@ -360,6 +404,7 @@ impl Workspace {
                     message: format!("cannot read file: {e}"),
                     source: String::new(),
                     width: 0,
+                    suggestions: Vec::new(),
                 });
                 ws.rebuild_diags();
                 ws
@@ -996,6 +1041,7 @@ impl Workspace {
             offset,
             offset,
             message.into(),
+            Vec::new(),
         )
     }
 
@@ -1009,6 +1055,7 @@ impl Workspace {
             span.start as usize,
             span.end as usize,
             message.into(),
+            Vec::new(),
         )
     }
 }
@@ -1057,6 +1104,7 @@ fn file_diags(
                 e.offset,
                 e.offset,
                 format!("syntax error: {}", e.message),
+                Vec::new(),
             )
         })
         .collect();
@@ -1080,6 +1128,7 @@ fn file_diags(
             parsed.module.defs[i].span.start as usize,
             parsed.module.defs[i].span.start as usize,
             msg,
+            Vec::new(),
         ));
     }
     // An overload may replace *types*, never the number of parameters.
@@ -1141,6 +1190,7 @@ fn file_diags(
             parsed.module.defs[j].span.start as usize,
             parsed.module.defs[j].span.start as usize,
             msg,
+            Vec::new(),
         ));
     }
     uneven.sort();
@@ -1157,6 +1207,7 @@ fn file_diags(
             parsed.module.defs[i].span.start as usize,
             parsed.module.defs[i].span.start as usize,
             msg,
+            Vec::new(),
         ));
     }
     out
@@ -1293,6 +1344,7 @@ pub(crate) fn make_diag_indexed(
     start: usize,
     end: usize,
     message: String,
+    suggestions: Vec<Suggestion>,
 ) -> Diag {
     // An offset from a parse of a *different* text can land inside a
     // multi-byte character of this one. Snap to a boundary rather than
@@ -1316,6 +1368,7 @@ pub(crate) fn make_diag_indexed(
         // reporting something that fails the build. `with_severity` is how the
         // checker marks the handful that only advise.
         severity: Severity::Error,
+        suggestions,
         path: path.display().to_string(),
         line,
         col,
@@ -1336,7 +1389,15 @@ impl Diag {
 /// [`make_diag_indexed`] for a caller with no line index: builds one per call,
 /// so it is linear in the text length. Use the indexed form for repeated calls.
 fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: String) -> Diag {
-    make_diag_indexed(path, text, &line_starts(text), start, end, message)
+    make_diag_indexed(
+        path,
+        text,
+        &line_starts(text),
+        start,
+        end,
+        message,
+        Vec::new(),
+    )
 }
 
 #[cfg(test)]
@@ -1621,6 +1682,7 @@ mod tests {
     #[test]
     fn a_rendered_column_counts_characters() {
         let diag = Diag {
+            suggestions: Vec::new(),
             severity: Severity::Error,
             path: "q.cagara".into(),
             line: 1,
@@ -1643,6 +1705,7 @@ mod tests {
     fn a_long_diagnostic_line_is_clipped() {
         let source: String = "a".repeat(1000);
         let diag = Diag {
+            suggestions: Vec::new(),
             severity: Severity::Error,
             path: "q.cagara".into(),
             line: 1,

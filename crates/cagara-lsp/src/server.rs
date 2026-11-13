@@ -571,7 +571,7 @@ fn request(
                         title: f.title,
                         kind: Some(CodeActionKind::QUICKFIX),
                         edit: Some(WorkspaceEdit {
-                            changes: Some(HashMap::from([(uri.clone(), vec![f.edit])])),
+                            changes: Some(HashMap::from([(uri.clone(), f.edits)])),
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -1359,6 +1359,67 @@ mod tests {
         // `t` and `bad` write their types; `unsorted` failed to check, so it has
         // none to show. One hint, therefore.
         assert_eq!(labels.len(), 1, "hints: {labels:?}");
+
+        // The join warning's fix comes from the diagnostic itself: wrap the
+        // right operand and rename the predicate's reference to the column.
+        client
+            .sender
+            .send(notify(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": { "uri": uri, "version": 2 },
+                    "contentChanges": [{
+                        "text": "a : query { id = int, x = int } = table \"s\" \"a\"\n\
+                                 b : query { id = int, y = int } = table \"s\" \"b\"\n\
+                                 q = a & innerJoin b (.<id == .>id)\n"
+                    }]
+                }),
+            ))
+            .unwrap();
+        let _ = messages(&client, quiet);
+        let whole = json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 99, "character": 0 }
+            },
+            "context": { "diagnostics": [] }
+        });
+        client
+            .sender
+            .send(request(5, "textDocument/codeAction", whole))
+            .unwrap();
+        let r = response(&client, 5);
+        let actions: Vec<serde_json::Value> =
+            serde_json::from_value(r.response_result.unwrap()).unwrap();
+        let join = actions
+            .iter()
+            .find(|a| {
+                a.get("title")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t.contains("right_"))
+            })
+            .unwrap_or_else(|| panic!("no join rename fix: {actions:?}"));
+        let edits = join
+            .pointer("/edit/changes")
+            .and_then(|c| c.as_object())
+            .and_then(|c| c.values().next())
+            .and_then(|e| e.as_array())
+            .unwrap_or_else(|| panic!("no edits: {join:?}"));
+        let texts: Vec<&str> = edits
+            .iter()
+            .filter_map(|e| e.get("newText").and_then(|t| t.as_str()))
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("& select { right_id = .id })")),
+            "the operand is not renamed: {texts:?}"
+        );
+        assert!(
+            texts.contains(&".>right_id"),
+            "the predicate is not retokened: {texts:?}"
+        );
 
         client
             .sender

@@ -2947,16 +2947,18 @@ fn unnest_is_a_lateral_join() {
         "b = t & unnest .xs & where (.value > 1) & select { k = .k, v = .value }\n",
         "c = t & agg { k = group .k, ids = arrayAgg .k } & unnest .ids\n",
     );
+    // An identity projection needs no derived table: the lateral reads the
+    // table's own column.
     assert_eq!(
         dialect(src, "a", "postgres").unwrap(),
-        "SELECT t1.k, t1.xs, t2.value FROM (SELECT k, xs FROM s.t) AS t1 \
-         CROSS JOIN LATERAL (SELECT unnest AS value FROM UNNEST(t1.xs)) AS t2"
+        "SELECT k, xs, t1.value FROM s.t \
+         CROSS JOIN LATERAL (SELECT unnest AS value FROM UNNEST(xs)) AS t1"
     );
     assert_eq!(
         dialect(src, "b", "duckdb").unwrap(),
-        "SELECT t1.k, t2.value AS v FROM (SELECT k, xs FROM s.t) AS t1 \
-         CROSS JOIN LATERAL (SELECT unnest AS value FROM UNNEST(t1.xs)) AS t2 \
-         WHERE (t2.value > 1)"
+        "SELECT k, t1.value AS v FROM s.t \
+         CROSS JOIN LATERAL (SELECT unnest AS value FROM UNNEST(xs)) AS t1 \
+         WHERE (t1.value > 1)"
     );
     // An aggregate's list column unnests too, which is the round trip.
     assert_eq!(

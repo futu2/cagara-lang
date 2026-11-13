@@ -750,6 +750,7 @@ impl<'w> Checker<'w> {
             pending: Vec::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
+            join_args: HashMap::new(),
             span: Span::default(),
             trail: Vec::new(),
             fit_cache: HashMap::new(),
@@ -767,6 +768,19 @@ impl<'w> Checker<'w> {
             par_ann: false,
         }
     }
+}
+
+/// Where a join's parts are written, as far as the application shows them.
+///
+/// A piped join (`a & innerJoin b pred`) applies its right operand and the
+/// predicate in one application and the left operand in the outer `&`, so a
+/// partially applied join has `left: None` — which is exactly right, because the
+/// fix that renames the right side never needs it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct JoinArgs {
+    pub(crate) pred: Option<Span>,
+    pub(crate) right: Option<Span>,
+    pub(crate) left: Option<Span>,
 }
 
 pub(crate) struct Checker<'w> {
@@ -800,9 +814,13 @@ pub(crate) struct Checker<'w> {
     /// Kept apart from `errors` so nothing that asks "did this definition
     /// check" has to know about severity: `warn` is only ever called on a path
     /// that is already known to be well typed.
-    pub(crate) warnings: Vec<(Span, String)>,
+    pub(crate) warnings: Vec<(Span, String, Vec<crate::workspace::Suggestion>)>,
     /// Location of the argument being checked (for deferred literals).
     pub(crate) span: Span,
+    /// The spans of a join's arguments, keyed by the span of the primitive's
+    /// application: a warning about a shared column can only offer a rename if
+    /// it knows where the two operands and the predicate are written.
+    pub(crate) join_args: HashMap<(u32, u32), JoinArgs>,
     /// Previous state of every variable binding, for trial unification.
     pub(crate) trail: Vec<(u32, VarInfo)>,
     pub(crate) fit_cache: HashMap<(usize, Vec<usize>, String), Vec<usize>>,
@@ -881,11 +899,28 @@ pub(crate) fn names(fields: &[(String, Ty)]) -> String {
 pub(crate) struct TyErr {
     pub(crate) span: Span,
     pub(crate) msg: String,
+    /// Fixes the reader can apply. A type error is a *place* in the source, and
+    /// wherever the right rewrite is known at that place it is recorded here
+    /// rather than left for the editor to guess.
+    pub(crate) suggestions: Vec<crate::workspace::Suggestion>,
+}
+
+impl TyErr {
+    /// The same error, with fixes the reader can apply.
+    #[allow(dead_code)] // used by the checks that attach a suggestion; kept here with the type
+    pub(crate) fn fixing(mut self, suggestions: Vec<crate::workspace::Suggestion>) -> Self {
+        self.suggestions = suggestions;
+        self
+    }
 }
 pub(crate) type R<T> = Result<T, TyErr>;
 pub(crate) type U = Result<(), String>;
 pub(crate) fn at(span: Span) -> impl FnOnce(String) -> TyErr {
-    move |msg| TyErr { span, msg }
+    move |msg| TyErr {
+        span,
+        msg,
+        suggestions: Vec::new(),
+    }
 }
 /// An overload's origin names the use site and which hole of the used
 /// definition it is (0 for a direct use of an overload set). `site` and the

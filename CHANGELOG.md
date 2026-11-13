@@ -1,43 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 — 2026-11-14
 
-- `lift f x` applies a function to the value inside a `maybe`, so a missing input has one way to be
-  handled instead of a nullable overload of every function: `lift (parseDate "%Y%m%d") .d` is a
-  `maybe date` from a `maybe string`, and it expands to `CASE WHEN x IS NULL THEN NULL ELSE f(x) END`.
-- `parseTimestamp` and `formatTimestamp` mirror `parseDate`/`formatDate` for the time of day.
-- `unnest` now refuses a row that already has a `value` column. It used to emit two columns of that
-  name while the type kept one, so the second list's element was unreachable and nothing said so.
-- An unknown name or a misspelled column says which name it probably meant (`did you mean \`upper\`?`),
-  which the language server turns into a rename. Join-side and `omit` diagnostics included.
-- A `try*` cast on `--dialect postgres` is a compile error: PostgreSQL has no `TRY_CAST`, so the
-  query used to compile into SQL the server rejected. The message names `pg_input_is_valid` (16+) and
-  the `to*` alternative. The generic `ansi` target keeps the loose spelling.
-- BigQuery's `PARSE_DATE` reads date elements only, so `parseDate` with a `%H`/`%M`/`%S` format is a
-  compile error there instead of SQL the server rejects; `parseTimestamp` is the function for that.
-
-- `parseDate "%Y%m%d" s` and `formatDate "%Y-%m" d` are one interface for every dialect. The format
-  is written once, in strftime's vocabulary (`%Y %m %d %H %M %S`, `%%`), and the backend translates
-  both the function and the format: PostgreSQL and Snowflake `TO_DATE`/`TO_CHAR` with `YYYYMMDD`,
-  DuckDB `STRPTIME`/`STRFTIME`, Trino and MySQL `DATE_PARSE`/`DATE_FORMAT` (where minutes are `%i`,
-  because `%M` there is the month's name), Spark `yyyyMMdd`, BigQuery `PARSE_DATE`/`FORMAT_DATE`.
-  The format must be a literal, an unknown specifier is a compile error rather than a different
-  meaning on another target, and `parseDate` is refused on SQLite and T-SQL, which have no format
-  parser (they can still print by format). Verified by running the same Cagara query on DuckDB and
-  PostgreSQL and getting the same rows.
-
-- A format conversion (`STR_TO_DATE`/`DATE_FORMAT` in a `sql` template) is spelled by the target
-  instead of always becoming sqlglot's `TO_CHAR`/`TO_TIMESTAMP`: Trino gets `date_parse`/
-  `date_format`, DuckDB `strptime`/`strftime`, and PostgreSQL keeps `TO_CHAR`/`TO_TIMESTAMP`. The
-  format *string* is family-specific (`%Y-%m-%d` vs `YYYY-MM-DD`), so a template that must work on
-  several targets still has to be written per family — the portable route is `substring` + `||` and
-  a `CAST`, which needs no format at all.
-
-- `lpad`/`rpad` pass their arguments to SQL in the right order. The helpers are `lpad n fill s` —
-  `LPAD(s, n, fill)` — but the template read `LPAD($2, $1, $3)`, which pads the *fill* to the width
-  with copies of the string: `lpad 3 "0" .s` emitted `LPAD('0', 3, s)`, giving `077` for `s = '7'`
-  where the answer is `007`. Wrong quietly rather than rejected, so it now has a test and a
-  real-engine check.
+Three threads. **Dates get one interface**: `parseDate`/`parseTimestamp` and
+their `format*` inverses take a format written once (`%Y %m %d %H %M %S`) and
+the backend spells both the function and the format for the target — PostgreSQL
+`TO_DATE`/`TO_CHAR` with `YYYYMMDD`, DuckDB `STRPTIME`/`STRFTIME`, Trino and
+MySQL `DATE_PARSE`/`DATE_FORMAT` with `%i` for minutes, Spark `yyyyMMdd`,
+BigQuery `PARSE_DATE`/`FORMAT_DATE` — and refuses a target that cannot mean it
+instead of emitting SQL a server rejects (SQLite and T-SQL have no format
+parser; PostgreSQL has no `TRY_CAST`; BigQuery's `PARSE_DATE` reads date
+elements only). **`maybe` gets one way in**: `lift f x` applies a function to
+the value inside a `maybe`, so no function needs a nullable overload.
+**Diagnostics get specific**: an unknown name or a misspelled column says which
+name it probably meant, `unnest` refuses a row that already has a `value`, and a
+format conversion in a `sql` template is spelled by the target.
 
 ## 0.4.1 — 2026-11-13
 

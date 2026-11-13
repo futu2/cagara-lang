@@ -3,3 +3,4 @@ result
 .direnv/
 .claude/
 .reasonix/
+node_modules/

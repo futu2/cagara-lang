@@ -54,6 +54,14 @@ lists, spelled by whichever dialect can hold one.
   element, and the position that wants keys is the one that reports the missing
   direction.
 
+- The differential suite runs on PostgreSQL as well as SQLite and DuckDB:
+  `crates/cagara-sql/tests/pglite.mjs` drives
+  [PGlite](https://pglite.dev/) — Postgres compiled to WebAssembly — through
+  `node`, so the shared cases, `examples/report.cagara` and the `list` cases are
+  executed by a real planner. PostgreSQL is the only engine here that can hold a
+  `list`, so it is where `ARRAY[…]`, `ARRAY_AGG` and `||` are verified rather
+  than compared against the text we expected.
+
 - `list` is a column type. `arrayAgg` collects a group's values into one
   (`agg { k = group .id, xs = arrayAgg .n }` is `xs : list int`), `[1, 2, 3]`
   is a list literal in any expression position, and `<>` gained a third

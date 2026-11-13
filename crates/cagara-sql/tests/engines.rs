@@ -1,8 +1,17 @@
 //! Differential tests: the same Cagara queries, compiled per dialect and run
-//! on real engines, must return the same rows. Each engine runs through its
-//! command-line shell (`sqlite3` 3.46 or later, `duckdb`) and is skipped
-//! when that is not installed, unless `CAGARA_REQUIRE_ENGINES` is set (as in
-//! CI); `nix develop` provides both.
+//! on real engines, must return the same rows.
+//!
+//! Each engine runs through a shell and is skipped when that shell is not
+//! installed, unless `CAGARA_REQUIRE_ENGINES` is set (as in CI):
+//!
+//! | engine | shell | notes |
+//! |---|---|---|
+//! | SQLite 3.46+ | `sqlite3` | `nix develop` provides it |
+//! | DuckDB | `duckdb` | `nix develop` provides it |
+//! | PostgreSQL | `node` + `tests/pglite.mjs` | PGlite: Postgres compiled to WASM. `npm install --no-save @electric-sql/pglite` in the repository root |
+//!
+//! Postgres is the only one of the three that can hold a `list`, so it is where
+//! `ARRAY[…]`, `ARRAY_AGG` and `||` are checked by a real planner.
 
 use cagara_hir::{root_queries, Workspace};
 use cagara_sql::{compile, Dialect, Options};
@@ -304,14 +313,20 @@ const ENGINES: &[Engine] = &[
 /// Rows of the last statement under the shared [`SETUP`], or `None` when the
 /// shell is not installed.
 fn run(e: &Engine, sql: &str) -> Option<Result<Vec<String>, String>> {
-    run_script(e, SETUP, sql)
+    let args: Vec<&std::ffi::OsStr> = e.args.iter().map(std::ffi::OsStr::new).collect();
+    run_script(e.shell, &args, SETUP, sql)
 }
 
 /// Rows of the last statement in `sql`, after `setup` has been run. `None`
 /// when the shell is not installed.
-fn run_script(e: &Engine, setup: &str, sql: &str) -> Option<Result<Vec<String>, String>> {
-    let mut child = match Command::new(e.shell)
-        .args(e.args)
+fn run_script(
+    shell: &str,
+    args: &[&std::ffi::OsStr],
+    setup: &str,
+    sql: &str,
+) -> Option<Result<Vec<String>, String>> {
+    let mut child = match Command::new(shell)
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -526,7 +541,8 @@ fn the_report_example_runs_on_every_engine() {
             } else {
                 sql
             };
-            match run_script(e, setup, &sql) {
+            let args: Vec<&std::ffi::OsStr> = e.args.iter().map(std::ffi::OsStr::new).collect();
+            match run_script(e.shell, &args, setup, &sql) {
                 None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
                     panic!(
                         "`{}` is not installed (CAGARA_REQUIRE_ENGINES is set)",
@@ -612,4 +628,187 @@ fn a_list_query_runs_on_duckdb() {
             Some(Ok(rows)) => assert!(!rows.is_empty(), "`{name}` returned no rows\n  {sql}"),
         }
     }
+}
+
+/// Two rows are the same when every column is: text for text, number for
+/// number.
+///
+/// The shells print numbers their own way — sqlite3 writes a `DOUBLE` as
+/// `99.0`, Postgres as `99` — so a textual comparison would report a difference
+/// where the values agree.
+fn same_row(a: &str, b: &str) -> bool {
+    let (x, y): (Vec<&str>, Vec<&str>) = (a.split('|').collect(), b.split('|').collect());
+    x.len() == y.len()
+        && x.iter().zip(&y).all(|(p, q)| {
+            p == q
+                || match (p.parse::<f64>(), q.parse::<f64>()) {
+                    (Ok(p), Ok(q)) => p == q,
+                    _ => false,
+                }
+        })
+}
+
+/// The `main` schema the shared setup writes into, in Postgres's spelling.
+fn pg_setup(setup: &str) -> String {
+    format!(
+        "CREATE SCHEMA main;\n{}",
+        setup.replace("DOUBLE", "DOUBLE PRECISION")
+    )
+}
+
+/// Run `queries` against one fresh Postgres and return each query's rows.
+///
+/// One process for the whole batch: booting a WASM Postgres costs a few seconds
+/// and a suite of twenty queries would pay it twenty times. The batch format is
+/// the setup, then the queries, separated by a record separator
+/// (`crates/cagara-sql/tests/pglite.mjs`).
+fn pg_batch(harness: &str, setup: &str, queries: &[String]) -> Vec<Vec<String>> {
+    let mut script = setup.to_string();
+    for q in queries {
+        script.push('\u{1e}');
+        script.push_str(q);
+    }
+    let args = [std::ffi::OsStr::new(harness)];
+    let lines = run_script("node", &args, "", &script)
+        .expect("node ran")
+        .unwrap_or_else(|m| panic!("postgres: {m}"));
+    let mut out: Vec<Vec<String>> = vec![Vec::new()];
+    for line in lines {
+        if line == "\u{1e}" {
+            out.push(Vec::new());
+        } else {
+            out.last_mut().expect("a block").push(line);
+        }
+    }
+    // A trailing separator would leave an empty block; the harness never writes
+    // one, so a length mismatch is a harness bug worth seeing.
+    assert_eq!(out.len(), queries.len(), "one block per query: {out:?}");
+    out
+}
+
+/// Postgres, through PGlite — Postgres compiled to WebAssembly and driven by
+/// `node`, so no server is needed (`crates/cagara-sql/tests/pglite.mjs`).
+///
+/// The shared cases and `examples/report.cagara` run here as they do on the
+/// other engines, plus the `list` cases, which no other engine in this file can
+/// hold: PostgreSQL is where `ARRAY[…]`, `ARRAY_AGG` and `||` are checked by a
+/// real planner rather than against the text we expect.
+#[test]
+fn postgres_agrees_via_pglite() {
+    let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
+    let ready = Command::new("node")
+        .args([harness, "--check"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ready {
+        assert!(
+            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            "`node` with @electric-sql/pglite is not installed (CAGARA_REQUIRE_ENGINES is set)"
+        );
+        eprintln!("skipping postgres: node or @electric-sql/pglite is not installed");
+        return;
+    }
+    let postgres = Options {
+        dialect: Dialect::Postgres,
+        ..Options::default()
+    };
+    let mut failures: Vec<String> = Vec::new();
+    let mut ran = 0;
+
+    // The shared cases and the three `list` cases, on one database.
+    let list_src = format!(
+        "{TABLES}\
+         l1 = nums & select {{ id = .id, xs = [10, 20] }}\n\
+         l2 = nums & select {{ id = .id, both = [1] <> [2] }}\n\
+         l3 = nums & where (.id == 1) & agg {{ xs = arrayAgg .id }}\n"
+    );
+    let shared = format!(
+        "{TABLES}{}\n{}",
+        CASES.iter().map(|(d, _)| *d).collect::<Vec<_>>().join("\n"),
+        list_src.strip_prefix(TABLES).expect("prefix")
+    );
+    let ws = Workspace::from_source(&shared);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let list_cases: &[(&str, &[&str], bool)] = &[
+        (
+            "l1",
+            &["1|{10,20}", "2|{10,20}", "3|{10,20}", "4|{10,20}"],
+            false,
+        ),
+        ("l2", &["1|{1,2}", "2|{1,2}", "3|{1,2}", "4|{1,2}"], false),
+        ("l3", &["{1}"], false),
+    ];
+    let wanted: Vec<(&str, &[&str], bool)> = CASES
+        .iter()
+        .map(|(d, w)| (d.split_whitespace().next().expect("name"), *w, false))
+        .chain(list_cases.iter().copied())
+        .collect();
+    let mut queries = Vec::with_capacity(wanted.len());
+    for (name, _, _) in &wanted {
+        let (_, rel) = rels
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no query `{name}`"));
+        let rel = rel
+            .as_ref()
+            .unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
+        queries.push(compile(rel, postgres).unwrap_or_else(|m| panic!("`{name}`: {m}")));
+    }
+    let blocks = pg_batch(harness, &pg_setup(SETUP), &queries);
+    for ((name, want, unordered), rows) in wanted.iter().zip(&blocks) {
+        ran += 1;
+        let mut got = rows.clone();
+        let mut want: Vec<&str> = want.to_vec();
+        if *unordered {
+            got.sort();
+            want.sort();
+        }
+        if got.len() != want.len() || !got.iter().zip(&want).all(|(a, b)| same_row(a, b)) {
+            failures.push(format!("`{name}` on postgres: got {got:?}, want {want:?}"));
+        }
+    }
+
+    // `examples/report.cagara`, whose tables are `public.` — which Postgres has.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/report.cagara");
+    let source = std::fs::read_to_string(path).expect("read examples/report.cagara");
+    let ws = Workspace::from_source(&source);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let mut queries = Vec::with_capacity(REPORT_CASES.len());
+    for (name, _, _) in REPORT_CASES {
+        let (_, rel) = rels
+            .iter()
+            .find(|(n, _)| n == *name)
+            .unwrap_or_else(|| panic!("report.cagara has no `{name}`"));
+        let rel = rel
+            .as_ref()
+            .unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
+        queries.push(compile(rel, postgres).unwrap_or_else(|m| panic!("`{name}`: {m}")));
+    }
+    let setup = REPORT_SETUP_DUCKDB.replace("DOUBLE", "DOUBLE PRECISION");
+    let blocks = pg_batch(harness, &setup, &queries);
+    for ((name, want, unordered), rows) in REPORT_CASES.iter().zip(&blocks) {
+        ran += 1;
+        let mut got = rows.clone();
+        let mut want: Vec<&str> = want.to_vec();
+        if *unordered {
+            got.sort();
+            want.sort();
+        }
+        if got.len() != want.len() || !got.iter().zip(&want).all(|(a, b)| same_row(a, b)) {
+            failures.push(format!(
+                "report `{name}` on postgres: got {got:?}, want {want:?}"
+            ));
+        }
+    }
+
+    assert!(ran > 0, "no Postgres query ran");
+    assert!(
+        failures.is_empty(),
+        "{} of {ran} Postgres queries disagreed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

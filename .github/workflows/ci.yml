@@ -38,6 +38,10 @@ jobs:
           curl -sSfLo duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.3.2/duckdb_cli-linux-amd64.zip
           unzip -oq sqlite.zip && unzip -oq duckdb.zip && chmod +x sqlite3 duckdb
           echo "$RUNNER_TEMP/engines" >> "$GITHUB_PATH"
+      # PostgreSQL for the differential tests, without a server: PGlite is
+      # Postgres compiled to WebAssembly, driven by node.
+      - name: Install PGlite
+        run: npm install --no-save --no-audit --no-fund @electric-sql/pglite
       - run: cargo test --workspace --locked
         env:
           CAGARA_REQUIRE_ENGINES: "1"

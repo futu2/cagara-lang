@@ -13,7 +13,7 @@
 use crate::stage::transform_deep;
 use sqlglot_rust::ast::{
     BinaryOperator, Expr, OrderByItem, QuoteStyle, SelectItem, SelectStatement, TableSource,
-    UnaryOperator,
+    TypedFunction, UnaryOperator,
 };
 use sqlglot_rust::{Dialect, Statement};
 
@@ -248,6 +248,44 @@ fn quote(name: &str, to: Dialect) -> String {
     format!("{open}{escaped}{close}")
 }
 
+/// Spell a string↔datetime conversion the way the target does.
+///
+/// sqlglot emits `TO_CHAR(x, fmt)` / `TO_TIMESTAMP(x, fmt)` for a format
+/// conversion, which only PostgreSQL reads. DuckDB and Trino have their own
+/// pairs, and both take the same C-style format the template was written with:
+/// `STRFTIME`/`STRPTIME` and `DATE_FORMAT`/`DATE_PARSE`.
+fn format_call(e: Expr, f: Fam) -> Expr {
+    let Expr::TypedFunction { func, filter, over } = e else {
+        return e;
+    };
+    let (name, args) = match (&func, f) {
+        (TypedFunction::StrToTime { expr, format }, Fam::Duck) => {
+            ("strptime", vec![(**expr).clone(), (**format).clone()])
+        }
+        (TypedFunction::StrToTime { expr, format }, Fam::Trino) => {
+            ("date_parse", vec![(**expr).clone(), (**format).clone()])
+        }
+        (TypedFunction::TimeToStr { expr, format }, Fam::Duck) => {
+            ("strftime", vec![(**expr).clone(), (**format).clone()])
+        }
+        (TypedFunction::TimeToStr { expr, format }, Fam::Trino) => {
+            ("date_format", vec![(**expr).clone(), (**format).clone()])
+        }
+        _ => {
+            return Expr::TypedFunction { func, filter, over };
+        }
+    };
+    Expr::Function {
+        name: name.to_string(),
+        args,
+        distinct: false,
+        filter,
+        over,
+        order_by: Vec::new(),
+        within_group: false,
+    }
+}
+
 /// Rewrite `FILTER (WHERE p)` into the portable `CASE` spelling.
 ///
 /// A filtered aggregate keeps the rows the predicate keeps. Written as `CASE`
@@ -338,6 +376,14 @@ fn expr(e: Expr, to: Dialect) -> Result<Expr, String> {
         transform_deep(e, &concat)
     } else {
         e
+    };
+    // `TO_CHAR`/`TO_TIMESTAMP` are what sqlglot emits for a format conversion,
+    // but only PostgreSQL has them spelled that way among the targets here.
+    // DuckDB and Trino say `STRFTIME`/`STRPTIME` and `DATE_FORMAT`/`DATE_PARSE`,
+    // with the same C-style format string the template already gave.
+    let e = match fam(to) {
+        Fam::Duck | Fam::Trino => transform_deep(e, &|e| format_call(e, fam(to))),
+        _ => e,
     };
     // Window specs sort NULLs last too.
     let e = transform_deep(e, &|e| match e {

@@ -2648,6 +2648,33 @@ fn an_aggregate_takes_a_filter_a_distinct_or_a_window() {
     );
 }
 
+/// A format conversion is spelled by the target: `SPECIFIC` functions differ
+/// (`TO_CHAR`/`TO_TIMESTAMP` on PostgreSQL, `DATE_FORMAT`/`DATE_PARSE` on Trino,
+/// `STRFTIME`/`STRPTIME` on DuckDB), and the same `sql` template reaches all
+/// three. Before this, every dialect got sqlglot's `TO_CHAR`, which only
+/// PostgreSQL reads — DuckDB and Trino both reject it, checked against their
+/// docs and, for DuckDB, against the engine.
+#[test]
+fn a_format_conversion_is_spelled_by_the_target() {
+    let src = concat!(
+        "t : query { s = string, d = date } = table \"s\" \"t\"\n",
+        "q = t & select { ts = parseFmt .s, out = formatFmt .d }\n",
+        "parseFmt : expr r string -> expr r timestamp = sql \"STR_TO_DATE($1, '%Y%m%d')\"\n",
+        "formatFmt : expr r date -> expr r string = sql \"DATE_FORMAT($1, '%Y-%m-%d')\"\n",
+    );
+    let trino = dialect(src, "q", "trino").expect("trino");
+    assert!(trino.contains("date_parse(s, '%Y%m%d')"), "{trino}");
+    assert!(trino.contains("date_format(d, '%Y-%m-%d')"), "{trino}");
+    let duck = dialect(src, "q", "duckdb").expect("duckdb");
+    assert!(duck.contains("strptime(s, '%Y%m%d')"), "{duck}");
+    assert!(duck.contains("strftime(d, '%Y-%m-%d')"), "{duck}");
+    // PostgreSQL keeps sqlglot's spelling — and its own format vocabulary, which
+    // is why the format string is the writer's problem, not the backend's.
+    let pg = dialect(src, "q", "postgres").expect("postgres");
+    assert!(pg.contains("TO_TIMESTAMP(s, 'YYYYMMDD')"), "{pg}");
+    assert!(pg.contains("TO_CHAR(d, 'YYYY-MM-DD')"), "{pg}");
+}
+
 /// The padding helpers put their arguments where SQL does.
 ///
 /// `lpad n fill s` is documented as `LPAD(s, n, fill)`, and the template had the

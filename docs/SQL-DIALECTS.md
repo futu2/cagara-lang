@@ -82,11 +82,18 @@ unsafe:
   yielding NULL. The prelude's `try*` functions therefore call a `CAGARA_*`
   intrinsic, which builds `Expr::TryCast` directly.
 
-  SQLite is the exception that cannot be papered over: it has no `TRY_CAST`,
-  and `CAST('abc' AS INT)` there is `0` rather than an error, so no guard can
-  turn a failed cast into NULL without also turning every other unparseable
-  value into a silent `0`. Emitting the node as-is lets the engine reject it
-  loudly, which is the honest outcome; a `try*` cast is not portable to SQLite.
+  Two targets do not have the clause at all, and both are known gaps rather than
+  emulated ones:
+
+  - **SQLite** has no `TRY_CAST`, and `CAST('abc' AS INT)` there is `0` rather
+    than an error, so no guard can turn a failed cast into NULL without also
+    turning every other unparseable value into a silent `0`. Emitting the node
+    as-is lets the engine reject it loudly, which is the honest outcome.
+  - **PostgreSQL** has no `TRY_CAST` either — `TRY_CAST(x AS DATE)` is a syntax
+    error there, measured on PGlite, not a NULL. The spelling is `CASE WHEN
+    pg_input_is_valid(x, 'date') THEN CAST(x AS DATE) END` (PostgreSQL 16+),
+    which the backend does not emit; a `try*` cast on PostgreSQL needs a `sql`
+    template of your own, or a `to*` cast when the input is known to be shaped.
 
 So the prelude names a `CAGARA_*` function and
 [`crates/cagara-sql/src/intrinsics.rs`](../crates/cagara-sql/src/intrinsics.rs)

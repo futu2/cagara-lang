@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A format conversion (`STR_TO_DATE`/`DATE_FORMAT` in a `sql` template) is spelled by the target
+  instead of always becoming sqlglot's `TO_CHAR`/`TO_TIMESTAMP`: Trino gets `date_parse`/
+  `date_format`, DuckDB `strptime`/`strftime`, and PostgreSQL keeps `TO_CHAR`/`TO_TIMESTAMP`. The
+  format *string* is family-specific (`%Y-%m-%d` vs `YYYY-MM-DD`), so a template that must work on
+  several targets still has to be written per family — the portable route is `substring` + `||` and
+  a `CAST`, which needs no format at all.
+
 - `lpad`/`rpad` pass their arguments to SQL in the right order. The helpers are `lpad n fill s` —
   `LPAD(s, n, fill)` — but the template read `LPAD($2, $1, $3)`, which pads the *fill* to the width
   with copies of the string: `lpad 3 "0" .s` emitted `LPAD('0', 3, s)`, giving `077` for `s = '7'`

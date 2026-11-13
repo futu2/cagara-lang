@@ -54,6 +54,14 @@ lists, spelled by whichever dialect can hold one.
   element, and the position that wants keys is the one that reports the missing
   direction.
 
+- The language server answers `textDocument/codeAction` and `textDocument/inlayHint`. The quick fixes
+  are the two rules that are mechanical: a bare sort key becomes `asc (…)` / `desc (…)`, and a name a
+  "did you mean" already resolved is renamed. The inferred type of a definition that writes no
+  annotation is shown as a hint after its name. A join's shared-column warning and a `maybe` used
+  where a value is needed are **not** offered: their diagnostics name the problem but not the span to
+  rewrite, so an edit built from what they carry would be a guess; that needs the checker to attach a
+  suggestion, which is the next step.
+
 - Every differential case runs twice per engine: once with the default lowering and once with
   `--optimize`. The optimizer rewrites the statement *after* lowering, so a case where it changes an
   answer is exactly what the suite exists to catch.

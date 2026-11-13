@@ -11,16 +11,18 @@ use lsp_types::notification::{
     DidSaveTextDocument, LogMessage, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting, GotoDefinition,
-    HoverRequest, References, Request as _,
+    CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting,
+    GotoDefinition, HoverRequest, InlayHintRequest, References, Request as _,
 };
 use lsp_types::{
-    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
-    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams,
-    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, HoverProviderCapability, Location, LogMessageParams, MarkupContent, MarkupKind,
-    MessageType, OneOf, PublishDiagnosticsParams, ReferenceParams, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CompletionOptions, CompletionParams, CompletionResponse,
+    Diagnostic, DiagnosticSeverity, DocumentFormattingParams, DocumentHighlight,
+    DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability, InlayHint,
+    InlayHintKind, InlayHintLabel, InlayHintParams, Location, LogMessageParams, MarkupContent,
+    MarkupKind, MessageType, OneOf, PublishDiagnosticsParams, ReferenceParams, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Uri, WorkspaceEdit,
 };
 use std::collections::HashMap;
 use std::error::Error;
@@ -174,6 +176,10 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
         document_highlight_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        // The inferred type of a definition that does not write one, at the end
+        // of its name (`analysis::type_hints`).
+        inlay_hint_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".into()]),
             ..Default::default()
@@ -549,6 +555,53 @@ fn request(
                 .then(|| analysis::completion(&mut state.ws, tp.position));
             json(serde_json::to_value(items.map(CompletionResponse::Array)))
         }
+        CodeActionRequest::METHOD => {
+            let p: CodeActionParams = serde_json::from_value(params).map_err(bad_params)?;
+            let key = doc_key(&p.text_document.uri);
+            let uri = p.text_document.uri;
+            let fixes = if state.select(&key) {
+                analysis::code_actions(&state.ws, p.range)
+            } else {
+                Vec::new()
+            };
+            let actions: Vec<CodeActionOrCommand> = fixes
+                .into_iter()
+                .map(|f| {
+                    CodeActionOrCommand::CodeAction(CodeAction {
+                        title: f.title,
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        edit: Some(WorkspaceEdit {
+                            changes: Some(HashMap::from([(uri.clone(), vec![f.edit])])),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                })
+                .collect();
+            json(serde_json::to_value(actions))
+        }
+        InlayHintRequest::METHOD => {
+            let p: InlayHintParams = serde_json::from_value(params).map_err(bad_params)?;
+            let key = doc_key(&p.text_document.uri);
+            let hints: Vec<InlayHint> = match state.select(&key) {
+                false => Vec::new(),
+                true => analysis::type_hints(&state.ws)
+                    .into_iter()
+                    .filter(|(r, _)| range_contains(&p.range, r.start))
+                    .map(|(r, label)| InlayHint {
+                        position: r.start,
+                        label: InlayHintLabel::String(label),
+                        kind: Some(InlayHintKind::TYPE),
+                        text_edits: None,
+                        tooltip: None,
+                        padding_left: Some(true),
+                        padding_right: None,
+                        data: None,
+                    })
+                    .collect(),
+            };
+            json(serde_json::to_value(hints))
+        }
         Formatting::METHOD => {
             let p: DocumentFormattingParams = serde_json::from_value(params).map_err(bad_params)?;
             let key = doc_key(&p.text_document.uri);
@@ -562,6 +615,15 @@ fn request(
         }
         _ => Err((ErrorCode::MethodNotFound, format!("unsupported: {method}"))),
     }
+}
+
+/// Is `pos` inside `range`? LSP ranges are half-open, and a hint sits exactly at
+/// a definition's name end, so the end counts as inside for a requested range
+/// that stops there (the editor asks with the visible viewport).
+fn range_contains(range: &lsp_types::Range, pos: lsp_types::Position) -> bool {
+    let before_end = (pos.line, pos.character) <= (range.end.line, range.end.character);
+    let after_start = (pos.line, pos.character) >= (range.start.line, range.start.character);
+    before_end && after_start
 }
 
 fn notification(sender: &Sender<Message>, state: &mut State, n: Notification) -> Res<()> {
@@ -1175,6 +1237,135 @@ mod tests {
             .send(notify("exit", serde_json::Value::Null))
             .unwrap();
         t.join().unwrap().unwrap();
+    }
+
+    /// A diagnostic a fix exists for comes with that fix, and a fix built from
+    /// the wrong span would rewrite the wrong text — so the edit is asserted,
+    /// not just its title.
+    ///
+    /// Two rules are mechanical: a bare sort key (`asc (…)` / `desc (…)`), and a
+    /// name a "did you mean" already resolved. The join warning and the nullable
+    /// coercion are deliberately absent from `analysis::code_actions`: their
+    /// messages name the problem but not the span to rewrite.
+    #[test]
+    fn a_fixable_diagnostic_comes_with_its_fix() {
+        let dir = std::env::temp_dir().join("cagara-lsp-fixes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("q.cagara");
+        let src = "t : query { a = int } = table \"s\" \"t\"\n\
+                   q = t & where (.a > 0)\n\
+                   unsorted = t & order [.a]\n\
+                   bad : intt = 1\n";
+        std::fs::write(&f, src).unwrap();
+
+        let (server, client) = Connection::memory();
+        let t =
+            std::thread::spawn(move || serve(&server, "0.4.1 (test)").map_err(|e| e.to_string()));
+        client
+            .sender
+            .send(request(1, "initialize", json!({ "capabilities": {} })))
+            .unwrap();
+        let _ = response(&client, 1);
+        client
+            .sender
+            .send(notify("initialized", json!({})))
+            .unwrap();
+        let _ = client.receiver.recv_timeout(Duration::from_secs(30));
+        let uri = format!("file://{}", f.display());
+        client
+            .sender
+            .send(notify(
+                "textDocument/didOpen",
+                json!({ "textDocument": {
+                    "uri": uri, "languageId": "cagara", "version": 1, "text": src
+                } }),
+            ))
+            .unwrap();
+        let quiet = Duration::from_millis(600);
+        assert!(
+            !messages(&client, quiet).is_empty(),
+            "the file has an error and a warning"
+        );
+
+        // The whole document, so every diagnostic with a fix answers.
+        let whole = json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 99, "character": 0 }
+            },
+            "context": { "diagnostics": [] }
+        });
+        client
+            .sender
+            .send(request(2, "textDocument/codeAction", whole))
+            .unwrap();
+        let r = response(&client, 2);
+        let actions: Vec<serde_json::Value> =
+            serde_json::from_value(r.response_result.unwrap()).unwrap();
+        let titles: Vec<&str> = actions
+            .iter()
+            .filter_map(|a| a.get("title").and_then(|t| t.as_str()))
+            .collect();
+        assert!(
+            titles.iter().any(|t| t.contains("asc")),
+            "no `asc` fix: {titles:?}"
+        );
+        assert!(
+            titles.iter().any(|t| t.contains("desc")),
+            "no `desc` fix: {titles:?}"
+        );
+        assert!(
+            titles.iter().any(|t| t.contains("Rename to `int`")),
+            "no rename fix: {titles:?}"
+        );
+        // `changes` is a map of URI to edits, so the edit is found by value.
+        let texts: Vec<&str> = actions
+            .iter()
+            .filter_map(|a| a.pointer("/edit/changes").and_then(|c| c.as_object()))
+            .filter_map(|c| c.values().next())
+            .filter_map(|edits| edits.get(0))
+            .filter_map(|e| e.get("newText").and_then(|t| t.as_str()))
+            .collect();
+        assert!(texts.contains(&"asc (.a)"), "edits: {texts:?}");
+        assert!(texts.contains(&"desc (.a)"), "edits: {texts:?}");
+        assert!(texts.contains(&"int"), "edits: {texts:?}");
+
+        // Inlay hints: the inferred type of a definition that does not write
+        // one, and none for the one that does.
+        let params = json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 99, "character": 0 }
+            }
+        });
+        client
+            .sender
+            .send(request(3, "textDocument/inlayHint", params))
+            .unwrap();
+        let r = response(&client, 3);
+        let hints: Vec<serde_json::Value> =
+            serde_json::from_value(r.response_result.unwrap()).unwrap();
+        let labels: Vec<&str> = hints
+            .iter()
+            .filter_map(|h| h.get("label").and_then(|l| l.as_str()))
+            .collect();
+        assert!(
+            labels.iter().any(|l| l.contains("query { a = int }")),
+            "no type hint for `q`: {labels:?}"
+        );
+        // `t` and `bad` write their types; `unsorted` failed to check, so it has
+        // none to show. One hint, therefore.
+        assert_eq!(labels.len(), 1, "hints: {labels:?}");
+
+        client
+            .sender
+            .send(request(4, "shutdown", serde_json::Value::Null))
+            .unwrap();
+        let _ = response(&client, 4);
+        let _ = t.join().unwrap();
     }
 }
 

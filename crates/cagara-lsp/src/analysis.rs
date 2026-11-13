@@ -1271,6 +1271,24 @@ mod tests {
         Position { line, character }
     }
 
+    /// Every definition that does not write its type gets one as a hint, and a
+    /// definition that does is left alone.
+    #[test]
+    fn an_unannotated_definition_gets_a_type_hint() {
+        let hints = type_hints(&ws());
+        let labels: Vec<&str> = hints.iter().map(|(_, l)| l.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("query { s = maybe")),
+            "no hint for `q`: {labels:?}"
+        );
+        // `users` and `twice` write no type either; `bad` writes none and its
+        // type is the error's, so it may be open.
+        assert!(
+            labels.iter().any(|l| l.contains("->")),
+            "no hint for a function: {labels:?}"
+        );
+    }
+
     /// The position of `needle` in `src`, `within` characters in.
     ///
     /// Locating a marker keeps a cursor tied to the text it is about. A
@@ -2074,4 +2092,156 @@ mod severity_tests {
         assert_eq!(*severity, Severity::Warning);
         assert!(message.contains("on both sides"), "{message}");
     }
+}
+
+// ── code actions and inlay hints ─────────────────────────────
+
+/// One fix the language server can offer for a diagnostic at the cursor.
+pub struct Fix {
+    pub title: String,
+    pub edit: TextEdit,
+}
+
+/// Text edits for the diagnostics that overlap `range`.
+///
+/// Two rules are mechanical enough to fix without guessing: a sort key that
+/// does not say its direction, and a name a "did you mean" already resolved.
+/// Both are read off the diagnostic's own message and *its* range — a message
+/// that does not match produces no action rather than a wrong one.
+///
+/// A join's shared-column warning and a `maybe` used where a value is needed
+/// are deliberately absent: their messages name the problem but not the span to
+/// rewrite (the join's operand, the nullable expression), so an edit built from
+/// what is here would be a guess. Those need the checker to carry a fix, which
+/// is the next step.
+pub fn code_actions(ws: &Workspace, range: Range) -> Vec<Fix> {
+    let md = &ws.modules[ws.root];
+    let p = Positions::new(&md.text);
+    let mut out = Vec::new();
+    for (r, message, _) in diagnostics(ws) {
+        if r.end.line < range.start.line || range.end.line < r.start.line {
+            continue;
+        }
+        let (Some(start), Some(end)) = (p.offset(r.start), p.offset(r.end)) else {
+            continue;
+        };
+        let Some(text) = md.text.get(start..end) else {
+            continue;
+        };
+        if message.contains("a sort key must say its direction") {
+            for (word, title) in [
+                ("asc", "Say `asc`: `asc (…)`"),
+                ("desc", "Say `desc`: `desc (…)`"),
+            ] {
+                out.push(Fix {
+                    title: title.to_string(),
+                    edit: TextEdit {
+                        range: r,
+                        new_text: format!("{word} ({text})"),
+                    },
+                });
+            }
+        } else if let Some(name) = suggested_name(&message) {
+            // The message resolved the typo already; the edit renames the token
+            // it means, which is the one closest to that name in the range.
+            if let Some((s, e)) = closest_token(text, &name) {
+                out.push(Fix {
+                    title: format!("Rename to `{name}`"),
+                    edit: TextEdit {
+                        range: root_range(&p, start + s, start + e),
+                        new_text: name,
+                    },
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The name after "did you mean `…`?", if the message has one.
+fn suggested_name(message: &str) -> Option<String> {
+    let rest = message.split("did you mean `").nth(1)?;
+    let name = rest.split('`').next()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The identifier inside `text` that is closest to `target`, by Levenshtein
+/// distance, if any is close enough to be the typo rather than a coincidence.
+fn closest_token(text: &str, target: &str) -> Option<(usize, usize)> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut best: Option<(usize, usize, usize)> = None;
+    let mut start = None;
+    for (i, c) in text.char_indices() {
+        match (is_word(c), start) {
+            (true, None) => start = Some(i),
+            (true, Some(_)) => {}
+            (false, Some(s)) => {
+                let token = &text[s..i];
+                if token != target {
+                    let d = edit_distance(token, target);
+                    let limit = (target.chars().count() / 3).max(1);
+                    if d <= limit && best.is_none_or(|(_, _, b)| d < b) {
+                        best = Some((s, i, d));
+                    }
+                }
+                start = None;
+            }
+            (false, None) => {}
+        }
+    }
+    if let Some(s) = start {
+        let token = &text[s..];
+        if token != target {
+            let d = edit_distance(token, target);
+            let limit = (target.chars().count() / 3).max(1);
+            if d <= limit && best.is_none_or(|(_, _, b)| d < b) {
+                best = Some((s, text.len(), d));
+            }
+        }
+    }
+    best.map(|(s, e, _)| (s, e))
+}
+
+/// Levenshtein distance, for picking the typo out of a range.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// The type of every definition that does not write one, as an inlay hint after
+/// its name.
+///
+/// An annotation is left alone: the user already said it, and a hint repeating
+/// it is noise. A definition whose type is still open is skipped rather than
+/// shown as `?` — the editor is not the place for the compiler's uncertainty.
+pub fn type_hints(ws: &Workspace) -> Vec<(Range, String)> {
+    let tc = check_reachable(ws);
+    let md = &ws.modules[ws.root];
+    let p = Positions::new(&md.text);
+    let mut out = Vec::new();
+    for (i, d) in md.module.defs.iter().enumerate() {
+        if d.ty.is_some() {
+            continue;
+        }
+        let Some(ty) = tc.type_of(ws.root, i) else {
+            continue;
+        };
+        let Some((s, e)) = trimmed(&md.text, d.span) else {
+            continue;
+        };
+        let name_end = (s + d.name.len()).min(e);
+        out.push((root_range(&p, name_end, name_end), format!(": {ty}")));
+    }
+    out
 }

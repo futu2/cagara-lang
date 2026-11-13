@@ -54,7 +54,7 @@ example, `cagara examples/report.cagara --only adults`.
 - Modules via `import "file.cagara"`, plus a standard library written in Cagara ([`prelude/core.cagara`](prelude/core.cagara) and [`prelude/std.cagara`](prelude/std.cagara)).
 - ANSI SQL by default, with dialect support and test coverage described in [`docs/SQL-DIALECTS.md`](docs/SQL-DIALECTS.md).
 - A file's entry point is the definition named `main`, which must be a query and is the one statement `cagara` prints; a file without one is a library and prints nothing.
-- A formatter (`cagara fmt`) and a language server (`cagara lsp`) with diagnostics, hover, go-to-definition and completion.
+- A formatter (`cagara fmt`) and a language server (`cagara lsp`) with diagnostics, hover, go-to-definition, references, highlights, symbols, completion, formatting, quick fixes for the two diagnostic kinds that are mechanical to fix (a bare sort key, a name a "did you mean" resolved) and inlay hints for the inferred type of a definition that does not write one.
 - Documentation carried by the source: `##` above a definition and `#!` above the file, printed by `cagara doc` as markdown or JSON — and shown on hover, so the words are written once. `cagara doc --prelude` prints the whole prelude reference, and `cagara doc --check` lists what is not documented yet.
 
 Cagara is intentionally a query language rather than a general-purpose

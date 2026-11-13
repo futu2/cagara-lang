@@ -54,6 +54,11 @@ lists, spelled by whichever dialect can hold one.
   element, and the position that wants keys is the one that reports the missing
   direction.
 
+- `listLength xs` and `listContains xs x` read a list: how many elements it has, and whether it
+  holds one. `listContains` takes a list *value* (a column, an `arrayAgg` result), where `in` takes a
+  literal. PostgreSQL spells them `cardinality` and `x = ANY(xs)`, DuckDB `len` and
+  `list_contains`; a dialect with no array type refuses both.
+
 - The differential suite runs on PostgreSQL as well as SQLite and DuckDB:
   `crates/cagara-sql/tests/pglite.mjs` drives
   [PGlite](https://pglite.dev/) — Postgres compiled to WebAssembly — through

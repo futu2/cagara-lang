@@ -598,7 +598,10 @@ fn a_list_query_runs_on_duckdb() {
     let src = format!(
         "{TABLES}\
          list_agg = orders & agg {{ k = group .user_id, amounts = arrayAgg .amount }}\n\
-         list_lit = orders & select {{ one = [1, 2, 3] }}\n"
+         list_lit = orders & select {{ one = [1, 2, 3] }}\n\
+         list_ops = orders & where (.id == 10) \
+                   & agg {{ k = group .user_id, xs = arrayAgg .id }} \
+                   & select {{ n = listLength .xs, has = listContains .xs 10 }}\n"
     );
     let ws = Workspace::from_source(&src);
     assert!(ws.diags.is_empty(), "{:?}", ws.diags);
@@ -607,7 +610,7 @@ fn a_list_query_runs_on_duckdb() {
         dialect: Dialect::from_str("duckdb").expect("dialect"),
         ..Options::default()
     };
-    for name in ["list_agg", "list_lit"] {
+    for name in ["list_agg", "list_lit", "list_ops"] {
         let (_, rel) = rels
             .iter()
             .find(|(n, _)| n == name)
@@ -721,7 +724,9 @@ fn postgres_agrees_via_pglite() {
         "{TABLES}\
          l1 = nums & select {{ id = .id, xs = [10, 20] }}\n\
          l2 = nums & select {{ id = .id, both = [1] <> [2] }}\n\
-         l3 = nums & where (.id == 1) & agg {{ xs = arrayAgg .id }}\n"
+         l3 = nums & where (.id == 1) & agg {{ xs = arrayAgg .id }}\n\
+         l4 = nums & where (.id == 1) & agg {{ xs = arrayAgg .id }} \
+              & select {{ n = listLength .xs, has = listContains .xs 1 }}\n"
     );
     let shared = format!(
         "{TABLES}{}\n{}",

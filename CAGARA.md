@@ -625,7 +625,12 @@ grouped = t & agg { k = group .id, xs = arrayAgg .n }        # xs : list int
 fixed   = t & select { threes = [1, 2, 3] }                  # a list literal
 twice   = t & agg { k = group .id, xs = arrayAgg .n }
             & select { k = .k, both = .xs <> .xs }           # `<>` concatenates lists
+sized   = t & select { n = listLength [1, 2, 3] }            # 3
+found   = t & select { y = listContains [1, 2, 3] 2 }        # true
 ```
+
+A list can be measured and searched — `listLength xs` and `listContains xs x`, the latter on a
+list *value* where `in` takes a literal:
 
 The SQL follows the dialect: `ARRAY[1, 2, 3]`, `ARRAY_AGG(n)` and `a || b` on PostgreSQL;
 `list_value(1, 2, 3)`, `list(n)` and `list_concat(a, b)` on DuckDB. A dialect with no array type

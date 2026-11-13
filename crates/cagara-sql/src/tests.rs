@@ -2921,6 +2921,54 @@ fn the_combining_operator_has_its_own_maybe_instance() {
     );
 }
 
+/// A list can be measured and searched, and each dialect spells that its own
+/// way.
+///
+/// The literal membership operator is `in`; these take a list *value*, which is
+/// what a column or an `arrayAgg` result is.
+#[test]
+fn a_list_can_be_measured_and_searched() {
+    let src = concat!(
+        "t : query { k = int, xs = list int } = table \"s\" \"t\"\n",
+        "a = t & select { k = .k, n = listLength .xs }\n",
+        "b = t & select { k = .k, has = listContains .xs 3 }\n",
+        "c = t & agg { k = group .k, xs = arrayAgg .k } ",
+        "& select { k = .k, n = listLength .xs, has = listContains .xs 2 }\n",
+    );
+    // PostgreSQL: `cardinality` and `x = ANY(list)`.
+    assert_eq!(
+        dialect(src, "a", "postgres").unwrap(),
+        "SELECT k, cardinality(xs) AS n FROM s.t"
+    );
+    assert_eq!(
+        dialect(src, "b", "postgres").unwrap(),
+        "SELECT k, (3 = ANY(xs)) AS has FROM s.t"
+    );
+    assert_eq!(
+        dialect(src, "c", "postgres").unwrap(),
+        "SELECT k, cardinality(ARRAY_AGG(k)) AS n, (2 = ANY(ARRAY_AGG(k))) AS has \
+         FROM s.t GROUP BY k"
+    );
+    // DuckDB: `len` (the generator writes `LENGTH`, which DuckDB accepts for a
+    // list) and `list_contains`.
+    assert_eq!(
+        dialect(src, "a", "duckdb").unwrap(),
+        "SELECT k, LENGTH(xs) AS n FROM s.t"
+    );
+    assert_eq!(
+        dialect(src, "b", "duckdb").unwrap(),
+        "SELECT k, list_contains(xs, 3) AS has FROM s.t"
+    );
+    // A dialect with no array type refuses, and names the operation.
+    for d in ["sqlite", "mysql", "tsql"] {
+        let e = dialect(src, "a", d).unwrap_err();
+        assert!(e.contains("`listLength`"), "{d}: {e}");
+        assert!(e.contains("PostgreSQL and DuckDB"), "{d}: {e}");
+        let e = dialect(src, "b", d).unwrap_err();
+        assert!(e.contains("`listContains`"), "{d}: {e}");
+    }
+}
+
 /// `list` is a value type: an aggregate builds one, a literal is one, and `<>`
 /// combines two — each spelled by the dialect that can hold it.
 ///

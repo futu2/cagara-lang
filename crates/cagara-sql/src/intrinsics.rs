@@ -116,6 +116,8 @@ fn list_refusal(name: &str, f: Fam) -> Option<String> {
         "CAGARA_LIST" => "a list literal",
         "CAGARA_ARRAY_AGG" => "`arrayAgg`",
         "CAGARA_LIST_CONCAT" => "`<>` on a list",
+        "CAGARA_LIST_LENGTH" => "`listLength`",
+        "CAGARA_LIST_CONTAINS" => "`listContains`",
         _ => return None,
     };
     (!has_list(f)).then(|| no_list(list_intrinsic))
@@ -280,6 +282,20 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
         ("CAGARA_ARRAY_AGG", 1) => match f {
             Fam::Duck => func("list", a.to_vec()),
             _ => func("ARRAY_AGG", a.to_vec()),
+        },
+        ("CAGARA_LIST_LENGTH", 1) => match f {
+            Fam::Duck => func("len", a.to_vec()),
+            _ => func("cardinality", a.to_vec()),
+        },
+        ("CAGARA_LIST_CONTAINS", 2) => match f {
+            Fam::Duck => func("list_contains", a.to_vec()),
+            // `x = ANY(list)` is the standard spelling; it is a comparison
+            // rather than a function call, so it is built as one.
+            _ => Expr::AnyOp {
+                expr: Box::new(a[1].clone()),
+                op: BinaryOperator::Eq,
+                right: Box::new(a[0].clone()),
+            },
         },
         ("CAGARA_LIST_CONCAT", 2) => match f {
             Fam::Duck => func("list_concat", a.to_vec()),

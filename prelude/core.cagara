@@ -249,6 +249,14 @@ desc : expr r (maybe a) -> sortkey r = primitive "__desc"
 ## (PostgreSQL, DuckDB); one without refuses the query rather than writing
 ## something else.
 arrayAgg : expr r a -> agg (expr r (list a)) = sql "CAGARA_ARRAY_AGG($1)"
+## `listLength xs` — how many elements a list has. `CAGARA_LIST_LENGTH` is
+## `cardinality` on PostgreSQL and `len` on DuckDB.
+listLength : expr r (list a) -> expr r int = sql "CAGARA_LIST_LENGTH($1)"
+
+## `listContains xs x` — whether the list holds `x`. `CAGARA_LIST_CONTAINS` is
+## `x = ANY(xs)` on PostgreSQL and `list_contains(xs, x)` on DuckDB, and it takes
+## a list *value*: the literal membership operator is `in`.
+listContains : expr r (list a) -> expr r a -> expr r bool = sql "CAGARA_LIST_CONTAINS($1, $2)"
 
 ## The grouping key: `agg { user_id = group .user_id, n = count }`. Every
 ## non-aggregate expression in the same `agg` is grouped by it.

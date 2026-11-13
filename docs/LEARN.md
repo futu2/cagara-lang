@@ -650,8 +650,9 @@ pair is an error, because the sort key is neither sortable under `DISTINCT` nor
 safe to carry into it.
 
 **Lists are values.** `arrayAgg` collects a group's values into one (`xs : list int`), `[1, 2, 3]`
-is a list literal, and `<>` concatenates two — the same combining operator the strings use. They
-need a dialect with an array type (PostgreSQL, DuckDB); one without refuses the query.
+is a list literal, `<>` concatenates two — the same combining operator the strings use — and
+`listLength`/`listContains` measure and search one. They need a dialect with an array type
+(PostgreSQL, DuckDB); one without refuses the query.
 
 `asc` / `desc` take an expression, not another sort key: `asc (desc .x)` is a
 type error. A key without a direction is one too: `order [.a]` is refused with

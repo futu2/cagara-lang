@@ -2,31 +2,15 @@
 
 ## Unreleased
 
-- `list` is a column type. `arrayAgg` collects a group's values into one
-  (`agg { k = group .id, xs = arrayAgg .n }` is `xs : list int`), `[1, 2, 3]`
-  is a list literal in any expression position, and `<>` gained a third
-  instance that concatenates two lists — the same combining operation the
-  strings use. The SQL is the target's: `ARRAY[…]` / `ARRAY_AGG` / `||` on
-  PostgreSQL, `list_value(…)` / `list(…)` / `list_concat(…)` on DuckDB. A
-  dialect with no array type (SQLite, MySQL, T-SQL, the warehouses) refuses the
-  query at compile time and says why, rather than writing the list as JSON text
-  and changing the type without saying so.
+## 0.4.1 — 2026-11-13
 
-- An expression that reads no row is a value. `year currentDate` is an `int`
-  and `truncYear currentDate` is a `date`, while `year .d` still reads the
-  column and takes its type from the row. One signature per function is enough —
-  a row expression whose row is still unknown is read as its value wherever a
-  scalar is expected — so the eighteen `string -> string`-style value twins are
-  gone from the prelude, along with the ambiguity they caused: beside
-  `expr r date -> expr r date`, a `date -> date` twin tied whenever a column's
-  type was not yet known, and only the row can say whether `.d` is a `date` or a
-  `timestamp`. A column reference is not affected (`x : int = .a` is still an
-  error: it puts a row into the expression), and neither is an aggregate (its
-  phase says it is a row computation).
-
-## Unreleased
-
-Two behaviour changes and one that the first cut of this release did not have: a join whose inputs share a column name warns instead of failing, every sort key says its direction, and `<>` is the combining operator rather than a second spelling of `++`.
+This release changes the language in four places and adds one type. A join whose
+inputs share a column name warns instead of failing; a sort key must say `asc` or
+`desc`; `<>` is the combining operator with `maybe` and `list` instances rather
+than a second spelling of `++`; and an expression that reads no row is a value,
+so `year currentDate` is an `int` and the eighteen hand-written value twins are
+gone. `list` becomes a column type, with `arrayAgg`, list literals and `<>` on
+lists, spelled by whichever dialect can hold one.
 
 - A join whose inputs share a column name is a **warning**, not an error. The
   merged row keeps the left value — which is what its `merge r s` type says — so
@@ -69,6 +53,28 @@ Two behaviour changes and one that the first cut of this release did not have: a
   position, including a partition. A list now keeps the form of its first
   element, and the position that wants keys is the one that reports the missing
   direction.
+
+- `list` is a column type. `arrayAgg` collects a group's values into one
+  (`agg { k = group .id, xs = arrayAgg .n }` is `xs : list int`), `[1, 2, 3]`
+  is a list literal in any expression position, and `<>` gained a third
+  instance that concatenates two lists — the same combining operation the
+  strings use. The SQL is the target's: `ARRAY[…]` / `ARRAY_AGG` / `||` on
+  PostgreSQL, `list_value(…)` / `list(…)` / `list_concat(…)` on DuckDB. A
+  dialect with no array type (SQLite, MySQL, T-SQL, the warehouses) refuses the
+  query at compile time and says why, rather than writing the list as JSON text
+  and changing the type without saying so.
+
+- An expression that reads no row is a value. `year currentDate` is an `int`
+  and `truncYear currentDate` is a `date`, while `year .d` still reads the
+  column and takes its type from the row. One signature per function is enough —
+  a row expression whose row is still unknown is read as its value wherever a
+  scalar is expected — so the eighteen `string -> string`-style value twins are
+  gone from the prelude, along with the ambiguity they caused: beside
+  `expr r date -> expr r date`, a `date -> date` twin tied whenever a column's
+  type was not yet known, and only the row can say whether `.d` is a `date` or a
+  `timestamp`. A column reference is not affected (`x : int = .a` is still an
+  error: it puts a row into the expression), and neither is an aggregate (its
+  phase says it is a row computation).
 
 ## 0.4.0 — 2026-11-12
 

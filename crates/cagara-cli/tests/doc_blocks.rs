@@ -289,3 +289,36 @@ fn every_name_in_the_catalog_exists_in_the_prelude() {
         "CAGARA.md catalog names that the prelude does not define: {missing:?}"
     );
 }
+
+/// The toolchain the build is pinned to, and the one every workflow installs,
+/// are the same version.
+///
+/// `rust-toolchain.toml` pins a version rather than `stable` because a new
+/// stable can ship a lint the code has never had to satisfy: `cargo clippy`
+/// passed locally on 1.99.1 and failed on CI's 1.100.0, which added a
+/// `needless_range_loop` case. A pinned file only helps if the workflows
+/// install *that* version — a workflow step that installs a toolchain cannot
+/// read the file itself, so it names the version, and this keeps the two from
+/// drifting apart.
+#[test]
+fn the_toolchain_pin_agrees_with_every_workflow() {
+    let root = repo_root();
+    let pin = read(&root.join("rust-toolchain.toml"));
+    let pin = pin
+        .lines()
+        .find_map(|l| l.strip_prefix("channel = \""))
+        .and_then(|l| l.strip_suffix('"'))
+        .expect("rust-toolchain.toml names a channel");
+    assert_ne!(pin, "stable", "the toolchain must be pinned to a version");
+    for workflow in ["ci.yml", "release.yml"] {
+        let text = read(&root.join(".github/workflows").join(workflow));
+        assert!(
+            text.contains(&format!("toolchain: \"{pin}\"")),
+            "{workflow} does not install toolchain {pin}, which rust-toolchain.toml pins"
+        );
+        assert!(
+            !text.contains("dtolnay/rust-toolchain@stable"),
+            "{workflow} still asks for `stable`, which ignores the pin"
+        );
+    }
+}

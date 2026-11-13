@@ -1,4 +1,14 @@
 [toolchain]
-channel = "stable"
+# Pinned, not `stable`. CI fails the moment a new stable ships a lint the code
+# did not have to satisfy, and a local `cargo clippy` on a different stable then
+# passes while CI fails — which is exactly what happened in 1.100.0
+# (`needless_range_loop` grew a case). Bumping this is a commit that the whole
+# workspace is checked against, not something that arrives overnight.
+#
+# The two workflows name the same version (`grep -n 1\.100\.0 .github/workflows`)
+# because a workflow step that installs a *toolchain* cannot read this file, and
+# the release builds must install their cross-compilation targets for the same
+# version this file names.
+channel = "1.100.0"
 components = ["clippy", "rustfmt"]
 profile = "minimal"

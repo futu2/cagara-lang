@@ -76,6 +76,12 @@ source:
 cargo build --release    # -> target/release/cagara
 ```
 
+The Rust toolchain is pinned in `rust-toolchain.toml`, so a build uses the same
+compiler CI does — a locally installed `cargo` on a different `stable` can pass
+`cargo clippy` on code CI rejects, which is what a `stable` channel does the day
+a new lint ships. `cargo test` runs the differential suite on SQLite, DuckDB and
+PostgreSQL when those are installed and skips the ones that are not.
+
 ## Usage
 
 ```sh

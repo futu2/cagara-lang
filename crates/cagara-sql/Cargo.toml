@@ -7,6 +7,6 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-sqlglot-rust = "=0.10.30"
+sqlglot-rust.workspace = true
 cagara-hir = { path = "../cagara-hir" }
 

@@ -70,8 +70,11 @@ jobs:
             vsix: win32-arm64
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          # Keep in sync with `rust-toolchain.toml`: the targets below are
+          # installed for *this* version, which is the one the build uses.
+          toolchain: "1.100.0"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:

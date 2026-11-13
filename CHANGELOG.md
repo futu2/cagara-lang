@@ -63,6 +63,12 @@ lists, spelled by whichever dialect can hold one.
   (sum .x))` is `SUM(DISTINCT x) FILTER (WHERE p)`. A `filtered` aggregate used as a window keeps
   the `CASE` spelling, because the window template has no place for the clause.
 
+- The Rust toolchain is pinned (`rust-toolchain.toml`) and the workflows install that exact
+  version. CI failed on 1.100.0 while a local `cargo clippy` on 1.99.1 passed: the new stable extended
+  `needless_range_loop` to a test's index loop. A `stable` channel means a new lint can arrive between
+  a commit and its push, so the pin is a commit here instead — with a test that the workflows install
+  the version the file names.
+
 - A filter after `agg` is the aggregate's `HAVING`, not an outer `WHERE` over a derived table:
   `agg { u = group .user_id, n = count } & where (.n > 5)` is one statement with
   `GROUP BY user_id HAVING COUNT(*) > 5`. The predicate's columns are written as the expressions

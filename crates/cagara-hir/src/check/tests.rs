@@ -2852,8 +2852,8 @@ fn a_typed_node_answers_by_the_span_it_was_filed_under() {
     let (mut typed, mut untyped) = (0usize, 0usize);
     for (what, ws) in &programs {
         let tc = check(ws);
-        for m in 0..ws.modules.len() {
-            for i in 0..ws.modules[m].module.defs.len() {
+        for (m, module) in ws.modules.iter().enumerate() {
+            for i in 0..module.module.defs.len() {
                 let Some(tree) = tc.typed_body(m, i) else {
                     continue;
                 };

@@ -9,8 +9,13 @@ this page tracks the remaining boundaries and language work.
 - The compile-time normalizer and relational arena are the only production query
   path. The former typed lowering adapter and its route differential have been
   removed after the corpus reached agreement.
-- Some joins need derived tables because parenthesized joins are not yet a
-  first-class `Rel` shape.
+- A join chained on the left (`a & innerJoin b … & innerJoin c …`, which is what
+  a pipeline writes) lowers to one `FROM` chain, with no derived table. A join
+  *nested on the right* (`a & innerJoin (b & innerJoin c …) …`) puts its right
+  input behind a derived table, because SQL has no parenthesized-join node in the
+  AST this backend builds: `a JOIN (b JOIN c)` is only expressible as a subquery.
+  That is a projection away from the parenthesized form, and it is correct SQL,
+  so it stays until an AST node exists for it.
 - A filter after an aggregate is `HAVING`; a filter over a window, a `distinct`
   or a `limit` still wraps a derived table, because those run after grouping.
 - Aggregates are values, modified by three combinators (`filtered`,

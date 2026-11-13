@@ -42,6 +42,14 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
 
 ## Next steps
 
+0. A diagnostic that knows how to fix itself (the join warning's rename, a
+   `maybe` used where a value is needed) carries no span for the *operand* it
+   would rewrite, so the language server offers quick fixes only for the two
+   rules whose range is already in the message (`asc`/`desc`, a "did you mean").
+   The missing piece is a suggestion on the diagnostic: the checker records the
+   span and the edit, the server applies it. Without it, an edit would be a
+   guess.
+
 1. Separate relational rewrites from SQL emission. A `Rel -> Rel` pass can fuse
    stages or choose derived tables while keeping dialect rules in the backend.
 2. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`

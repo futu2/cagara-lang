@@ -808,7 +808,9 @@ main =
   & distinct
 ```
 
-- `order` takes a list of `asc`/`desc` keys; keys are expressions over the current row.
+- `order` takes a list of `asc`/`desc` keys; keys are expressions over the current row. Every key
+  says its direction — there is no bare-key-means-ascending form, so `order [.a]` is an error and
+  `order [asc .a]` is the only way to say it.
 - A second `order` sorts rows that are already sorted, so its keys lead and the earlier ones become
   tiebreakers: `order [asc .a] & order [desc .id]` is `ORDER BY id DESC, a`.
 - NULLs sort **last** in both directions; this is fixed by the language.
@@ -1871,7 +1873,8 @@ Run this in order before returning a file.
 9. **Joins:** predicate uses `.<` and `.>`; both columns exist on the correct sides; output
    name/shared-column rule understood.
 10. **Sets:** operands have identical rows (names, order, types).
-11. **Lists:** only sort keys, partition keys, or `inList`; homogeneous.
+11. **Lists:** only sort keys (each with `asc`/`desc`), partition keys (no direction), or `inList`;
+    homogeneous.
 12. **Conditionals:** `case` ends with `true => value`; arms share a type and phase; conditions are
     non-null `bool`.
 13. **Names:** every function is in §7; no invented functions or SQL keywords.

@@ -624,8 +624,8 @@ expression.
 adults = users & where (.age >= 18 && .active)
 ```
 
-`order` sorts. Sort keys are written with `asc` or `desc`, and take an
-expression rather than just a column:
+`order` sorts. Every sort key is written with `asc` or `desc` — there is no
+bare-key form — and takes an expression rather than just a column:
 
 ```haskell
 ranked = orders & order [desc .amount, asc .id]
@@ -649,7 +649,9 @@ pair is an error, because the sort key is neither sortable under `DISTINCT` nor
 safe to carry into it.
 
 `asc` / `desc` take an expression, not another sort key: `asc (desc .x)` is a
-type error.
+type error. A key without a direction is one too: `order [.a]` is refused with
+"a sort key must say its direction". A window `partition` is the one key list
+that has no direction to give, so its keys are written without `asc`/`desc`.
 
 ### How `where` positions affect the SQL
 
@@ -1096,7 +1098,7 @@ bad1 = orders & where ((rowNumber {order = [desc .amount]}) <= 3)
 # this argument contains a window function; windows cannot nest
 # (compute it in an earlier `select` stage)
 
-bad2 = orders & order [rowNumber {}]
+bad2 = orders & order [asc (rowNumber {})]
 # sort and partition keys must be plain column expressions;
 # compute aggregates or windows in an earlier stage
 

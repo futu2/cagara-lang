@@ -264,7 +264,7 @@ fn window_then_filter_wraps() {
 #[test]
 fn running_total_frame() {
     let s = sql(
-        "q = orders & select { id = .id, running = over { partition = [.user_id], order = [.created_at], frame = runningFrame } (sum .amount) }\n",
+        "q = orders & select { id = .id, running = over { partition = [.user_id], order = [asc .created_at], frame = runningFrame } (sum .amount) }\n",
         "q",
     );
     assert!(
@@ -860,7 +860,7 @@ fn errors() {
     )
     .contains("belong in `agg`"));
     let w = error(
-        "q = users & where (rowNumber { order = [.id] } <= 3)\n",
+        "q = users & where (rowNumber { order = [asc .id] } <= 3)\n",
         "q",
     );
     assert!(w.contains("window"), "{w}");
@@ -2552,18 +2552,27 @@ fn an_overlapping_join_reshapes_the_operand() {
 /// Writing `asc .x` says the same thing; `fmt --canonical` (not built yet)
 /// would drop it.
 #[test]
-fn a_bare_order_key_is_ascending() {
+fn an_order_key_must_say_its_direction() {
+    // `order [.a]` used to be read as ascending, which made a missing `asc`
+    // indistinguishable from a deliberate one. A key now says `asc` or `desc`,
+    // and the diagnostic says so.
+    let e = error("q = users & order [.id]\n", "q");
+    assert!(e.contains("must say its direction"), "{e}");
+    assert!(e.contains("asc <expr>` or `desc <expr>"), "{e}");
+    // The same rule inside a window specification, which takes an order list too.
+    let e = error(
+        "q = users & select { r = rowNumber { order = [.id] } }\n",
+        "q",
+    );
+    assert!(e.contains("must say its direction"), "{e}");
+    // Both spellings are keys, and both lower to `ORDER BY … NULLS LAST`.
     let src = "t : query { a = int, b = string } = table \"s\" \"t\"\n\
-               q = t & order [.a, desc .b]\n";
+               q = t & order [asc .a, desc .b]\n";
     let s = sql(src, "q");
     assert!(
         s.contains("ORDER BY a NULLS LAST, b DESC NULLS LAST"),
         "{s}"
     );
-    // The explicit spelling lowers to the same SQL.
-    let with_asc = "t2 : query { a = int, b = string } = table \"s\" \"t\"\n\
-                    r = t2 & order [asc .a, desc .b]\n";
-    assert_eq!(sql(with_asc, "r"), s);
 }
 
 /// An aggregate is a value, and three combinators modify one.
@@ -2734,7 +2743,7 @@ fn the_six_wrong_number_bugs_stay_fixed() {
     let s = sql(
         &format!(
             "{schema}q = orders & select {{ id = .id, total = over {{ partition = [.user_id], \
-             order = [.id] }} (sum .amount) }}\n"
+             order = [asc .id] }} (sum .amount) }}\n"
         ),
         "q",
     );

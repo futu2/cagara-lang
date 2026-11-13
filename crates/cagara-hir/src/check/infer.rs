@@ -1960,13 +1960,30 @@ impl<'w> Checker<'w> {
             // An empty list has no element to go on; it fits any.
             return Ok(list(self.fresh()));
         };
-        // A list of column expressions is a list of sort / partition
-        // keys, so `[asc .x, .y]` has one element type.
+        // A list of column expressions keeps the form its first element has:
+        // `[.a]` is a list of expressions and `[asc .a]` is a list of sort
+        // keys. It used to be "a list of keys" whenever the elements were
+        // column expressions, which is what made a bare key mean ascending —
+        // in *every* position, including a partition, where direction is not a
+        // thing. Now the position decides: `order` wants keys and reports a
+        // missing `asc`, `partition` wants expressions and takes either.
         let elem = match self.resolve(first) {
-            Ty::Con("expr" | "sortkey", _) => sortkey(self.fresh()),
+            Ty::Con("expr" | "sortkey", _) => self.resolve(first),
             _ => first.clone(),
         };
         for (t, s) in &ts {
+            // A direction marker inside a list whose first element was bare is
+            // ignored: `partition = [.a, desc .b]` is a partition either way,
+            // because a partition has no direction. Only a list *position*
+            // does this — `asc (desc .x)` stays an error, which is why the rule
+            // is here and not in `coerce`.
+            if let (Ty::Con("expr", none), Ty::Con("sortkey", ka)) =
+                (self.resolve(&elem), self.resolve(t))
+            {
+                self.unify(&ka[0], &none[1]).map_err(at(*s))?;
+                self.key_phase(&none[0]).map_err(at(*s))?;
+                continue;
+            }
             self.coerce(t, &elem).map_err(at(*s))?;
         }
         Ok(list(elem))
@@ -2175,10 +2192,18 @@ impl<'w> Checker<'w> {
             {
                 self.lift(s, &e)
             }
-            (Ty::Con("expr", ea), Ty::Con("sortkey", ka)) => {
-                let (p, r, want) = (ea[0].clone(), ea[1].clone(), ka[0].clone());
-                self.key_phase(&p)?;
-                self.unify(&r, &want)
+            // A sort key must say its direction. This used to accept a bare
+            // expression and read it as ascending, which made `order [.a]` and
+            // `order [asc .a]` two spellings of one thing — and left the reader
+            // guessing whether a missing `asc` was deliberate or forgotten.
+            // The coercion still runs, so the message can name the fix.
+            (Ty::Con("expr", ea), Ty::Con("sortkey", _)) => {
+                self.key_phase(&ea[0].clone())?;
+                Err(
+                    "a sort key must say its direction: write `asc <expr>` or `desc <expr>` — \
+                     `order [asc .a, desc .b]`"
+                        .to_string(),
+                )
             }
             (Ty::Row(..) | Ty::Empty, Ty::Con("winspec", w)) => {
                 let r = w[0].clone();

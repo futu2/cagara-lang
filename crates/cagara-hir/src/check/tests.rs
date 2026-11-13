@@ -531,7 +531,7 @@ fn phase_errors() {
     assert!(err("q = users & where (count >= 1)\n", "q").contains("aggregate"));
     assert!(err("q = users & select { n = count }\n", "q").contains("belong in `agg`"));
     assert!(err(
-        "q = users & where (rowNumber { order = [.id] } <= 3)\n",
+        "q = users & where (rowNumber { order = [asc .id] } <= 3)\n",
         "q"
     )
     .contains("window"));

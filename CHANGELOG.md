@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- A sort key must say its direction. `order [.a]` used to mean ascending, which
+  made a missing `asc` indistinguishable from a forgotten one and gave one
+  meaning two spellings; it is now an error, and `asc`/`desc` are the only way
+  to write a key. A window `partition` is unaffected — it has no direction to
+  give, and its keys are written bare (a direction marker there is still
+  accepted and ignored). `asc (desc .x)` remains an error.
+
+  This needed the list rule to stop deciding: a list of column expressions used
+  to become a list of *sort keys*, so a bare key meant ascending in every
+  position, including a partition. A list now keeps the form of its first
+  element, and the position that wants keys is the one that reports the missing
+  direction.
+
 ## Unreleased
 
 - A join whose inputs share a column name is a **warning**, not an error. The

@@ -567,7 +567,7 @@ impl Lowerer {
             }
         }
         // A second `order` sorts rows that are already sorted, so its own keys
-        // lead and the earlier ones become tiebreakers: `order [a] & order [b]`
+        // lead and the earlier ones become tiebreakers: `order [asc a] & order [asc b]`
         // is `ORDER BY b, a`. Replacing them instead made the first `order`
         // silently dead — the same shape as `limit` and `offset` disagreeing
         // about which one runs first.

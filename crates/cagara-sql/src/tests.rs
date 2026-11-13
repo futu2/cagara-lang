@@ -2648,6 +2648,21 @@ fn an_aggregate_takes_a_filter_a_distinct_or_a_window() {
     );
 }
 
+/// The padding helpers put their arguments where SQL does.
+///
+/// `lpad n fill s` is documented as `LPAD(s, n, fill)`, and the template had the
+/// fill and the string swapped: `lpad 3 "0" .s` emitted `LPAD('0', 3, s)`, which
+/// pads the *fill* to the width with copies of `s` — `077` for `s = '7'`, where
+/// the answer is `007`. Silently wrong rather than rejected, so it has a test.
+#[test]
+fn the_padding_helpers_pass_their_arguments_in_sql_order() {
+    let src = "t : query { s = string } = table \"s\" \"t\"\n\
+               q = t & select { l = lpad 3 \"0\" .s, r = rpad 3 \"0\" .s }\n";
+    let s = sql(src, "q");
+    assert!(s.contains("LPAD(s, 3, '0') AS l"), "{s}");
+    assert!(s.contains("RPAD(s, 3, '0') AS r"), "{s}");
+}
+
 /// A one-argument function works over a value as well as over a column, and the
 /// two uses emit the same SQL.
 ///

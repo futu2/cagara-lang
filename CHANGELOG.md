@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `lpad`/`rpad` pass their arguments to SQL in the right order. The helpers are `lpad n fill s` —
+  `LPAD(s, n, fill)` — but the template read `LPAD($2, $1, $3)`, which pads the *fill* to the width
+  with copies of the string: `lpad 3 "0" .s` emitted `LPAD('0', 3, s)`, giving `077` for `s = '7'`
+  where the answer is `007`. Wrong quietly rather than rejected, so it now has a test and a
+  real-engine check.
+
 ## 0.4.1 — 2026-11-13
 
 This release changes the language in four places and adds one type. A join whose

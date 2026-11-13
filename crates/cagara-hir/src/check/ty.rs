@@ -878,10 +878,11 @@ pub(crate) struct Checker<'w> {
 
 pub(crate) fn missing(l: &str, have: &[(String, Ty)]) -> String {
     let avail: Vec<&str> = have.iter().map(|(k, _)| k.as_str()).collect();
+    let hint = crate::suggest::did_you_mean(l, avail.iter().copied());
     if avail.is_empty() {
-        format!("no column `{l}`")
+        format!("no column `{l}`{hint}")
     } else {
-        format!("no column `{l}`; available: {}", avail.join(", "))
+        format!("no column `{l}`; available: {}{hint}", avail.join(", "))
     }
 }
 

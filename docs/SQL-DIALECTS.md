@@ -37,7 +37,7 @@ the backend spells both the function and the format per family —
 
 | family | parse | format | format style |
 |---|---|---|---|
-| PostgreSQL, ANSI, Snowflake | `TO_DATE(s, fmt)` | `TO_CHAR(d, fmt)` | `YYYY MM DD HH24 MI SS` |
+| PostgreSQL, ANSI, Snowflake | `TO_DATE(s, fmt)` / `TO_TIMESTAMP(s, fmt)` | `TO_CHAR(d, fmt)` | `YYYY MM DD HH24 MI SS` |
 | DuckDB, BigQuery | `STRPTIME` / `PARSE_DATE` | `STRFTIME` / `FORMAT_DATE` | `%Y %m %d %H %M %S` |
 | Trino, MySQL | `DATE_PARSE` / `STR_TO_DATE` | `DATE_FORMAT` | `%Y %m %d %H %i %s` |
 | Spark | `TO_DATE(s, fmt)` | `DATE_FORMAT` | `yyyy MM dd HH mm ss` |
@@ -113,10 +113,11 @@ unsafe:
     turning every other unparseable value into a silent `0`. Emitting the node
     as-is lets the engine reject it loudly, which is the honest outcome.
   - **PostgreSQL** has no `TRY_CAST` either — `TRY_CAST(x AS DATE)` is a syntax
-    error there, measured on PGlite, not a NULL. The spelling is `CASE WHEN
-    pg_input_is_valid(x, 'date') THEN CAST(x AS DATE) END` (PostgreSQL 16+),
-    which the backend does not emit; a `try*` cast on PostgreSQL needs a `sql`
-    template of your own, or a `to*` cast when the input is known to be shaped.
+    error there, measured on PGlite, not a NULL — so a `try*` cast on
+    `--dialect postgres` is a **compile error** that names the two ways out:
+    `CASE WHEN pg_input_is_valid(x, 'date') THEN CAST(x AS DATE) END`
+    (PostgreSQL 16+), or a `to*` cast when the input is known to be shaped. The
+    generic `ansi` target keeps `TRY_CAST` as the loose spelling.
 
 So the prelude names a `CAGARA_*` function and
 [`crates/cagara-sql/src/intrinsics.rs`](../crates/cagara-sql/src/intrinsics.rs)

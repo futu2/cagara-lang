@@ -12,6 +12,7 @@ pub mod workspace;
 
 mod elaborate;
 mod normalize;
+pub(crate) mod suggest;
 pub use check::{check, check_reachable, probe_fields, TypeCheck};
 pub use checked::{CheckedExpr, ExprKind};
 pub use compile::{

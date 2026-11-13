@@ -629,11 +629,21 @@ sized   = t & select { n = listLength [1, 2, 3] }            # 3
 found   = t & select { y = listContains [1, 2, 3] 2 }        # true
 back    = t & agg { xs = arrayAgg .n } & unnest .xs          # the rows again…
             & select { n = .value }                          # …as `value`
+lifted  = t & agg { k = group .id, xs = arrayAgg .n }
+            & update { maybe_xs = just .xs }                 # stand-in for a nullable column
+            & select { k = .k, n = lift .maybe_xs listLength }   # a maybe list, measured
 ```
+
+`lift x f` applies `f` to the value inside a `maybe`: `nothing` stays `nothing`, `just v` becomes
+`just (f v)` (`CASE WHEN x IS NULL THEN NULL ELSE f(x) END`). It is how a function over values is
+used on a nullable column without a nullable overload of every function — `lift .d (parseDate
+"%Y%m%d")` is a `maybe date` from a `maybe string`. `x` appears twice in the SQL, so bind an
+expensive expression with `let` first.
 
 `listLength` and `listContains` measure and search a list; `unnest` expands each row once per
 element, keeping the other columns (the SQL is a `CROSS JOIN LATERAL`, so they repeat) and naming the
-element `value`. `listContains` takes a list *value* — a column or an `arrayAgg` result — where `in`
+element `value`. That name is fixed, so a row that already has a `value` is refused: two columns of
+the same name would make the second unreachable. `listContains` takes a list *value* — a column or an `arrayAgg` result — where `in`
 takes a literal.
 
 The SQL follows the dialect: `ARRAY[1, 2, 3]`, `ARRAY_AGG(n)` and `a || b` on PostgreSQL;
@@ -1321,7 +1331,9 @@ yesterday        : expr r date
 toDate           : expr r timestamp|string -> expr r date
 toTimestamp      : expr r date|string -> expr r timestamp
 parseDate        : string -> expr r string -> expr r date
+parseTimestamp   : string -> expr r string -> expr r timestamp
 formatDate       : string -> expr r date -> expr r string
+formatTimestamp  : string -> expr r timestamp -> expr r string
 
 addDays addWeeks addMonths addQuarters addYears
                  : expr r int -> expr r date -> expr r date
@@ -1340,8 +1352,8 @@ hour minute      : expr r timestamp -> expr r int
 daysBetween      : expr r date -> expr r date -> expr r int
 ```
 
-- `parseDate "%Y%m%d" s` and `formatDate "%Y-%m" d` take a **format**, written once for
-  every dialect: the language reads `%Y %m %d %H %M %S` and `%%`, and the backend translates it
+- `parseDate "%Y%m%d" s`, `parseTimestamp "%Y-%m-%d %H:%M:%S" s` and their `format*` inverses take a
+  **format**, written once for every dialect: the language reads `%Y %m %d %H %M %S` and `%%`, and the backend translates it
   (`YYYYMMDD` for PostgreSQL, `%Y%m%d` for MySQL, `yyyyMMdd` for Spark, …). The format must be a
   literal. SQLite and T-SQL can print by format but have no format parser, so `parseDate` is a
   compile error there — parse an ISO string with `toDate` instead.

@@ -194,8 +194,9 @@ fn finish_schema(
                     Side::Single => return blame(rules::needs_side(&n)),
                 };
                 if !cols.contains(&n) {
+                    let hint = crate::suggest::did_you_mean(&n, cols.iter().map(String::as_str));
                     return blame(format!(
-                        "the {what} join input has no column `{n}`; available: {}",
+                        "the {what} join input has no column `{n}`{hint}; available: {}",
                         cols.join(", ")
                     ));
                 }
@@ -274,7 +275,11 @@ fn merge(fs: &[(String, Expr)], cols: &[String]) -> Result<Vec<String>, String> 
 /// `input ~ { k : t | output }`; this is the validator's side of that fact.
 pub fn omit_columns(cols: &[String], key: &str) -> Result<Vec<String>, String> {
     if !cols.iter().any(|c| c == key) {
-        return Err(format!("no column `{key}`; available: {}", cols.join(", ")));
+        let hint = crate::suggest::did_you_mean(key, cols.iter().map(String::as_str));
+        return Err(format!(
+            "no column `{key}`{hint}; available: {}",
+            cols.join(", ")
+        ));
     }
     Ok(cols.iter().filter(|c| *c != key).cloned().collect())
 }
@@ -303,10 +308,11 @@ fn refs(e: &Expr, cols: &[String], ctx: &str) -> Result<(), String> {
     for (side, n) in e.columns() {
         match side {
             Side::Single if !cols.contains(&n) => {
+                let hint = crate::suggest::did_you_mean(&n, cols.iter().map(String::as_str));
                 return Err(format!(
-                    "no column `{n}` in the input of `{ctx}`; available: {}",
+                    "no column `{n}` in the input of `{ctx}`; available: {}{hint}",
                     cols.join(", ")
-                ))
+                ));
             }
             Side::Left | Side::Right => return Err(rules::JOIN_ONLY.into()),
             _ => {}

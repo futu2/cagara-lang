@@ -266,6 +266,21 @@ impl CheckedExpr {
         })
     }
 
+    /// The same expression seen at another type.
+    ///
+    /// `lift` uses it: the SQL is unchanged, and the expression is handed to the
+    /// caller's function as the non-null value that function expects. Sound only
+    /// because the wrapper lifts the result back into a `maybe` — the view never
+    /// escapes to a place where the `maybe` was load-bearing.
+    pub(crate) fn view_as(&self, ty: ScalarType) -> CheckedExpr {
+        CheckedExpr {
+            phase: self.phase,
+            ty,
+            node: self.node.clone(),
+            origin: self.origin,
+        }
+    }
+
     /// A window template: every argument and every window-spec expression must
     /// be row phase.
     pub fn win_template(
@@ -541,10 +556,19 @@ pub(crate) fn refs_columns(
         match side {
             Side::Single if !input.has(&n) => {
                 let avail = input.names().join(", ");
+                let hint =
+                    crate::suggest::did_you_mean(&n, input.names().iter().map(String::as_str));
+                // A bare column points at itself when it is the whole
+                // expression — that is the span a rename would rewrite.
+                let at = if matches!(e.node(), crate::checked::CheckedExprNode::Column { .. }) {
+                    e.origin()
+                } else {
+                    origin
+                };
                 return Err(Error::new(format!(
-                    "no column `{n}` in the input of `{ctx}`; available: {avail}"
+                    "no column `{n}` in the input of `{ctx}`; available: {avail}{hint}"
                 ))
-                .at(origin));
+                .at(at));
             }
             Side::Left | Side::Right => return Err(Error::new(rules::JOIN_ONLY).at(origin)),
             _ => {}

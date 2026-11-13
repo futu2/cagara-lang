@@ -337,8 +337,18 @@ impl Builder {
                             .at(origin),
                     );
                 };
-                // The output row is the input's plus the element, which is what
-                // the checker's `merge r { value = a }` promised.
+                // The element is added under `value`. A row that already has
+                // one cannot take another: the checker's `merge` keeps the left
+                // column, so the element would be unreachable while the SQL
+                // emitted two columns with the same name.
+                if row.has("value") {
+                    return Err(Error::new(
+                        "`unnest` adds a column named `value`, and this row already has one; \
+                         rename or drop it first — `select { previous = .value }` keeps it, \
+                         and `omit` with the key \"value\" drops it",
+                    )
+                    .at(origin));
+                }
                 let mut fs = row.columns().to_vec();
                 fs.push(("value".to_string(), (**elem).clone()));
                 let out = crate::core::RowType::new(fs);

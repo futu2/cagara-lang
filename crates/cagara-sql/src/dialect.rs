@@ -377,6 +377,29 @@ fn expr(e: Expr, to: Dialect) -> Result<Expr, String> {
     } else {
         e
     };
+    // PostgreSQL has no `TRY_CAST`: `TRY_CAST(x AS DATE)` is a syntax error
+    // there, not a NULL, and the server only finds out. The generic `ansi`
+    // target keeps the spelling (it is the loose one); a named target that
+    // rejects it says so at compile time.
+    if to == Dialect::Postgres {
+        let found = std::cell::Cell::new(false);
+        let e = transform_deep(e, &|e| {
+            if matches!(e, Expr::TryCast { .. }) {
+                found.set(true);
+            }
+            e
+        });
+        if found.get() {
+            return Err(
+                "PostgreSQL has no `TRY_CAST`, so a `try*` cast cannot be spelled there — the \
+                 server would reject the SQL rather than yield NULL. Write the guard yourself \
+                 (`CASE WHEN pg_input_is_valid(x, 'date') THEN CAST(x AS DATE) END`, PostgreSQL \
+                 16+), or use a `to*` cast when the input is known to be shaped"
+                    .to_string(),
+            );
+        }
+        return Ok(e);
+    }
     // `TO_CHAR`/`TO_TIMESTAMP` are what sqlglot emits for a format conversion,
     // but only PostgreSQL has them spelled that way among the targets here.
     // DuckDB and Trino say `STRFTIME`/`STRPTIME` and `DATE_FORMAT`/`DATE_PARSE`,

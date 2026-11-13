@@ -17,6 +17,8 @@ pub enum Prim {
     Where,
     /// `unnest xs`: the input rows, one per element of the list.
     Unnest,
+    /// `lift x f`: apply `f` to the value inside a `maybe`, keeping `nothing`.
+    Lift,
     Select,
     Update,
     Omit,
@@ -62,6 +64,7 @@ pub enum Prim {
 pub const PRIMS: &[(&str, Prim)] = &[
     ("__table", Prim::Table),
     ("__where", Prim::Where),
+    ("__lift", Prim::Lift),
     ("__unnest", Prim::Unnest),
     ("__select", Prim::Select),
     ("__update", Prim::Update),
@@ -147,7 +150,7 @@ impl Prim {
             UnboundedPreceding | UnboundedFollowing | CurrentRow => 0,
             Group | Asc | Desc | Preceding | Following => 1,
             Where | Unnest | Select | Update | Omit | AggStage | Order | Limit | Offset | Table
-            | Rows | Prefix | Suffix | Merge | MapValue => 2,
+            | Rows | Prefix | Suffix | Merge | MapValue | Lift => 2,
             Distinct => 1,
             In => 2,
             Join(_) => 3,

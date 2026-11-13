@@ -275,10 +275,19 @@ tryFloat : expr r string -> expr r (maybe float) = sql "CAGARA_TRY_FLOAT($1)"
 ## `tryDate` when the input may not be a date at all.
 parseDate : string -> expr r string -> expr r date = sql "CAGARA_PARSE_DATE($1, $2)"
 
+## `parseTimestamp "%Y-%m-%d %H:%M:%S" s` — the same, keeping the time of day.
+## `parseDate` drops it; this one is what a `%H`, `%M` or `%S` format wants.
+parseTimestamp : string -> expr r string -> expr r timestamp = sql "CAGARA_PARSE_TIMESTAMP($1, $2)"
+
 ## `formatDate "%Y-%m" d` — the inverse: a `date` printed by format, with the
 ## same vocabulary as `parseDate`. `toString` is the fixed ISO spelling and needs
 ## no format.
 formatDate : string -> expr r date -> expr r string = sql "CAGARA_FORMAT_DATE($1, $2)"
+
+## `formatTimestamp "%Y-%m-%d %H:%M" t` — a `timestamp` printed by format, with
+## the same vocabulary as the rest.
+formatTimestamp : string -> expr r timestamp -> expr r string =
+  sql "CAGARA_FORMAT_TIMESTAMP($1, $2)"
 
 ## `tryDate` parses a `string` as a `date`, NULL on failure.
 tryDate : expr r string -> expr r (maybe date) = sql "CAGARA_TRY_DATE($1)"

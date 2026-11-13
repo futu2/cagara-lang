@@ -1810,7 +1810,23 @@ impl<'w> Checker<'w> {
                     // `check` re-records a literal argument at the type it was
                     // lifted to (`18` in `.age >= 18` has the value type it was
                     // lifted to), so no special case is needed here.
-                    let checked = self.check(env, arg, &p)?;
+                    let checked = match self.check(env, arg, &p) {
+                        Ok(t) => t,
+                        Err(mut e) => {
+                            // `unnest .id` otherwise reads as a mismatch between
+                            // two `expr`s whose halves look swapped ("expected
+                            // `int`, found `list a`"), naming the wrong side and
+                            // the wrong thing. The operation is what is wrong,
+                            // so it says so.
+                            if self.callee_row_stage(f) == Some(RowStage::Unnest)
+                                && e.msg.contains("type mismatch")
+                            {
+                                e.msg = "`unnest` needs a list, and this is not one; the                                          element under `value` comes from a list"
+                                    .to_string();
+                            }
+                            return Err(e);
+                        }
+                    };
                     // A `sortkey` result is what says this argument is a *key*:
                     // `asc` and `desc` are the only producers, and they take an
                     // `expr`, which an aggregate and a window also are. Their
@@ -2181,7 +2197,11 @@ impl<'w> Checker<'w> {
             Some(Binding::Module(_)) => Err(format!(
                 "`{n}` is a module; refer to a definition as `{n}.name`"
             )),
-            None => Err(format!("unknown name `{n}`")),
+            None => {
+                let hint =
+                    crate::suggest::did_you_mean(n, self.env.scope.keys().map(String::as_str));
+                Err(format!("unknown name `{n}`{hint}"))
+            }
         }
     }
 
@@ -2465,6 +2485,16 @@ impl<'w> Checker<'w> {
                         query(Ty::Merge(Box::new(r), Box::new(extra))),
                     ),
                 )
+            }
+            Lift => {
+                // `expr r (maybe a) -> (expr r a -> expr r b) -> expr r (maybe b)`
+                let (a, b, r) = (self.fresh(), self.fresh(), self.fresh_row());
+                let x = expr(con("row"), r.clone(), Ty::Con("maybe", vec![a.clone()]));
+                let f = fun(
+                    expr(con("row"), r.clone(), a),
+                    expr(con("row"), r.clone(), b.clone()),
+                );
+                fun(x, fun(f, expr(con("row"), r, Ty::Con("maybe", vec![b]))))
             }
             Where => {
                 let (pred, r) = (self.fresh(), self.fresh_row());

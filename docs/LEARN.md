@@ -1361,7 +1361,7 @@ byId : expr { id = int | r } int -> query { id = int | r } -> query { id = int |
 `endsWith suffix s`
 
 **Dates and timestamps:** `currentDate` `yesterday` `now` `toDate` `toTimestamp` `parseDate`
-`formatDate` `toString`
+`parseTimestamp` `formatDate` `formatTimestamp` `toString`
 `addDays` `addWeeks` `addMonths` `addQuarters` `addYears` `addHours`
 `addMinutes` `addSeconds`; `truncYear` `truncQuarter` `truncMonth` `truncWeek`
 `truncDay` `truncHour` `truncMinute`; `year` `quarter` `month` `day`
@@ -1516,7 +1516,9 @@ literals widen to *either*, depending on what the surrounding context expects.
 | `daysBetween start end` | ✓ | — | `int` |
 | `toDate` / `toTimestamp` | converts | converts | see below |
 | `parseDate fmt s` | — | — | `date` (see below) |
+| `parseTimestamp fmt s` | — | — | `timestamp` (see below) |
 | `formatDate fmt d` | ✓ | — | `string` |
+| `formatTimestamp fmt t` | — | ✓ | `string` |
 | `toString` | ✓ | ✓ | `string` |
 
 The asymmetry is the point: a calendar day has no hour, and adding two hours to a
@@ -1630,10 +1632,29 @@ mean the month's *name* — a format the language does not define is a compile
 error rather than a different meaning on another target.
 
 `parseDate` raises on a value that is not a date, exactly as the target's own
-parser does. For input that may not be a date, use `tryDate` where the target has
-`TRY_CAST` (DuckDB, Trino, Snowflake, Spark, BigQuery) — PostgreSQL and SQLite do
-not, so there the choice is a `toDate` on known-good input or a `sql` template of
-your own.
+parser does. For input that may not be a date, `tryDate` needs `TRY_CAST`, which
+DuckDB, Trino, Snowflake, Spark and BigQuery have and **PostgreSQL and SQLite do
+not**: a `try*` cast is a compile error for PostgreSQL (the server would reject
+the SQL rather than yield NULL), so there the choice is a `to*` cast on
+known-good input or your own `CASE WHEN pg_input_is_valid(x, 'date') THEN …`
+(PostgreSQL 16+).
+
+#### `lift`: one way to feed a `maybe` to a function
+
+Every function above is written for a present value, and none has a nullable
+overload. `lift` is the one combinator that bridges the gap:
+
+```haskell
+t = orders & select {
+  .id,
+  packed = lift .packed_date (parseDate "%Y%m%d"),   # maybe string -> maybe date
+  size = lift .maybe_items listLength                # maybe (list int) -> maybe int
+}
+```
+
+`nothing` stays `nothing` and `just v` becomes `just (f v)`; the SQL is
+`CASE WHEN x IS NULL THEN NULL ELSE f(x) END`, so `f` never sees the NULL. `x`
+appears twice, so bind an expensive expression with `let` first.
 
 Note that `toString` on a `date` and on a `timestamp` both render the value's
 text form directly; wrapping one in the other first is only about *which* form

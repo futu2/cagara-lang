@@ -2648,6 +2648,81 @@ fn an_aggregate_takes_a_filter_a_distinct_or_a_window() {
     );
 }
 
+/// The timestamp half of the format pair, and the two targets that refuse a
+/// format parser or a `TRY_CAST`.
+#[test]
+fn a_timestamp_format_is_written_once_too() {
+    let src = "t : query { s = string, ts = timestamp } = table \"s\" \"t\"\n\
+               q = t & select { p = parseTimestamp \"%Y-%m-%d %H:%M:%S\" .s, f = formatTimestamp \"%Y-%m\" .ts }\n";
+    let pg = dialect(src, "q", "postgres").expect("postgres");
+    assert!(
+        pg.contains("TO_TIMESTAMP(s, 'YYYY-MM-DD HH24:MI:SS')"),
+        "{pg}"
+    );
+    let duck = dialect(src, "q", "duckdb").expect("duckdb");
+    assert!(duck.contains("STRPTIME(s, '%Y-%m-%d %H:%M:%S')"), "{duck}");
+    // No narrowing cast: the parser's own answer is the type.
+    assert!(!duck.contains("AS DATE"), "{duck}");
+    let bq = dialect(src, "q", "bigquery").expect("bigquery");
+    assert!(
+        bq.contains("PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', s)"),
+        "{bq}"
+    );
+    assert!(bq.contains("FORMAT_TIMESTAMP('%Y-%m', ts)"), "{bq}");
+
+    // BigQuery's `PARSE_DATE` reads date elements only, so a time of day is a
+    // compile error there rather than SQL the server rejects.
+    let src = "t : query { s = string } = table \"s\" \"t\"\n\
+               q = t & select { p = parseDate \"%Y-%m-%d %H\" .s }\n";
+    let e = dialect(src, "q", "bigquery").unwrap_err();
+    assert!(e.contains("reads only date elements"), "{e}");
+    // The date-only format still compiles there.
+    let src = "t : query { s = string } = table \"s\" \"t\"\n\
+               q = t & select { p = parseDate \"%Y-%m-%d\" .s }\n";
+    assert!(dialect(src, "q", "bigquery").is_ok());
+}
+
+/// PostgreSQL has no `TRY_CAST`, so a `try*` cast is refused for it instead of
+/// compiling into SQL the server rejects at run time.
+#[test]
+fn a_try_cast_is_refused_on_postgres() {
+    let src = "t : query { a = string } = table \"s\" \"t\"\n\
+               q = t & select { v = tryInt .a }\n";
+    let e = dialect(src, "q", "postgres").unwrap_err();
+    assert!(e.contains("PostgreSQL has no `TRY_CAST`"), "{e}");
+    assert!(e.contains("pg_input_is_valid"), "{e}");
+    // The generic target keeps the loose spelling; a target that has the
+    // clause emits it.
+    assert!(dialect(src, "q", "duckdb")
+        .expect("duckdb")
+        .contains("TRY_CAST(a AS BIGINT)"));
+}
+
+/// `lift` writes the NULL guard, and the function it takes is written once.
+#[test]
+fn lift_guards_the_null_and_keeps_the_function() {
+    let src = "t : query { d = maybe string, xs = maybe (list int) } = table \"s\" \"t\"\n\
+               q = t & select { p = lift .d (parseDate \"%Y%m%d\"), n = lift .xs listLength }\n";
+    let duck = dialect(src, "q", "duckdb").expect("duckdb");
+    assert!(
+        duck.contains("CASE WHEN d IS NULL THEN NULL ELSE CAST(STRPTIME(d, '%Y%m%d') AS DATE) END"),
+        "{duck}"
+    );
+    assert!(
+        duck.contains("CASE WHEN xs IS NULL THEN NULL ELSE len(xs) END"),
+        "{duck}"
+    );
+    let pg = dialect(src, "q", "postgres").expect("postgres");
+    assert!(
+        pg.contains("CASE WHEN d IS NULL THEN NULL ELSE TO_DATE(d, 'YYYYMMDD')::DATE END"),
+        "{pg}"
+    );
+    assert!(
+        pg.contains("CASE WHEN xs IS NULL THEN NULL ELSE cardinality(xs) END"),
+        "{pg}"
+    );
+}
+
 /// One `parseDate`/`formatDate`, every target's own spelling underneath.
 ///
 /// The language writes `%Y %m %d %H %M %S`; each family reads something else,
@@ -2691,10 +2766,7 @@ fn a_date_format_is_written_once_and_spelled_per_target() {
     // SQLite and T-SQL can print by format but not parse one; the refusal names
     // both, and prints the SQL of neither.
     let e = dialect(src, "q", "sqlite").unwrap_err();
-    assert!(
-        e.contains("`parseDate` needs a dialect with a format parser"),
-        "{e}"
-    );
+    assert!(e.contains("need a dialect with a format parser"), "{e}");
     // Formatting alone still compiles there.
     let src = "t : query { d = date } = table \"s\" \"t\"\n\
                q = t & select { f = formatDate \"%Y-%m\" .d }\n";

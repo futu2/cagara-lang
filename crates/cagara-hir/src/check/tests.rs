@@ -131,6 +131,69 @@ fn ty_err(src: &str, name: &str) -> Option<String> {
         .err()
 }
 
+/// `lift` turns a `maybe` argument into a `maybe` result, and the function it
+/// takes never sees the missing value.
+///
+/// This is why no function needs a nullable overload: one combinator says how a
+/// missing input is handled, and every unary expression function composes with
+/// it.
+#[test]
+fn lift_takes_a_missing_value_to_a_missing_result() {
+    let prelude = "d : query { id = int, s = maybe string, xs = maybe (list int) } = \
+                   table \"s\" \"d\"\n";
+    let src = format!(
+        "{prelude}\
+         q = d & select {{ p = lift .s (parseDate \"%Y%m%d\"), n = lift .xs listLength }}\n"
+    );
+    assert_eq!(ty(&src, "q"), "query { p = maybe date, n = maybe int }");
+    // The value is not a `maybe`, so there is nothing to lift.
+    let src = format!(
+        "{prelude}\
+         q = d & select {{ p = lift .id (parseDate \"%Y%m%d\") }}\n"
+    );
+    let e = ty_err(&src, "q").expect("a plain value has nothing to lift");
+    assert!(e.contains("maybe"), "{e}");
+}
+
+/// A name that is one edit from one in scope says which one; a name that is not
+/// close says nothing extra.
+#[test]
+fn an_unknown_name_says_which_name_it_meant() {
+    let e = err(
+        "t : query { s = string } = table \"s\" \"t\"\n\
+         q = t & select { x = uppper .s }\n",
+        "q",
+    );
+    assert!(
+        e.contains("unknown name `uppper`; did you mean `upper`?"),
+        "{e}"
+    );
+    let e = err(
+        "t : query { s = string } = table \"s\" \"t\"\n\
+         q = t & select { x = zzqq .s }\n",
+        "q",
+    );
+    assert!(!e.contains("did you mean"), "{e}");
+}
+
+/// A misspelled column names the column it probably meant — the message the
+/// language server turns into a rename.
+#[test]
+fn a_misspelled_column_names_the_column_it_meant() {
+    let e = err(
+        "t : query { amount = float, user_id = int } = table \"s\" \"t\"\n\
+         q = t & select { x = .amout }\n",
+        "q",
+    );
+    assert!(e.contains("did you mean `amount`"), "{e}");
+    let e = err(
+        "t : query { id = int } = table \"s\" \"t\"\n\
+         q = t & omit \"idd\"\n",
+        "q",
+    );
+    assert!(e.contains("did you mean `id`"), "{e}");
+}
+
 #[test]
 fn prelude_and_tables_check() {
     assert_eq!(

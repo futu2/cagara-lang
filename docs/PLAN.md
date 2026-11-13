@@ -42,16 +42,24 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
 
 ## Next steps
 
-0. A `maybe` used where a value is needed is still the one diagnostic without a
+0. `unnest .x` where `x` is not a list still reports a `type mismatch` whose
+   halves read swapped ("expected `int`, found `list a`"): the column's value
+   variable is bound to the parameter's list element before the table's row
+   arrives, so the conflict surfaces in the row unification rather than at the
+   argument. A message that names the operation needs the argument's value slot
+   checked before it is bound, which is the same deferral problem as item 0
+   below.
+
+1. A `maybe` used where a value is needed is still the one diagnostic without a
    quick fix. Its refusal is reported when the constraints run, and by then the
    failing argument's span is no longer in hand — so the fix needs `Cons` to
    carry the span of the argument it was posted for, the way `join_args` carries
    a join's. The suggestion channel itself exists (`Diag::suggestions`) and the
    join warning already uses it.
 
-1. Separate relational rewrites from SQL emission. A `Rel -> Rel` pass can fuse
+2. Separate relational rewrites from SQL emission. A `Rel -> Rel` pass can fuse
    stages or choose derived tables while keeping dialect rules in the backend.
-2. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
+3. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
    beyond SQLite, DuckDB and PostgreSQL (PGlite). Every shared case already runs
    under both lowerings (the default and `--optimize`); MySQL, T-SQL and the
    warehouses stay text-only because they need a server this repository does not

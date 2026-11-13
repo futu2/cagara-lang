@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- `lift x f` applies a function to the value inside a `maybe`, so a missing input has one way to be
+  handled instead of a nullable overload of every function: `lift .d (parseDate "%Y%m%d")` is a
+  `maybe date` from a `maybe string`, and it expands to `CASE WHEN x IS NULL THEN NULL ELSE f(x) END`.
+- `parseTimestamp` and `formatTimestamp` mirror `parseDate`/`formatDate` for the time of day.
+- `unnest` now refuses a row that already has a `value` column. It used to emit two columns of that
+  name while the type kept one, so the second list's element was unreachable and nothing said so.
+- An unknown name or a misspelled column says which name it probably meant (`did you mean \`upper\`?`),
+  which the language server turns into a rename. Join-side and `omit` diagnostics included.
+- A `try*` cast on `--dialect postgres` is a compile error: PostgreSQL has no `TRY_CAST`, so the
+  query used to compile into SQL the server rejected. The message names `pg_input_is_valid` (16+) and
+  the `to*` alternative. The generic `ansi` target keeps the loose spelling.
+- BigQuery's `PARSE_DATE` reads date elements only, so `parseDate` with a `%H`/`%M`/`%S` format is a
+  compile error there instead of SQL the server rejects; `parseTimestamp` is the function for that.
+
 - `parseDate "%Y%m%d" s` and `formatDate "%Y-%m" d` are one interface for every dialect. The format
   is written once, in strftime's vocabulary (`%Y %m %d %H %M %S`, `%%`), and the backend translates
   both the function and the format: PostgreSQL and Snowflake `TO_DATE`/`TO_CHAR` with `YYYYMMDD`,

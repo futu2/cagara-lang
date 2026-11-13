@@ -74,7 +74,13 @@ fn node(e: Expr, f: Fam) -> Result<Expr, String> {
     // one vocabulary and each target spells in its own; that translation is
     // fallible (an unsupported specifier, a format that is not a literal, a
     // target with no parser), so it runs before the infallible table below.
-    if matches!(upper.as_str(), "CAGARA_PARSE_DATE" | "CAGARA_FORMAT_DATE") {
+    if matches!(
+        upper.as_str(),
+        "CAGARA_PARSE_DATE"
+            | "CAGARA_PARSE_TIMESTAMP"
+            | "CAGARA_FORMAT_DATE"
+            | "CAGARA_FORMAT_TIMESTAMP"
+    ) {
         return parse_or_format(&upper, &args, f).map(atomic);
     }
     let lowered = if over.is_none() {
@@ -168,6 +174,23 @@ fn translate_format(fmt: &str, style: FmtStyle) -> Result<String, String> {
     Ok(out)
 }
 
+/// Does a translated format name a time of day? Only BigQuery's `PARSE_DATE`
+/// cares, and it is the one that would fail on the server.
+fn has_time_element(fmt: &str) -> bool {
+    let (mut h, mut m, mut sec) = (0usize, 0usize, 0usize);
+    for (i, b) in fmt.bytes().enumerate() {
+        if b == b'%' {
+            match fmt.as_bytes().get(i + 1) {
+                Some(b'H') => h += 1,
+                Some(b'M') => m += 1,
+                Some(b'S') => sec += 1,
+                _ => {}
+            }
+        }
+    }
+    h + m + sec > 0
+}
+
 /// The style a family's parser and formatter read.
 fn fmt_style(f: Fam) -> FmtStyle {
     match f {
@@ -188,6 +211,12 @@ fn fmt_style(f: Fam) -> FmtStyle {
 /// literal: it is translated at compile time, and a runtime string could not
 /// be.
 fn parse_or_format(name: &str, args: &[Expr], f: Fam) -> Result<Expr, String> {
+    let (parse, timestamp) = match name {
+        "CAGARA_PARSE_DATE" => (true, false),
+        "CAGARA_PARSE_TIMESTAMP" => (true, true),
+        "CAGARA_FORMAT_DATE" => (false, false),
+        _ => (false, true),
+    };
     let [fmt, value] = args else {
         return Err(format!(
             "unknown SQL intrinsic `{name}` with {} argument(s)",
@@ -198,8 +227,14 @@ fn parse_or_format(name: &str, args: &[Expr], f: Fam) -> Result<Expr, String> {
         return Err(format!(
             "`{}` takes a literal format string — `\"%Y%m%d\"`, not a column or an \
              expression — because it is translated for the target at compile time",
-            if name == "CAGARA_PARSE_DATE" {
-                "parseDate"
+            if parse {
+                if timestamp {
+                    "parseTimestamp"
+                } else {
+                    "parseDate"
+                }
+            } else if timestamp {
+                "formatTimestamp"
             } else {
                 "formatDate"
             }
@@ -208,28 +243,58 @@ fn parse_or_format(name: &str, args: &[Expr], f: Fam) -> Result<Expr, String> {
     let style = fmt_style(f);
     let fmt = translate_format(fmt, style)?;
     let f_lit = || Expr::StringLiteral(fmt.clone());
-    if name == "CAGARA_PARSE_DATE" {
+    // BigQuery's `PARSE_DATE` reads date elements only: a time element belongs
+    // to `PARSE_TIMESTAMP`, and BigQuery rejects the call rather than dropping
+    // the time.
+    if parse && !timestamp && f == Fam::BigQuery && has_time_element(&fmt) {
+        return Err(
+            "BigQuery's `PARSE_DATE` reads only date elements, and this format has a \
+                    time of day; use `parseTimestamp` for `%H`, `%M` or `%S`"
+                .to_string(),
+        );
+    }
+    if parse {
         let parsed = match f {
-            // `strptime` and `date_parse` return a timestamp; the language's
-            // `parseDate` is a `date`, so the time of day is dropped.
             Fam::Duck => func("STRPTIME", vec![value.clone(), f_lit()]),
             Fam::Trino => func("DATE_PARSE", vec![value.clone(), f_lit()]),
             Fam::Mysql => func("STR_TO_DATE", vec![value.clone(), f_lit()]),
+            Fam::BigQuery if timestamp => func("PARSE_TIMESTAMP", vec![f_lit(), value.clone()]),
             Fam::BigQuery => func("PARSE_DATE", vec![f_lit(), value.clone()]),
+            Fam::Snowflake | Fam::Ansi if timestamp => {
+                func("TO_TIMESTAMP", vec![value.clone(), f_lit()])
+            }
             Fam::Snowflake | Fam::Ansi => func("TO_DATE", vec![value.clone(), f_lit()]),
+            Fam::Spark if timestamp => func("TO_TIMESTAMP", vec![value.clone(), f_lit()]),
             Fam::Spark => func("TO_DATE", vec![value.clone(), f_lit()]),
             // SQLite and T-SQL have no format parser: SQLite reads only ISO
             // strings, and T-SQL's `PARSE` is culture-driven.
             Fam::Sqlite | Fam::Tsql => {
                 return Err(
-                    "`parseDate` needs a dialect with a format parser; this one has none \
-                     (it can still format with `formatDate`). The other dialects spell it \
-                     `TO_DATE`, `STR_TO_DATE`, `strptime`, `date_parse` or `PARSE_DATE`"
+                    "`parseDate` and `parseTimestamp` need a dialect with a format \
+                            parser; this one has none (it can still format with the `format*` \
+                            pair). The other dialects spell it `TO_DATE`/`TO_TIMESTAMP`, \
+                            `STR_TO_DATE`, `strptime`, `date_parse` or `PARSE_DATE`"
                         .to_string(),
                 )
             }
         };
-        Ok(cast(parsed, DataType::Date))
+        // Only the date form narrows the time of day away; a timestamp is the
+        // parser's own answer.
+        Ok(if timestamp {
+            parsed
+        } else {
+            cast(parsed, DataType::Date)
+        })
+    } else if timestamp {
+        Ok(match f {
+            Fam::Duck | Fam::Sqlite => func("STRFTIME", vec![value.clone(), f_lit()]),
+            Fam::Trino | Fam::Mysql | Fam::Spark => {
+                func("DATE_FORMAT", vec![value.clone(), f_lit()])
+            }
+            Fam::BigQuery => func("FORMAT_TIMESTAMP", vec![f_lit(), value.clone()]),
+            Fam::Snowflake | Fam::Ansi => func("TO_CHAR", vec![value.clone(), f_lit()]),
+            Fam::Tsql => func("FORMAT", vec![value.clone(), f_lit()]),
+        })
     } else {
         Ok(match f {
             Fam::Duck => func("STRFTIME", vec![value.clone(), f_lit()]),

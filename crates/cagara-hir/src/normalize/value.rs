@@ -387,6 +387,13 @@ impl<'a> Normalizer<'a, 'a> {
         self.budget.spend(origin)?;
         match value {
             Value::Closure(closure) => self.apply_closure(closure, arg),
+            Value::Lift { mut args, origin } => {
+                args.push(arg);
+                if args.len() < 2 {
+                    return Ok(Value::Lift { args, origin });
+                }
+                self.saturated_lift(args, origin)
+            }
             Value::Stage(stage) => self.apply_stage(stage, arg),
             Value::Combine(combine) => self.apply_combine(combine, arg),
             Value::Template(template) => scalar::apply_template(self, template, arg),
@@ -474,6 +481,58 @@ impl<'a> Normalizer<'a, 'a> {
     /// the next parameter is the reduction step, and the body is normalized when
     /// the last one arrives — exactly as nested lambdas would reduce, one step
     /// at a time.
+    /// `lift x f`: `nothing` stays `nothing`, `just v` becomes `just (f v)`.
+    ///
+    /// The SQL is `CASE WHEN x IS NULL THEN NULL ELSE f(x) END`, so the function
+    /// never sees the NULL and the result is a `maybe` the caller has to handle
+    /// — which is the whole point: one combinator instead of a nullable overload
+    /// of every function that takes a value.
+    fn saturated_lift(
+        &mut self,
+        args: Vec<Value<'a>>,
+        origin: Origin,
+    ) -> Result<Value<'a>, Control> {
+        let [value, func] = <[Value<'a>; 2]>::try_from(args).map_err(|_| {
+            Control::unsupported(origin, "`lift` needs a `maybe` value and a function")
+        })?;
+        let Value::Scalar(x) = value else {
+            return Err(Control::unsupported(
+                origin,
+                format!("`lift` takes a `maybe` value, not {}", value_class(&value)),
+            ));
+        };
+        let crate::core::ScalarType::Maybe(inner) = x.ty() else {
+            return Err(Control::unsupported(
+                origin,
+                format!(
+                    "`lift` needs a `maybe` value, and this is `{}`; it is the one that says \
+                     how a missing value is handled",
+                    x.ty()
+                ),
+            ));
+        };
+        let applied = self.apply(func, Value::Scalar(x.view_as((**inner).clone())))?;
+        let Value::Scalar(y) = applied else {
+            return Err(Control::unsupported(
+                origin,
+                format!(
+                    "`lift` needs a function from an expression to an expression, and this one \
+                     gives {}",
+                    value_class(&applied)
+                ),
+            ));
+        };
+        let ty = crate::core::ScalarType::Maybe(Box::new(y.ty().clone()));
+        let out = crate::checked::CheckedExpr::template(
+            "CASE WHEN $1 IS NULL THEN NULL ELSE $2 END",
+            vec![x, y],
+            ty,
+            origin,
+        )
+        .map_err(Control::Program)?;
+        Ok(Value::Scalar(out))
+    }
+
     fn apply_closure(
         &mut self,
         closure: Closure<'a>,
@@ -1272,6 +1331,7 @@ pub(crate) fn own(value: &Value<'_>) -> Value<'static> {
             items: items.iter().map(own).collect(),
             names: names.clone(),
         },
+        Value::Lift { .. } => Value::Label(Label::text("")),
         Value::Closure(_) => Value::Label(Label::text("")),
         Value::Name(name) => Value::Name(name.clone()),
     }
@@ -1280,6 +1340,7 @@ pub(crate) fn own(value: &Value<'_>) -> Value<'static> {
 /// A short name for what a value denotes, for a diagnostic.
 pub(crate) fn value_class(value: &Value<'_>) -> &'static str {
     match value {
+        Value::Lift { .. } => "a `lift` awaiting its function",
         Value::Closure(_) => "a function",
         Value::Name(_) => "a name",
         Value::Query(_) => "a query",

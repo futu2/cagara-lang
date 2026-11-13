@@ -258,6 +258,19 @@ listLength : expr r (list a) -> expr r int = sql "CAGARA_LIST_LENGTH($1)"
 ## a list *value*: the literal membership operator is `in`.
 listContains : expr r (list a) -> expr r a -> expr r bool = sql "CAGARA_LIST_CONTAINS($1, $2)"
 
+## `lift x f` — apply a function to the value inside a `maybe`: `nothing` stays
+## `nothing`, `just v` becomes `just (f v)`. The result is a `maybe`, so a
+## missing value never flows into a place that expects a present one — and a
+## function needs no nullable overload of its own:
+##
+##     paid = orders & agg { at = lift .created_at (parseDate "%Y%m%d") }
+##
+## The SQL is `CASE WHEN x IS NULL THEN NULL ELSE f(x) END`, so the function is
+## never handed the NULL. `x` appears twice, so an expensive expression is
+## evaluated twice — bind it with `let` first if that matters.
+lift : expr r (maybe a) -> (expr r a -> expr r b) -> expr r (maybe b) =
+  primitive "__lift"
+
 ## `unnest xs` — every input row once per element of the list, the element
 ## under `value`: `agg { k = group .id, ids = arrayAgg .id } & unnest .ids`
 ## gives the rows back. The SQL is a LATERAL join over the array, so the other

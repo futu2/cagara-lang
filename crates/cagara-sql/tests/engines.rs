@@ -310,6 +310,12 @@ const ENGINES: &[Engine] = &[
     },
 ];
 
+/// Rows of the last statement in `sql`, under this engine's own `setup`.
+fn run_setup(e: &Engine, setup: &str, sql: &str) -> Option<Result<Vec<String>, String>> {
+    let args: Vec<&std::ffi::OsStr> = e.args.iter().map(std::ffi::OsStr::new).collect();
+    run_script(e.shell, &args, setup, sql)
+}
+
 /// Rows of the last statement under the shared [`SETUP`], or `None` when the
 /// shell is not installed.
 fn run(e: &Engine, sql: &str) -> Option<Result<Vec<String>, String>> {
@@ -504,6 +510,65 @@ fn a_parsed_and_printed_date_agrees_on_the_engines() {
     let sql = compile(rel, opts).expect("postgres");
     let blocks = pg_batch(harness, &setup, std::slice::from_ref(&sql));
     assert_eq!(blocks[0], want, "{sql}");
+}
+
+/// `lift` on the engines: one row has a value and one does not, so the NULL
+/// branch of the guard is what the second row measures.
+#[test]
+fn a_lifted_value_keeps_its_nulls_on_the_engines() {
+    // DuckDB and SQLite have no schemas unless one is made; both engines get the
+    // same `main` schema, which is where the other cases live too.
+    let setup = "CREATE SCHEMA IF NOT EXISTS main;\n\
+                 CREATE TABLE main.d (id INTEGER, packed TEXT);\n\
+                 INSERT INTO main.d VALUES (1, '20240131'), (2, NULL);\n";
+    let src = "d : query { id = int, packed = maybe string } = table \"main\" \"d\"\n\
+               q = d & order [asc .id] & select { id = .id, p = lift .packed (parseDate \"%Y%m%d\") }\n";
+    let ws = Workspace::from_source(src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let (_, rel) = rels
+        .iter()
+        .find(|(n, _)| n == "q")
+        .unwrap_or_else(|| panic!("no `q`"));
+    let rel = rel
+        .as_ref()
+        .unwrap_or_else(|d| panic!("`q`: {}", d.message));
+    let want = ["1|2024-01-31", "2|NULL"];
+
+    let duck = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    let sql = compile(
+        rel,
+        Options {
+            dialect: Dialect::DuckDb,
+            ..Options::default()
+        },
+    )
+    .expect("duckdb");
+    let Some(rows) = run_setup(&duck, setup, &sql) else {
+        panic!("`duckdb` is not installed");
+    };
+    match rows {
+        Ok(rows) => assert_eq!(rows, want, "{sql}"),
+        Err(m) => panic!("duckdb: {m}\n  {sql}"),
+    }
+
+    let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
+    let pg = compile(
+        rel,
+        Options {
+            dialect: Dialect::Postgres,
+            ..Options::default()
+        },
+    )
+    .expect("postgres");
+    let pg_setup = String::from("CREATE SCHEMA main;\n").clone()
+        + &setup.replace("CREATE SCHEMA IF NOT EXISTS main;\n", "");
+    let blocks = pg_batch(harness, &pg_setup, std::slice::from_ref(&pg));
+    assert_eq!(blocks[0], want, "{pg}");
 }
 
 /// The tables `examples/report.cagara` queries, with rows chosen so every

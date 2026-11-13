@@ -96,6 +96,10 @@ pub(crate) fn primitive<'a>(
             origin,
         }),
         crate::primitive::Prim::Group => Ok(Value::Group { arg: None, origin }),
+        crate::primitive::Prim::Lift => Ok(Value::Lift {
+            args: Vec::new(),
+            origin,
+        }),
         crate::primitive::Prim::In => Ok(Value::Membership {
             list: None,
             value: None,

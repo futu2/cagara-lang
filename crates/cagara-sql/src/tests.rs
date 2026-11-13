@@ -2889,3 +2889,37 @@ fn shorthand_arg(named: &str) -> &str {
         None => panic!("`{named}` has no argument"),
     }
 }
+
+/// `<>` is the combining operator, not a second spelling of `++`.
+///
+/// On `string` the two agree, because concatenation is the only thing SQL can
+/// do. On `maybe string` they differ, and the difference is the point: `<>` is
+/// Haskell's `<>`, so `nothing` is its identity — `nothing <> x` is `x` — while
+/// `++` is SQL's `||`, where one NULL swallows the other side.
+#[test]
+fn the_combining_operator_has_its_own_maybe_instance() {
+    let t = "t : query { a = string, b = string, na = maybe string, nb = maybe string } = \
+             table \"s\" \"t\"\n";
+    assert_eq!(
+        sql(&format!("{t}q = t & select {{ c = .a <> .b }}\n"), "q"),
+        "SELECT a || b AS c FROM s.t"
+    );
+    assert_eq!(
+        sql(&format!("{t}q = t & select {{ c = .na <> .nb }}\n"), "q"),
+        "SELECT COALESCE(na || nb, na, nb) AS c FROM s.t"
+    );
+    // `++` stays what it says: string concatenation, NULL-propagating.
+    assert_eq!(
+        sql(&format!("{t}q = t & select {{ c = .a ++ .b }}\n"), "q"),
+        "SELECT a || b AS c FROM s.t"
+    );
+    // Right-associative like the rest of the group: `a <> b <> c` is
+    // `a <> (b <> c)`, which the SQL shows by grouping on the right.
+    assert_eq!(
+        sql(
+            &format!("{t}q = t & select {{ c = .a <> .b <> \"!\" }}\n"),
+            "q"
+        ),
+        "SELECT a || (b || '!') AS c FROM s.t"
+    );
+}

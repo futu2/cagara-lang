@@ -3412,3 +3412,34 @@ fn reshaping_a_join_operand_is_what_names_the_output_columns() {
     )
     .is_empty());
 }
+
+/// `asc`/`desc` take an `expr`, and an aggregate is not one.
+///
+/// The key phase rule is stated where a key is *built*, not where one is
+/// consumed: `asc` and `desc` are the only producers, and their argument is the
+/// expression being sorted by. It used to be checked only for a bare key
+/// (`order [sum .id]`), so `order [asc (sum .id)]` was accepted by the checker
+/// and refused much later by the compiler — the same program, two verdicts.
+#[test]
+fn an_aggregate_cannot_be_a_sort_key_even_when_wrapped() {
+    for src in [
+        "q = users & order [asc (sum .id)]\n",
+        "q = users & order [desc (over { partition = [.active] } (sum .age))]\n",
+        "q = users & select { r = rowNumber { order = [asc (count)] } }\n",
+        "q = users & where (rowNumber { order = [desc (sum .id)] } <= 3)\n",
+    ] {
+        let e = err(src, "q");
+        assert!(e.contains("plain column"), "{src}: {e}");
+    }
+    // A window function is a key's other disqualification: its result is only
+    // readable in a later stage, so a key in the same one cannot name it.
+    let e = err(
+        "q = users & select { rn = rowNumber { order = [asc .age] }, r = rank { order = [asc (rowNumber { order = [asc .id] })] } }\n",
+        "q",
+    );
+    assert!(e.contains("plain column") || e.contains("window"), "{e}");
+    assert_eq!(
+        ty("q = users & order [asc .age, desc .name]\n", "q"),
+        "query { age = int, name = string, id = int, active = bool }"
+    );
+}

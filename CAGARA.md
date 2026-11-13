@@ -475,7 +475,7 @@ Tighter binds first. Application is tighter than every operator.
 | 21 | `??` | right | null fallback |
 | 19 | `*` `/` `%` | left | arithmetic |
 | 17 | `+` `-` | left | arithmetic |
-| 15 | `<>` | right | string concatenation |
+| 15 | `<>` | right | combine: `string` concatenation, `maybe string` first-present |
 | 13 | `==` `!=` `<` `<=` `>` `>=` | left | comparison |
 | 11 | `&&` | left | boolean and |
 | 9 | `\|\|` | left | boolean or |
@@ -489,7 +489,9 @@ Consequences worth memorizing:
 - `&` is looser than every expression operator (only `$` is looser), so
   `q & where (.a > 1) & select {.a}` chains.
 - `>>>` is tighter than `&`, so `q & (f >>> g)` composes before applying.
-- `<>` is **concatenation**, not inequality.
+- `<>` is **combination**, not inequality: `string` concatenates, `maybe string` keeps whichever
+  side is present (and concatenates when both are). It is Haskell's `<>`, not a second spelling of
+  `++`.
 
 Arithmetic is not overloaded across types. `+ - * / %` are `int` with `int` or `float` with `float`.
 `/` on `int` truncates toward zero; `%` keeps the dividend's sign, in every dialect.
@@ -1018,7 +1020,8 @@ implicit column names would silently mean a function on the tables that matter
 most (`&? id == 1` reports `found a -> a`, which is the identity function).
 
 Three more expression operators: `$` (application, loosest of all), `<<<`
-(composition backwards), and `<>` (concatenation, the Haskell spelling of `++`).
+(composition backwards), and `<>` (combine — concatenation on `string`, first-present on
+`maybe string`).
 
 An earlier version removed the shorthands, on the grounds that named stages were
 used far more often. That measurement was right about frequency and wrong about
@@ -1190,6 +1193,7 @@ caseWhen               : the same function under an alias
 /                      : expr r float -> expr r float -> expr r float
 %                      : expr r int -> expr r int -> expr r int        (sign of dividend)
 <>                     : expr r string -> expr r string -> expr r string
+<>                     : expr r (maybe string) -> expr r (maybe string) -> expr r (maybe string)
 concat                 : expr r string -> expr r string -> expr r string
 
 upper lower trim ltrim rtrim : expr r string -> expr r string
@@ -1224,7 +1228,8 @@ Argument order is subject-last, which is the reverse of the SQL spelling:
 | `strpos sub s` | 1-based position, 0 if absent | `STRPOS(s, sub)` |
 | `contains sub s` | plain substring test | `STRPOS(s, sub) > 0` |
 | `like pattern s` | SQL `LIKE` | `s LIKE pattern` |
-| `concat a b` / `a <> b` | concatenation | `a \|\| b` |
+| `concat a b` / `a ++ b` | concatenation | `a \|\| b` |
+| `a <> b` | combine (`string`, `maybe string`) | `a \|\| b` / `COALESCE(a \|\| b, a, b)` |
 | `roundTo digits x` | round to `digits` places | `ROUND(x, digits)` |
 | `power exponent base` | `base` raised to `exponent` | `POWER(base, exponent)` |
 

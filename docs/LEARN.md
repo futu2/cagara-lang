@@ -216,7 +216,8 @@ And four expression operators besides arithmetic and comparison:
 | `>>>` / `<<<` | — | composition, forwards / backwards: `f >>> g` is `g` after `f` |
 | `$` | — | application, loosest of all: `f $ x` is `f x` |
 | `??` | `coalesce default x` | the value, or a fallback |
-| `++` / `<>` | `concat a b` | string concatenation |
+| `++` | `concat a b` | string concatenation |
+| `<>` | — | combine: concatenation, or first-present on `maybe string` |
 
 An earlier version of the language deleted the shorthands. The reason given was
 that they were used far less often than the named stages — which was true — but
@@ -288,7 +289,7 @@ file cannot declare an operator or change one's level.
 | 21 | `??` | right |
 | 19 | `*` `/` `%` | left |
 | 17 | `+` `-` | left |
-| 15 | `<>` (string concatenation) | right |
+| 15 | `<>` (combine — see §strings) | right |
 | 13 | `==` `!=` `<` `<=` `>` `>=` | left |
 | 11 | `&&` | left |
 | 9 | `\|\|` | left |

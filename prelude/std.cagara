@@ -46,9 +46,18 @@ _++_ : expr r string -> expr r string -> expr r string = sql "$1 || $2"
 ## `concat a b` is `a ++ b`, for a call site where an operator reads worse.
 concat : expr r string -> expr r string -> expr r string = _++_
 
-## The same concatenation in the spelling Haskell uses: `a <> b` is `a ++ b`.
-## Both spell the SQL `||`, and which one a file writes is a matter of taste.
-_<>_ : expr r string -> expr r string -> expr r string = _++_
+## `a <> b` — combine, in the sense Haskell's `<>` has: an operation on one
+## type that is associative. Two instances exist, because two are what SQL can
+## express: `string` is concatenation, and `maybe string` is "whichever side is
+## present, concatenated when both are", whose identity is `nothing`.
+##
+## This is why `<>` is not a second spelling of `++`. `++` is string
+## concatenation and says so in its type; `<>` is the combining operator, so it
+## also has a `maybe` instance — and that instance *ignores* a `nothing` rather
+## than letting it swallow the other side, which is not what `||` does.
+_<>_ : expr r string -> expr r string -> expr r string = sql "$1 || $2"
+_<>_ : expr r (maybe string) -> expr r (maybe string) -> expr r (maybe string) =
+  sql "COALESCE($1 || $2, $1, $2)"
 
 ## Boolean negation.
 not : expr r bool -> expr r bool = sql "NOT $1"

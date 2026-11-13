@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- `<>` is the combining operator rather than a second spelling of `++`. Haskell's
+  `<>` is associative combination on *one* type, and its instances here are the
+  two SQL can express: `string` (concatenation, `a || b`) and `maybe string`
+  (`COALESCE(a || b, a, b)`), where `nothing` is the identity and a missing side
+  no longer swallows the other. `++` stays string concatenation, NULL-propagating,
+  and keeps `concat` as its name.
+
+- A sort key is checked where it is built, not where it is consumed. `asc` and
+  `desc` are the only producers of a `sortkey`, and their argument is the
+  expression being sorted by — so an aggregate or a window is refused there, by
+  the checker, with the same sentence the compiler used to produce later. Before
+  this, `order [asc (sum .id)]` passed the checker and failed at compile, while
+  `order [sum .id]` was refused by both: one program, two verdicts.
+
 - A sort key must say its direction. `order [.a]` used to mean ascending, which
   made a missing `asc` indistinguishable from a forgotten one and gave one
   meaning two spellings; it is now an error, and `asc`/`desc` are the only way

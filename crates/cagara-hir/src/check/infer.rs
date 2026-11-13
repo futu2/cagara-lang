@@ -1763,7 +1763,19 @@ impl<'w> Checker<'w> {
                     // `check` re-records a literal argument at the type it was
                     // lifted to (`18` in `.age >= 18` has the value type it was
                     // lifted to), so no special case is needed here.
-                    self.check(env, arg, &p)?;
+                    let checked = self.check(env, arg, &p)?;
+                    // A `sortkey` result is what says this argument is a *key*:
+                    // `asc` and `desc` are the only producers, and they take an
+                    // `expr`, which an aggregate and a window also are. Their
+                    // phase is the thing that disqualifies them, so it is
+                    // checked here, where the result type still describes the
+                    // position — the alternative, checking in `coerce`, cannot
+                    // tell a key from any other `expr` expectation.
+                    if matches!(self.resolve(&r), Ty::Con("sortkey", _)) {
+                        if let Some(phase) = self.value_phase(&checked) {
+                            self.key_phase(&phase).map_err(at(arg.span))?;
+                        }
+                    }
                     *r
                 }
                 Ty::Var(_) => {
@@ -2241,6 +2253,20 @@ impl<'w> Checker<'w> {
 
     pub(crate) fn key_phase(&mut self, p: &Ty) -> U {
         self.place(Place::Key, p)
+    }
+
+    /// The phase a value's type carries, in the form the placement rules take.
+    ///
+    /// An `expr` names its phase in its first slot; an aggregate or a window is
+    /// its own phase. A constant has none, which is why `None` here is fine:
+    /// constants are allowed at every place.
+    fn value_phase(&self, t: &Ty) -> Option<Ty> {
+        match self.resolve(t) {
+            Ty::Con("expr", ea) => Some(ea[0].clone()),
+            Ty::Con("agg", _) => Some(con("agg")),
+            Ty::Con("win", _) => Some(con("win")),
+            _ => None,
+        }
     }
 
     pub(crate) fn winspec(&mut self, spec: &Ty, r: &Ty) -> U {

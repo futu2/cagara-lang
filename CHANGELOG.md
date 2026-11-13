@@ -7,7 +7,8 @@
   when the position takes a `maybe`. It wraps the column, not the field around it, so `upper .s`
   becomes `upper (.s ?? "")`, and the hint on the mismatch names `??` rather than `coalesce`. The
   checker keeps the span of every field value and every column access for this, the way it keeps a
-  join's parts.
+  join's parts, and `cagara check` prints the fix (`fix: Use `?? ""` — .s → (.s ?? "")`) and carries
+  it in `--json` as `"fixes": [{"title":…, "edit":…}]`, so a hook or a script can act on it too.
 
 ## 0.4.2 — 2026-11-14
 

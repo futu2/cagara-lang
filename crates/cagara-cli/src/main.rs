@@ -911,14 +911,25 @@ struct Found {
     line: usize,
     col: usize,
     message: String,
+    /// The rewrite the diagnostic knows, when it knows one. `check` is also a
+    /// library entry point for scripts, so the fix travels with the diagnostic
+    /// rather than being re-derived from the text by each consumer.
+    suggestions: Vec<(String, String)>,
 }
 
 impl Found {
     fn text(&self) -> String {
-        format!(
+        let mut line = format!(
             "{}:{}:{}: {}: {}",
             self.path, self.line, self.col, self.severity, self.message
-        )
+        );
+        for (title, edit) in &self.suggestions {
+            line.push_str(&format!("\n  fix: {title}"));
+            if !edit.is_empty() {
+                line.push_str(&format!(" — {edit}"));
+            }
+        }
+        line
     }
 
     /// Whether this diagnostic fails the run. A warning is reported and the
@@ -946,15 +957,64 @@ impl Found {
             }
             o
         }
+        let fixes: Vec<String> = self
+            .suggestions
+            .iter()
+            .map(|(title, edit)| {
+                format!(
+                    "{{\"title\":\"{}\",\"edit\":\"{}\"}}",
+                    esc(title),
+                    esc(edit)
+                )
+            })
+            .collect();
         format!(
-            "{{\"severity\":\"{}\",\"path\":\"{}\",\"line\":{},\"column\":{},\"message\":\"{}\"}}",
+            "{{\"severity\":\"{}\",\"path\":\"{}\",\"line\":{},\"column\":{},\"message\":\"{}\",\"fixes\":[{}]}}",
             self.severity,
             esc(&self.path),
             self.line,
             self.col,
-            esc(&self.message)
+            esc(&self.message),
+            fixes.join(",")
         )
     }
+}
+
+/// The fixes a diagnostic carries, as (title, what the text would become).
+///
+/// The edits are spans and insertions; applying them needs the source, which is
+/// here. A consumer that wants to *offer* the fix rather than read it (the
+/// language server) applies the edits itself, from `Diag::suggestions`.
+fn fixes(ws: &Workspace, d: &cagara_hir::workspace::Diag) -> Vec<(String, String)> {
+    use cagara_hir::workspace::SuggestionEdit;
+    let text = &ws.modules[ws.root].text;
+    d.suggestions
+        .iter()
+        .map(|s| {
+            let rendered: Vec<String> = s
+                .edits
+                .iter()
+                .map(|e| {
+                    let slice = |sp: &cagara_syntax::ast::Span| {
+                        text.get(sp.start as usize..sp.end as usize)
+                            .unwrap_or_default()
+                    };
+                    match e {
+                        SuggestionEdit::Replace { span, text: new } => {
+                            format!("{} → {new}", slice(span))
+                        }
+                        SuggestionEdit::Surround {
+                            span,
+                            before,
+                            after,
+                        } => format!("{} → {before}{}{after}", slice(span), slice(span)),
+                        SuggestionEdit::Retoken { from, to, .. } => format!("{from} → {to}"),
+                    }
+                })
+                .collect();
+            (s.title.clone(), rendered.join(", ").replace(", ", " "))
+        })
+        .collect()
 }
 
 /// Every `*.cagara` file under `path`, in a stable order. A file path is itself.
@@ -1039,6 +1099,7 @@ fn check_tree(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode>
                 line: d.line,
                 col: d.col,
                 message: d.message.clone(),
+                suggestions: fixes(&ws, d),
             });
         }
         if ws.diags.is_empty() {
@@ -1050,6 +1111,7 @@ fn check_tree(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode>
                     line: e.diag.line,
                     col: e.diag.col,
                     message: e.diag.message.clone(),
+                    suggestions: fixes(&ws, &e.diag),
                 });
             }
             for w in tc.warnings() {
@@ -1059,6 +1121,7 @@ fn check_tree(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode>
                     line: w.diag.line,
                     col: w.diag.col,
                     message: w.diag.message.clone(),
+                    suggestions: fixes(&ws, &w.diag),
                 });
             }
         }

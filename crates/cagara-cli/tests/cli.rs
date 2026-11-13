@@ -747,10 +747,37 @@ fn only_reaches_into_an_imported_module() {
 /// `cagara check` answers "is this tree sound", one file per run, and says so
 /// in a machine-readable form with `--json`.
 ///
+/// `check` reports the fix a diagnostic knows, in both forms.
+///
+/// The suggestion is data on the diagnostic (`Diag::suggestions`), which is what
+/// lets a consumer that is not the language server — a hook, a script reading
+/// `--json` — act on it instead of re-deriving it from the message.
+#[test]
+fn check_reports_the_fix_a_diagnostic_knows() {
+    let dir = TempDir::new("check-fix");
+    dir.write(
+        "q.cagara",
+        "t : query { s = maybe string } = table \"s\" \"t\"\n\
+         q = t & select { x = upper .s }\n",
+    );
+    let out = cagara([
+        std::ffi::OsString::from("check"),
+        std::ffi::OsString::from("--json"),
+        dir.0.path().into(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    let json = stdout(&out);
+    assert!(json.contains("\"fixes\":["), "{json}");
+    assert!(json.contains("Use `??"), "{json}");
+    // The stream is JSON, so the quotes in the rewrite arrive escaped.
+    assert!(json.contains(r#".s → (.s ?? \"\")"#), "{json}");
+}
+
 /// It checks each file as a *library*, so a directory of table declarations is
 /// reportable without one of them being `main`. Exit codes distinguish "found a
 /// diagnostic" (1) from "you called me wrong" (2), which is what a hook needs.
 #[test]
+
 fn check_reports_a_whole_tree() {
     let dir = TempDir::new("check-tree");
     dir.write(
@@ -931,7 +958,12 @@ fn the_editor_and_the_command_line_agree() {
             // end rather than up to the next comma — these messages contain
             // commas, and a diff-style one contains newlines too.
             let start = line.find("\"message\":\"").expect("message") + "\"message\":\"".len();
-            let end = line.rfind("\"}").expect("end");
+            // The fixes array is appended after the message, so the message
+            // ends at whichever delimiter follows it.
+            let end = line
+                .rfind("\",\"fixes\":")
+                .or_else(|| line.rfind("\"}"))
+                .expect("end");
             let message = line[start..end].replace("\\n", "\n").replace("\\\"", "\"");
             (
                 get("line").parse().expect("line"),

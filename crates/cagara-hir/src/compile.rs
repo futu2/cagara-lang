@@ -199,6 +199,12 @@ pub(crate) fn compile_reusing(
     for error in tc.errors() {
         push_unique(&mut out.diagnostics, &mut seen, error.diag.clone());
     }
+    // Warnings travel with the errors: the editor and `cagara check` read this
+    // list, and a warning that only the compiler saw would be invisible in both.
+    // The severity on the `Diag` is what tells them apart.
+    for warning in tc.warnings() {
+        push_unique(&mut out.diagnostics, &mut seen, warning.diag.clone());
+    }
 
     for (index, definition) in root.source().defs.iter().enumerate() {
         let name = definition.name.clone();

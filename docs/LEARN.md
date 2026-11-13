@@ -2092,7 +2092,8 @@ the computation one stage earlier.
   in depth.
 - [SQL dialect support](SQL-DIALECTS.md) — what each target guarantees, and why
   the date and string intrinsics are spelled in Rust.
-- [`prelude/core.cagara` (and `prelude/std.cagara`)](../prelude.cagara) — the whole standard library, in
+- [`prelude/core.cagara`](../prelude/core.cagara) and
+  [`prelude/std.cagara`](../prelude/std.cagara) — the whole standard library, in
   Cagara, with comments.
 - [`docs/PLAN.md`](PLAN.md) — design and architecture, including the type
   system and the lowering rules.

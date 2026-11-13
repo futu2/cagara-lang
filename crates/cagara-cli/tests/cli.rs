@@ -898,10 +898,14 @@ fn the_editor_and_the_command_line_agree() {
     // A non-BMP character before the errors makes a byte column and a UTF-16
     // column differ, which is exactly the case the conversion can get wrong.
     let src = "t : query { id = int, name = string } = table \"s\" \"t\"\n\
+               o : query { id = int, user_id = int } = table \"s\" \"o\"\n\n\
                # 🎉🎉\n\
                a = t & select { .nope }\n\
                b = t & select { x = upper .id }\n\
-               c = t & select { .id } & where (.id)\n";
+               c = t & select { .id } & where (.id)\n\
+               # A join whose inputs share `id`: a warning, and both paths must\n\
+               # report it with the same severity and position.\n\
+               d = t & innerJoin o (.<id == .>user_id)\n";
     let path = dir.write("p.cagara", src);
 
     // What the command line says.
@@ -959,13 +963,20 @@ fn the_editor_and_the_command_line_agree() {
         from_lsp, from_cli,
         "the two must report the same diagnostics"
     );
-    assert_eq!(from_cli.len(), 3, "{from_cli:?}");
+    assert_eq!(from_cli.len(), 4, "{from_cli:?}");
+    // The warning is one of them, and it is a warning on both sides.
+    assert!(
+        from_cli
+            .iter()
+            .any(|(_, _, level, msg)| level == "warning" && msg.contains("on both sides")),
+        "{from_cli:?}"
+    );
     // The emoji line is why the columns are converted at all: a byte column
     // would be one higher than a UTF-16 column after `# 🎉🎉`.
     assert!(
         from_cli
             .iter()
-            .all(|(line, _, _, _)| *line == 3 || *line == 4 || *line == 5),
+            .all(|(line, _, _, _)| (5..=10).contains(line)),
         "{from_cli:?}"
     );
 }

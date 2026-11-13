@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## Unreleased
+
 - A join whose inputs share a column name is a **warning**, not an error. The
   merged row keeps the left value — which is what its `merge r s` type says — so
   the query compiles and runs; the warning says the right column cannot be read

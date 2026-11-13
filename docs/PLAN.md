@@ -16,15 +16,16 @@ this page tracks the remaining boundaries and language work.
   with `rules::{mix, nested, place}`, and a per-stage record of the input and
   output rows in `check/stage.rs`); what is missing is the backend rule that
   recognises an `Agg`-phase predicate over the stage that produced it.
-- Filtered aggregates are prelude templates over `CASE`, not a relational node.
-  They cover every built-in aggregate without a dialect-specific `FILTER`
-  lowering; a first-class `FILTER` would need an IR field and a backend rule.
-- A name in a type position that is not one of `CONS` (`check/reduce.rs`) is a
-  type *parameter*, because signatures carry their parameters implicitly. That
-  is what makes `id : a -> a` work, and it also means a mistyped type
-  (`amount = decimal`) silently makes the definition polymorphic instead of
-  being reported. Distinguishing a parameter from a typo needs an explicit
-  binder for type parameters — the fix is a language change, not a check.
+- Aggregates are values, modified by three combinators (`filtered`,
+  `distinctAgg`, `over`) that rewrite the aggregate's template — `SUM(CASE WHEN
+  … THEN x END)` and `SUM(DISTINCT x)`, which every engine accepts. A
+  first-class `FILTER (WHERE …)` node would be smaller SQL and needs an IR field
+  plus a backend rule; the combinators are the portable spelling until then.
+- A single lowercase letter in a type position is a type *parameter* (that is
+  what makes `id : a -> a` work); anything else must be a constructor the
+  language has, and a near miss is reported with a "did you mean". An explicit
+  binder for type parameters would let a one-letter typo be reported too, and is
+  a language change rather than a check.
 - SQL optimization remains opt-in and runs after Cagara lowering.
 
 ## Next steps

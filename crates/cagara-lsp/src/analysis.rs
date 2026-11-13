@@ -2049,3 +2049,29 @@ mod tests {
         assert_eq!(fields(before, pos(2, 26)), ["id", "age"]);
     }
 }
+
+#[cfg(test)]
+mod severity_tests {
+    use super::diagnostics;
+    use cagara_hir::workspace::{Severity, Workspace};
+
+    /// A warning reaches the editor as a warning.
+    ///
+    /// The editor and `cagara check` read the same compilation diagnostics, so
+    /// a warning that the compiler recorded but never published would be
+    /// silently missing from both — this is the assertion that publish and
+    /// `--json` agree on *severity*, not only on text and position.
+    #[test]
+    fn a_join_warning_is_published_with_warning_severity() {
+        let src = "users : query { id = int, name = string } = table \"s\" \"u\"\n\
+                   orders : query { id = int, user_id = int } = table \"s\" \"o\"\n\
+                   q = users & innerJoin orders (.<id == .>user_id)\n";
+        let ws = Workspace::from_source(src);
+        assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+        let ds = diagnostics(&ws);
+        assert_eq!(ds.len(), 1, "{ds:?}");
+        let (_, message, severity) = &ds[0];
+        assert_eq!(*severity, Severity::Warning);
+        assert!(message.contains("on both sides"), "{message}");
+    }
+}

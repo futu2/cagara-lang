@@ -66,8 +66,12 @@ pub enum Expr {
     Tpl(String, Vec<Expr>),
     /// Membership test against a compile-time list of expressions.
     In(Box<Expr>, Vec<Expr>, bool),
-    /// Aggregate SQL template; arguments must be row-phase.
-    Agg(String, Vec<Expr>),
+    /// Aggregate SQL template and its arguments, which must be row-phase. A
+    /// filter is the `filtered` modifier's predicate: `SUM(x) FILTER (WHERE p)`
+    /// where the target has `FILTER`, and the portable `CASE` spelling where it
+    /// does not (decided in the dialect pass, which is where the target is
+    /// known).
+    Agg(String, Vec<Expr>, Option<Box<Expr>>),
     /// Grouping key (`group e`).
     Group(Box<Expr>),
     /// Window function template plus its OVER specification.
@@ -94,9 +98,12 @@ impl Expr {
                 .iter()
                 .chain(std::iter::once(value.as_ref()))
                 .try_fold(Phase::Const, |acc, a| rules::mix(acc, a.phase()?)),
-            Expr::Agg(_, args) => {
+            Expr::Agg(_, args, filter) => {
                 args.iter()
                     .try_for_each(|a| row_only(a, "an aggregate argument"))?;
+                if let Some(p) = filter {
+                    row_only(p, "an aggregate filter")?;
+                }
                 Ok(Phase::Agg)
             }
             Expr::Group(k) => {
@@ -113,7 +120,8 @@ impl Expr {
     pub fn children(&self) -> Vec<&Expr> {
         match self {
             Expr::Col(..) | Expr::Lit(_) => vec![],
-            Expr::Tpl(_, a) | Expr::Agg(_, a) => a.iter().collect(),
+            Expr::Tpl(_, a) => a.iter().collect(),
+            Expr::Agg(_, a, filter) => a.iter().chain(filter.iter().map(|p| p.as_ref())).collect(),
             Expr::In(value, list, _) => {
                 list.iter().chain(std::iter::once(value.as_ref())).collect()
             }
@@ -146,7 +154,13 @@ impl Expr {
     fn for_each_child(&self, mut f: impl FnMut(&Expr)) {
         match self {
             Expr::Col(..) | Expr::Lit(_) => {}
-            Expr::Tpl(_, args) | Expr::Agg(_, args) => args.iter().for_each(&mut f),
+            Expr::Tpl(_, args) => args.iter().for_each(&mut f),
+            Expr::Agg(_, args, filter) => {
+                args.iter().for_each(&mut f);
+                if let Some(p) = filter {
+                    f(p);
+                }
+            }
             Expr::In(value, list, _) => {
                 list.iter().for_each(&mut f);
                 f(value);
@@ -163,7 +177,14 @@ impl Expr {
     fn try_for_each_child<E>(&self, mut f: impl FnMut(&Expr) -> Result<(), E>) -> Result<(), E> {
         match self {
             Expr::Col(..) | Expr::Lit(_) => Ok(()),
-            Expr::Tpl(_, args) | Expr::Agg(_, args) => args.iter().try_for_each(f),
+            Expr::Tpl(_, args) => args.iter().try_for_each(f),
+            Expr::Agg(_, args, filter) => {
+                args.iter().try_for_each(&mut f)?;
+                match filter {
+                    Some(p) => f(p),
+                    None => Ok(()),
+                }
+            }
             Expr::In(value, list, _) => {
                 list.iter().try_for_each(&mut f)?;
                 f(value)
@@ -180,7 +201,10 @@ impl Expr {
     fn for_each_child_until(&self, mut predicate: impl FnMut(&Expr) -> bool) -> bool {
         match self {
             Expr::Col(..) | Expr::Lit(_) => false,
-            Expr::Tpl(_, args) | Expr::Agg(_, args) => args.iter().any(predicate),
+            Expr::Tpl(_, args) => args.iter().any(predicate),
+            Expr::Agg(_, args, filter) => {
+                args.iter().any(&mut predicate) || filter.as_ref().is_some_and(|p| predicate(p))
+            }
             Expr::In(value, list, _) => list.iter().any(&mut predicate) || predicate(value),
             Expr::Group(key) => predicate(key),
             Expr::Win(_, args, spec) => {

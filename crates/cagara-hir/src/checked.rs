@@ -128,8 +128,12 @@ impl CheckedExpr {
             CheckedExprNode::Column { .. }
             | CheckedExprNode::Lit(_)
             | CheckedExprNode::Call { .. } => 0,
-            CheckedExprNode::Template { args, .. } | CheckedExprNode::AggTemplate { args, .. } => {
+            CheckedExprNode::Template { args, .. } => {
                 args.iter().map(CheckedExpr::node_count).sum()
+            }
+            CheckedExprNode::AggTemplate { args, filter, .. } => {
+                args.iter().map(CheckedExpr::node_count).sum::<usize>()
+                    + filter.as_ref().map_or(0, |p| p.node_count())
             }
             CheckedExprNode::WinTemplate { args, spec, .. } => {
                 args.iter().map(CheckedExpr::node_count).sum::<usize>()
@@ -230,6 +234,33 @@ impl CheckedExpr {
             node: CheckedExprNode::AggTemplate {
                 sql: sql.into(),
                 args,
+                filter: None,
+            },
+            origin,
+        })
+    }
+
+    /// An aggregate with a filter: the predicate is kept beside the aggregate
+    /// rather than folded into its template, so the SQL layer can choose
+    /// `FILTER (WHERE …)` or the portable `CASE` spelling by target.
+    pub fn agg_template_filtered(
+        sql: impl Into<String>,
+        args: Vec<CheckedExpr>,
+        filter: Option<CheckedExpr>,
+        ty: ScalarType,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        row_args("an aggregate argument", &args, origin)?;
+        if let Some(p) = &filter {
+            row_args("an aggregate filter", std::slice::from_ref(p), origin)?;
+        }
+        Ok(CheckedExpr {
+            phase: Phase::Agg,
+            ty,
+            node: CheckedExprNode::AggTemplate {
+                sql: sql.into(),
+                args,
+                filter: filter.map(Box::new),
             },
             origin,
         })
@@ -342,6 +373,10 @@ pub(crate) enum CheckedExprNode {
     AggTemplate {
         sql: String,
         args: Vec<CheckedExpr>,
+        /// `filtered`'s predicate: emitted as `FILTER (WHERE p)` where the
+        /// target has it, and as the portable `CASE` spelling where it does
+        /// not.
+        filter: Option<Box<CheckedExpr>>,
     },
     WinTemplate {
         sql: String,
@@ -574,7 +609,14 @@ pub(crate) fn erase_expr(e: CheckedExpr) -> Result<Expr, Error> {
         CheckedExprNode::Column { side, name } => Expr::Col(side, name),
         CheckedExprNode::Lit(l) => Expr::Lit(l),
         CheckedExprNode::Template { sql, args } => Expr::Tpl(sql, erase_exprs(args)?),
-        CheckedExprNode::AggTemplate { sql, args } => Expr::Agg(sql, erase_exprs(args)?),
+        CheckedExprNode::AggTemplate { sql, args, filter } => Expr::Agg(
+            sql,
+            erase_exprs(args)?,
+            match filter {
+                Some(p) => Some(Box::new(erase_expr(p.as_ref().clone())?)),
+                None => None,
+            },
+        ),
         CheckedExprNode::WinTemplate { sql, args, spec } => Expr::Win(
             sql,
             erase_exprs(args)?,

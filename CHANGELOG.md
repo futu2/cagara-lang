@@ -54,6 +54,15 @@ lists, spelled by whichever dialect can hold one.
   element, and the position that wants keys is the one that reports the missing
   direction.
 
+- A filtered aggregate is the standard `FILTER (WHERE …)` clause — `SUM(amount) FILTER (WHERE
+  status = 'paid')`, `COUNT(*) FILTER (WHERE …)` — instead of the `CASE` rewrite, on every target
+  that has the clause (the ANSI family, SQLite, DuckDB, PostgreSQL, Trino, Snowflake). A target
+  without it (the MySQL family, T-SQL, BigQuery, Spark) still gets `SUM(CASE WHEN p THEN x END)`,
+  chosen in the dialect pass from the aggregate's own expression, so the two spellings come from one
+  IR node and cannot drift. `filtered` and `distinctAgg` compose again: `distinctAgg (filtered p
+  (sum .x))` is `SUM(DISTINCT x) FILTER (WHERE p)`. A `filtered` aggregate used as a window keeps
+  the `CASE` spelling, because the window template has no place for the clause.
+
 - A filter after `agg` is the aggregate's `HAVING`, not an outer `WHERE` over a derived table:
   `agg { u = group .user_id, n = count } & where (.n > 5)` is one statement with
   `GROUP BY user_id HAVING COUNT(*) > 5`. The predicate's columns are written as the expressions

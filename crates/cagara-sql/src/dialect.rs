@@ -35,6 +35,15 @@ pub(crate) enum Fam {
     Spark,
 }
 
+/// Does this dialect have the aggregate `FILTER (WHERE …)` clause?
+///
+/// Standard SQL since 2003, and every engine here that has it treats it as a
+/// suffix of the aggregate call. The ones that do not get the portable spelling
+/// instead, applied by [`rewrite`] — `SUM(CASE WHEN p THEN x END)`.
+pub(crate) fn supports_filter(d: Dialect) -> bool {
+    !matches!(fam(d), Fam::Mysql | Fam::Tsql | Fam::BigQuery | Fam::Spark)
+}
+
 pub(crate) fn fam(d: Dialect) -> Fam {
     match d {
         Dialect::Mysql | Dialect::Doris | Dialect::SingleStore | Dialect::StarRocks => Fam::Mysql,
@@ -239,10 +248,81 @@ fn quote(name: &str, to: Dialect) -> String {
     format!("{open}{escaped}{close}")
 }
 
+/// Rewrite `FILTER (WHERE p)` into the portable `CASE` spelling.
+///
+/// A filtered aggregate keeps the rows the predicate keeps. Written as `CASE`
+/// inside the argument that is the same aggregate for every engine, at the cost
+/// of repeating the predicate once per argument — and a filter on `COUNT(*)`,
+/// which has no argument, counts a constant instead.
+fn fold_filter(e: Expr) -> Expr {
+    let case = |p: Expr, then: Expr| Expr::Case {
+        operand: None,
+        when_clauses: vec![(p, then)],
+        else_clause: None,
+    };
+    match e {
+        // A bare call: the filter wraps each argument.
+        Expr::Function {
+            name,
+            args,
+            distinct,
+            filter: Some(p),
+            over,
+            order_by,
+            within_group,
+        } => {
+            let p = *p;
+            let args = if args.is_empty() {
+                vec![case(p, Expr::Number("1".into()))]
+            } else {
+                args.into_iter().map(|a| case(p.clone(), a)).collect()
+            };
+            Expr::Function {
+                name,
+                args,
+                distinct,
+                filter: None,
+                over,
+                order_by,
+                within_group,
+            }
+        }
+        // A call the parser knows: its argument is its only child, and
+        // `COUNT(*)`'s wildcard becomes the constant the predicate counts.
+        Expr::TypedFunction {
+            func,
+            filter: Some(p),
+            over,
+        } => {
+            let p = *p;
+            let wrapped = func.transform_children(&|child: Expr| {
+                let then = match child {
+                    Expr::Wildcard => Expr::Number("1".into()),
+                    other => other,
+                };
+                case(p.clone(), then)
+            });
+            Expr::TypedFunction {
+                func: wrapped,
+                filter: None,
+                over,
+            }
+        }
+        other => other,
+    }
+}
+
 /// One expression: intrinsics, concat lowering, then sqlglot's
 /// per-expression rewrites (reached by wrapping it in a one-column SELECT).
 fn expr(e: Expr, to: Dialect) -> Result<Expr, String> {
     let e = crate::intrinsics::lower(e, to)?;
+    // A filtered aggregate is `FILTER (WHERE …)` where the target has the
+    // clause, and the portable `SUM(CASE WHEN … THEN x END)` where it does not.
+    let e = if supports_filter(to) {
+        e
+    } else {
+        transform_deep(e, &fold_filter)
+    };
     if to == Dialect::Ansi {
         return Ok(e);
     }

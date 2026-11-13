@@ -827,20 +827,22 @@ sales = orders & agg {
 
 ```sql
 SELECT user_id,
-       SUM(CASE WHEN (status = 'paid') THEN amount END) AS paid,
-       SUM(CASE WHEN (status = 'refunded') THEN amount END) AS refunded,
-       COUNT(CASE WHEN (status = 'paid') THEN 1 END) AS n_paid
+       SUM(amount) FILTER (WHERE status = 'paid') AS paid,
+       SUM(amount) FILTER (WHERE status = 'refunded') AS refunded,
+       COUNT(*) FILTER (WHERE status = 'paid') AS n_paid
 FROM public.orders
 GROUP BY user_id;
 ```
 
 The predicate is a non-null `bool` over the input row and cannot contain an
 aggregate or window. It is evaluated before grouping, so it may name a column
-that is not a group key (`status` above). The `CASE` has no `ELSE`: a group with
-no matching rows is `NULL` for a filtered `sum`/`avg`/`min`/`max`, and `0` for
-a filtered count — the same results `FILTER` gives. Do
-not add `ELSE 0` yourself; for `avg` it changes the denominator, and for the
-other value aggregates it changes an empty group from `NULL` to `0`.
+that is not a group key (`status` above). A group with no matching rows is
+`NULL` for a filtered `sum`/`avg`/`min`/`max`, and `0` for a filtered count —
+SQL `FILTER`'s own behaviour, with no `ELSE` to add. A target that has no
+`FILTER` clause gets `SUM(CASE WHEN p THEN x END)` instead, which means the same
+thing; do not write the `ELSE 0` yourself either way, because for `avg` it
+changes the denominator and for the other value aggregates it turns an empty
+group's `NULL` into `0`.
 
 When **every** aggregate in the stage shares one predicate, filter before
 `agg` instead:

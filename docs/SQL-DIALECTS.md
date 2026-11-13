@@ -25,8 +25,11 @@ shells are unavailable.
 compile time with a message naming what needs an array. A list is never lowered to JSON text — that would change the column's type without
 saying so.
 
-Filtered aggregates do not depend on the dialect: `filtered` is a prelude
-template over `CASE`, not a `FILTER` clause, so it needs no per-dialect rewrite.
+Filtered aggregates are `FILTER (WHERE …)` where the target has the clause —
+the ANSI family, SQLite, DuckDB, PostgreSQL, Trino and Snowflake — and the
+portable `SUM(CASE WHEN p THEN x END)` where it does not (the MySQL family,
+T-SQL, BigQuery, Spark). The choice is made in the dialect pass, from the `Expr`
+the aggregate already lowered to, so the two spellings cannot drift apart.
 
 Two constructs are deliberately refused rather than emitted in a dialect that
 cannot mean them:

@@ -772,7 +772,7 @@ fn constant_global_agg_has_one_row() {
 }
 
 #[test]
-fn filtered_aggregates_lower_to_portable_case() {
+fn filtered_aggregates_lower_to_filter_or_case() {
     let src = r#"q = orders & agg {
   u = group .user_id,
   paid = filtered (.status == "paid") (sum .amount),
@@ -784,23 +784,30 @@ fn filtered_aggregates_lower_to_portable_case() {
   hi = filtered (.status == "paid") (max .amount)
 }
 "#;
+    // A target with the standard `FILTER` clause reads the aggregate once.
     let s = sql(src, "q");
     for want in [
-        "SUM(CASE WHEN (status = 'paid') THEN amount END) AS paid",
-        "AVG(CASE WHEN (status = 'paid') THEN amount END) AS mean",
-        "COUNT(CASE WHEN (status = 'paid') THEN 1 END) AS n",
-        "COUNT(CASE WHEN (status = 'paid') THEN id END) AS n_of",
-        "COUNT(DISTINCT CASE WHEN (status = 'paid') THEN id END) AS n_distinct",
-        "MIN(CASE WHEN (status = 'paid') THEN amount END) AS lo",
-        "MAX(CASE WHEN (status = 'paid') THEN amount END) AS hi",
+        "SUM(amount) FILTER (WHERE status = 'paid') AS paid",
+        "AVG(amount) FILTER (WHERE status = 'paid') AS mean",
+        "COUNT(*) FILTER (WHERE status = 'paid') AS n",
+        "COUNT(id) FILTER (WHERE status = 'paid') AS n_of",
+        "COUNT(DISTINCT id) FILTER (WHERE status = 'paid') AS n_distinct",
+        "MIN(amount) FILTER (WHERE status = 'paid') AS lo",
+        "MAX(amount) FILTER (WHERE status = 'paid') AS hi",
     ] {
         assert!(s.contains(want), "missing `{want}` in {s}");
     }
-    assert!(!s.contains("FILTER"), "{s}");
-    // The rewrite is chosen in the prelude, not per dialect, so a target that
-    // has no `FILTER` clause gets the same portable SQL.
+    assert!(!s.contains("CASE WHEN"), "{s}");
+    // A target without it gets the portable spelling, which repeats the
+    // predicate inside the argument.
     let m = dialect(src, "q", "mysql").expect("mysql");
-    assert!(m.contains("CASE WHEN"), "{m}");
+    for want in [
+        "SUM(CASE WHEN status = 'paid' THEN amount END) AS paid",
+        "COUNT(CASE WHEN status = 'paid' THEN 1 END) AS n",
+        "COUNT(DISTINCT CASE WHEN status = 'paid' THEN id END) AS n_distinct",
+    ] {
+        assert!(m.contains(want), "missing `{want}` in {m}");
+    }
     assert!(!m.contains("FILTER"), "{m}");
 }
 
@@ -2594,14 +2601,13 @@ fn an_aggregate_takes_a_filter_a_distinct_or_a_window() {
                }\n";
     let s = sql(src, "q");
     assert!(
-        s.contains("SUM(CASE WHEN (status = 'paid') THEN amount END) AS paid"),
+        s.contains("SUM(amount) FILTER (WHERE status = 'paid') AS paid"),
         "{s}"
     );
     assert!(s.contains("COUNT(DISTINCT user_id) AS who"), "{s}");
-    // Composition: the filter applies first, then the distinct — which has no
-    // name in the old spelling and needs none here.
+    // Composition: the filter and the distinct both apply to the same call.
     assert!(
-        s.contains("SUM(DISTINCT CASE WHEN (status = 'paid') THEN amount END) AS dp"),
+        s.contains("SUM(DISTINCT amount) FILTER (WHERE status = 'paid') AS dp"),
         "{s}"
     );
 
@@ -2614,14 +2620,20 @@ fn an_aggregate_takes_a_filter_a_distinct_or_a_window() {
         "{s}"
     );
 
-    // An aggregate with no argument is `COUNT(*)`, and there is nothing to
-    // wrap: the filter goes where the `*` is.
+    // An aggregate with no argument is `COUNT(*)`, and the `FILTER` clause is
+    // what makes the predicate's rows the ones counted — no argument to wrap.
     let src = "o2 : query { status = string } = table \"s\" \"o\"\n\
                n = o2 & agg { paid = filtered (.status == \"paid\") count }\n";
     let s = sql(src, "n");
     assert!(
-        s.contains("COUNT(CASE WHEN (status = 'paid') THEN 1 END) AS paid"),
+        s.contains("COUNT(*) FILTER (WHERE status = 'paid') AS paid"),
         "{s}"
+    );
+    // Without the clause, the `*` becomes the constant the predicate counts.
+    let m = dialect(src, "n", "mysql").expect("mysql");
+    assert!(
+        m.contains("COUNT(CASE WHEN status = 'paid' THEN 1 END) AS paid"),
+        "{m}"
     );
 
     // Applying `distinctAgg` twice is applying it once: the rewrite does not

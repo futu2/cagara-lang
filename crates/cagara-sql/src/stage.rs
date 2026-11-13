@@ -391,6 +391,128 @@ pub fn atomic(e: Expr) -> Expr {
 
 const ARG: &str = "cagara_arg_";
 
+/// Attach a filter predicate to the aggregate's call.
+///
+/// The parser produces two shapes for a call: a bare `Function` and a
+/// `TypedFunction` (the ones it knows, like `SUM`). Both carry a `filter`
+/// field, and both reach the dialect pass as a `FILTER (WHERE …)` clause or the
+/// portable spelling.
+fn attach_filter(e: Expr, predicate: Expr) -> Result<Expr, String> {
+    Ok(match e {
+        Expr::Function {
+            name,
+            args,
+            distinct,
+            filter: None,
+            over,
+            order_by,
+            within_group,
+        } => Expr::Function {
+            name,
+            args,
+            distinct,
+            filter: Some(Box::new(predicate)),
+            over,
+            order_by,
+            within_group,
+        },
+        Expr::TypedFunction {
+            func,
+            filter: None,
+            over,
+        } => Expr::TypedFunction {
+            func,
+            filter: Some(Box::new(predicate)),
+            over,
+        },
+        other => {
+            return Err(format!(
+                "internal: the template `{other:?}` is not a call the filter can attach to"
+            ))
+        }
+    })
+}
+
+/// Does this template consist of one function call and nothing else?
+///
+/// `SUM($1)` qualifies; `COALESCE(SUM($1), 0)` does not, and neither does a
+/// template with arithmetic around the call. Only the former can carry a
+/// `FILTER` clause.
+fn is_plain_call(sql: &str) -> bool {
+    let sql = sql.trim();
+    let Some(open) = sql.find('(') else {
+        return false;
+    };
+    let name = &sql[..open];
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+    {
+        return false;
+    }
+    let mut depth = 0usize;
+    for (i, c) in sql[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return open + i + c.len_utf8() == sql.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Fold a filter predicate into the aggregate's arguments, the portable way:
+/// `SUM(x)` becomes `SUM(CASE WHEN p THEN x END)`.
+///
+/// Used when the template is not a plain call, and — for the dialects without
+/// `FILTER` — as the fallback the dialect pass applies.
+pub fn portable_filter(sql: &str, args: Vec<Expr>, predicate: Expr) -> Result<Expr, String> {
+    // `COUNT(*)` has no argument to wrap, so the filter goes where the `*` is:
+    // `COUNT(CASE WHEN p THEN 1 END)` counts the rows the predicate keeps.
+    if args.is_empty() {
+        if let (Some(open), Some(close)) = (sql.find('('), sql.rfind(')')) {
+            let rewritten = format!(
+                "{}(CASE WHEN $1 THEN 1 END){}",
+                &sql[..open],
+                &sql[close + 1..]
+            );
+            return template(&rewritten, vec![predicate]);
+        }
+    }
+    let mut out = String::with_capacity(sql.len() + 24);
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        let mut n = String::new();
+        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            n.push(chars.next().expect("peeked a digit"));
+        }
+        match n.parse::<usize>() {
+            Ok(k) if k >= 1 => {
+                out.push_str(&format!("CASE WHEN $P THEN ${k} END"));
+            }
+            _ => {
+                out.push('$');
+                out.push_str(&n);
+            }
+        }
+    }
+    // The predicate takes the last placeholder, after the aggregate's own.
+    let mut all = args;
+    all.push(predicate);
+    let rewritten = out.replace("$P", &format!("${}", all.len()));
+    template(&rewritten, all)
+}
+
 pub fn template(sql: &str, args: Vec<Expr>) -> Result<Expr, String> {
     let b = sql.as_bytes();
     let mut text = String::new();
@@ -721,7 +843,19 @@ pub fn lower_expr(e: &ir::Expr, r: &Resolver) -> Result<Expr, String> {
                 negated: *negated,
             })
         }
-        ir::Expr::Tpl(sql, args) | ir::Expr::Agg(sql, args) => template(sql, all(args)?),
+        ir::Expr::Tpl(sql, args) => template(sql, all(args)?),
+        ir::Expr::Agg(sql, args, filter) => {
+            let args = all(args)?;
+            match filter {
+                Some(p) if is_plain_call(sql) => {
+                    let e = template(sql, args)?;
+                    let predicate = lower_expr(p, r)?;
+                    attach_filter(e, predicate)
+                }
+                Some(p) => portable_filter(sql, args, lower_expr(p, r)?),
+                None => template(sql, args),
+            }
+        }
         ir::Expr::Group(k) => lower_expr(k, r),
         ir::Expr::Win(sql, args, spec) => {
             let mut args = all(args)?;

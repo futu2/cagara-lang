@@ -254,7 +254,7 @@ fn saturated_modifier<'a>(
             ),
         ));
     };
-    let (sql, args) = agg_parts(&agg, origin)?;
+    let (sql, args, filter) = agg_parts(&agg, origin)?;
     let ty = agg.ty().clone();
     let rewrote = match m.kind {
         ModifierKind::Filtered => {
@@ -264,15 +264,25 @@ fn saturated_modifier<'a>(
                     "`filtered` needs a predicate and an aggregate",
                 ));
             };
-            let (sql, args) = filtered_template(&sql, &args, p);
-            CheckedExpr::agg_template(sql, args, ty, origin)
+            // The predicate stays beside the aggregate: whether it becomes
+            // `FILTER (WHERE p)` or the portable `CASE` spelling is a property
+            // of the target, and the target is not known here.
+            CheckedExpr::agg_template_filtered(sql, args, Some(p), ty, origin)
         }
         ModifierKind::Distinct => {
-            CheckedExpr::agg_template(distinct_template(&sql), args, ty, origin)
+            CheckedExpr::agg_template_filtered(distinct_template(&sql), args, filter, ty, origin)
         }
         ModifierKind::Over => {
             let Some(spec) = m.spec else {
                 return Err(Control::unsupported(origin, "`over` needs a window spec"));
+            };
+            // A window template has no place for a filter (`SUM(x) FILTER (WHERE
+            // p) OVER (…)` is not what the prelude's window declarations
+            // describe), so the predicate folds into the argument — the portable
+            // spelling, which every engine reads the same way.
+            let (sql, args) = match filter {
+                Some(p) => filtered_template(&sql, &args, p),
+                None => (sql, args),
             };
             CheckedExpr::win_template(sql, args, *spec, ty, origin)
         }
@@ -289,11 +299,15 @@ fn modifier_name(kind: ModifierKind) -> &'static str {
 }
 
 /// An aggregate's template text and its arguments.
-fn agg_parts(agg: &CheckedExpr, origin: Origin) -> Result<(String, Vec<CheckedExpr>), Control> {
+type AggParts = (String, Vec<CheckedExpr>, Option<CheckedExpr>);
+
+fn agg_parts(agg: &CheckedExpr, origin: Origin) -> Result<AggParts, Control> {
     match agg.node() {
-        crate::checked::CheckedExprNode::AggTemplate { sql, args } => {
-            Ok((sql.clone(), args.clone()))
-        }
+        crate::checked::CheckedExprNode::AggTemplate { sql, args, filter } => Ok((
+            sql.clone(),
+            args.clone(),
+            filter.as_ref().map(|p| p.as_ref().clone()),
+        )),
         _ => Err(Control::unsupported(
             origin,
             "only an aggregate can be filtered, made distinct or windowed",

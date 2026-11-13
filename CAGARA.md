@@ -793,11 +793,11 @@ and every overload emits the same `SUM(x)`.
   ```
 
   They compose, which the older per-function names could not: `distinctAgg (filtered p
-  (sum .x))` is `SUM(DISTINCT CASE WHEN … END)` and needs no name of its own. Filtering
-  `count` (no argument) wraps the `*`: `filtered p count` is
-  `COUNT(CASE WHEN p THEN 1 END)`.
-  The predicate is a non-null row-phase `bool` with no aggregate or window. The
-  helpers compile to `CASE`, not SQL `FILTER`, so every dialect accepts them.
+  (sum .x))` is `SUM(DISTINCT x) FILTER (WHERE p)` and needs no name of its own.
+  The predicate is a non-null row-phase `bool` with no aggregate or window, and it is emitted as
+  the standard `FILTER (WHERE p)` clause — `SUM(amount) FILTER (WHERE p)`, `COUNT(*) FILTER (WHERE
+  p)`. A target without that clause (the MySQL family, T-SQL, BigQuery, Spark) gets the portable
+  `CASE WHEN p THEN x END` inside the argument instead, which is the same aggregate.
   When every aggregate shares one predicate, use `where` before `agg` instead.
 - A filter after `agg` is the aggregate's `HAVING` — the same `where`, in the clause where it
   belongs. It stays an outer `WHERE` over a derived table when something that runs *after* grouping

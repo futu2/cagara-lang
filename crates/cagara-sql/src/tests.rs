@@ -2635,16 +2635,13 @@ fn an_aggregate_takes_a_filter_a_distinct_or_a_window() {
     );
 }
 
-/// A one-argument function is available over a value as well as over a column,
-/// and the two spellings emit the same SQL.
+/// A one-argument function works over a value as well as over a column, and the
+/// two uses emit the same SQL.
 ///
-/// This is what makes a *value layer* possible without a second language: `upper
-/// : string -> string` beside `upper : expr r string -> expr r string`. A value
-/// is what a constant or a parameter is, so `start : date = truncYear
-/// currentDate` needs no row, and `(x : date) => …` can take a computed date.
-/// The form is chosen by the context — a column selects the row form, a value
-/// selects the value form — and the SQL is the same either way, because both
-/// are the same template.
+/// There is one signature and no second overload: `truncYear` is `expr r date ->
+/// expr r date`, and an expression that reads no row *is* its value (see the
+/// checker's coercion). So `truncYear currentDate` is a `date` and `truncYear
+/// .d` reads the column, both through the same template.
 #[test]
 fn a_one_argument_function_works_over_a_value_and_a_column() {
     // A value: `truncYear` applied to the constant `currentDate`, in a field.

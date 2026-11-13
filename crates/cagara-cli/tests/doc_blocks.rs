@@ -214,3 +214,78 @@ fn block_extraction_rejects_an_unterminated_block() {
     let result = std::panic::catch_unwind(|| cagara_blocks(src));
     assert!(result.is_err(), "an unterminated block must be reported");
 }
+
+/// Every name in the reference's prelude catalog exists in the prelude.
+///
+/// The catalog is written by hand and the prelude is code, so the two drift the
+/// only way hand-written lists do: a name is deleted or renamed and its line
+/// stays. That happened twice — `sumFilter` and `avgOver` outlived the helpers
+/// they named — and a reader who trusts the catalog would write a query the
+/// compiler rejects. One direction is checked: the catalog is a *summary* and
+/// need not list every definition, but nothing it lists may be missing.
+#[test]
+fn every_name_in_the_catalog_exists_in_the_prelude() {
+    use std::collections::BTreeSet;
+
+    // The prelude's names, from the same command a reader would run.
+    let out = Command::new(env!("CARGO_BIN_EXE_cagara"))
+        .args(["doc", "--prelude"])
+        .output()
+        .expect("run cagara doc --prelude");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc = String::from_utf8_lossy(&out.stdout).into_owned();
+    let prelude: BTreeSet<String> = doc
+        .lines()
+        .filter_map(|l| l.strip_prefix("## `"))
+        .filter_map(|l| l.strip_suffix('`'))
+        .map(str::to_string)
+        .collect();
+    assert!(prelude.len() > 100, "the prelude listing looks empty");
+
+    // The catalog: every `name :` line inside the `text` blocks of §7.
+    let src = read(&repo_root().join("CAGARA.md"));
+    let start = src
+        .find("## 7. Prelude catalog")
+        .expect("CAGARA.md has the catalog");
+    let end = src[start..]
+        .find("\n## 8.")
+        .map(|i| start + i)
+        .expect("the catalog ends at §8");
+    let mut documented: BTreeSet<String> = BTreeSet::new();
+    for block in fenced_blocks(&src[start..end], "text") {
+        for line in block.lines() {
+            let Some((lhs, _)) = line.split_once(':') else {
+                continue;
+            };
+            // A signature line names one or more functions before the colon;
+            // anything with a brace, bracket or arrow on the left is a value
+            // sketch (`{ partition = … }`), not a name.
+            if lhs.contains(['{', '}', '[', ']', '=', '>', '#']) {
+                continue;
+            }
+            for name in lhs.split_whitespace() {
+                let ok = name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'')
+                    && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
+                if ok {
+                    documented.insert(name.to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        documented.len() > 50,
+        "the catalog looks empty: {documented:?}"
+    );
+
+    let missing: Vec<&String> = documented.difference(&prelude).collect();
+    assert!(
+        missing.is_empty(),
+        "CAGARA.md catalog names that the prelude does not define: {missing:?}"
+    );
+}

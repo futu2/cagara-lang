@@ -793,9 +793,9 @@ This is not the same as coalescing first. Over `[NULL, 5]`, `avg .amount` is
 `5`, while `avg (coalesce 0 .amount)` is `2.5`; `min .amount` over `[NULL, 5]`
 is `5`, while the coalesced form is `0`. Use `coalesce` when a missing value
 should count as a default; use the nullable overload when SQL's null-skipping
-meaning is what you want. The value forms still return `maybe` for an all-`NULL` or empty input;
-the count forms return non-null `int`. There are no `*MaybeFilter` forms yet —
-filter the rows with `where` first, or combine the predicate and null test.
+meaning is what you want. They still return `maybe` for an all-`NULL` or empty
+input, and the count forms return non-null `int`. To filter as well, wrap the
+aggregate: `filtered (.status == "paid") (sum .amount)` keeps the same type.
 
 ### Filtered aggregates
 
@@ -848,8 +848,9 @@ When **every** aggregate in the stage shares one predicate, filter before
 paid = orders & where (.status == "paid") & agg { user_id = group .user_id, total = sum .amount }
 ```
 
-That filters the rows once. The `*Filter` forms exist for the case where
-different aggregates in one stage need different predicates.
+That filters the rows once. `filtered` is for the case where different
+aggregates in one stage need different predicates:
+`agg { paid = filtered (.status == "paid") (sum .amount), all = sum .amount }`.
 
 ---
 
@@ -866,7 +867,7 @@ Where nullability comes from:
 |---|---|
 | A column declared `maybe int` | reads as nullable |
 | The possibly-absent side of a left, right, or full join | its columns become `maybe` |
-| `sum`, `avg`, `min`, `max` and their `*Filter` forms | `maybe` |
+| `sum`, `avg`, `min`, `max` — filtered or not | `maybe` |
 | `lag`, `lead`, `over` | `maybe` |
 | `count`, `countOf`, `countDistinct`; `over spec count`, `filtered p count` | non-null `int` |
 | `countOfMaybe`, `countDistinctMaybe` | non-null `int` |
@@ -1374,8 +1375,8 @@ column, and the nullable counts are `countOfMaybe` `countDistinctMaybe`
 
 **Casts:** `toInt` `toFloat` `toBool` `toString` `toDecimal` `tryInt` `tryFloat` `tryDate` `tryTimestamp` `tryDecimal` (`from*` spellings: `fromString`, `fromInt`, `fromFloat`)
 
-**Windows:** `rowNumber` `rank` `denseRank` `lag` `lead` `over` `avgOver`
-`countOver` `firstValue` `lastValue` `ntile spec n` `percentRank` `cumeDist`
+**Windows:** `rowNumber` `rank` `denseRank` `lag` `lead` `firstValue` `lastValue` `ntile spec n`
+`percentRank` `cumeDist` — and any aggregate, made a window by `over spec agg`
 
 **Conditionals:** `ifThenElse` (alias `caseWhen`), `case { cond => value; ...; true => default }`
 
@@ -1946,7 +1947,7 @@ underlined, and the process exits non-zero when there are errors.
 
 Dialect support varies in *depth*, and the distinction matters. Some dialects
 have Cagara's date, string, and integer-arithmetic operations rewritten and are
-executed against real engines in CI (SQLite, DuckDB); others can be targeted but
+executed against real engines in CI (SQLite, DuckDB, PostgreSQL through PGlite); others can be targeted but
 their intrinsic spellings use the ANSI/Postgres fallback. Comparing `int`
 division is instructive:
 
@@ -2048,7 +2049,7 @@ common ones, with the fix:
 | `this argument contains a window function; windows cannot nest` | `select` the window, then filter the new column |
 | `type mismatch: expected int, found float` | convert explicitly with `toFloat` / `toInt` |
 | `only one side is nullable` | wrap with `coalesce`, or use `just` |
-| `expected a non-null value, found a \`maybe\`` | handle it; for an aggregate input use the `*Maybe` helper |
+| `expected a non-null value, found a \`maybe\`` | handle it; for an aggregate input the nullable overload of `sum`/`avg`/`min`/`max` already takes it |
 | `a line starting with an identifier in column 0` | indent the continuation, or terminate the previous item with `;` |
 | `a lambda parameter's type annotation is written \`(x : ty) => body\`` | put the parameter and its type in parentheses |
 | `\`main\` must be a query` | make `main` a query, or omit it for a library |
@@ -2090,7 +2091,7 @@ the computation one stage earlier.
 
 - [`examples/report.cagara`](../examples/report.cagara) — filtering, aggregation,
   windows, joins, nulls, and shorthands in one file; compiled and executed
-  against SQLite and DuckDB by the test suite.
+  against SQLite, DuckDB and PostgreSQL by the test suite.
 - [`examples/public.cagara`](../examples/public.cagara) and
   [`schema.cagara`](../examples/schema.cagara) — modules.
 - [`examples/errors.cagara`](../examples/errors.cagara) — a file of

@@ -95,12 +95,12 @@ impl<'w> Checker<'w> {
     /// Rank the candidates that all fit, by how well their parameters match
     /// the shape of the arguments.
     ///
-    /// Two overload families overlap on an *open* type: the value/row twins
-    /// (`upper : string -> string` beside `upper : expr r string -> expr r string`)
-    /// and the nullable twins (`a -> bool` beside `maybe a -> maybe bool`).
-    /// Both fit while an argument's type is still a variable, and choosing by
-    /// declaration order makes the answer depend on where the overload was
-    /// written — after which the real argument type contradicts it:
+    /// Two overload families overlap on an *open* type: a source-type pair
+    /// (`toInt` over `float` and over `string`) and the nullable twins
+    /// (`a -> bool` beside `maybe a -> maybe bool`). Both fit while an
+    /// argument's type is still a variable, and choosing by declaration order
+    /// makes the answer depend on where the overload was written — after which
+    /// the real argument type contradicts it:
     ///
     /// ```text
     /// addDays (-7) .d        -- `.d` is a row expression, not a value

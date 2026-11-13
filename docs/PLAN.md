@@ -19,8 +19,9 @@ this page tracks the remaining boundaries and language work.
 - Aggregates are values, modified by three combinators (`filtered`,
   `distinctAgg`, `over`) that rewrite the aggregate's template — `SUM(CASE WHEN
   … THEN x END)` and `SUM(DISTINCT x)`, which every engine accepts. A
-  first-class `FILTER (WHERE …)` node would be smaller SQL and needs an IR field
-  plus a backend rule; the combinators are the portable spelling until then.
+  first-class `FILTER (WHERE …)` clause would be smaller SQL and needs an IR
+  field plus a backend rule; the combinators are the portable spelling until
+  then.
 - A single lowercase letter in a type position is a type *parameter* (that is
   what makes `id : a -> a` work); anything else must be a constructor the
   language has, and a near miss is reported with a "did you mean". An explicit
@@ -33,26 +34,25 @@ this page tracks the remaining boundaries and language work.
 `list a` is a value type: `arrayAgg` builds one, `[1, 2]` is one, and `<>` concatenates two. The
 spelling is the target's — `ARRAY[…]`/`ARRAY_AGG`/`||` on PostgreSQL, `list_value`/`list`/
 `list_concat` on DuckDB — and a dialect with no array type refuses the query instead of writing
-JSON text, which would change the type silently. `EXISTS`-style operations over a list
-(`listLength`, membership, `unnest`) are still future work: they need their own intrinsic per
-dialect, which is the same shape as the three above.
+JSON text, which would change the type silently. What a list cannot do yet is anything but be built and
+concatenated: `listLength`, membership over a column, and `unnest` are future work, and each needs
+its own intrinsic per dialect — the same shape as the three above.
 
 ## Next steps
 
 1. Separate relational rewrites from SQL emission. A `Rel -> Rel` pass can fuse
    stages or choose derived tables while keeping dialect rules in the backend.
 2. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
-   beyond SQLite and DuckDB, and run it with `--optimize` as well as the
-   default lowering.
+   beyond SQLite, DuckDB and PostgreSQL (PGlite), and run it with `--optimize` as
+   well as the default lowering.
 
 ## Deferred language work
 
 Catalog declarations, typed bind parameters, a decimal/numeric scalar type for
 exact money (`toDecimal` is a SQL cast today; the Cagara type stays `float`, and
-no `decimal` constructor exists to inhabit), name-aligned set operations, first-class aggregate `FILTER`
-emission (the prelude's `*Filter` helpers already cover the built-in aggregates
-portably), `qualify`, grouping sets, lateral or correlated subqueries, and
-richer window frames remain future work. The remaining features should extend
+no `decimal` constructor exists to inhabit), name-aligned set operations,
+`qualify`, grouping sets, lateral or correlated subqueries, and richer window
+frames remain future work. The remaining features should extend
 the typed core, normalizer, relational arena, and SQL backend together.
 
 See [`CORE.md`](CORE.md) for semantics and [`ROW-TYPES.md`](ROW-TYPES.md) for

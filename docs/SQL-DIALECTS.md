@@ -24,9 +24,8 @@ spelled for PostgreSQL (`ARRAY[…]`, `ARRAY_AGG`, `||`) and DuckDB (`list_value
 needs an array. A list is never lowered to JSON text — that would change the column's type without
 saying so.
 
-Filtered aggregates do not depend on the dialect: `filtered` and the other
-`*Filter` helpers are prelude templates over `CASE`, not a `FILTER` clause, so
-they need no per-dialect rewrite.
+Filtered aggregates do not depend on the dialect: `filtered` is a prelude
+template over `CASE`, not a `FILTER` clause, so it needs no per-dialect rewrite.
 
 Two constructs are deliberately refused rather than emitted in a dialect that
 cannot mean them:

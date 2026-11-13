@@ -768,7 +768,7 @@ Rules:
 - A later `agg` may aggregate the previous `agg`'s output; that is a separate stage, not nesting.
 - `sum`, `avg`, `min`, `max` return `maybe`. `count`, `countOf`, `countDistinct` return `int`. A
 nullable column needs no separate name: `sum` accepts `int`, `float`, `maybe int` and `maybe float`,
-and the `*Maybe` spellings are aliases of the same SQL.
+and every overload emits the same `SUM(x)`.
 - A nullable column goes to the same aggregate — `sum .m` is `maybe int` — or to
   `countOfMaybe`/`countDistinctMaybe`. Coalescing first changes `avg`/`min`/`max`.
 - An aggregate is a **value**, so three combinators modify one instead of a name per
@@ -819,10 +819,10 @@ main = orders & agg {
   }
 ```
 
-`sumFilter`/`avgFilter`/`minFilter`/`maxFilter` return `maybe`, like their
-unfiltered forms; the count forms return non-null `int`. A group with no
-matching row is `NULL` for the value aggregates and `0` for the counts, the same
-as SQL `FILTER`.
+`filtered` keeps the type of the aggregate it modifies: `filtered p (sum .x)` is
+`maybe`, `filtered p count` is non-null `int`. A group with no matching row is
+`NULL` for the value aggregates and `0` for the counts — SQL `FILTER`'s
+behaviour, without the clause.
 
 ### 5.5 `order`, `limit`, `offset`, `distinct`
 
@@ -1106,9 +1106,9 @@ Where `maybe` comes from:
 |---|---|
 | column declared `maybe` | `maybe` |
 | nullable side of left/right/full join | that side's columns `maybe` |
-| `sum`, `avg`, `min`, `max` and their `*Filter` forms | `maybe` (empty/all-null input) |
-| `lag`, `lead`, `over`, `avgOver` | `maybe` |
-| `count`, `countOf`, `countDistinct`, `countOver`; `countFilter`, `countOfFilter`, `countDistinctFilter` | non-null `int` |
+| `sum`, `avg`, `min`, `max` — filtered or not | `maybe` (empty/all-null input) |
+| `lag`, `lead`, `over` | `maybe` |
+| `count`, `countOf`, `countDistinct`, `over spec count`, `filtered p count` | non-null `int` |
 | `countOfMaybe`, `countDistinctMaybe` | non-null `int` |
 | `isNull`, `isNotNull`, `isTrue` | non-null `bool` |
 | `try*` casts | `maybe` |
@@ -1374,44 +1374,46 @@ another use constrains it.
 ### 7.6 Aggregates (only in `agg`)
 
 ```text
-count          : agg (expr r int)
-countOf        : expr r a -> agg (expr r int)
-countDistinct  : expr r a -> agg (expr r int)
+count              : agg (expr r int)                              COUNT(*)
+countOf            : expr r a -> agg (expr r int)                  COUNT(x)
+countDistinct      : expr r a -> agg (expr r int)                  COUNT(DISTINCT x)
+countOfMaybe       : expr r (maybe a) -> agg (expr r int)          COUNT(x)
+countDistinctMaybe : expr r (maybe a) -> agg (expr r int)          COUNT(DISTINCT x)
 
-sum            : expr r int -> agg (expr r (maybe int))
-sum            : expr r float -> agg (expr r (maybe float))
-avg            : expr r int|float -> agg (expr r (maybe float))
-min max        : expr r a -> agg (expr r (maybe a))
+sum : expr r int -> agg (expr r (maybe int))        sum : expr r (maybe int) -> agg (expr r (maybe int))
+sum : expr r float -> agg (expr r (maybe float))    sum : expr r (maybe float) -> agg (expr r (maybe float))
+avg : expr r int -> agg (expr r (maybe float))      avg : expr r (maybe int) -> agg (expr r (maybe float))
+avg : expr r float -> agg (expr r (maybe float))    avg : expr r (maybe float) -> agg (expr r (maybe float))
+min : expr r a -> agg (expr r (maybe a))            min : expr r (maybe a) -> agg (expr r (maybe a))
+max : expr r a -> agg (expr r (maybe a))            max : expr r (maybe a) -> agg (expr r (maybe a))
 
-sum            : expr r (maybe int) -> agg (expr r (maybe int))
-sum            : expr r (maybe float) -> agg (expr r (maybe float))
-avg            : expr r (maybe int|float) -> agg (expr r (maybe float))
-min max        : expr r (maybe a) -> agg (expr r (maybe a))
-countOfMaybe   : expr r (maybe a) -> agg (expr r int)
-countDistinctMaybe : expr r (maybe a) -> agg (expr r int)
+arrayAgg : expr r a -> agg (expr r (list a))       ARRAY_AGG(x) — a list column
 
-filtered : count expr r bool -> agg (expr r int)
-filtered : (countOf expr) r bool -> expr r a -> agg (expr r int)
-filtered : (distinctAgg (countOf expr)) r bool -> expr r a -> agg (expr r int)
-
-filtered : (sum expr) r bool -> expr r int -> agg (expr r (maybe int))
-filtered : (sum expr) r bool -> expr r float -> agg (expr r (maybe float))
-filtered : (avg expr) r bool -> expr r int|float -> agg (expr r (maybe float))
-filtered filtered (min :) (max expr) r bool -> expr r a -> agg (expr r (maybe a))
+filtered    : expr r bool -> agg (expr r a) -> agg (expr r a)
+distinctAgg : agg (expr r a) -> agg (expr r a)
+filtered    : expr r bool -> agg (expr r (maybe a)) -> agg (expr r (maybe a))
+distinctAgg : agg (expr r (maybe a)) -> agg (expr r (maybe a))
+over        : winspec r -> agg (expr r a) -> win (expr r a)
+over        : winspec r -> agg (expr r (maybe a)) -> win (expr r (maybe a))
 ```
 
 `count` is a value, not a call: write `n = count`, not `count ()`. `sum`/`avg`/`min`/`max` return
 `maybe`; `coalesce 0 (sum .x)` makes a number. `countOf`/`countDistinct` require non-null input.
+`arrayAgg` needs a dialect with an array type (PostgreSQL, DuckDB); the others refuse it.
 
-The nullable overloads keep SQL's own semantics: the column passes straight through, so
-`sum .x` over a `maybe` column emits `SUM(x)`, not `SUM(COALESCE(x, 0))`. This matters for
-`avg`/`min`/`max`: over `[NULL, 5]`, `avg .x` is `5`, while `avg (coalesce 0 .x)` is `2.5`. `countOfMaybe`/`countDistinctMaybe` are `COUNT(x)` and
-`COUNT(DISTINCT x)`. For an all-NULL or empty input the value aggregates are still `maybe`.
+The nullable overloads keep SQL's own semantics: the column passes straight through, so `sum .x`
+over a `maybe` column emits `SUM(x)`, not `SUM(COALESCE(x, 0))`. This matters for `avg`/`min`/`max`:
+over `[NULL, 5]`, `avg .x` is `5`, while `avg (coalesce 0 .x)` is `2.5`.
 
-The `*Filter` forms take a non-null row-phase `bool` predicate first and apply it to that
-aggregate's input rows, so `filtered p (sum .x`) means `SUM(x) FILTER (WHERE p)` (compiled to the
-portable `SUM(CASE WHEN p THEN x END)`). They return the same type as the unfiltered form. When every
-aggregate in the stage shares one predicate, use `where` before `agg` instead.
+**Three modifiers, not a name per combination.** An aggregate is a value, so the modifiers nest:
+`distinctAgg (filtered p (sum .x))`.
+
+- `filtered p a` keeps the rows where `p` holds. It rewrites the aggregate's template to the portable
+  `SUM(CASE WHEN p THEN x END)`, and a group with no matching row stays `NULL` for the value
+  aggregates and `0` for the counts — SQL `FILTER (WHERE …)`'s behaviour, without that clause.
+- `distinctAgg a` is `DISTINCT` inside the aggregate.
+- `over spec a` makes it a window function; see §7.7. When every aggregate in the stage shares one
+  predicate, `where` before `agg` is cheaper than `filtered` on each of them.
 
 ### 7.7 Windows (only in `select`/`update` fields)
 
@@ -1427,10 +1429,6 @@ such as `truncMonth .ts` are fine, but aggregates and windows are not.
 ```text
 rowNumber rank denseRank : winspec r -> win (expr r int)
 lag lead                 : winspec r -> expr r a -> win (expr r (maybe a))
-sumOver                  : winspec r -> expr r int -> win (expr r (maybe int))
-sumOver                  : winspec r -> expr r float -> win (expr r (maybe float))
-avgOver                  : winspec r -> expr r int|float -> win (expr r (maybe float))
-countOver                : winspec r -> win (expr r int)
 firstValue lastValue     : winspec r -> expr r a -> win (expr r (maybe a))
 ntile                    : winspec r -> expr r int -> win (expr r int)
 percentRank cumeDist     : winspec r -> win (expr r float)
@@ -1460,8 +1458,8 @@ A frame is not a spec: `lag wholePartition .amount` is wrong; write
 wrong; write `rowNumber {order = [asc .id]}`. The spec comes first: `ntile {order = [asc .id]} 4`,
 not `ntile 4 {order = [asc .id]}`.
 
-An aggregating window (`over`, `avgOver`, `countOver`, and the min/max forms) that orders without
-naming a frame gets the **running** frame, `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. SQL's
+An aggregating window (`over spec (sum …)`, and the other aggregates) that orders without naming a
+frame gets the **running** frame, `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. SQL's
 own default, `RANGE … CURRENT ROW`, folds rows with equal order keys into the same value, so a
 running total would be wrong per row whenever the key repeats. Ranking functions and `lag`/`lead`
 ignore the frame, so they stay frameless. Ask for another frame explicitly:
@@ -1655,10 +1653,10 @@ If a request needs one of these, say so or write a `sql` template; do not guess 
 - **Subqueries:** no `FROM (SELECT ...)`, no correlated subqueries, no `LATERAL`. Compose named query
   definitions instead; a join input may be a query.
 - **Aggregation:** `HAVING` (use `where` after `agg`), `GROUPING SETS`, `DISTINCT ON`, `QUALIFY`.
-  SQL's `FILTER (WHERE ...)` clause is not syntax; use the `*Filter` helpers
-  (`sumFilter`, `countFilter`, ...) or spell `CASE` in a custom aggregate template.
+  SQL's `FILTER (WHERE ...)` clause is not syntax; write `filtered p agg`, or spell `CASE` in a
+  custom aggregate template.
 - **Functions not in §7:** `random`, more aggregates (`median`, `stddev`, `string_agg`,
-  `array_agg`, `bool_and`/`bool_or`), `split`, `regexp_*`. These may be added as `sql` templates,
+  `bool_and`/`bool_or`; `array_agg` is `arrayAgg`), `split`, `regexp_*`. These may be added as `sql` templates,
   but only with a signature.
 - **Language features:** user types, record values as data, arrays/maps, `if` statements, loops,
   exceptions, parameters, multiple statements, DDL/DML (`INSERT`, `UPDATE`, `DELETE`, `CREATE`),
@@ -1896,10 +1894,9 @@ Run this in order before returning a file.
    bindings are lexical and cannot refer to themselves.
 5. **Row changes:** `select` (replace) vs `update` (merge) vs `omit` (drop) chosen deliberately.
 6. **Aggregation:** aggregates only in `agg`; every non-`group` field is an aggregate or constant;
-   no nested aggregates; `sum`/`avg`/`min`/`max` and their `*Filter` forms wrapped in `coalesce`
-   when a non-null is needed; a nullable aggregate input uses the `*Maybe` form (not `coalesce`,
-   which changes `avg`/`min`/`max`); filtered aggregates use the helpers, not `ifThenElse` with
-   `ELSE 0`.
+   no nested aggregates; `sum`/`avg`/`min`/`max` wrapped in `coalesce` when a non-null is needed; a
+   nullable aggregate input uses the same name's nullable overload (not `coalesce`, which changes
+   `avg`/`min`/`max`); a filtered aggregate is `filtered p agg`, not `ifThenElse` with `ELSE 0`.
 7. **Windows:** only in `select`/`update` fields; filter/sort on the named column in a later stage.
 8. **Nulls:** predicates and operators see non-null values; every `maybe` is handled.
 9. **Joins:** predicate uses `.<` and `.>`; both columns exist on the correct sides; output

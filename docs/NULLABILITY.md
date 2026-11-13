@@ -8,15 +8,14 @@ function signature means a non-null type, so `expr r a` does not accept
 |---|---|
 | A column declared `maybe int` | Reads as a nullable expression |
 | The possibly absent side of a left, right, or full join | Its output columns become `maybe` |
-| `sum`, `avg`, `min`, `max` and their `*Filter` forms | Return `maybe`, including for empty/all-null input |
+| `sum`, `avg`, `min`, `max` — filtered or not | Return `maybe`, including for empty/all-null input |
 | `lag`, `lead`, `over` | Return `maybe` |
 | `count`, `countOf`, `countDistinct`; `over spec count`, `filtered p count` | Return non-null `int` |
 | `countOfMaybe`, `countDistinctMaybe` | Return non-null `int` |
 
-The filtered aggregate helpers take a non-null `bool` predicate over the
-aggregate's input rows. Their result type is the same as the unfiltered
-aggregate, so a filtered `sum`/`avg`/`min`/`max` is `maybe` and a filtered
-`count`/`countOf`/`countDistinct` is non-null `int`.
+`filtered p agg` takes a non-null `bool` predicate over the aggregate's input
+rows and keeps the aggregate's type, so `filtered p (sum .x)` is `maybe` and
+`filtered p count` is non-null `int`.
 
 A nullable column reaches an aggregate under the *same* name: `sum`, `avg`,
 `min` and `max` accept `maybe` and pass it through unchanged, which is how a

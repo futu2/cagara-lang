@@ -198,11 +198,11 @@ so `expr r a` does not accept `expr r (maybe a)`. Where nullability arises:
 - `sum`, `avg`, `min`, `max`, `lag`, `lead` and the `*Over` windows return
   `maybe`, because SQL returns
   `NULL` for an empty or all-null input; `count`/`countOf`/`countDistinct` and
-  their `*Maybe` count forms return non-null `int`. The `*Filter` aggregate
-  helpers keep the same result type as their unfiltered forms.
+  their `countOfMaybe`/`countDistinctMaybe` forms return non-null `int`.
+  `filtered` keeps the result type of the aggregate it modifies.
 
-Filtered aggregates are not an IR construct: `filtered p (sum x`), for example, is
-the ordinary prelude template `SUM(CASE WHEN p THEN x END)`. Omitting `ELSE`
+Filtered aggregates are not an IR construct: `filtered p (sum x)`, for example,
+is the ordinary prelude template `SUM(CASE WHEN p THEN x END)`. Omitting `ELSE`
 is what preserves SQL `FILTER`'s empty-group behaviour (`NULL` for the value
 aggregates, `0` for the counts), and the `CASE` spelling needs no
 dialect-specific lowering.
@@ -214,9 +214,9 @@ Nullable values are not silently coerced. The prelude provides the operators:
 and its `NULL` condition drops the row, which is SQL's own filter. These are
 ordinary templates, so their null behaviour is the SQL they name. A plain
 comparison requires non-null operands, and the ordinary aggregate signatures do
-too; the prelude's explicit `*Maybe` aggregates opt a nullable input into SQL's
-null-skipping behaviour, so the query still states where a `NULL` is allowed to
-flow.
+too; the nullable overloads of `sum`/`avg`/`min`/`max` opt a nullable input
+into SQL's null-skipping behaviour under the same name, so the query still states
+where a `NULL` is allowed to flow.
 
 **Phases.** `ir::Phase` is `Const | Row | Agg | Win`. `rules::mix` combines two
 phases (`Agg` with anything but `Const`/`Agg` is a clash; `Win` combines with

@@ -262,6 +262,24 @@ tryInt : expr r string -> expr r (maybe int) = sql "CAGARA_TRY_INT($1)"
 ## `tryFloat` parses a `string` as a `float`, NULL on failure.
 tryFloat : expr r string -> expr r (maybe float) = sql "CAGARA_TRY_FLOAT($1)"
 
+## `parseDate "%Y-%m-%d" s` — a `date` from a string, by format. One interface
+## for every target: PostgreSQL spells the format `YYYY-MM-DD` where the string
+## says `%Y-%m-%d`, MySQL reads `%i` for minutes where the string says `%M`, and
+## Spark writes `yyyy-MM-dd`; the translation happens here, not in your query.
+##
+## The format is `%Y` (year), `%m` (month), `%d` (day), `%H` (hour), `%M`
+## (minute), `%S` (second) and `%%` for a literal percent — nothing else, so a
+## format that works on one target cannot mean something else on another. It
+## must be a literal: it is compiled into the SQL. A bad value raises, exactly
+## as the target's own parser does; use `toDate` when the shape is fixed and
+## `tryDate` when the input may not be a date at all.
+parseDate : string -> expr r string -> expr r date = sql "CAGARA_PARSE_DATE($1, $2)"
+
+## `formatDate "%Y-%m" d` — the inverse: a `date` printed by format, with the
+## same vocabulary as `parseDate`. `toString` is the fixed ISO spelling and needs
+## no format.
+formatDate : string -> expr r date -> expr r string = sql "CAGARA_FORMAT_DATE($1, $2)"
+
 ## `tryDate` parses a `string` as a `date`, NULL on failure.
 tryDate : expr r string -> expr r (maybe date) = sql "CAGARA_TRY_DATE($1)"
 

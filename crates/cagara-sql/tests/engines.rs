@@ -428,6 +428,84 @@ fn engines_agree() {
     eprintln!("{ran} engine runs");
 }
 
+/// `parseDate`/`formatDate` mean the same thing on the engines that run here.
+///
+/// One Cagara query, two spellings underneath — `strftime` and `TO_CHAR` — and
+/// the same rows back. SQLite is absent because it has no format *parser*;
+/// `a_date_format_is_written_once_and_spelled_per_target` covers what it emits
+/// instead.
+#[test]
+fn a_parsed_and_printed_date_agrees_on_the_engines() {
+    let src = format!(
+        "{TABLES}\
+         fmt = days & select {{ s = formatDate \"%Y-%m-%d %H:%M:%S\" .d, ym = formatDate \"%Y-%m\" .d }}\n"
+    );
+    let ws = Workspace::from_source(&src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let (_, rel) = rels
+        .iter()
+        .find(|(n, _)| n == "fmt")
+        .unwrap_or_else(|| panic!("no `fmt`"));
+    let rel = rel
+        .as_ref()
+        .unwrap_or_else(|d| panic!("`fmt`: {}", d.message));
+    let want = [
+        "2024-01-31 00:00:00|2024-01",
+        "2024-01-07 00:00:00|2024-01",
+        "2023-12-25 00:00:00|2023-12",
+    ];
+
+    // DuckDB, through its shell.
+    let duck = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    let opts = Options {
+        dialect: Dialect::DuckDb,
+        ..Options::default()
+    };
+    let sql = compile(rel, opts).expect("duckdb");
+    match run(&duck, &sql) {
+        Some(Ok(rows)) => assert_eq!(rows, want, "{sql}"),
+        Some(Err(m)) => panic!("duckdb: {m}\n  {sql}"),
+        None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
+            panic!("`duckdb` is not installed (CAGARA_REQUIRE_ENGINES is set)")
+        }
+        None => eprintln!("skipping duckdb: not installed"),
+    }
+
+    // PostgreSQL, through PGlite.
+    let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
+    let ready = Command::new("node")
+        .args([harness, "--check"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ready {
+        assert!(
+            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            "`node` with @electric-sql/pglite is not installed (CAGARA_REQUIRE_ENGINES is set)"
+        );
+        eprintln!("skipping postgres: node or @electric-sql/pglite is not installed");
+        return;
+    }
+    // `days.d` is a `date` in both setups; only the schema and the `DOUBLE`
+    // spelling differ, so the SQL is the same shape.
+    let setup = format!(
+        "CREATE SCHEMA main;\n{}",
+        SETUP.replace("DOUBLE", "DOUBLE PRECISION")
+    );
+    let opts = Options {
+        dialect: Dialect::Postgres,
+        ..Options::default()
+    };
+    let sql = compile(rel, opts).expect("postgres");
+    let blocks = pg_batch(harness, &setup, std::slice::from_ref(&sql));
+    assert_eq!(blocks[0], want, "{sql}");
+}
+
 /// The tables `examples/report.cagara` queries, with rows chosen so every
 /// clause of the report has something to say.
 ///

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `parseDate "%Y%m%d" s` and `formatDate "%Y-%m" d` are one interface for every dialect. The format
+  is written once, in strftime's vocabulary (`%Y %m %d %H %M %S`, `%%`), and the backend translates
+  both the function and the format: PostgreSQL and Snowflake `TO_DATE`/`TO_CHAR` with `YYYYMMDD`,
+  DuckDB `STRPTIME`/`STRFTIME`, Trino and MySQL `DATE_PARSE`/`DATE_FORMAT` (where minutes are `%i`,
+  because `%M` there is the month's name), Spark `yyyyMMdd`, BigQuery `PARSE_DATE`/`FORMAT_DATE`.
+  The format must be a literal, an unknown specifier is a compile error rather than a different
+  meaning on another target, and `parseDate` is refused on SQLite and T-SQL, which have no format
+  parser (they can still print by format). Verified by running the same Cagara query on DuckDB and
+  PostgreSQL and getting the same rows.
+
 - A format conversion (`STR_TO_DATE`/`DATE_FORMAT` in a `sql` template) is spelled by the target
   instead of always becoming sqlglot's `TO_CHAR`/`TO_TIMESTAMP`: Trino gets `date_parse`/
   `date_format`, DuckDB `strptime`/`strftime`, and PostgreSQL keeps `TO_CHAR`/`TO_TIMESTAMP`. The

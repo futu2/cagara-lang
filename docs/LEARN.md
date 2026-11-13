@@ -1360,7 +1360,8 @@ byId : expr { id = int | r } int -> query { id = int | r } -> query { id = int |
 `replaceAll from to s` `strpos sub s` `contains sub s` `startsWith prefix s`
 `endsWith suffix s`
 
-**Dates and timestamps:** `currentDate` `yesterday` `now` `toDate` `toTimestamp` `toString`
+**Dates and timestamps:** `currentDate` `yesterday` `now` `toDate` `toTimestamp` `parseDate`
+`formatDate` `toString`
 `addDays` `addWeeks` `addMonths` `addQuarters` `addYears` `addHours`
 `addMinutes` `addSeconds`; `truncYear` `truncQuarter` `truncMonth` `truncWeek`
 `truncDay` `truncHour` `truncMinute`; `year` `quarter` `month` `day`
@@ -1514,6 +1515,8 @@ literals widen to *either*, depending on what the surrounding context expects.
 | `addHours`, `addMinutes`, `addSeconds` | ✗ | ✓ | `timestamp` |
 | `daysBetween start end` | ✓ | — | `int` |
 | `toDate` / `toTimestamp` | converts | converts | see below |
+| `parseDate fmt s` | — | — | `date` (see below) |
+| `formatDate fmt d` | ✓ | — | `string` |
 | `toString` | ✓ | ✓ | `string` |
 
 The asymmetry is the point: a calendar day has no hour, and adding two hours to a
@@ -1595,6 +1598,42 @@ SELECT id, CAST(created_at AS DATE) AS day, CAST(due AS TIMESTAMP) AS midnight,
        CAST(due AS TEXT) AS label, CAST(created_at AS TEXT) AS ts_label
 FROM public.orders;
 ```
+
+#### `parseDate` / `formatDate`: one format, every dialect
+
+`toDate` and `toString` fix the spelling (ISO). When the input or the output has
+another shape — an `YYYYMMDD` column, a `%Y-%m` bucket — give the format, and
+write it once: the language reads strftime's `%Y %m %d %H %M %S` (plus `%%`),
+and the backend translates it to whatever the target wants.
+
+```haskell
+t = orders & select {
+  .id,
+  parsed = parseDate "%Y%m%d" .packed,          # "20240131" -> date
+  label = formatDate "%Y-%m" .due               # date -> "2024-01"
+}
+```
+
+| target | `parseDate "%Y%m%d"` | `formatDate "%Y-%m"` |
+|---|---|---|
+| PostgreSQL, ANSI, Snowflake | `TO_DATE(s, 'YYYYMMDD')` | `TO_CHAR(d, 'YYYY-MM')` |
+| DuckDB | `CAST(STRPTIME(s, '%Y%m%d') AS DATE)` | `STRFTIME(d, '%Y-%m')` |
+| Trino, MySQL | `CAST(DATE_PARSE(s, '%Y%m%d') AS DATE)` | `DATE_FORMAT(d, '%Y-%m')` |
+| Spark | `TO_DATE(s, 'yyyyMMdd')` | `DATE_FORMAT(d, 'yyyy-MM')` |
+| BigQuery | `PARSE_DATE('%Y%m%d', s)` | `FORMAT_DATE('%Y-%m', d)` |
+| SQLite, T-SQL | *compile error* (no format parser) | `STRFTIME` / `FORMAT` |
+
+Two rules keep that honest. The format must be a **literal** — it is compiled in,
+and a column's value could not be. And only the specifiers above are translated:
+`%M` is the minute here, so it becomes `%i` on Trino and MySQL, where `%M` would
+mean the month's *name* — a format the language does not define is a compile
+error rather than a different meaning on another target.
+
+`parseDate` raises on a value that is not a date, exactly as the target's own
+parser does. For input that may not be a date, use `tryDate` where the target has
+`TRY_CAST` (DuckDB, Trino, Snowflake, Spark, BigQuery) — PostgreSQL and SQLite do
+not, so there the choice is a `toDate` on known-good input or a `sql` template of
+your own.
 
 Note that `toString` on a `date` and on a `timestamp` both render the value's
 text form directly; wrapping one in the other first is only about *which* form

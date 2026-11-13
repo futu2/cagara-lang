@@ -70,6 +70,13 @@ fn node(e: Expr, f: Fam) -> Result<Expr, String> {
     if let Some(msg) = list_refusal(&upper, f) {
         return Err(msg);
     }
+    // A format conversion takes a *format string*, which the language writes in
+    // one vocabulary and each target spells in its own; that translation is
+    // fallible (an unsupported specifier, a format that is not a literal, a
+    // target with no parser), so it runs before the infallible table below.
+    if matches!(upper.as_str(), "CAGARA_PARSE_DATE" | "CAGARA_FORMAT_DATE") {
+        return parse_or_format(&upper, &args, f).map(atomic);
+    }
     let lowered = if over.is_none() {
         intrinsic(&upper, &args, f)
     } else {
@@ -88,6 +95,151 @@ fn node(e: Expr, f: Fam) -> Result<Expr, String> {
             "unknown SQL intrinsic `{upper}` with {} argument(s)",
             args.len()
         )),
+    }
+}
+
+/// The format vocabulary the language writes, and how a target spells it.
+///
+/// `%Y %m %d %H %M %S` is strftime's, which is what DuckDB and BigQuery read
+/// directly. The others differ in small, silent ways: PostgreSQL and Snowflake
+/// want `YYYY MM DD HH24 MI SS`, Spark and T-SQL `.NET`/Java `yyyy MM dd HH mm
+/// ss`, and MySQL's dialect (which Trino's `date_parse` follows) reads `%i` for
+/// minutes while `%M` means the month's *name* — so passing a C-style format
+/// through unchanged would silently parse minutes as a month name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FmtStyle {
+    /// `%Y %m %d %H %M %S` — DuckDB, BigQuery.
+    Strftime,
+    /// PostgreSQL, Snowflake: `YYYY MM DD HH24 MI SS`.
+    Pg,
+    /// MySQL and Trino's `date_parse`: `%Y %m %d %H %i %s`.
+    Mysql,
+    /// Spark `to_date`/`date_format` and T-SQL `FORMAT`: `yyyy MM dd HH mm ss`.
+    Java,
+}
+
+/// Translate the language's format string into the target's spelling.
+fn translate_format(fmt: &str, style: FmtStyle) -> Result<String, String> {
+    let mut out = String::with_capacity(fmt.len() + 8);
+    let mut chars = fmt.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let Some(spec) = chars.next() else {
+            return Err(format!(
+                "`{fmt}` ends with `%`, which is not a format specifier; write `%%` for a                  literal percent"
+            ));
+        };
+        let token = match (spec, style) {
+            ('%', _) => "%",
+            ('Y', FmtStyle::Strftime) => "%Y",
+            ('Y', FmtStyle::Mysql) => "%Y",
+            ('Y', FmtStyle::Pg) => "YYYY",
+            ('Y', FmtStyle::Java) => "yyyy",
+            ('m', FmtStyle::Strftime | FmtStyle::Mysql) => "%m",
+            ('m', FmtStyle::Pg) => "MM",
+            ('m', FmtStyle::Java) => "MM",
+            ('d', FmtStyle::Strftime | FmtStyle::Mysql) => "%d",
+            ('d', FmtStyle::Pg) => "DD",
+            ('d', FmtStyle::Java) => "dd",
+            ('H', FmtStyle::Strftime | FmtStyle::Mysql) => "%H",
+            ('H', FmtStyle::Pg) => "HH24",
+            ('H', FmtStyle::Java) => "HH",
+            ('M', FmtStyle::Strftime) => "%M",
+            ('M', FmtStyle::Mysql) => "%i",
+            ('M', FmtStyle::Pg) => "MI",
+            ('M', FmtStyle::Java) => "mm",
+            ('S', FmtStyle::Strftime) => "%S",
+            ('S', FmtStyle::Mysql) => "%s",
+            ('S', FmtStyle::Pg) => "SS",
+            ('S', FmtStyle::Java) => "ss",
+            _ => {
+                return Err(format!(
+                    "`%{spec}` is not a format specifier this language translates; the \
+                     supported ones are `%Y` (year), `%m` (month), `%d` (day), `%H` (hour), \
+                     `%M` (minute), `%S` (second) and `%%` for a literal percent"
+                ))
+            }
+        };
+        out.push_str(token);
+    }
+    Ok(out)
+}
+
+/// The style a family's parser and formatter read.
+fn fmt_style(f: Fam) -> FmtStyle {
+    match f {
+        // SQLite formats with `strftime`, so it reads the C-style format even
+        // though it has no parser to read it with.
+        Fam::Duck | Fam::BigQuery | Fam::Sqlite => FmtStyle::Strftime,
+        Fam::Trino | Fam::Mysql => FmtStyle::Mysql,
+        Fam::Spark | Fam::Tsql => FmtStyle::Java,
+        Fam::Ansi | Fam::Snowflake => FmtStyle::Pg,
+    }
+}
+
+/// `parseDate` / `formatDate`: one interface, the target's own function
+/// underneath.
+///
+/// `args[0]` is the format and `args[1]` the value (`parseDate` takes the string
+/// to parse there, `formatDate` the date to print). The format must be a
+/// literal: it is translated at compile time, and a runtime string could not
+/// be.
+fn parse_or_format(name: &str, args: &[Expr], f: Fam) -> Result<Expr, String> {
+    let [fmt, value] = args else {
+        return Err(format!(
+            "unknown SQL intrinsic `{name}` with {} argument(s)",
+            args.len()
+        ));
+    };
+    let Expr::StringLiteral(fmt) = fmt else {
+        return Err(format!(
+            "`{}` takes a literal format string — `\"%Y%m%d\"`, not a column or an \
+             expression — because it is translated for the target at compile time",
+            if name == "CAGARA_PARSE_DATE" {
+                "parseDate"
+            } else {
+                "formatDate"
+            }
+        ));
+    };
+    let style = fmt_style(f);
+    let fmt = translate_format(fmt, style)?;
+    let f_lit = || Expr::StringLiteral(fmt.clone());
+    if name == "CAGARA_PARSE_DATE" {
+        let parsed = match f {
+            // `strptime` and `date_parse` return a timestamp; the language's
+            // `parseDate` is a `date`, so the time of day is dropped.
+            Fam::Duck => func("STRPTIME", vec![value.clone(), f_lit()]),
+            Fam::Trino => func("DATE_PARSE", vec![value.clone(), f_lit()]),
+            Fam::Mysql => func("STR_TO_DATE", vec![value.clone(), f_lit()]),
+            Fam::BigQuery => func("PARSE_DATE", vec![f_lit(), value.clone()]),
+            Fam::Snowflake | Fam::Ansi => func("TO_DATE", vec![value.clone(), f_lit()]),
+            Fam::Spark => func("TO_DATE", vec![value.clone(), f_lit()]),
+            // SQLite and T-SQL have no format parser: SQLite reads only ISO
+            // strings, and T-SQL's `PARSE` is culture-driven.
+            Fam::Sqlite | Fam::Tsql => {
+                return Err(
+                    "`parseDate` needs a dialect with a format parser; this one has none \
+                     (it can still format with `formatDate`). The other dialects spell it \
+                     `TO_DATE`, `STR_TO_DATE`, `strptime`, `date_parse` or `PARSE_DATE`"
+                        .to_string(),
+                )
+            }
+        };
+        Ok(cast(parsed, DataType::Date))
+    } else {
+        Ok(match f {
+            Fam::Duck => func("STRFTIME", vec![value.clone(), f_lit()]),
+            Fam::Trino | Fam::Mysql => func("DATE_FORMAT", vec![value.clone(), f_lit()]),
+            Fam::BigQuery => func("FORMAT_DATE", vec![f_lit(), value.clone()]),
+            Fam::Snowflake | Fam::Ansi => func("TO_CHAR", vec![value.clone(), f_lit()]),
+            Fam::Spark => func("DATE_FORMAT", vec![value.clone(), f_lit()]),
+            Fam::Sqlite => func("STRFTIME", vec![f_lit(), value.clone()]),
+            Fam::Tsql => func("FORMAT", vec![value.clone(), f_lit()]),
+        })
     }
 }
 

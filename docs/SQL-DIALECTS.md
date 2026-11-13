@@ -31,6 +31,29 @@ portable `SUM(CASE WHEN p THEN x END)` where it does not (the MySQL family,
 T-SQL, BigQuery, Spark). The choice is made in the dialect pass, from the `Expr`
 the aggregate already lowered to, so the two spellings cannot drift apart.
 
+A **format conversion** is the same idea in one place: `parseDate`/`formatDate`
+write the format once, in strftime's vocabulary (`%Y %m %d %H %M %S`, `%%`), and
+the backend spells both the function and the format per family —
+
+| family | parse | format | format style |
+|---|---|---|---|
+| PostgreSQL, ANSI, Snowflake | `TO_DATE(s, fmt)` | `TO_CHAR(d, fmt)` | `YYYY MM DD HH24 MI SS` |
+| DuckDB, BigQuery | `STRPTIME` / `PARSE_DATE` | `STRFTIME` / `FORMAT_DATE` | `%Y %m %d %H %M %S` |
+| Trino, MySQL | `DATE_PARSE` / `STR_TO_DATE` | `DATE_FORMAT` | `%Y %m %d %H %i %s` |
+| Spark | `TO_DATE(s, fmt)` | `DATE_FORMAT` | `yyyy MM dd HH mm ss` |
+| SQLite, T-SQL | *refused* | `STRFTIME` / `FORMAT` | `%Y…` / `yyyy…` |
+
+The middle column differs for a reason worth stating: MySQL's format language
+(which Trino's `date_parse` follows) reads `%i` for minutes and `%M` for the
+month's *name*, so passing a C-style format through unchanged would silently
+parse a minute as a month name. Translating is what makes one `formatDate`
+mean one thing everywhere. A specifier the language does not define is a compile
+error, and the format must be a literal — it is compiled in.
+
+SQLite and T-SQL have no format *parser* (SQLite reads ISO strings only, T-SQL's
+`PARSE` is culture-driven), so `parseDate` is refused there; both can still print
+by format.
+
 Two constructs are deliberately refused rather than emitted in a dialect that
 cannot mean them:
 

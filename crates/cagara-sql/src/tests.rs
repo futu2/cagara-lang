@@ -2648,6 +2648,76 @@ fn an_aggregate_takes_a_filter_a_distinct_or_a_window() {
     );
 }
 
+/// One `parseDate`/`formatDate`, every target's own spelling underneath.
+///
+/// The language writes `%Y %m %d %H %M %S`; each family reads something else,
+/// and two of them differ in ways that would be silent: PostgreSQL wants
+/// `YYYY MM DD HH24 MI SS`, and MySQL's dialect (which Trino's `date_parse`
+/// follows) reads `%i` for minutes where the C-style `%M` means the month's
+/// name. The format is translated here so a query means the same thing
+/// wherever it runs.
+#[test]
+fn a_date_format_is_written_once_and_spelled_per_target() {
+    let src = concat!(
+        "t : query { s = string, d = date } = table \"s\" \"t\"\n",
+        "q = t & select { p = parseDate \"%Y%m%d\" .s, f = formatDate \"%Y-%m-%d %H:%M:%S\" .d }\n",
+    );
+    let pg = dialect(src, "q", "postgres").expect("postgres");
+    assert!(pg.contains("TO_DATE(s, 'YYYYMMDD')"), "{pg}");
+    assert!(pg.contains("TO_CHAR(d, 'YYYY-MM-DD HH24:MI:SS')"), "{pg}");
+    let duck = dialect(src, "q", "duckdb").expect("duckdb");
+    assert!(
+        duck.contains("CAST(STRPTIME(s, '%Y%m%d') AS DATE)"),
+        "{duck}"
+    );
+    assert!(duck.contains("STRFTIME(d, '%Y-%m-%d %H:%M:%S')"), "{duck}");
+    let trino = dialect(src, "q", "trino").expect("trino");
+    assert!(
+        trino.contains("CAST(DATE_PARSE(s, '%Y%m%d') AS DATE)"),
+        "{trino}"
+    );
+    // Trino's minutes are `%i`, not `%M` — `%M` there is the month's name.
+    assert!(
+        trino.contains("DATE_FORMAT(d, '%Y-%m-%d %H:%i:%s')"),
+        "{trino}"
+    );
+    let spark = dialect(src, "q", "spark").expect("spark");
+    assert!(spark.contains("TO_DATE(s, 'yyyyMMdd')"), "{spark}");
+    let bq = dialect(src, "q", "bigquery").expect("bigquery");
+    assert!(bq.contains("PARSE_DATE('%Y%m%d', s)"), "{bq}");
+    let snow = dialect(src, "q", "snowflake").expect("snowflake");
+    assert!(snow.contains("TO_DATE(s, 'YYYYMMDD')"), "{snow}");
+
+    // SQLite and T-SQL can print by format but not parse one; the refusal names
+    // both, and prints the SQL of neither.
+    let e = dialect(src, "q", "sqlite").unwrap_err();
+    assert!(
+        e.contains("`parseDate` needs a dialect with a format parser"),
+        "{e}"
+    );
+    // Formatting alone still compiles there.
+    let src = "t : query { d = date } = table \"s\" \"t\"\n\
+               q = t & select { f = formatDate \"%Y-%m\" .d }\n";
+    let sqlite = dialect(src, "q", "sqlite").expect("sqlite format");
+    assert!(sqlite.contains("STRFTIME('%Y-%m', d)"), "{sqlite}");
+    let tsql = dialect(src, "q", "tsql").expect("tsql format");
+    assert!(tsql.contains("FORMAT(d, 'yyyy-MM')"), "{tsql}");
+
+    // The format is compiled in, so it must be a literal — and only the
+    // specifiers the language defines are translated. A *column* cannot even be
+    // offered: the parameter is a row-free `string`, so the checker refuses it
+    // before the backend sees the call; a row-free *expression* gets as far as
+    // the translation, which is where the message is.
+    let src = "t : query { s = string } = table \"s\" \"t\"\n\
+               q = t & select { p = parseDate (\"%Y\" ++ \"%m%d\") .s }\n";
+    let e = dialect(src, "q", "duckdb").unwrap_err();
+    assert!(e.contains("literal format string"), "{e}");
+    let src = "t : query { s = string } = table \"s\" \"t\"\n\
+               q = t & select { p = parseDate \"%j\" .s }\n";
+    let e = dialect(src, "q", "duckdb").unwrap_err();
+    assert!(e.contains("`%j` is not a format specifier"), "{e}");
+}
+
 /// A format conversion is spelled by the target: `SPECIFIC` functions differ
 /// (`TO_CHAR`/`TO_TIMESTAMP` on PostgreSQL, `DATE_FORMAT`/`DATE_PARSE` on Trino,
 /// `STRFTIME`/`STRPTIME` on DuckDB), and the same `sql` template reaches all

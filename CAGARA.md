@@ -1320,6 +1320,8 @@ yesterday        : expr r date
 
 toDate           : expr r timestamp|string -> expr r date
 toTimestamp      : expr r date|string -> expr r timestamp
+parseDate        : string -> expr r string -> expr r date
+formatDate       : string -> expr r date -> expr r string
 
 addDays addWeeks addMonths addQuarters addYears
                  : expr r int -> expr r date -> expr r date
@@ -1338,6 +1340,11 @@ hour minute      : expr r timestamp -> expr r int
 daysBetween      : expr r date -> expr r date -> expr r int
 ```
 
+- `parseDate "%Y%m%d" s` and `formatDate "%Y-%m" d` take a **format**, written once for
+  every dialect: the language reads `%Y %m %d %H %M %S` and `%%`, and the backend translates it
+  (`YYYYMMDD` for PostgreSQL, `%Y%m%d` for MySQL, `yyyyMMdd` for Spark, …). The format must be a
+  literal. SQLite and T-SQL can print by format but have no format parser, so `parseDate` is a
+  compile error there — parse an ISO string with `toDate` instead.
 - `date` has no hour; `hour`/`truncHour`/`addHours` require `timestamp`. Convert with `toTimestamp`.
 - `daysBetween start end` is positive when `end` is later; use `toDate` on a timestamp first.
 - `dayOfWeek` is 0 for Sunday; `truncWeek` starts on Monday (ISO).

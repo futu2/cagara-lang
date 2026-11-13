@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- An expression that reads no row is a value. `year currentDate` is an `int`
+  and `truncYear currentDate` is a `date`, while `year .d` still reads the
+  column and takes its type from the row. One signature per function is enough —
+  a row expression whose row is still unknown is read as its value wherever a
+  scalar is expected — so the eighteen `string -> string`-style value twins are
+  gone from the prelude, along with the ambiguity they caused: beside
+  `expr r date -> expr r date`, a `date -> date` twin tied whenever a column's
+  type was not yet known, and only the row can say whether `.d` is a `date` or a
+  `timestamp`. A column reference is not affected (`x : int = .a` is still an
+  error: it puts a row into the expression), and neither is an aggregate (its
+  phase says it is a row computation).
+
+## Unreleased
+
+Two behaviour changes and one that the first cut of this release did not have: a join whose inputs share a column name warns instead of failing, every sort key says its direction, and `<>` is the combining operator rather than a second spelling of `++`.
+
+- A join whose inputs share a column name is a **warning**, not an error. The
+  merged row keeps the left value — which is what its `merge r s` type says — so
+  the query compiles and runs; the warning says the right column cannot be read
+  afterwards, and how to rename it on the operand if it is wanted. Erroring
+  forced a `select` on every join between two tables that both have an `id`,
+  which is most of them, to avoid a name collision whose behaviour was already
+  well defined.
+
+  This is the first diagnostic that does not fail the build, so severity is now
+  part of the diagnostic itself: `cagara` and `cagara check` print `warning:`,
+  `check --json` reports `"severity":"warning"` and exits 0, and the language
+  server publishes it as `DiagnosticSeverity::WARNING`. `cagara check` exits 1
+  only for errors, so a hook that gates on it is unchanged — except that it no
+  longer stops on advice.
+
 - `<>` is the combining operator rather than a second spelling of `++`. Haskell's
   `<>` is associative combination on *one* type, and its instances here are the
   two SQL can express: `string` (concatenation, `a || b`) and `maybe string`
@@ -28,23 +59,6 @@
   position, including a partition. A list now keeps the form of its first
   element, and the position that wants keys is the one that reports the missing
   direction.
-
-## Unreleased
-
-- A join whose inputs share a column name is a **warning**, not an error. The
-  merged row keeps the left value — which is what its `merge r s` type says — so
-  the query compiles and runs; the warning says the right column cannot be read
-  afterwards, and how to rename it on the operand if it is wanted. Erroring
-  forced a `select` on every join between two tables that both have an `id`,
-  which is most of them, to avoid a name collision whose behaviour was already
-  well defined.
-
-  This is the first diagnostic that does not fail the build, so severity is now
-  part of the diagnostic itself: `cagara` and `cagara check` print `warning:`,
-  `check --json` reports `"severity":"warning"` and exits 0, and the language
-  server publishes it as `DiagnosticSeverity::WARNING`. `cagara check` exits 1
-  only for errors, so a hook that gates on it is unchanged — except that it no
-  longer stops on advice.
 
 ## 0.4.0 — 2026-11-12
 

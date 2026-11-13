@@ -3443,3 +3443,48 @@ fn an_aggregate_cannot_be_a_sort_key_even_when_wrapped() {
         "query { age = int, name = string, id = int, active = bool }"
     );
 }
+
+/// An expression that reads no row is a value.
+///
+/// The date family returns row expressions — `year : expr r int` — because the
+/// same call reads a column (`year .d`) and a constant (`year currentDate`).
+/// One signature covers both: a column reference puts the column into the
+/// expression's row, and a call built from constants leaves that row a
+/// variable, so the value position can read it as the scalar it is. Before
+/// this, a second `date -> int` overload was needed beside the row one, and the
+/// two tied whenever a column's type was not yet known.
+#[test]
+fn a_date_function_over_constants_is_a_value() {
+    // Values: nothing in them reads a row.
+    assert_eq!(ty("y : int = year currentDate\n", "y"), "int");
+    assert_eq!(ty("m : int = month currentTimestamp\n", "m"), "int");
+    assert_eq!(
+        ty("start : date = truncYear currentDate\n", "start"),
+        "date"
+    );
+    assert_eq!(
+        ty("later : date = addDays 3 currentDate\n", "later"),
+        "date"
+    );
+    assert_eq!(ty("n : int = toInt 3.7\n", "n"), "int");
+    assert_eq!(ty("f : float = toFloat 3\n", "f"), "float");
+    // The same names still read columns, and `.d` is typed by the row it is
+    // read from: `d` is a `date`, and the result follows.
+    assert_eq!(
+        ty(
+            "t : query { d = date, ts = timestamp } = table \"s\" \"t\"\n\
+             q = t & select { a = truncYear .d, b = year .d, c = year .ts }\n",
+            "q"
+        ),
+        "query { a = date, b = int, c = int }"
+    );
+    // A column reference is *not* row-free, so it cannot be read as a value —
+    // which is what keeps `x : int = .a` an error.
+    assert!(
+        err("x : int = .a\n", "x").contains("type mismatch"),
+        "a column reference is not a value"
+    );
+    // Nor is an aggregate: its phase says it is a row computation.
+    assert!(err("n : int = count\n", "n").contains("type mismatch"));
+    assert!(err("n : int = sum .a\n", "n").contains("type mismatch"));
+}

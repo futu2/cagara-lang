@@ -2209,6 +2209,27 @@ impl<'w> Checker<'w> {
             // `order [asc .a]` two spellings of one thing — and left the reader
             // guessing whether a missing `asc` was deliberate or forgotten.
             // The coercion still runs, so the message can name the fix.
+            // A row expression that does not read a row is a value: `year
+            // currentDate` has the type `expr r int` with `r` unconstrained,
+            // because nothing in it refers to a column. Reading it where a
+            // scalar is expected is what makes the value position work without
+            // a second overload per function — and it is *why* `.d` keeps its
+            // expression type: a column reference binds its row, so the
+            // coercion does not apply and the overload is chosen by the
+            // column's declared type instead of being ambiguous.
+            // `expr` carries three slots where the phase is explicit and two
+            // where it is the row phase, so both shapes are read here.
+            (Ty::Con("expr", ea), want)
+                if (ea.len() == 3 || ea.len() == 2)
+                    && self.is_row_free(ea)
+                    && matches!(
+                        self.resolve(want),
+                        Ty::Con(s, sa) if sa.is_empty() && SCALARS.contains(&s)
+                    ) =>
+            {
+                let value = if ea.len() == 3 { &ea[2] } else { &ea[1] };
+                self.unify(value, want)
+            }
             (Ty::Con("expr", ea), Ty::Con("sortkey", _)) => {
                 self.key_phase(&ea[0].clone())?;
                 Err(
@@ -2249,6 +2270,28 @@ impl<'w> Checker<'w> {
             }
             _ => self.unify(&con(s), target),
         }
+    }
+
+    /// Does this expression read a row? `expr p r a` does when `r` is bound to
+    /// one. A free row means the expression is built from constants, which is
+    /// what makes `year currentDate` a value.
+    ///
+    /// The phase matters too: an aggregate (`agg (expr row r a)`) has a free
+    /// inner row in the same way, and it is *not* a value — it is a row
+    /// computation, which the phase slot says.
+    fn is_row_free(&self, ea: &[Ty]) -> bool {
+        let (row, phase_ok) = if ea.len() == 3 {
+            (
+                &ea[1],
+                matches!(
+                    self.resolve(&ea[0]),
+                    Ty::Con("row", _) | Ty::Con("const", _) | Ty::Var(_)
+                ),
+            )
+        } else {
+            (&ea[0], true)
+        };
+        phase_ok && matches!(self.resolve(row), Ty::Var(_))
     }
 
     pub(crate) fn key_phase(&mut self, p: &Ty) -> U {

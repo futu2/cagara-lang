@@ -28,40 +28,19 @@ this page tracks the remaining boundaries and language work.
   a language change rather than a check.
 - SQL optimization remains opt-in and runs after Cagara lowering.
 
-## In progress: values where only rows existed
+## In progress: `list` as a value type
 
-Two features need the same thing: a value position where today only a row
-position works.
+`list a` is a type today only for key lists (`order`, `partition`) and `inList`, never a column.
+Making it a value needs four pieces together: the type accepted in `expr r (list a)` and printed;
+an aggregate that produces one (`arrayAgg : expr r a -> agg (expr r (list a))`); list literals,
+spelled per dialect (`ARRAY[1, 2]` on PostgreSQL, `[1, 2]` on DuckDB); and `<>` extended with a
+`list a` instance (`||` on PostgreSQL, `list_concat` on DuckDB). SQLite has no array type: a `list`
+there is a compile error naming the dialect, not a silent fallback to JSON text — a fallback would
+change the type without saying so. The differential engine tests grow a DuckDB-only case.
 
-**The date family at value level.** `year .d` reads a column; `year
-currentDate` should be a plain `int`. The value forms exist as twins
-(`year : date -> int` beside `year : expr r date -> expr r int`) and they work
-inside a query — `select { a = truncYear currentDate }` is `date` — but not in
-an annotated definition: `y : int = year currentDate` still picks the row form.
-The reason is the argument's type: `currentDate` is only *known* to be `date`
-after the overload is arbitrated, and while it is open the ranking treats it as
-a variable and prefers the row-indexed candidate. Pinning the application's
-result to the signature's type fixes the value case but not the row case: a
-record field's column (`year .d`) starts a *fresh* row, so the overload still
-cannot see that `.d` is a `date`. That needs the record's input row to be bound
-before its fields are checked — `record_expr(phase, row, fields, out)` carries
-the row in its second slot, but the stage's signature row is a *different*
-variable, bound only after the record is checked. The fix is a deferred record
-constraint: check the fields, then re-check the ones whose columns were open
-once the row closes. Attempts that bind the row eagerly (a `record_row` context
-in `check_record`) resolve the overload but mistype `update` and `case` arms,
-which is why this is a design step rather than a patch.
-
-**`list` as a value type.** `list a` is a type today only for key lists
-(`order`, `partition`) and `inList`, never a column. Making it a value needs
-four pieces together: the type accepted in `expr r (list a)` and printed; an
-aggregate that produces one (`arrayAgg : expr r a -> agg (expr r (list a))`);
-list literals, spelled per dialect (`ARRAY[1, 2]` on PostgreSQL, `[1, 2]` on
-DuckDB); and `<>` extended with a `list a` instance (`||` on PostgreSQL,
-`list_concat` on DuckDB). SQLite has no array type: a `list` there is a compile
-error naming the dialect, not a silent fallback to JSON text — a fallback would
-change the type without saying so. The differential engine tests grow a
-DuckDB-only case.
+The date-family half of this section is done: an expression whose row is unknown reads as its
+value, so `year currentDate` is an `int` and `.d` is still typed by its column (see `CAGARA.md`
+§functions). The eighteen hand-written value twins it replaced are gone.
 
 ## Next steps
 

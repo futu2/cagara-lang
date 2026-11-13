@@ -598,13 +598,22 @@ definition, not at some call site far away:
 The axes that *are* overloads are what the prelude uses: a narrower or wider type (`int`/`float`), a
 nullable one (`a`/`maybe a`), a source type (`string`/`int` into `toInt`), and a phase (`expr`/value).
 
-A one-argument function that has a **single** row form also has a value form, so it works on a
-constant or a parameter as well as on a column: `upper : string -> string` beside
-`upper : expr r string -> expr r string`. The context picks the form — a column selects the row
-form, a value selects the value form — and the SQL is the same either way. A name overloaded by
-*source type* (`truncYear` over `date` and `timestamp`) has no value form: ranking a source type
-and a phase at once is not something the checker does, and `ambiguous use` would be worse than the
-row form, which a value argument reaches by lifting.
+An expression that reads **no row** is also a value. A function like `year` has one signature —
+`year : expr r int` — and `year .d` puts `d`'s column into the expression's row, while
+`year currentDate` leaves that row a variable, because nothing in it refers to a column. A row
+expression whose row is still unknown is read as its value wherever a scalar is expected:
+
+```cagara
+start : date = truncYear currentDate      # a value: nothing here reads a row
+y : int = year currentDate                # likewise
+cutoff : date = addDays (-7) currentDate  # so parametric helpers compose
+```
+
+That is why there is no second `date -> date` overload of `truncYear`. Adding one beside
+`expr r date -> expr r date` makes the two candidates tie whenever a column's type is not yet
+known, and the tie is a real ambiguity: only the row says whether `.d` is a `date` or a
+`timestamp`. `x : int = .a` stays an error for the same rule read backwards — a column reference
+*does* put a row into the expression, so it is not a value.
 
 An alias is a definition whose body is another name; it carries overloading with it:
 

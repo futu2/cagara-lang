@@ -37,6 +37,11 @@ impl Default for Options {
 /// Validate and compile one query to SQL. The IR and `sql` templates are
 /// ANSI; sqlglot then rewrites them for the target dialect (e.g. `||` →
 /// `CONCAT` for MySQL / T-SQL, `LIMIT` → `TOP` / `FETCH`).
+/// Does this relation unnest anywhere?
+fn has_unnest(rel: &Rel) -> bool {
+    matches!(rel, Rel::Unnest(..)) || rel.children().into_iter().any(has_unnest)
+}
+
 pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
     cagara_hir::schema::schema(rel)?;
     if !dialect::supports_full_join(opts.dialect) && has_full_join(rel) {
@@ -45,6 +50,14 @@ pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
              `leftJoin`/`rightJoin` and `unionAll`"
                 .into(),
         );
+    }
+    // `unnest` is a relational node, so its refusal is here rather than in the
+    // intrinsic pass: the lowerer has no dialect, and the wording belongs with
+    // the other `list` refusals.
+    if has_unnest(rel) {
+        if let Some(msg) = intrinsics::unnest_refusal(dialect::fam(opts.dialect)) {
+            return Err(msg);
+        }
     }
     let mut lowerer = lower::Lowerer::for_rel(rel);
     let st = lowerer.rel(rel)?;

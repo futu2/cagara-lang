@@ -2921,6 +2921,53 @@ fn the_combining_operator_has_its_own_maybe_instance() {
     );
 }
 
+/// `unnest` is a LATERAL join, and a *subquery* rather than a table function.
+///
+/// PostgreSQL and DuckDB disagree about what a bare `UNNEST(x) AS t2` names its
+/// only column (PostgreSQL calls it `t2`, DuckDB `unnest`), so the lateral wraps
+/// a projection that names it once. Verified on both engines.
+#[test]
+fn unnest_is_a_lateral_join() {
+    let src = concat!(
+        "t : query { k = int, xs = list int } = table \"s\" \"t\"\n",
+        "a = t & unnest .xs\n",
+        "b = t & unnest .xs & where (.value > 1) & select { k = .k, v = .value }\n",
+        "c = t & agg { k = group .k, ids = arrayAgg .k } & unnest .ids\n",
+    );
+    assert_eq!(
+        dialect(src, "a", "postgres").unwrap(),
+        "SELECT t1.k, t1.xs, t2.value FROM (SELECT k, xs FROM s.t) AS t1 \
+         CROSS JOIN LATERAL (SELECT unnest AS value FROM UNNEST(t1.xs)) AS t2"
+    );
+    assert_eq!(
+        dialect(src, "b", "duckdb").unwrap(),
+        "SELECT t1.k, t2.value AS v FROM (SELECT k, xs FROM s.t) AS t1 \
+         CROSS JOIN LATERAL (SELECT unnest AS value FROM UNNEST(t1.xs)) AS t2 \
+         WHERE (t2.value > 1)"
+    );
+    // An aggregate's list column unnests too, which is the round trip.
+    assert_eq!(
+        dialect(src, "c", "postgres").unwrap(),
+        "SELECT t1.k, t1.ids, t2.value FROM (SELECT k, ARRAY_AGG(k) AS ids FROM s.t \
+         GROUP BY k) AS t1 \
+         CROSS JOIN LATERAL (SELECT unnest AS value FROM UNNEST(t1.ids)) AS t2"
+    );
+    // The type: the element joins the input row under `value`.
+    let full = format!("{USERS}{src}");
+    let ws = Workspace::from_source(&full);
+    let q = root_queries(&ws)
+        .into_iter()
+        .find(|(n, _)| n == "a")
+        .expect("`a`")
+        .1
+        .expect("`a` checks");
+    let _ = q;
+    for d in ["sqlite", "mysql"] {
+        let e = dialect(src, "a", d).unwrap_err();
+        assert!(e.contains("`unnest`"), "{d}: {e}");
+    }
+}
+
 /// A list can be measured and searched, and each dialect spells that its own
 /// way.
 ///

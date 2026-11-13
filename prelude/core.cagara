@@ -258,6 +258,13 @@ listLength : expr r (list a) -> expr r int = sql "CAGARA_LIST_LENGTH($1)"
 ## a list *value*: the literal membership operator is `in`.
 listContains : expr r (list a) -> expr r a -> expr r bool = sql "CAGARA_LIST_CONTAINS($1, $2)"
 
+## `unnest xs` — every input row once per element of the list, the element
+## under `value`: `agg { k = group .id, ids = arrayAgg .id } & unnest .ids`
+## gives the rows back. The SQL is a LATERAL join over the array, so the other
+## columns repeat. Needs a dialect with an array type (PostgreSQL, DuckDB).
+unnest : expr r (list a) -> query r -> query (merge r { value = a }) =
+  primitive "__unnest"
+
 ## The grouping key: `agg { user_id = group .user_id, n = count }`. Every
 ## non-aggregate expression in the same `agg` is grouped by it.
 group : expr r a -> agg (expr r a) = primitive "__group"

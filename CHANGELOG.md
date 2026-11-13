@@ -54,6 +54,12 @@ lists, spelled by whichever dialect can hold one.
   element, and the position that wants keys is the one that reports the missing
   direction.
 
+- `unnest xs` turns a list back into rows: every input row once per element, the element under
+  `value`, the other columns repeating — a `CROSS JOIN LATERAL` in SQL. It is a lateral
+  *subquery* (`(SELECT unnest AS value FROM UNNEST(x))`) rather than a lateral table function: the
+  two engines disagree about what a bare `UNNEST(x) AS t` names its column (PostgreSQL calls it
+  `t`, DuckDB `unnest`), and a projection names it once. Verified on both.
+
 - `listLength xs` and `listContains xs x` read a list: how many elements it has, and whether it
   holds one. `listContains` takes a list *value* (a column, an `arrayAgg` result), where `in` takes a
   literal. PostgreSQL spells them `cardinality` and `x = ANY(xs)`, DuckDB `len` and

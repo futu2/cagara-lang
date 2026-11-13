@@ -104,6 +104,7 @@ fn child_of(rel: &Rel) -> Option<&Rel> {
         | Rel::Limit(r, _)
         | Rel::Offset(r, _)
         | Rel::Distinct(r)
+        | Rel::Unnest(r, _)
         | Rel::At(_, r) => Some(r),
         Rel::Join { left, .. } => Some(left),
         Rel::Set { left, .. } => Some(left),
@@ -156,6 +157,15 @@ fn finish_schema(
         Rel::Select(r, fs) => projection(fs, &of(r)?, false).map_err(|m| (loc, m)),
         Rel::Update(r, fs) => merge(fs, &of(r)?).map_err(|m| (loc, m)),
         Rel::Omit(r, k) => omit_columns(&of(r)?, k).map_err(|m| (loc, m)),
+        // `unnest` keeps the input's columns and adds `value`. The element type
+        // is the checker's business; the schema here is names only.
+        Rel::Unnest(r, e) => {
+            let mut c = of(r)?;
+            refs(e, &c, "unnest").map_err(|m| (loc, m))?;
+            rules::place(Place::Where, e.phase().map_err(|m| (loc, m))?).map_err(|m| (loc, m))?;
+            c.push("value".to_string());
+            Ok(c)
+        }
         // A rename preserves the columns' positions and types; only the labels
         // change. The checker computed the same thing with `keyMap (prefix s)`.
         Rel::Prefix(r, affix) => Ok(rename_columns(&of(r)?, affix, true)),

@@ -34,9 +34,9 @@ this page tracks the remaining boundaries and language work.
 `list a` is a value type: `arrayAgg` builds one, `[1, 2]` is one, and `<>` concatenates two. The
 spelling is the target's — `ARRAY[…]`/`ARRAY_AGG`/`||` on PostgreSQL, `list_value`/`list`/
 `list_concat` on DuckDB — and a dialect with no array type refuses the query instead of writing
-JSON text, which would change the type silently. What a list cannot do yet is anything but be built and
-concatenated: `listLength`, membership over a column, and `unnest` are future work, and each needs
-its own intrinsic per dialect — the same shape as the three above.
+JSON text, which would change the type silently. A list can be built (`[1, 2]`, `arrayAgg`), combined (`<>`), measured and searched (`listLength`,
+`listContains`) and unpacked (`unnest`). What is missing is comparison as a value (`==` over two
+lists) and the JSON-facing functions; both would need their own intrinsic per dialect.
 
 ## Next steps
 

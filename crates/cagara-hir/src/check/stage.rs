@@ -99,6 +99,8 @@ impl NodeRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowStage {
     Where,
+    /// `unnest xs`: expands the rows, and adds the element column.
+    Unnest,
     Select,
     Update,
     Omit,
@@ -124,6 +126,7 @@ impl RowStage {
         use Prim::*;
         Some(match p {
             Where => RowStage::Where,
+            Unnest => RowStage::Unnest,
             Select => RowStage::Select,
             Update => RowStage::Update,
             Omit => RowStage::Omit,

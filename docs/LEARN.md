@@ -651,8 +651,9 @@ safe to carry into it.
 
 **Lists are values.** `arrayAgg` collects a group's values into one (`xs : list int`), `[1, 2, 3]`
 is a list literal, `<>` concatenates two — the same combining operator the strings use — and
-`listLength`/`listContains` measure and search one. They need a dialect with an array type
-(PostgreSQL, DuckDB); one without refuses the query.
+`listLength`/`listContains` measure and search one, and `unnest xs` turns one back into rows (a
+`CROSS JOIN LATERAL`, so the other columns repeat; the element is called `value`). They need a
+dialect with an array type (PostgreSQL, DuckDB); one without refuses the query.
 
 `asc` / `desc` take an expression, not another sort key: `asc (desc .x)` is a
 type error. A key without a direction is one too: `order [.a]` is refused with

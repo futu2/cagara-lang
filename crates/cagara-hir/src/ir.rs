@@ -236,6 +236,9 @@ pub enum Rel {
     /// `omit "k"`: the input row without column `k`. In the checker this is
     /// nothing but the row equation `input ~ { k : t | output }`.
     Omit(Box<Rel>, String),
+    /// `unnest xs`: every input row once per element of `xs`, with the element
+    /// under `value`. A LATERAL join over the array in SQL.
+    Unnest(Box<Rel>, Expr),
     /// `prefix "s"`: every column name gains `s` in front. The checker types
     /// this as the row term `keyMap (prefix s) input`; the affix is carried
     /// here so the lowerer computes the same names the checker did.
@@ -279,6 +282,7 @@ impl Rel {
             | Rel::Limit(r, _)
             | Rel::Offset(r, _)
             | Rel::Distinct(r)
+            | Rel::Unnest(r, _)
             | Rel::At(_, r) => vec![r],
             Rel::Join { left, right, .. } => vec![left, right],
             Rel::Set { left, right, .. } => vec![left, right],
@@ -300,6 +304,7 @@ impl Rel {
             | Rel::Limit(r, _)
             | Rel::Offset(r, _)
             | Rel::Distinct(r)
+            | Rel::Unnest(r, _)
             | Rel::At(_, r) => vec![r],
             Rel::Join { left, right, .. } | Rel::Set { left, right, .. } => vec![left, right],
         }

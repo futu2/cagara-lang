@@ -2399,6 +2399,20 @@ impl<'w> Checker<'w> {
         let (s, i) = (con("string"), con("int"));
         match p {
             Table => fun(s.clone(), fun(s, query(self.fresh_row()))),
+            Unnest => {
+                // `expr r (list a) -> query r -> query (merge r { value = a })`:
+                // the element joins the input row under `value`.
+                let (r, a) = (self.fresh_row(), self.fresh());
+                let xs = expr(con("row"), r.clone(), list(a.clone()));
+                let extra = row(vec![("value".to_string(), a)], Ty::Empty);
+                fun(
+                    xs,
+                    fun(
+                        query(r.clone()),
+                        query(Ty::Merge(Box::new(r), Box::new(extra))),
+                    ),
+                )
+            }
             Where => {
                 let (pred, r) = (self.fresh(), self.fresh_row());
                 self.pending.push((

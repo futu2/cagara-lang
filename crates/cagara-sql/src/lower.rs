@@ -390,6 +390,7 @@ impl Lowerer {
             Rel::Limit(r, n) => self.lower_limit(r, n),
             Rel::Offset(r, n) => self.lower_offset(r, n),
             Rel::Distinct(r) => self.lower_distinct(r),
+            Rel::Unnest(r, list) => self.lower_unnest(r, list),
             Rel::Join {
                 kind,
                 left,
@@ -433,6 +434,63 @@ impl Lowerer {
         }
         let e = st.resolve(p)?;
         st.wheres.push(e);
+        Ok(st)
+    }
+
+    /// `unnest xs` — a LATERAL join over the array, one row per element.
+    ///
+    /// The input is always wrapped first: the expression reads the list column,
+    /// and the input's own projection may have dropped or renamed it. The join
+    /// is a `CROSS JOIN LATERAL UNNEST(…)`, whose column Postgres and DuckDB
+    /// both call `unnest`; the output row names it `value`, which is what the
+    /// checker's `merge r { value = a }` promised.
+    fn lower_unnest(&mut self, r: &Rel, list: &IrExpr) -> Result<Stage, String> {
+        // The input is a derived table of its own names, qualified: the lateral
+        // reads one of them, and an unqualified name would be ambiguous once the
+        // unnested column is in scope.
+        let inner = self.rel(r)?;
+        let names = inner.names();
+        let input_alias = self.alias();
+        let mut st = Stage::new(
+            TableSource::Subquery {
+                query: Box::new(Statement::Select(inner.into_statement())),
+                alias: Some(input_alias.clone()),
+                alias_quote_style: QuoteStyle::None,
+            },
+            names
+                .iter()
+                .map(|n| (n.clone(), col(Some(&input_alias), n)))
+                .collect(),
+        );
+        let expr = st.resolve(list)?;
+        let alias = self.alias();
+        // A lateral *subquery* rather than a lateral table function: the two
+        // engines name a bare `UNNEST(…) AS t2`'s column differently (PostgreSQL
+        // calls it `t2`, DuckDB `unnest`), and a projection inside names it once.
+        let unnest = Stage::new(
+            TableSource::Unnest {
+                expr: Box::new(expr),
+                alias: None,
+                alias_quote_style: QuoteStyle::None,
+                with_offset: false,
+            },
+            vec![("value".to_string(), col(None, "unnest"))],
+        );
+        let lateral = TableSource::Lateral {
+            source: Box::new(TableSource::Subquery {
+                query: Box::new(Statement::Select(unnest.into_statement())),
+                alias: Some(alias.clone()),
+                alias_quote_style: QuoteStyle::None,
+            }),
+        };
+        st.joins.push(JoinClause {
+            join_type: JoinType::Cross,
+            table: lateral,
+            on: None,
+            using: vec![],
+        });
+        st.items
+            .push(("value".to_string(), col(Some(&alias), "value")));
         Ok(st)
     }
 

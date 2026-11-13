@@ -668,6 +668,14 @@ impl<'a> Normalizer<'a, 'a> {
                 };
                 self.builder.rewrite(site, origin, input, rewrite)
             }
+            QueryNodeKind::Unnest => {
+                let Some(list) = arguments.first() else {
+                    return self.wrong_argument(origin, "a list");
+                };
+                let list = self.arg_expr(list, origin)?;
+                self.builder
+                    .keep_row(site, origin, input, Kept::Unnest(list))
+            }
             QueryNodeKind::Where => {
                 let Some(predicate) = arguments.first() else {
                     return self.wrong_argument(origin, "a predicate");
@@ -1018,6 +1026,7 @@ impl<'a> Normalizer<'a, 'a> {
         use crate::check::RowStage;
         match stage {
             RowStage::Where => QueryNodeKind::Where,
+            RowStage::Unnest => QueryNodeKind::Unnest,
             RowStage::Select => QueryNodeKind::Select,
             RowStage::Update => QueryNodeKind::Update,
             RowStage::Omit => QueryNodeKind::Omit,
@@ -1313,6 +1322,7 @@ pub(crate) fn stage_spec(prim: crate::primitive::Prim) -> Option<StageSpec> {
     use crate::check::RowStage;
     let kind = match RowStage::of_prim(prim)? {
         RowStage::Where => QueryNodeKind::Where,
+        RowStage::Unnest => QueryNodeKind::Unnest,
         RowStage::Select => QueryNodeKind::Select,
         RowStage::Update => QueryNodeKind::Update,
         RowStage::Omit => QueryNodeKind::Omit,

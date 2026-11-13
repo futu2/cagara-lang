@@ -79,6 +79,7 @@ pub(crate) enum QueryNodeKind {
     Omit,
     MapValue,
     Where,
+    Unnest,
     Select,
     Update,
     Agg,
@@ -101,6 +102,8 @@ pub(crate) enum Payload {
     },
     /// `where pred`.
     Predicate(CheckedExpr),
+    /// `unnest xs`: the list expression a row is expanded by.
+    Unnest(CheckedExpr),
     /// `select`/`update`/`agg` fields, in source order.
     Fields(Vec<(String, CheckedExpr)>),
     /// A join predicate, plus the fields a `joinspec` takes from the right
@@ -283,7 +286,7 @@ impl Builder {
         kept: Kept,
     ) -> Result<NodeId, Error> {
         let row = self.node(input).row.clone();
-        let (kind, payload) = match kept {
+        let (kind, payload, row) = match kept {
             Kept::Filter(pred) => {
                 crate::checked::place(Place::Where, &pred, origin)?;
                 if !pred.ty().is_condition() {
@@ -294,14 +297,14 @@ impl Builder {
                     .at(origin));
                 }
                 crate::checked::refs_columns(&pred, &row, "where", origin)?;
-                (QueryNodeKind::Where, Payload::Predicate(pred))
+                (QueryNodeKind::Where, Payload::Predicate(pred), row.clone())
             }
             Kept::Order(keys) => {
                 for (key, _) in &keys {
                     crate::checked::place(Place::Key, key, origin)?;
                     crate::checked::refs_columns(key, &row, "order", origin)?;
                 }
-                (QueryNodeKind::Order, Payload::Keys(keys))
+                (QueryNodeKind::Order, Payload::Keys(keys), row.clone())
             }
             Kept::Limit(n) => {
                 if n < 0 {
@@ -310,7 +313,7 @@ impl Builder {
                             .at(origin),
                     );
                 }
-                (QueryNodeKind::Limit, Payload::Count(n))
+                (QueryNodeKind::Limit, Payload::Count(n), row.clone())
             }
             Kept::Offset(n) => {
                 if n < 0 {
@@ -319,9 +322,28 @@ impl Builder {
                     ))
                     .at(origin));
                 }
-                (QueryNodeKind::Offset, Payload::Count(n))
+                (QueryNodeKind::Offset, Payload::Count(n), row.clone())
             }
-            Kept::Distinct => (QueryNodeKind::Distinct, Payload::None),
+            Kept::Distinct => (QueryNodeKind::Distinct, Payload::None, row.clone()),
+            Kept::Unnest(expr) => {
+                // The list is read over the input row, so it must be a row-phase
+                // expression that names only columns the input has — the same
+                // rules a `where` predicate follows.
+                crate::checked::place(Place::Where, &expr, origin)?;
+                crate::checked::refs_columns(&expr, &row, "unnest", origin)?;
+                let crate::core::ScalarType::List(elem) = expr.ty() else {
+                    return Err(
+                        Error::new(format!("`unnest` needs a list, found {}", expr.ty()))
+                            .at(origin),
+                    );
+                };
+                // The output row is the input's plus the element, which is what
+                // the checker's `merge r { value = a }` promised.
+                let mut fs = row.columns().to_vec();
+                fs.push(("value".to_string(), (**elem).clone()));
+                let out = crate::core::RowType::new(fs);
+                (QueryNodeKind::Unnest, Payload::Unnest(expr), out)
+            }
         };
         Ok(self.push(RelNode {
             kind,
@@ -497,6 +519,8 @@ pub(crate) enum Rewrite {
 /// Which row-preserving stage a [`Builder::keep_row`] builds.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Kept {
+    /// `unnest xs`: expand each row once per element of the list.
+    Unnest(CheckedExpr),
     Filter(CheckedExpr),
     Order(Vec<(CheckedExpr, bool)>),
     Limit(i64),
@@ -621,6 +645,9 @@ impl CompiledQuery {
             (Payload::Count(n), QueryNodeKind::Limit) => crate::ir::Rel::Limit(child(0)?, *n),
             (Payload::Count(n), QueryNodeKind::Offset) => crate::ir::Rel::Offset(child(0)?, *n),
             (Payload::None, QueryNodeKind::Distinct) => crate::ir::Rel::Distinct(child(0)?),
+            (Payload::Unnest(expr), QueryNodeKind::Unnest) => {
+                crate::ir::Rel::Unnest(child(0)?, crate::checked::erase_expr(expr.clone())?)
+            }
             (Payload::On(on), QueryNodeKind::Join(kind)) => crate::ir::Rel::Join {
                 kind,
                 left: child(0)?,

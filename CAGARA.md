@@ -627,10 +627,14 @@ twice   = t & agg { k = group .id, xs = arrayAgg .n }
             & select { k = .k, both = .xs <> .xs }           # `<>` concatenates lists
 sized   = t & select { n = listLength [1, 2, 3] }            # 3
 found   = t & select { y = listContains [1, 2, 3] 2 }        # true
+back    = t & agg { xs = arrayAgg .n } & unnest .xs          # the rows again…
+            & select { n = .value }                          # …as `value`
 ```
 
-A list can be measured and searched — `listLength xs` and `listContains xs x`, the latter on a
-list *value* where `in` takes a literal:
+`listLength` and `listContains` measure and search a list; `unnest` expands each row once per
+element, keeping the other columns (the SQL is a `CROSS JOIN LATERAL`, so they repeat) and naming the
+element `value`. `listContains` takes a list *value* — a column or an `arrayAgg` result — where `in`
+takes a literal.
 
 The SQL follows the dialect: `ARRAY[1, 2, 3]`, `ARRAY_AGG(n)` and `a || b` on PostgreSQL;
 `list_value(1, 2, 3)`, `list(n)` and `list_concat(a, b)` on DuckDB. A dialect with no array type

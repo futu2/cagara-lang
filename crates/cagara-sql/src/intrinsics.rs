@@ -106,6 +106,12 @@ fn has_list(f: Fam) -> bool {
     matches!(f, Fam::Ansi | Fam::Duck)
 }
 
+/// The refusal for `unnest`, which is a relational node rather than a template:
+/// the lowerer emits its SQL directly, so it asks here for the wording.
+pub(crate) fn unnest_refusal(f: Fam) -> Option<String> {
+    list_refusal("CAGARA_UNNEST", f)
+}
+
 /// The refusal for a `list` intrinsic on a dialect with no array type.
 ///
 /// Checked before the intrinsic is lowered, so the message is about the target
@@ -118,6 +124,7 @@ fn list_refusal(name: &str, f: Fam) -> Option<String> {
         "CAGARA_LIST_CONCAT" => "`<>` on a list",
         "CAGARA_LIST_LENGTH" => "`listLength`",
         "CAGARA_LIST_CONTAINS" => "`listContains`",
+        "CAGARA_UNNEST" => "`unnest`",
         _ => return None,
     };
     (!has_list(f)).then(|| no_list(list_intrinsic))

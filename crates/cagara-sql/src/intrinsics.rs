@@ -67,6 +67,9 @@ fn node(e: Expr, f: Fam) -> Result<Expr, String> {
             within_group,
         });
     }
+    if let Some(msg) = list_refusal(&upper, f) {
+        return Err(msg);
+    }
     let lowered = if over.is_none() {
         intrinsic(&upper, &args, f)
     } else {
@@ -86,6 +89,36 @@ fn node(e: Expr, f: Fam) -> Result<Expr, String> {
             args.len()
         )),
     }
+}
+
+/// The message a dialect without an array type gives. A `list` has no SQL type
+/// there, and pretending it is JSON text would change the type without saying
+/// so.
+fn no_list(name: &str) -> String {
+    format!(
+        "`{name}` needs a dialect with an array type, and this one has none; \
+         `list` values are PostgreSQL and DuckDB only"
+    )
+}
+
+/// The dialects that can express a `list` at all.
+fn has_list(f: Fam) -> bool {
+    matches!(f, Fam::Ansi | Fam::Duck)
+}
+
+/// The refusal for a `list` intrinsic on a dialect with no array type.
+///
+/// Checked before the intrinsic is lowered, so the message is about the target
+/// rather than about an unknown name: `list` is a type the language has, and
+/// this engine is the thing that cannot hold it.
+fn list_refusal(name: &str, f: Fam) -> Option<String> {
+    let list_intrinsic = match name {
+        "CAGARA_LIST" => "a list literal",
+        "CAGARA_ARRAY_AGG" => "`arrayAgg`",
+        "CAGARA_LIST_CONCAT" => "`<>` on a list",
+        _ => return None,
+    };
+    (!has_list(f)).then(|| no_list(list_intrinsic))
 }
 
 fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
@@ -230,6 +263,31 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
                 BinaryOperator::Modulo,
                 atomic(a[1].clone()),
             ),
+        },
+        // ── arrays ─────────────────────────────────────────────────────
+        //
+        // `list` is a value type, and these three are its syntax: a literal,
+        // an aggregate that builds one, and concatenation. PostgreSQL and
+        // DuckDB have arrays; the dialects that do not refuse the query here
+        // rather than emit SQL their engine would reject.
+        // PostgreSQL spells a list literal `ARRAY[…]`; DuckDB spells it
+        // `list_value(…)`, which is the same value and does not depend on
+        // `ARRAY[…]` being accepted there.
+        ("CAGARA_LIST", _) => match f {
+            Fam::Duck => func("list_value", a.to_vec()),
+            _ => Expr::ArrayLiteral(a.to_vec()),
+        },
+        ("CAGARA_ARRAY_AGG", 1) => match f {
+            Fam::Duck => func("list", a.to_vec()),
+            _ => func("ARRAY_AGG", a.to_vec()),
+        },
+        ("CAGARA_LIST_CONCAT", 2) => match f {
+            Fam::Duck => func("list_concat", a.to_vec()),
+            _ => Expr::BinaryOp {
+                left: Box::new(a[0].clone()),
+                op: BinaryOperator::Concat,
+                right: Box::new(a[1].clone()),
+            },
         },
         _ => return None,
     })

@@ -746,12 +746,46 @@ impl<'a> Normalizer<'a, 'a> {
         built.map(Value::Query).map_err(Control::Program)
     }
 
+    /// A list literal as an expression: `select { xs = [1, 2] }`.
+    ///
+    /// The list is written as an intrinsic rather than as a SQL literal here,
+    /// because its spelling is the target's business: `ARRAY[1, 2]` on
+    /// PostgreSQL and DuckDB, and a refusal on a dialect that has no array
+    /// type. `list` is a *value* type, so the element type comes from the
+    /// checker and this node only orders the parts.
+    fn list_expr(&self, items: &[Value<'a>], origin: Origin) -> Result<CheckedExpr, Control> {
+        if items.is_empty() {
+            return Err(Control::unsupported(
+                origin,
+                "an empty list has no element type",
+            ));
+        }
+        let mut args = Vec::with_capacity(items.len());
+        for item in items {
+            args.push(self.arg_expr(item, origin)?);
+        }
+        let marks: Vec<String> = (1..=args.len()).map(|i| format!("${i}")).collect();
+        // The type of a list expression is the checker's business; the
+        // normalizer only needs *a* type, and `Unknown` is what a constructor
+        // that cannot name one uses (see `ScalarType::Unknown`).
+        CheckedExpr::template(
+            format!("CAGARA_LIST({})", marks.join(", ")),
+            args,
+            crate::core::ScalarType::Unknown,
+            origin,
+        )
+        .map_err(Control::Program)
+    }
+
     /// An accumulated argument as an expression: a literal is still a
     /// literal, so it is built here, and the phase a stage needs is the one
     /// the checker already gave the expression the operation consumes — a
     /// literal is `const` until it is measured against that expression's
     /// own phase. See [`rephase`].
     fn arg_expr(&self, value: &Value<'a>, origin: Origin) -> Result<CheckedExpr, Control> {
+        if let Value::Tuple { items, names: None } = value {
+            return self.list_expr(items, origin);
+        }
         match value {
             Value::Scalar(expr) => Ok(expr.clone()),
             Value::Label(label) => {
@@ -1039,6 +1073,9 @@ impl<'a> Normalizer<'a, 'a> {
         expr: &Expr,
     ) -> Result<CheckedExpr, Control> {
         let origin = Origin::new(module, expr.span);
+        if let Value::Tuple { items, names: None } = &value {
+            return self.list_expr(items, origin);
+        }
         match value {
             Value::Scalar(checked) => Ok(checked),
             Value::Label(label) => {

@@ -566,3 +566,50 @@ fn the_report_example_runs_on_every_engine() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     eprintln!("{ran} report runs");
 }
+
+/// A `list` query runs on an engine that has arrays.
+///
+/// SQLite has no array type, so the differential cases above cannot carry one;
+/// this is the DuckDB half, run when the shell is installed. The rows are
+/// compared as text, and DuckDB prints a list as `[1, 2]`, so the expected
+/// values are written the way the shell renders them.
+#[test]
+fn a_list_query_runs_on_duckdb() {
+    let engine = ENGINES
+        .iter()
+        .find(|e| e.dialect == "duckdb")
+        .expect("duckdb engine");
+    let src = format!(
+        "{TABLES}\
+         list_agg = orders & agg {{ k = group .user_id, amounts = arrayAgg .amount }}\n\
+         list_lit = orders & select {{ one = [1, 2, 3] }}\n"
+    );
+    let ws = Workspace::from_source(&src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let opts = Options {
+        dialect: Dialect::from_str("duckdb").expect("dialect"),
+        ..Options::default()
+    };
+    for name in ["list_agg", "list_lit"] {
+        let (_, rel) = rels
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no query `{name}`"));
+        let rel = rel
+            .as_ref()
+            .unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
+        let sql = compile(rel, opts).unwrap_or_else(|m| panic!("`{name}`: {m}"));
+        match run(engine, &sql) {
+            None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
+                panic!("`duckdb` is not installed (CAGARA_REQUIRE_ENGINES is set)")
+            }
+            None => {
+                eprintln!("skipping duckdb: not installed");
+                return;
+            }
+            Some(Err(m)) => panic!("`{name}` on duckdb: {m}\n  {sql}"),
+            Some(Ok(rows)) => assert!(!rows.is_empty(), "`{name}` returned no rows\n  {sql}"),
+        }
+    }
+}

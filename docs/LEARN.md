@@ -649,6 +649,10 @@ A `distinct` cannot follow an `order` whose key the projection dropped — that
 pair is an error, because the sort key is neither sortable under `DISTINCT` nor
 safe to carry into it.
 
+**Lists are values.** `arrayAgg` collects a group's values into one (`xs : list int`), `[1, 2, 3]`
+is a list literal, and `<>` concatenates two — the same combining operator the strings use. They
+need a dialect with an array type (PostgreSQL, DuckDB); one without refuses the query.
+
 `asc` / `desc` take an expression, not another sort key: `asc (desc .x)` is a
 type error. A key without a direction is one too: `order [.a]` is refused with
 "a sort key must say its direction". A window `partition` is the one key list

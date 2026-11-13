@@ -240,6 +240,16 @@ asc : expr r (maybe a) -> sortkey r = primitive "__asc"
 desc : expr r a -> sortkey r = primitive "__desc"
 desc : expr r (maybe a) -> sortkey r = primitive "__desc"
 
+## `arrayAgg e` — the values of `e` in one list, one per row of the group.
+## `agg { k = group .user_id, amounts = arrayAgg .amount }` is
+## `ARRAY_AGG(amount)` beside the grouping key.
+##
+## `list` is a value type, so the result can be read by a later stage and
+## combined with `<>`. Only a dialect with an array type can hold one
+## (PostgreSQL, DuckDB); one without refuses the query rather than writing
+## something else.
+arrayAgg : expr r a -> agg (expr r (list a)) = sql "CAGARA_ARRAY_AGG($1)"
+
 ## The grouping key: `agg { user_id = group .user_id, n = count }`. Every
 ## non-aggregate expression in the same `agg` is grouped by it.
 group : expr r a -> agg (expr r a) = primitive "__group"

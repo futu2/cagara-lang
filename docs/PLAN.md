@@ -28,19 +28,14 @@ this page tracks the remaining boundaries and language work.
   a language change rather than a check.
 - SQL optimization remains opt-in and runs after Cagara lowering.
 
-## In progress: `list` as a value type
+## Lists
 
-`list a` is a type today only for key lists (`order`, `partition`) and `inList`, never a column.
-Making it a value needs four pieces together: the type accepted in `expr r (list a)` and printed;
-an aggregate that produces one (`arrayAgg : expr r a -> agg (expr r (list a))`); list literals,
-spelled per dialect (`ARRAY[1, 2]` on PostgreSQL, `[1, 2]` on DuckDB); and `<>` extended with a
-`list a` instance (`||` on PostgreSQL, `list_concat` on DuckDB). SQLite has no array type: a `list`
-there is a compile error naming the dialect, not a silent fallback to JSON text — a fallback would
-change the type without saying so. The differential engine tests grow a DuckDB-only case.
-
-The date-family half of this section is done: an expression whose row is unknown reads as its
-value, so `year currentDate` is an `int` and `.d` is still typed by its column (see `CAGARA.md`
-§functions). The eighteen hand-written value twins it replaced are gone.
+`list a` is a value type: `arrayAgg` builds one, `[1, 2]` is one, and `<>` concatenates two. The
+spelling is the target's — `ARRAY[…]`/`ARRAY_AGG`/`||` on PostgreSQL, `list_value`/`list`/
+`list_concat` on DuckDB — and a dialect with no array type refuses the query instead of writing
+JSON text, which would change the type silently. `EXISTS`-style operations over a list
+(`listLength`, membership, `unnest`) are still future work: they need their own intrinsic per
+dialect, which is the same shape as the three above.
 
 ## Next steps
 

@@ -2923,3 +2923,51 @@ fn the_combining_operator_has_its_own_maybe_instance() {
         "SELECT a || (b || '!') AS c FROM s.t"
     );
 }
+
+/// `list` is a value type: an aggregate builds one, a literal is one, and `<>`
+/// combines two — each spelled by the dialect that can hold it.
+///
+/// PostgreSQL and DuckDB have arrays; the dialects that do not refuse the query
+/// at compile time, because a fallback would change the type silently.
+#[test]
+fn a_list_value_is_a_column_an_aggregate_and_a_literal() {
+    let src = "t : query { id = int, n = int } = table \"s\" \"t\"\n\
+               a = t & agg { k = group .id, xs = arrayAgg .n }\n\
+               b = t & select { xs = [1, 2, 3] }\n\
+               c = t & agg { k = group .id, xs = arrayAgg .n } \
+                   & select { k = .k, twice = .xs <> .xs }\n";
+    // PostgreSQL: `ARRAY[…]`, `ARRAY_AGG`, and `||` for concatenation.
+    assert_eq!(
+        dialect(src, "a", "postgres").unwrap(),
+        "SELECT id AS k, ARRAY_AGG(n) AS xs FROM s.t GROUP BY id"
+    );
+    assert_eq!(
+        dialect(src, "b", "postgres").unwrap(),
+        "SELECT ARRAY[1, 2, 3] AS xs FROM s.t"
+    );
+    assert_eq!(
+        dialect(src, "c", "postgres").unwrap(),
+        "SELECT id AS k, (ARRAY_AGG(n) || ARRAY_AGG(n)) AS twice FROM s.t GROUP BY id"
+    );
+    // DuckDB: `list_value`, the `list` aggregate, and `list_concat`.
+    assert_eq!(
+        dialect(src, "a", "duckdb").unwrap(),
+        "SELECT id AS k, list(n) AS xs FROM s.t GROUP BY id"
+    );
+    assert_eq!(
+        dialect(src, "b", "duckdb").unwrap(),
+        "SELECT list_value(1, 2, 3) AS xs FROM s.t"
+    );
+    assert_eq!(
+        dialect(src, "c", "duckdb").unwrap(),
+        "SELECT id AS k, list_concat(list(n), list(n)) AS twice FROM s.t GROUP BY id"
+    );
+    // And a dialect with no array type says so, naming what needs one.
+    for d in ["sqlite", "mysql", "tsql"] {
+        let e = dialect(src, "a", d).unwrap_err();
+        assert!(e.contains("needs a dialect with an array type"), "{d}: {e}");
+        assert!(e.contains("PostgreSQL and DuckDB"), "{d}: {e}");
+    }
+    let e = dialect(src, "b", "sqlite").unwrap_err();
+    assert!(e.contains("a list literal"), "{e}");
+}

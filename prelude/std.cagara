@@ -58,6 +58,11 @@ concat : expr r string -> expr r string -> expr r string = _++_
 _<>_ : expr r string -> expr r string -> expr r string = sql "$1 || $2"
 _<>_ : expr r (maybe string) -> expr r (maybe string) -> expr r (maybe string) =
   sql "COALESCE($1 || $2, $1, $2)"
+## `a <> b` on lists: the same combining operation on a third type, and what
+## makes two `arrayAgg` results compose across a grouping. `CAGARA_LIST_CONCAT`
+## is `||` on PostgreSQL and `list_concat` on DuckDB; a dialect with no `list`
+## type refuses the query rather than writing something else.
+_<>_ : expr r (list a) -> expr r (list a) -> expr r (list a) = sql "CAGARA_LIST_CONCAT($1, $2)"
 
 ## Boolean negation.
 not : expr r bool -> expr r bool = sql "NOT $1"

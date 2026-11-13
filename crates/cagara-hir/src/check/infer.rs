@@ -2209,6 +2209,14 @@ impl<'w> Checker<'w> {
             // `order [asc .a]` two spellings of one thing — and left the reader
             // guessing whether a missing `asc` was deliberate or forgotten.
             // The coercion still runs, so the message can name the fix.
+            // A value that *is* a value type with no expression wrapper — a
+            // list literal (`[1, 2]`), which the checker types directly — reads
+            // as an expression over no row in an expression position, exactly
+            // like the row-free expression above reads as a value in the other
+            // direction. Only `list` is here: every other value type is a
+            // scalar, and a scalar lifts through `lift` (which is about
+            // literals, not about rows).
+            (Ty::Con("list", _), Ty::Con("expr", ea)) if ea.len() == 3 => self.unify(&ea[2], &a),
             // A row expression that does not read a row is a value: `year
             // currentDate` has the type `expr r int` with `r` unconstrained,
             // because nothing in it refers to a column. Reading it where a
@@ -2890,7 +2898,11 @@ impl<'w> Checker<'w> {
         let mut out = Vec::new();
         for (l, t) in fs {
             match self.resolve(&t) {
+                // A scalar is a constant expression, and so is a list: a
+                // `select { xs = [1, 2] }` field is a value, not a nullary
+                // function, and the lowering spells it as an array literal.
                 Ty::Con(s, sa) if sa.is_empty() && SCALARS.contains(&s) => out.push((l, t)),
+                Ty::Con("list", _) => out.push((l, t)),
                 Ty::Con("expr", a) => {
                     let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
                     // A projection's field is a `select`/`agg` field, so a

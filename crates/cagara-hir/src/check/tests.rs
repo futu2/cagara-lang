@@ -3488,3 +3488,44 @@ fn a_date_function_over_constants_is_a_value() {
     assert!(err("n : int = count\n", "n").contains("type mismatch"));
     assert!(err("n : int = sum .a\n", "n").contains("type mismatch"));
 }
+
+/// `list` is a value type, so a column can hold one.
+///
+/// It comes from an aggregate (`arrayAgg`), from a literal, and it composes
+/// with `<>` — the same combining operator the strings use, which is what
+/// "one operation on one type" means when the type is a list.
+#[test]
+fn a_list_is_a_column_type() {
+    let src = "t : query { id = int, n = int } = table \"s\" \"t\"\n";
+    assert_eq!(
+        ty(
+            &format!("{src}a = t & agg {{ k = group .id, xs = arrayAgg .n }}\n"),
+            "a"
+        ),
+        "query { k = int, xs = list int }"
+    );
+    assert_eq!(
+        ty(&format!("{src}b = t & select {{ xs = [1, 2, 3] }}\n"), "b"),
+        "query { xs = list int }"
+    );
+    assert_eq!(
+        ty(
+            &format!(
+                "{src}c = t & agg {{ k = group .id, xs = arrayAgg .n }} \
+                 & select {{ k = .k, twice = .xs <> .xs }}\n"
+            ),
+            "c"
+        ),
+        "query { k = int, twice = list int }"
+    );
+    // A list of the wrong element type is still a type error, and a list cannot
+    // be compared with a scalar.
+    assert!(
+        err(&format!("{src}d = t & select {{ xs = [1, \"a\"] }}\n"), "d").contains("type mismatch")
+    );
+    assert!(err(
+        &format!("{src}e = t & select {{ xs = [1, 2] <> .n }}\n"),
+        "e"
+    )
+    .contains("type mismatch"));
+}

@@ -18,6 +18,12 @@ SQLite/DuckDB differential test checks query results for the cases in
 The live-engine suite is required in CI and can be skipped locally when the
 shells are unavailable.
 
+`list` is the one value type that is not portable. `arrayAgg`, a list literal and `<>` on lists are
+spelled for PostgreSQL (`ARRAY[…]`, `ARRAY_AGG`, `||`) and DuckDB (`list_value`, `list`,
+`list_concat`); every other dialect refuses the query at compile time with a message naming what
+needs an array. A list is never lowered to JSON text — that would change the column's type without
+saying so.
+
 Filtered aggregates do not depend on the dialect: `filtered` and the other
 `*Filter` helpers are prelude templates over `CASE`, not a `FILTER` clause, so
 they need no per-dialect rewrite.

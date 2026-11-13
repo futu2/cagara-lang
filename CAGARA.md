@@ -615,6 +615,24 @@ known, and the tie is a real ambiguity: only the row says whether `.d` is a `dat
 `timestamp`. `x : int = .a` stays an error for the same rule read backwards — a column reference
 *does* put a row into the expression, so it is not a value.
 
+`list a` is a value type too, not only a key list. A column can hold one, an aggregate can build
+one, and a literal is one:
+
+```cagara
+t : query { id = int, n = int } = table "public" "t"
+
+grouped = t & agg { k = group .id, xs = arrayAgg .n }        # xs : list int
+fixed   = t & select { threes = [1, 2, 3] }                  # a list literal
+twice   = t & agg { k = group .id, xs = arrayAgg .n }
+            & select { k = .k, both = .xs <> .xs }           # `<>` concatenates lists
+```
+
+The SQL follows the dialect: `ARRAY[1, 2, 3]`, `ARRAY_AGG(n)` and `a || b` on PostgreSQL;
+`list_value(1, 2, 3)`, `list(n)` and `list_concat(a, b)` on DuckDB. A dialect with no array type
+(SQLite, MySQL, T-SQL, BigQuery, Snowflake, Trino, Spark) **refuses** a query that uses one, naming
+what needs an array — a `list` is never silently written as JSON text, because that would change the
+type without saying so.
+
 An alias is a definition whose body is another name; it carries overloading with it:
 
 ```cagara

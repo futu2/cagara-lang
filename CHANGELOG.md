@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `list` is a column type. `arrayAgg` collects a group's values into one
+  (`agg { k = group .id, xs = arrayAgg .n }` is `xs : list int`), `[1, 2, 3]`
+  is a list literal in any expression position, and `<>` gained a third
+  instance that concatenates two lists — the same combining operation the
+  strings use. The SQL is the target's: `ARRAY[…]` / `ARRAY_AGG` / `||` on
+  PostgreSQL, `list_value(…)` / `list(…)` / `list_concat(…)` on DuckDB. A
+  dialect with no array type (SQLite, MySQL, T-SQL, the warehouses) refuses the
+  query at compile time and says why, rather than writing the list as JSON text
+  and changing the type without saying so.
+
 - An expression that reads no row is a value. `year currentDate` is an `int`
   and `truncYear currentDate` is a `date`, while `year .d` still reads the
   column and takes its type from the row. One signature per function is enough —

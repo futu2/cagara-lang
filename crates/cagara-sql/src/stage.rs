@@ -381,6 +381,9 @@ pub fn atomic(e: Expr) -> Expr {
         | Expr::Extract { .. }
         | Expr::Case { .. }
         | Expr::Nested(_)
+        // A list literal is a primary expression: `ARRAY[1, 2]` in a
+        // projection needs no parentheses around it.
+        | Expr::ArrayLiteral(_)
         | Expr::Star => e,
         other => Expr::Nested(Box::new(other)),
     }

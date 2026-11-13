@@ -275,8 +275,7 @@ pub(crate) fn expected_arg_kinds(con: &str) -> Vec<Kind> {
     }
 }
 
-pub(crate) const NULLABLE: &str =
-    "expected a non-null value, found a `maybe`; use `coalesce default x` \
+pub(crate) const NULLABLE: &str = "expected a non-null value, found a `maybe`; use `x ?? default` \
                         (or `isNull` / `isNotNull` to test it)";
 
 /// An aggregate reaching a phase that must be row or window: next to a

@@ -640,7 +640,7 @@ impl<'w> Checker<'w> {
         }
         let maybe = |t: &Ty| matches!(t, Ty::Con("maybe", _));
         let hint = if maybe(a) != maybe(e) {
-            "; only one side is nullable: `coalesce default x` takes a `maybe`, `just x` makes one"
+            "; only one side is nullable: `x ?? default` takes a `maybe`, `just x` makes one"
         } else {
             ""
         };

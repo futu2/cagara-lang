@@ -1138,7 +1138,7 @@ Handling:
 
 | Call | Meaning |
 |---|---|
-| `coalesce default x` | use `default` if `x` is NULL |
+| `x ?? default` / `coalesce default x` | use `default` if `x` is NULL |
 | `x ?? default` | the same, infix |
 | `nothing` | SQL NULL at any `maybe` type |
 | `just x` | treat non-null `x` as nullable (does not create NULL) |
@@ -1880,7 +1880,7 @@ The compiler names the column and often the fix. Match the wording, then apply t
 | `this argument contains an aggregate; aggregates cannot nest` | `sum (sum .x)` | aggregate in an earlier `agg` stage |
 | `field \`x\` is an aggregate; aggregates belong in \`agg\`, not \`select\`` | aggregate in `select`/`update` | move it into `agg` |
 | `expected a non-null value, found a \`maybe\`` | operator on nullable | `coalesce`, `??`, `isNull`, `isTrue`; a `where` takes a `maybe bool` directly |
-| `only one side is nullable: \`coalesce default x\` takes a \`maybe\`` | `coalesce`/`just` mismatch | `coalesce` only on `maybe`; `just` to add maybe |
+| `only one side is nullable: \`x ?? default\` takes a \`maybe\`` | `??`/`just` mismatch | `??` only on `maybe`; `just` to add maybe |
 | `join predicates must say which input a column comes from` | plain `.x` in a join predicate | `.<x` / `.>x` |
 | `\`.<x\` and \`.>x\` ... only be used in a join predicate` | side field after the join | use `.x` on the output row |
 | `sort and partition keys must be plain column expressions` | aggregate/window in `order` or spec | compute it in an earlier stage |

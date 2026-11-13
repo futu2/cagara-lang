@@ -880,7 +880,7 @@ Handling nulls explicitly:
 
 | Function | Meaning |
 |---|---|
-| `coalesce default x` | use `default` if `x` is `NULL` |
+| `x ?? default` / `coalesce default x` | use `default` if `x` is `NULL` |
 | `x ?? default` | the same, infix (and it binds tighter than arithmetic) |
 | `nothing` | SQL `NULL` at any nullable type |
 | `just x` | mark a non-null value as nullable |
@@ -906,7 +906,7 @@ t = u & leftJoin o (.<id == .>user_id) & select {.id, amt = .amount + 1.0}
 
 ```
 error: field `amt`: field `amount`: type mismatch: expected float, found maybe float;
-       only one side is nullable: `coalesce default x` takes a `maybe`, `just x` makes one
+       only one side is nullable: `x ?? default` takes a `maybe`, `just x` makes one
 ```
 
 The fix is to say what a missing amount means:

@@ -959,9 +959,9 @@ pub(crate) fn nullable_fix(msg: &str, span: Span) -> Vec<crate::workspace::Sugge
                 return Vec::new();
             };
             (
-                format!("Wrap in `coalesce {default}`"),
-                format!("coalesce {default} ("),
-                ")".to_string(),
+                format!("Use `?? {default}`"),
+                "(".to_string(),
+                format!(" ?? {default})"),
             )
         }
         // The position takes a `maybe` and the value is present.

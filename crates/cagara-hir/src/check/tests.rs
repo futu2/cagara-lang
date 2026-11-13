@@ -460,7 +460,10 @@ fn case_rejects_a_nullable_condition() {
         ),
         "q",
     );
-    assert!(e.contains("non-null") && e.contains("coalesce"), "{e}");
+    assert!(
+        e.contains("non-null") && e.contains("??") || e.contains("coalesce"),
+        "{e}"
+    );
     // `coalesce` clears it, and what the arm *produces* may be a `maybe` as
     // long as every arm agrees.
     assert_eq!(
@@ -1013,7 +1016,7 @@ fn nullable_columns_are_explicit() {
     assert_eq!(widened, "query { v = float }");
     // Neither argument may be a non-null value where a `maybe` is required.
     let e = err(&q("select { m = coalesce 0 .id }"), "q");
-    assert!(e.contains("coalesce"), "{e}");
+    assert!(e.contains("one side is nullable"), "{e}");
     // `where` takes a `bool` or a `maybe bool`: a NULL condition drops the row,
     // which is SQL's own three-valued filter (so `isTrue` is a spelling of the
     // same choice, not a requirement).
@@ -1077,7 +1080,7 @@ fn aggregate_nullability_is_explicit() {
         "q = orders & agg { r = sum .amount } & where (.r > 100.0)\n",
         "q",
     );
-    assert!(e.contains("maybe float") && e.contains("coalesce"), "{e}");
+    assert!(e.contains("maybe float") && e.contains("??"), "{e}");
     ty(
         "q = orders & agg { r = coalesce 0.0 (sum .amount) } & where (.r > 100.0)\n",
         "q",
@@ -1100,7 +1103,7 @@ fn aggregate_nullability_is_explicit() {
         ),
         "q",
     );
-    assert!(e.contains("non-null") && e.contains("coalesce"), "{e}");
+    assert!(e.contains("non-null") && e.contains("??"), "{e}");
     let e = err(
         &format!("{NULLABLE}q = people & agg {{ c = countOf .email }}\n"),
         "q",

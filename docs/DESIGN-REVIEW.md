@@ -163,7 +163,7 @@ main = t1 & leftJoin c (.<aid == .>bid)
 
 ```text
 error: left join input: field `aid`: expected a non-null value, found a `maybe`;
-       use `coalesce default x` ...
+       use `x ?? default` ...
 ```
 
 按提示写成 `.<aid ?? 0 == .>bid` 后，SQL 是：

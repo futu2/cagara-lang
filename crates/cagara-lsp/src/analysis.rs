@@ -2117,13 +2117,13 @@ mod nullable_fix_tests {
     /// constraint resolution, where the span of the value is gone — so the rule
     /// reads the message the way the sort-key and rename rules do. Both wrap the
     /// *column*, not the field it sits in: `upper .s` becomes
-    /// `upper (coalesce "" .s)`.
+    /// `upper (.s ?? "")`.
     #[test]
     fn a_nullable_mismatch_offers_its_wrapper() {
         let src = "t : query { s = maybe string, r = string } = table \"s\" \"t\"\n\
                    q = t & select { x = upper .s }\n";
         let titles = titles_at(src, 1, 9);
-        assert!(titles.iter().any(|t| t.contains("coalesce")), "{titles:?}");
+        assert!(titles.iter().any(|t| t.contains("??")), "{titles:?}");
 
         let src = "t : query { r = string } = table \"s\" \"t\"\n\
                    q = t & select { y = coalesce \"d\" .r }\n";
@@ -2144,7 +2144,7 @@ mod nullable_fix_tests {
         let fixes = code_actions(&ws, Range { start: p, end: p });
         let fix = fixes
             .iter()
-            .find(|f| f.title.contains("coalesce"))
+            .find(|f| f.title.contains("??"))
             .unwrap_or_else(|| {
                 panic!(
                     "no coalesce fix: {:?}",
@@ -2152,11 +2152,12 @@ mod nullable_fix_tests {
                 )
             });
         let e = &fix.edits[0];
-        assert_eq!(e.new_text, "coalesce \"\" ()");
+        assert_eq!(e.new_text, "(.s ?? \"\")");
         // `.s`, the column — not the field `x = upper .s` around it.
+        let line = src.lines().nth(1).unwrap();
+        assert_eq!(line[27..29].to_string(), ".s");
         assert_eq!(e.range.start.character, 27);
         assert_eq!(e.range.end.character, 29);
-        assert_eq!(&src.lines().nth(1).unwrap()[27..29], ".s");
     }
 }
 
@@ -2376,10 +2377,12 @@ fn nullable_wrap(message: &str, text: &str, p: &Positions<'_>, r: &Range) -> Opt
     {
         (false, true) => {
             let d = default?;
+            // The infix fallback, the way it is written by hand — `(.s ?? "")`,
+            // parenthesized so the rewrite is safe wherever the value sat.
             (
-                format!("coalesce {d} ("),
-                ")".to_string(),
-                format!("Wrap in `coalesce {d}`"),
+                "(".to_string(),
+                format!(" ?? {d})"),
+                format!("Use `?? {d}`"),
             )
         }
         (true, false) => (
@@ -2410,7 +2413,7 @@ fn nullable_wrap(message: &str, text: &str, p: &Positions<'_>, r: &Range) -> Opt
                 start: p.position(from),
                 end: p.position(to),
             },
-            new_text: format!("{before}{after}"),
+            new_text: format!("{before}{}{after}", &text[from..to]),
         }],
     })
 }

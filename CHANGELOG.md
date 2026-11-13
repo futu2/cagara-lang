@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- A `maybe` used where a present value is wanted now comes with its fix in the editor: `coalesce ""`
-  (with a per-type default) when the value is missing, `just` when the position takes a `maybe`. It
-  wraps the column, not the field around it, so `upper .s` becomes `upper (coalesce "" .s)`.
+- A `maybe` used where a present value is wanted now comes with its fix in the editor: `(.s ?? "")`
+  written with the infix fallback (the default per type) when the value is missing, `just (…)` when
+  the position takes a `maybe`. It wraps the column, not the field around it, so `upper .s` becomes
+  `upper (.s ?? "")`, and the hint on the mismatch names `??` rather than `coalesce`.
 
 ## 0.4.2 — 2026-11-14
 

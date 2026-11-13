@@ -522,7 +522,7 @@ fn a_lifted_value_keeps_its_nulls_on_the_engines() {
                  CREATE TABLE main.d (id INTEGER, packed TEXT);\n\
                  INSERT INTO main.d VALUES (1, '20240131'), (2, NULL);\n";
     let src = "d : query { id = int, packed = maybe string } = table \"main\" \"d\"\n\
-               q = d & order [asc .id] & select { id = .id, p = lift .packed (parseDate \"%Y%m%d\") }\n";
+               q = d & order [asc .id] & select { id = .id, p = lift (parseDate \"%Y%m%d\") .packed }\n";
     let ws = Workspace::from_source(src);
     assert!(ws.diags.is_empty(), "{:?}", ws.diags);
     let rels = root_queries(&ws);

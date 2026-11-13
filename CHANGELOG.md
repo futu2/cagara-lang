@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- `lift x f` applies a function to the value inside a `maybe`, so a missing input has one way to be
-  handled instead of a nullable overload of every function: `lift .d (parseDate "%Y%m%d")` is a
+- `lift f x` applies a function to the value inside a `maybe`, so a missing input has one way to be
+  handled instead of a nullable overload of every function: `lift (parseDate "%Y%m%d") .d` is a
   `maybe date` from a `maybe string`, and it expands to `CASE WHEN x IS NULL THEN NULL ELSE f(x) END`.
 - `parseTimestamp` and `formatTimestamp` mirror `parseDate`/`formatDate` for the time of day.
 - `unnest` now refuses a row that already has a `value` column. It used to emit two columns of that

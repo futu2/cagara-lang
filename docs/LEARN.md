@@ -1642,13 +1642,13 @@ known-good input or your own `CASE WHEN pg_input_is_valid(x, 'date') THEN …`
 #### `lift`: one way to feed a `maybe` to a function
 
 Every function above is written for a present value, and none has a nullable
-overload. `lift` is the one combinator that bridges the gap:
+overload. `lift` is the one combinator that bridges the gap. The function comes first, as in `map`, so it can be reused on its own:
 
 ```haskell
 t = orders & select {
   .id,
-  packed = lift .packed_date (parseDate "%Y%m%d"),   # maybe string -> maybe date
-  size = lift .maybe_items listLength                # maybe (list int) -> maybe int
+  packed = lift (parseDate "%Y%m%d") .packed_date,   # maybe string -> maybe date
+  size = lift listLength .maybe_items                # maybe (list int) -> maybe int
 }
 ```
 

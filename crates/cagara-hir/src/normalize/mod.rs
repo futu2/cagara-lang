@@ -203,7 +203,7 @@ pub(crate) enum Value<'a> {
     },
     /// A complete window specification, consumed by a window template.
     WinSpec(Box<crate::checked::WinSpecChecked>),
-    /// `lift x f`, collecting the value and then the function.
+    /// `lift f x`, collecting the function and then the value.
     Lift {
         args: Vec<Value<'a>>,
         origin: Origin,

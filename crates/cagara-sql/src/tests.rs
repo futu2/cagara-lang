@@ -2702,7 +2702,7 @@ fn a_try_cast_is_refused_on_postgres() {
 #[test]
 fn lift_guards_the_null_and_keeps_the_function() {
     let src = "t : query { d = maybe string, xs = maybe (list int) } = table \"s\" \"t\"\n\
-               q = t & select { p = lift .d (parseDate \"%Y%m%d\"), n = lift .xs listLength }\n";
+               q = t & select { p = lift (parseDate \"%Y%m%d\") .d, n = lift listLength .xs }\n";
     let duck = dialect(src, "q", "duckdb").expect("duckdb");
     assert!(
         duck.contains("CASE WHEN d IS NULL THEN NULL ELSE CAST(STRPTIME(d, '%Y%m%d') AS DATE) END"),

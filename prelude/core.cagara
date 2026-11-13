@@ -263,12 +263,16 @@ listContains : expr r (list a) -> expr r a -> expr r bool = sql "CAGARA_LIST_CON
 ## missing value never flows into a place that expects a present one — and a
 ## function needs no nullable overload of its own:
 ##
-##     paid = orders & agg { at = lift .created_at (parseDate "%Y%m%d") }
+##     paid = orders & agg { at = lift (parseDate "%Y%m%d") .created_at }
+##
+## The function comes first, as it does in `map` and `fmap`, so a lifted
+## function is reusable on its own: `lift (parseDate "%Y%m%d")` is
+## `expr r (maybe string) -> expr r (maybe date)`.
 ##
 ## The SQL is `CASE WHEN x IS NULL THEN NULL ELSE f(x) END`, so the function is
 ## never handed the NULL. `x` appears twice, so an expensive expression is
 ## evaluated twice — bind it with `let` first if that matters.
-lift : expr r (maybe a) -> (expr r a -> expr r b) -> expr r (maybe b) =
+lift : (expr r a -> expr r b) -> expr r (maybe a) -> expr r (maybe b) =
   primitive "__lift"
 
 ## `unnest xs` — every input row once per element of the list, the element

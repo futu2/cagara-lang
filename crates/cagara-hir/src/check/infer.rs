@@ -2487,14 +2487,15 @@ impl<'w> Checker<'w> {
                 )
             }
             Lift => {
-                // `expr r (maybe a) -> (expr r a -> expr r b) -> expr r (maybe b)`
+                // `(expr r a -> expr r b) -> expr r (maybe a) -> expr r (maybe b)`
                 let (a, b, r) = (self.fresh(), self.fresh(), self.fresh_row());
                 let x = expr(con("row"), r.clone(), Ty::Con("maybe", vec![a.clone()]));
                 let f = fun(
                     expr(con("row"), r.clone(), a),
                     expr(con("row"), r.clone(), b.clone()),
                 );
-                fun(x, fun(f, expr(con("row"), r, Ty::Con("maybe", vec![b]))))
+                let out = expr(con("row"), r, Ty::Con("maybe", vec![b]));
+                fun(f, fun(x, out))
             }
             Where => {
                 let (pred, r) = (self.fresh(), self.fresh_row());

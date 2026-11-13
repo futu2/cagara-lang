@@ -143,13 +143,13 @@ fn lift_takes_a_missing_value_to_a_missing_result() {
                    table \"s\" \"d\"\n";
     let src = format!(
         "{prelude}\
-         q = d & select {{ p = lift .s (parseDate \"%Y%m%d\"), n = lift .xs listLength }}\n"
+         q = d & select {{ p = lift (parseDate \"%Y%m%d\") .s, n = lift listLength .xs }}\n"
     );
     assert_eq!(ty(&src, "q"), "query { p = maybe date, n = maybe int }");
     // The value is not a `maybe`, so there is nothing to lift.
     let src = format!(
         "{prelude}\
-         q = d & select {{ p = lift .id (parseDate \"%Y%m%d\") }}\n"
+         q = d & select {{ p = lift (parseDate \"%Y%m%d\") .id }}\n"
     );
     let e = ty_err(&src, "q").expect("a plain value has nothing to lift");
     assert!(e.contains("maybe"), "{e}");

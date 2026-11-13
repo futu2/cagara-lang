@@ -481,7 +481,7 @@ impl<'a> Normalizer<'a, 'a> {
     /// the next parameter is the reduction step, and the body is normalized when
     /// the last one arrives — exactly as nested lambdas would reduce, one step
     /// at a time.
-    /// `lift x f`: `nothing` stays `nothing`, `just v` becomes `just (f v)`.
+    /// `lift f x`: `nothing` stays `nothing`, `just v` becomes `just (f v)`.
     ///
     /// The SQL is `CASE WHEN x IS NULL THEN NULL ELSE f(x) END`, so the function
     /// never sees the NULL and the result is a `maybe` the caller has to handle
@@ -492,8 +492,8 @@ impl<'a> Normalizer<'a, 'a> {
         args: Vec<Value<'a>>,
         origin: Origin,
     ) -> Result<Value<'a>, Control> {
-        let [value, func] = <[Value<'a>; 2]>::try_from(args).map_err(|_| {
-            Control::unsupported(origin, "`lift` needs a `maybe` value and a function")
+        let [func, value] = <[Value<'a>; 2]>::try_from(args).map_err(|_| {
+            Control::unsupported(origin, "`lift` needs a function and a `maybe` value")
         })?;
         let Value::Scalar(x) = value else {
             return Err(Control::unsupported(

@@ -630,14 +630,14 @@ found   = t & select { y = listContains [1, 2, 3] 2 }        # true
 back    = t & agg { xs = arrayAgg .n } & unnest .xs          # the rows again…
             & select { n = .value }                          # …as `value`
 lifted  = t & agg { k = group .id, xs = arrayAgg .n }
-            & update { maybe_xs = just .xs }                 # stand-in for a nullable column
-            & select { k = .k, n = lift .maybe_xs listLength }   # a maybe list, measured
+            & update { maybe_xs = just .xs }                     # stand-in for a nullable column
+            & select { k = .k, n = lift listLength .maybe_xs }   # a maybe list, measured
 ```
 
-`lift x f` applies `f` to the value inside a `maybe`: `nothing` stays `nothing`, `just v` becomes
+`lift f x` applies `f` to the value inside a `maybe`: `nothing` stays `nothing`, `just v` becomes
 `just (f v)` (`CASE WHEN x IS NULL THEN NULL ELSE f(x) END`). It is how a function over values is
-used on a nullable column without a nullable overload of every function — `lift .d (parseDate
-"%Y%m%d")` is a `maybe date` from a `maybe string`. `x` appears twice in the SQL, so bind an
+used on a nullable column without a nullable overload of every function — `lift (parseDate
+"%Y%m%d") .d` is a `maybe date` from a `maybe string`. `x` appears twice in the SQL, so bind an
 expensive expression with `let` first.
 
 `listLength` and `listContains` measure and search a list; `unnest` expands each row once per

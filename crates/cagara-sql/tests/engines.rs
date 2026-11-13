@@ -375,7 +375,7 @@ fn engines_agree() {
     let mut ran = 0;
     let mut failures = Vec::new();
     for e in ENGINES {
-        let opts = Options {
+        let base = Options {
             dialect: Dialect::from_str(e.dialect).expect("dialect"),
             ..Options::default()
         };
@@ -388,27 +388,37 @@ fn engines_agree() {
             let rel = rel
                 .as_ref()
                 .unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
-            let sql =
-                compile(rel, opts).unwrap_or_else(|m| panic!("`{name}` / {}: {m}", e.dialect));
-            match run(e, &sql) {
-                None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
-                    panic!(
-                        "`{}` is not installed (CAGARA_REQUIRE_ENGINES is set)",
-                        e.shell
-                    )
-                }
-                None => {
-                    eprintln!("skipping {}: `{}` is not installed", e.dialect, e.shell);
-                    break;
-                }
-                Some(Err(m)) => failures.push(format!("`{name}` on {}: {m}", e.shell)),
-                Some(Ok(rows)) => {
-                    ran += 1;
-                    if rows != *want {
-                        failures.push(format!(
-                            "`{name}` on {}: got {rows:?}, want {want:?}\n  {sql}",
+            // Both lowerings: the optimizer rewrites the statement after
+            // lowering, so a case where it changes an answer is exactly what
+            // this suite exists to catch.
+            for optimize in [false, true] {
+                let opts = Options { optimize, ..base };
+                let sql =
+                    compile(rel, opts).unwrap_or_else(|m| panic!("`{name}` / {}: {m}", e.dialect));
+                let label = if optimize {
+                    format!("{} (optimized)", e.shell)
+                } else {
+                    e.shell.to_string()
+                };
+                match run(e, &sql) {
+                    None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
+                        panic!(
+                            "`{}` is not installed (CAGARA_REQUIRE_ENGINES is set)",
                             e.shell
-                        ));
+                        )
+                    }
+                    None => {
+                        eprintln!("skipping {}: `{}` is not installed", e.dialect, e.shell);
+                        break;
+                    }
+                    Some(Err(m)) => failures.push(format!("`{name}` on {label}: {m}")),
+                    Some(Ok(rows)) => {
+                        ran += 1;
+                        if rows != *want {
+                            failures.push(format!(
+                                "`{name}` on {label}: got {rows:?}, want {want:?}\n  {sql}",
+                            ));
+                        }
                     }
                 }
             }

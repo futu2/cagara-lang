@@ -43,8 +43,10 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
 1. Separate relational rewrites from SQL emission. A `Rel -> Rel` pass can fuse
    stages or choose derived tables while keeping dialect rules in the backend.
 2. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
-   beyond SQLite, DuckDB and PostgreSQL (PGlite), and run it with `--optimize` as
-   well as the default lowering.
+   beyond SQLite, DuckDB and PostgreSQL (PGlite). Every shared case already runs
+   under both lowerings (the default and `--optimize`); MySQL, T-SQL and the
+   warehouses stay text-only because they need a server this repository does not
+   start.
 
 ## Deferred language work
 

@@ -7,7 +7,7 @@ have been checked against that database engine.
 
 | Coverage | Dialects |
 |---|---|
-| Executed against real engines in CI | SQLite 3.46+, DuckDB, PostgreSQL (through [PGlite](https://pglite.dev/), Postgres compiled to WASM and driven by `node`) |
+| Executed against real engines in CI, under both lowerings | SQLite 3.46+, DuckDB, PostgreSQL (through [PGlite](https://pglite.dev/), Postgres compiled to WASM and driven by `node`) |
 | Cagara-specific date, string, and integer arithmetic rewrites | ANSI/Postgres fallback; MySQL family (MySQL, Doris, SingleStore, StarRocks); SQLite; DuckDB; T-SQL/Fabric; BigQuery; Snowflake; Trino/Presto/Athena; Spark/Databricks |
 | SQLGlot Rust can recognize and validate | Other dialects exposed by the pinned `sqlglot-rust` version; their Cagara-specific intrinsic spelling uses the ANSI/Postgres fallback unless listed above |
 

@@ -54,6 +54,10 @@ lists, spelled by whichever dialect can hold one.
   element, and the position that wants keys is the one that reports the missing
   direction.
 
+- Every differential case runs twice per engine: once with the default lowering and once with
+  `--optimize`. The optimizer rewrites the statement *after* lowering, so a case where it changes an
+  answer is exactly what the suite exists to catch.
+
 - `unnest xs` turns a list back into rows: every input row once per element, the element under
   `value`, the other columns repeating — a `CROSS JOIN LATERAL` in SQL. It is a lateral
   *subquery* (`(SELECT unnest AS value FROM UNNEST(x))`) rather than a lateral table function: the

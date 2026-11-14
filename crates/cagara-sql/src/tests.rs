@@ -2707,7 +2707,14 @@ fn a_decimal_cast_says_decimal_everywhere() {
     let src = "o : query { total = string } = table \"s\" \"o\"\n\
                q = o & select { x = toDecimal 10 2 .total }\n";
     for d in [
-        "duckdb", "postgres", "mysql", "trino", "spark", "bigquery", "snowflake", "tsql",
+        "duckdb",
+        "postgres",
+        "mysql",
+        "trino",
+        "spark",
+        "bigquery",
+        "snowflake",
+        "tsql",
     ] {
         let sql = dialect(src, "q", d).unwrap_or_else(|e| panic!("{d}: {e}"));
         assert!(

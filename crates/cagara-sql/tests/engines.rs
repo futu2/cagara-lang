@@ -608,6 +608,218 @@ fn run_script(
     Some(Ok(rows))
 }
 
+/// Every statement is well-formed SQL.
+///
+/// Only three engines can be started here, so the other seven dialects — ANSI,
+/// MySQL, Trino, Spark, BigQuery, Snowflake, T-SQL — have no execution check. The
+/// strongest thing available without a server is to read the text back, and this
+/// does that for every shared case in every dialect.
+///
+/// It is a **weaker check than it looks**, and the reason is measured rather than
+/// assumed: sqlglot's parser is dialect-*agnostic* for this purpose. It reads
+/// `SELECT TOP 3 id` under PostgreSQL and `SELECT \`id\`` under PostgreSQL just as
+/// happily as under T-SQL and MySQL, so a statement being readable says it is
+/// well-formed SQL, not that the target accepts it. What it does catch is the
+/// generator producing malformed text — an unbalanced parenthesis, a stray
+/// placeholder, an empty clause — which no differential run can see for a dialect
+/// it cannot execute.
+///
+/// The per-dialect rules that *are* checkable are in
+/// [`each_dialect_avoids_what_it_cannot_read`].
+#[test]
+fn every_statement_is_well_formed_sql() {
+    let extra = "\
+                ex_concat = users & select { s = .name ++ \"!\" }\n\
+                ex_paged = users & order [asc .id] & limit 3 & offset 1 & select {.id}\n\
+                ex_window = nums & select { id = .id, r = rowNumber { order = [asc .id] } } & where (.r > 1)\n\
+                ex_agg = orders & agg { u = group .user_id, t = sum .amount, n = count } & where (.n > 1)\n\
+                ex_join = users & innerJoin (orders & select { user_id = .user_id, amount = .amount }) (.<id == .>user_id) & select { n = .name, a = .amount }\n\
+                ex_semi = users & semiJoin orders (.<id == .>user_id) & select {.name}\n\
+                ex_set = (union (users & select {.id}) (orders & select { id = .user_id })) & order [asc .id]\n\
+                ex_distinct = dupes & select {.k} & distinct & order [asc .k]\n\
+                ex_case = nums & select { id = .id, k = case { .a > 0 => \"pos\"; true => \"neg\" } }\n\
+                ex_ident = kw & select { order = .order, userId = .userId }\n";
+    let src = format!(
+        "{TABLES}{}\n{extra}",
+        CASES.iter().map(|(d, _)| *d).collect::<Vec<_>>().join("\n")
+    );
+    let ws = Workspace::from_source(&src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let names: Vec<&str> = CASES
+        .iter()
+        .map(|(d, _)| d.split_whitespace().next().expect("name"))
+        .chain([
+            "ex_concat",
+            "ex_paged",
+            "ex_window",
+            "ex_agg",
+            "ex_join",
+            "ex_semi",
+            "ex_set",
+            "ex_distinct",
+            "ex_case",
+            "ex_ident",
+        ])
+        .collect();
+
+    // Every dialect this backend accepts, not only the three that can run.
+    const DIALECTS: &[&str] = &[
+        "ansi",
+        "postgres",
+        "duckdb",
+        "sqlite",
+        "mysql",
+        "trino",
+        "spark",
+        "bigquery",
+        "snowflake",
+        "tsql",
+    ];
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    for d in DIALECTS {
+        let dialect = Dialect::from_str(d).expect("dialect");
+        for name in &names {
+            let (_, rel) = rels
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("no query `{name}`"));
+            let rel = rel
+                .as_ref()
+                .unwrap_or_else(|e| panic!("`{name}`: {}", e.message));
+            let sql = match compile(
+                rel,
+                Options {
+                    dialect,
+                    ..Options::default()
+                },
+            ) {
+                Ok(sql) => sql,
+                // A refusal is a decision (`fullJoin` on MySQL, a `list` or a
+                // `try*` on a dialect without one), not a failure to read back.
+                Err(_) => continue,
+            };
+            match sqlglot_rust::parse(&sql, dialect) {
+                Ok(_) => checked += 1,
+                Err(e) => failures.push(format!("{d} / `{name}`: {e}\n  {sql}")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(checked > 500, "only {checked} statements were read back");
+}
+
+/// Each dialect avoids the spellings it cannot read.
+///
+/// Parsing cannot decide this — the parser accepts every dialect's syntax under
+/// every dialect — so the rules are stated as text invariants instead, one list
+/// per target, and checked over every shared case. They are exactly the
+/// constructs the dialect pass exists to rewrite: a `LIMIT` in T-SQL, a `||` in
+/// MySQL (where it is boolean OR), a `NULLS LAST` where there is no such clause,
+/// a `::` cast outside PostgreSQL, backticks outside BigQuery and MySQL.
+#[test]
+fn each_dialect_avoids_what_it_cannot_read() {
+    let src = format!(
+        "{TABLES}{}\n",
+        CASES.iter().map(|(d, _)| *d).collect::<Vec<_>>().join("\n")
+    );
+    let ws = Workspace::from_source(&src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let names: Vec<&str> = CASES
+        .iter()
+        .map(|(d, _)| d.split_whitespace().next().expect("name"))
+        .collect();
+
+    // `(dialect, forbidden text, why)`. A construct is listed only when the
+    // target genuinely cannot read it, so a hit is a bug in the dialect pass.
+    const FORBIDDEN: &[(&str, &[&str])] = &[
+        // T-SQL paginates with `OFFSET … ROWS FETCH NEXT`, never `LIMIT`, and
+        // has no `NULLS LAST` (the emulation is a leading `CASE` key).
+        ("tsql", &["LIMIT ", "NULLS LAST", "NULLS FIRST"]),
+        // `||` is boolean OR in MySQL, and there is no `NULLS LAST`.
+        (
+            "mysql",
+            &["||", "NULLS LAST", "NULLS FIRST", "FULL JOIN", "::"],
+        ),
+        // A `::` cast is PostgreSQL's spelling; every other target takes CAST.
+        ("trino", &["::"]),
+        ("spark", &["::"]),
+        ("bigquery", &["::"]),
+        ("snowflake", &["::"]),
+        ("duckdb", &["::"]),
+        ("sqlite", &["::"]),
+        ("ansi", &["::", "`"]),
+    ];
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    for (d, forbidden) in FORBIDDEN {
+        let dialect = Dialect::from_str(d).expect("dialect");
+        for name in &names {
+            let (_, rel) = rels
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("no query `{name}`"));
+            let rel = rel
+                .as_ref()
+                .unwrap_or_else(|e| panic!("`{name}`: {}", e.message));
+            let Ok(sql) = compile(
+                rel,
+                Options {
+                    dialect,
+                    ..Options::default()
+                },
+            ) else {
+                continue;
+            };
+            checked += 1;
+            // The string-literal escapes are not the construct: `'it''s'` and
+            // `'a\b'` are data, so a match inside quotes is not a hit.
+            let bare = strip_literals(&sql);
+            for f in *forbidden {
+                if bare.contains(f) {
+                    failures.push(format!("{d} / `{name}`: {f:?} in\n  {sql}"));
+                }
+            }
+            assert!(
+                !bare.contains("CAGARA_"),
+                "{d} / `{name}`: an intrinsic was not lowered:\n  {sql}"
+            );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(checked > 300, "only {checked} statements were checked");
+}
+
+/// The SQL with every quoted string replaced by `''`, so a check for a construct
+/// cannot be fooled by data that happens to contain it.
+fn strip_literals(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut in_str = false;
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_str => {
+                in_str = true;
+                out.push('\'');
+            }
+            '\'' if in_str => {
+                // `''` is an escaped quote inside a literal.
+                if chars.peek() == Some(&'\'') {
+                    chars.next();
+                } else {
+                    in_str = false;
+                }
+                out.push('\'');
+            }
+            _ if in_str => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[test]
 fn engines_agree() {
     let src = format!(

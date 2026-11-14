@@ -223,6 +223,41 @@ fn nested(s: &mut Statement, to: Dialect) -> Result<(), String> {
     }
 }
 
+/// Rewrite the statements nested inside an expression, however deep the
+/// expression puts them.
+///
+/// sqlglot's AST has three expression forms that carry a `Statement`, and
+/// `Expr::transform` does not descend into any of them — it walks expressions,
+/// and a statement is not one. So each is rewritten here, by `nested`, which is
+/// what every other block already goes through.
+fn subqueries(e: Expr, to: Dialect) -> Result<Expr, String> {
+    crate::stage::try_transform_deep(e, &|e| {
+        Ok(match e {
+            Expr::Exists { subquery, negated } => Expr::Exists {
+                subquery: Box::new(beside(*subquery, to)?),
+                negated,
+            },
+            Expr::Subquery(sub) => Expr::Subquery(Box::new(beside(*sub, to)?)),
+            Expr::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => Expr::InSubquery {
+                expr,
+                subquery: Box::new(beside(*subquery, to)?),
+                negated,
+            },
+            other => other,
+        })
+    })
+}
+
+/// A statement that lives inside an expression, rewritten in place.
+fn beside(mut s: Statement, to: Dialect) -> Result<Statement, String> {
+    nested(&mut s, to)?;
+    Ok(s)
+}
+
 fn source(src: &mut TableSource, to: Dialect) -> Result<(), String> {
     match src {
         TableSource::Subquery { query, .. } => nested(query, to)?,
@@ -354,6 +389,14 @@ fn fold_filter(e: Expr) -> Expr {
 /// per-expression rewrites (reached by wrapping it in a one-column SELECT).
 fn expr(e: Expr, to: Dialect) -> Result<Expr, String> {
     let e = crate::intrinsics::lower(e, to)?;
+    // A subquery inside an expression — `EXISTS (…)` from a semi/anti join, and
+    // the two other spellings sqlglot's AST has — is a block of its own, and its
+    // clauses need the same rewriting as any other. Missing this left a
+    // `NULLS LAST` (and, without the statement transform's reach, other ANSI
+    // spellings) inside an `EXISTS`, which MySQL and T-SQL cannot read:
+    //
+    //     WHERE EXISTS (SELECT … FROM (SELECT … ORDER BY id NULLS LAST) AS t1)
+    let e = subqueries(e, to)?;
     // A filtered aggregate is `FILTER (WHERE …)` where the target has the
     // clause, and the portable `SUM(CASE WHEN … THEN x END)` where it does not.
     let e = if supports_filter(to) {

@@ -72,13 +72,45 @@ exact money, name-aligned set operations, `qualify`, grouping sets, lateral or
 correlated subqueries, and richer window frames remain future work.
 
 `decimal` is the one with a correctness argument behind it: `toDecimal` is a SQL
-cast today and the Cagara type stays `float`, so a money column summed in Cagara
-is summed as an IEEE double. Adding it as a parameterless scalar (`ScalarType`,
-`ty_to_scalar`, `SCALARS`, `CONS`, `Display`) and then the places that name a
-scalar's SQL type — `CAGARA_TO_DECIMAL`, `tryDecimal`, the declaration types, the
-`+ - *` overloads and `sum`'s signature — would make the type follow the cast.
-Precision and scale stay call-site arguments, as `toDecimal 10 2` has them today. The remaining features should extend
-the typed core, normalizer, relational arena, and SQL backend together.
+cast today and the Cagara type stays `float`, so a money column is *typed* as an
+IEEE double even where the engine's column type is exact. It gets parameters —
+`decimal p s`, both literal integers, `1 ≤ s ≤ p ≤ 38` — because that is what the
+engines actually have, and because a mismatch can then say which way it is wrong.
+
+The decisions, so the next round does not relitigate them:
+
+- **No implicit conversion in arithmetic.** `+`, `-`, `*` take two operands of
+  the *same* `(p,s)`; a different one is a compile error that suggests
+  `toDecimal p s`. There is no widening coercion between decimal types.
+- **Results still widen**, which is why arithmetic is a checker rule rather than
+  a signature: `+`/`-` give `(max(p-s) + s + 1, s)`, `*` gives `(p₁+p₂, s₁+s₂)`,
+  and a result past 38 digits is refused with the operands named, since no cast
+  can rescue it — the operands have to be narrowed.
+- **Literals lift.** A numeric literal takes the `(p,s)` its context demands, the
+  way `1` is already an `int` or a `float` depending on context, with its digits
+  checked at compile time. Columns and expressions never lift.
+- **Comparisons may mix `(p,s)`.** `decimal 10 2` against `decimal 12 2` compares
+  exact values in SQL and produces no value, so no conversion is implied;
+  arithmetic is the strict one.
+- `sum`/`avg` are signatures, not rules: `sum : expr r (decimal p s) -> agg
+  (expr r (maybe (decimal 38 s)))`, because the width is a constant in the
+  portable family (PostgreSQL's `numeric` is unbounded, which is why the language
+  states the portable 38 rather than either engine's best).
+- `/` stays refused: the scale of a quotient is engine-defined (PostgreSQL goes to
+  1000 digits, Trino errors, DuckDB truncates), so the answer is `roundTo` plus
+  `toDecimal`, written out.
+- Type-level numbers are `Ty::Con("10", [])` rather than a new `Ty` variant, so
+  elaboration and every walker stay untouched; the parser gains numeric type
+  atoms and the checker validates the range.
+
+S1 is three commits: (1) the type — parser atoms, `CONS`, range validation,
+`ScalarType::Decimal` and its arms; (2) `toDecimal`/`tryDecimal` and the
+conversions (`toString`, `toInt`, `toFloat`, `round`, `roundTo`), with the
+literal-parameter rule for the first two arguments (the `keyLabel` mechanism, over
+numbers instead of labels); (3) SQL emission (`DECIMAL(p,s)`, `NUMERIC`,
+`NUMBER`), the SQLite refusal, and the DuckDB/PostgreSQL differential. Arithmetic
+and the aggregates are S2; until then a `decimal` in `+ - * /` is a compile error
+that says so.
 
 See [`CORE.md`](CORE.md) for semantics and [`ROW-TYPES.md`](ROW-TYPES.md) for
 row algebra.

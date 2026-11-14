@@ -2471,7 +2471,7 @@ fn closest_token(text: &str, target: &str) -> Option<(usize, usize)> {
             (false, Some(s)) => {
                 let token = &text[s..i];
                 if token != target {
-                    let d = edit_distance(token, target);
+                    let d = cagara_hir::suggest::edit_distance(token, target);
                     let limit = (target.chars().count() / 3).max(1);
                     if d <= limit && best.is_none_or(|(_, _, b)| d < b) {
                         best = Some((s, i, d));
@@ -2485,7 +2485,7 @@ fn closest_token(text: &str, target: &str) -> Option<(usize, usize)> {
     if let Some(s) = start {
         let token = &text[s..];
         if token != target {
-            let d = edit_distance(token, target);
+            let d = cagara_hir::suggest::edit_distance(token, target);
             let limit = (target.chars().count() / 3).max(1);
             if d <= limit && best.is_none_or(|(_, _, b)| d < b) {
                 best = Some((s, text.len(), d));
@@ -2493,23 +2493,6 @@ fn closest_token(text: &str, target: &str) -> Option<(usize, usize)> {
         }
     }
     best.map(|(s, e, _)| (s, e))
-}
-
-/// Levenshtein distance, for picking the typo out of a range.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut cur = vec![0; b.len() + 1];
-    for (i, ca) in a.iter().enumerate() {
-        cur[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[b.len()]
 }
 
 /// The type of every definition that does not write one, as an inlay hint after

@@ -3731,7 +3731,7 @@ fn unknown_type_name(name: &str) -> String {
     ];
     let near = KNOWN
         .iter()
-        .map(|k| (*k, edit_distance(name, k)))
+        .map(|k| (*k, crate::suggest::edit_distance(name, k)))
         .filter(|(k, d)| *d <= 2 || k.starts_with(name) || name.starts_with(*k))
         .min_by_key(|(_, d)| *d);
     match near {
@@ -3745,21 +3745,4 @@ fn unknown_type_name(name: &str) -> String {
             KNOWN.join(", ")
         ),
     }
-}
-
-/// Levenshtein distance, for the "did you mean" in [`unknown_type_name`].
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut cur = vec![0; b.len() + 1];
-    for (i, ca) in a.iter().enumerate() {
-        cur[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[b.len()]
 }

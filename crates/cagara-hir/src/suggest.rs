@@ -38,7 +38,14 @@ pub(crate) fn did_you_mean<'a>(
 }
 
 /// Levenshtein distance, over characters.
-fn edit_distance(a: &str, b: &str) -> usize {
+///
+/// Three callers, one measurement: the near-miss for an unknown *name* (below), the
+/// near-miss for an unknown *type* (the checker compares against every known type
+/// name, so its threshold is on the distance rather than on the name's length), and
+/// the language server, which picks a typo out of a completion range and would
+/// otherwise carry a third copy. It is public for the last of those, which is a
+/// different crate.
+pub fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     let mut prev: Vec<usize> = (0..=b.len()).collect();

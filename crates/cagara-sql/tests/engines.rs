@@ -276,6 +276,154 @@ const CASES: &[(&str, &[&str])] = &[
             "pos|14|7.0|2|2|1|7|7",
         ],
     ),
+    // More shapes with several barriers in one pipeline.
+    (
+        "bar_join_offset = (orders & order [asc .id] & offset 1) & innerJoin (users & select { u_id = .id, name = .name }) (.<user_id == .>u_id) & select { oid = .id, n = .name } & order [asc .oid]",
+        &["11|ann", "12|it's a\\b "],
+    ),
+    // The preserved side of a right join is filtered *and* limited: both users
+    // without a matching order must still survive.
+    (
+        "bar_right_limit = (orders & order [asc .id] & limit 1) & rightJoin (users & select { u_id = .id, name = .name }) (.<user_id == .>u_id) & select { oid = .id, n = .name } & order [asc .n, asc (coalesce 2147483647 .oid)]",
+        &["10|ann", "NULL|bob", "NULL|it's a\\b "],
+    ),
+    // An aggregate over a `distinct`, which is a barrier in both directions.
+    (
+        "bar_agg_distinct_agg = nums & agg { b = group .b, n = count } & distinct & agg { k = count }",
+        &["3"],
+    ),
+    // A filter on a window, then an aggregate: the window is computed first.
+    (
+        "bar_win_where_agg = nums & select { id = .id, r = rowNumber { order = [asc .id] } } & where (.r <= 2) & agg { n = count }",
+        &["2"],
+    ),
+    // A limit, an aggregate, and a limit again.
+    (
+        "bar_limit_agg_limit = nums & order [asc .id] & limit 3 & agg { n = count } & limit 1",
+        &["3"],
+    ),
+    // An `omit` between two projections, so the second cannot read the dropped
+    // column and the stage has to be wrapped.
+    (
+        "bar_omit_between = nums & select { id = .id, a = .a, b = .b } & omit \"b\" & select { id = .id, a = .a } & order [asc .id]",
+        &["1|7", "2|-7", "3|7", "4|-8"],
+    ),
+    // Barriers *inside* a join input: the input is a relation, so its limit,
+    // its dedupe and its window all decide which rows that side contributes.
+    (
+        "bar_join_limit = (orders & order [asc .amount] & limit 2) & innerJoin (users & select { u_id = .id, name = .name }) (.<user_id == .>u_id) & select { oid = .id, amount = .amount, n = .name } & order [asc .oid]",
+        &["11|4.5|ann", "12|1.0|it's a\\b "],
+    ),
+    (
+        "bar_join_distinct = (dupes & select { id = .id } & distinct) & innerJoin (nums & select { nid = .id }) (.<id == .>nid) & select { id = .id } & order [asc .id]",
+        &["1", "2", "3"],
+    ),
+    (
+        "bar_join_agg = (nums & agg { b = group .b, n = count }) & innerJoin (nums & select { bb = .b, id = .id }) (.<b == .>bb) & select { b = .b, n = .n, id = .id } & order [asc .b, asc .id]",
+        &["-2|1|3", "2|2|1", "2|2|2", "3|1|4"],
+    ),
+    (
+        "bar_join_window = (nums & select { id = .id, r = rowNumber { order = [asc .id] } }) & innerJoin (nums & select { nid = .id }) (.<id == .>nid) & select { id = .id, r = .r } & order [asc .id]",
+        &["1|1", "2|2", "3|3", "4|4"],
+    ),
+    // A chain of two joins, so the second one joins a derived table to a
+    // derived table.
+    (
+        "bar_join_chain = orders & innerJoin (users & select { u_id = .id, name = .name }) (.<user_id == .>u_id) & innerJoin (nums & select { nn = .id, b = .b }) (.<user_id == .>nn) & select { oid = .id, n = .name, b = .b } & order [asc .oid]",
+        &["10|ann|2", "11|ann|2", "12|it's a\\b |-2"],
+    ),
+    (
+        "bar_leftjoin_window = users & leftJoin (nums & select { nid = .id, b = .b, r = rowNumber { order = [asc .id] } }) (.<id == .>nid) & select { id = .id, r = .r } & order [asc .id]",
+        &["1|1", "2|2", "3|3"],
+    ),
+    // A set operation of two aggregates: both branches produce the same row, so
+    // `union` leaves one.
+    (
+        "bar_union_agg = (union (nums & agg { n = count }) (nums & agg { n = count })) & order [asc .n]",
+        &["4"],
+    ),
+    // A filter after a `distinct`, and a limit between them.
+    (
+        "bar_where_distinct = dupes & select {.k} & distinct & where (.k == \"x\")",
+        &["x"],
+    ),
+    (
+        "bar_dist_limit_proj = dupes & select {.k} & distinct & order [asc .k] & limit 1 & select { k = .k }",
+        &["x"],
+    ),
+    // A filter after a limit that already ran over an aggregate.
+    (
+        "bar_agg_limit_where = nums & agg { b = group .b, n = count } & order [asc .b] & limit 2 & where (.n > 1)",
+        &["2|2"],
+    ),
+    // The barrier table, one case per row of it. Each of these folds the wrong
+    // way unless the stage is wrapped first, and folding changes *which rows*
+    // come back rather than producing invalid SQL — so the differential harness
+    // is the only thing that can catch it.
+    //
+    // A projection after a limit sees only the kept rows, not all of them.
+    (
+        "bar_proj_limit = nums & order [asc .id] & limit 2 & select { id = .id, a = .a }",
+        &["1|7", "2|-7"],
+    ),
+    // An aggregate after a limit counts the kept rows.
+    (
+        "bar_agg_limit = nums & order [asc .id] & limit 2 & agg { n = count }",
+        &["2"],
+    ),
+    // `distinct` after a limit dedupes the kept rows.
+    (
+        "bar_dist_limit = nums & order [asc .id] & limit 2 & distinct & select {.id} & order [asc .id]",
+        &["1", "2"],
+    ),
+    // `omit` after a `distinct` keeps the dedupe: the row being deduped is the
+    // three-column one, so dropping `k` afterwards leaves three ids.
+    (
+        "bar_omit_distinct = dupes & distinct & omit \"k\" & order [asc .id]",
+        &["1", "2", "3"],
+    ),
+    // Two limits: the second applies to the first's rows.
+    (
+        "bar_limit_limit = nums & order [asc .id] & limit 3 & limit 2 & select {.id}",
+        &["1", "2"],
+    ),
+    // Two offsets, likewise.
+    (
+        "bar_offset_offset = nums & order [asc .id] & offset 1 & offset 1 & select {.id}",
+        &["3", "4"],
+    ),
+    // A projection reading a column the previous one computed.
+    (
+        "bar_proj_proj = nums & select { x = .a + 1 } & select { y = .x * 2 } & order [asc .y]",
+        &["-14", "-12", "16", "16"],
+    ),
+    // A filter on a computed column: it must run after the projection that
+    // names it, not against the base table.
+    (
+        "bar_where_proj = nums & select { x = .a + 1 } & where (.x > 0) & select { x = .x } & order [asc .x]",
+        &["8", "8"],
+    ),
+    // An aggregate grouped by a projected column.
+    (
+        "bar_agg_proj = nums & select { k = .b, a = .a } & agg { k = group .k, n = count } & order [asc .k]",
+        &["-2|1", "2|2", "3|1"],
+    ),
+    // A window over an aggregate's result.
+    (
+        "bar_win_agg = nums & agg { n = count } & select { n = .n, r = rowNumber { order = [asc .n] } }",
+        &["4|1"],
+    ),
+    // `distinct` over an aggregate's rows.
+    (
+        "bar_dist_agg = nums & agg { b = group .b, n = count } & distinct & order [asc .b]",
+        &["-2|1", "2|2", "3|1"],
+    ),
+    // A sort after a `distinct` is a barrier too: sorting the pre-dedupe rows
+    // would order a different multiset.
+    (
+        "bar_sort_distinct = dupes & select {.k} & distinct & order [desc .k]",
+        &["y", "x"],
+    ),
     // On an empty input a global filtered aggregate still has one row:
     // `filtered p count` is 0 and a filtered `sum` is NULL.
     (

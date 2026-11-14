@@ -167,6 +167,7 @@ need their own intrinsic per dialect.
    |---|---|---|
    | `every_statement_is_well_formed_sql` | the generator produced well-formed SQL for that target (balanced, no placeholder left, no empty clause) | that the target *accepts* it — sqlglot's parser is dialect-agnostic here, which is measured in the test itself |
    | `each_dialect_avoids_what_it_cannot_read` | the dialect pass removed the spellings that target cannot read (`LIMIT` and `NULLS LAST` for T-SQL, `||` and `FULL JOIN` for MySQL, `::` everywhere but PostgreSQL, backticks outside MySQL) | anything about values — only an engine can answer that |
+   | `each_dialect_uses_the_spelling_it_has` | the right spelling is *present* — `CONCAT(` where `||` is OR, `TOP` and `OFFSET … ROWS FETCH NEXT` for T-SQL paging, a `CASE` for a boolean column — which the absence check cannot see, since a construct that is missing entirely passes an absence | the same: it is text |
 
    The first of those found a real bug: a statement nested inside an expression
    (`EXISTS (…)` from a semi/anti join) was never rewritten, so `NULLS LAST` reached

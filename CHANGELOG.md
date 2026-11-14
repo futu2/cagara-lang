@@ -18,6 +18,11 @@
   precision would be lost silently). `money_is_exact_on_the_engines` runs the sum of three 19.99s and
   `0.1 + 0.2` on DuckDB and PostgreSQL.
 
+- A `leftJoin` / `rightJoin` / `fullJoin` side no longer needs a derived table to compute a
+  column that would be NULL anyway: `amount * 2` inlines, because the unmatched row sees NULL
+  either way. A literal, or a function call (which might be `coalesce`), still computes before
+  the join.
+
 - A projection no longer forces a derived table when a `limit` or an `offset` sits below it: a
   `LIMIT` picks rows by an `ORDER BY` over the input columns, which SQL allows a projection to
   drop. A `distinct` still needs the barrier, because dropping a column there changes how many

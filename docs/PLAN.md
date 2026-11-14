@@ -115,8 +115,15 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
    `DISTINCT` — that is the one where dropping changes how many rows are deduped. A
    projection that reuses a sort key's name for another column is refused as well.
 
-   Next candidates, in the order they look worth it: filter-into-join for an inner
-   join, folding a projection into a join operand, and `count(*)` over an aggregate
+   A null-extended join side now inlines a *computed* column when the expression
+   stays NULL without its row (`amount * 2`), and keeps the derived table when it
+   does not (a literal, or a call — `coalesce` exists, so no call is assumed). That
+   is `null_propagating` in `lower.rs`.
+
+   What is *not* left to do, having checked: a filter on an inner join already folds
+   into the outer `WHERE` (`lower_join` hands the sides' `wheres` over), and a
+   projection that only renames a join operand already folds into it. The remaining
+   candidates are `count(*)` over an aggregate
    (`agg { c = count } & agg { d = count }` is `COUNT(*)` over one row per group,
    which SQL can write as a nested aggregate only with a window or a derived
    table — so it stays). None of them is needed for correctness today.

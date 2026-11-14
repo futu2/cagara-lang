@@ -366,13 +366,15 @@ combine only when they are the **same** type, and nothing converts.
 |---|---|
 | `decimal 10 2 + decimal 10 2` | `decimal 10 2` |
 | `decimal 10 2 - decimal 10 2` | `decimal 10 2` |
-| `decimal 10 2 + decimal 12 2` | **compile error**: convert one with `toDecimal` first |
+| `decimal 10 2 + decimal 12 2` | **compile error**: bring both to one type with `toDecimal` |
 | `decimal 10 2 * decimal 10 2` | **refused**: a product's scale is the sum of the operands', which the type cannot state |
 | `decimal 10 2 / decimal 10 2` | **refused**: a quotient's scale is engine-defined |
 | `decimal 10 2 == decimal 10 2` | `bool` |
+| `decimal 10 2 == decimal 12 2` | **compile error**: one type everywhere, so convert both |
 
 The width a declaration states is the promise about how large the value can be, so
-adding money keeps the type rather than widening it. A numeric literal takes the
+adding money keeps the type rather than widening it. Comparisons follow the same
+rule as arithmetic: one type on both sides. A numeric literal takes the
 shape its context demands, so `total * 1.2` is a *product with a literal* and is
 refused like any other product; write `roundTo 2 (total * 1.2)`'s inputs as
 decimals with `toDecimal` when the scale matters. To change a scale, say so:

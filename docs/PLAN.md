@@ -145,9 +145,10 @@ non-null reading produces. Lowering the candidate's score, or only the
 parameterized constructors' score, left exactly those two tests failing. Recorded
 because it is the shape any future "let these two types meet" feature will hit.
 
-What is left of the decimal work is therefore: mixed-parameter comparisons (same
-blocker — a specific candidate shadows the generic one), a result type that widens
-(needs type-level arithmetic), and `--ddl` if the schema side ever emits types.
+What is left of the decimal work is therefore: a result type that *widens* the way
+SQL's does (which needs type-level arithmetic in the language, or an arbitration
+that can rank a computed result), and `--ddl` if the schema side ever emits column
+types. Mixed comparisons are not on the list: they are refused by decision.
 
 See [`CORE.md`](CORE.md) for semantics and [`ROW-TYPES.md`](ROW-TYPES.md) for
 row algebra.

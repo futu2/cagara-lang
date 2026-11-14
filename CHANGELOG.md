@@ -28,6 +28,14 @@
   drop. A `distinct` still needs the barrier, because dropping a column there changes how many
   rows are deduped. A projection that reuses a sort key's name for another column keeps it too.
 
+- A `date` literal passed to `daysBetween`, `addDays`, `truncMonth` and their siblings is cast
+  where the target needs it (`DATE '2024-03-01'`). Trino, BigQuery and Spark reject the bare
+  string — `Unexpected parameters (varchar(3), date, varchar(10)) for function date_diff` —
+  where PostgreSQL, DuckDB, SQLite and MySQL coerce it.
+
+- Trino paging is `OFFSET n FETCH FIRST m ROWS ONLY`. Its grammar puts `OFFSET` before
+  `LIMIT`, so the `LIMIT … OFFSET …` every other target reads is a parse error there.
+
 - A filter over a window is `QUALIFY` on DuckDB, Snowflake, BigQuery and Teradata, instead of
   wrapping the window in a derived table. Two cases keep the wrap and both are correct: a
   `limit`/`offset` below the filter (SQL runs `QUALIFY` before `LIMIT`, which would filter the

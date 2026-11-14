@@ -28,6 +28,10 @@ pub struct Stage {
     pub(crate) limit: Option<i64>,
     pub(crate) offset: Option<i64>,
     pub(crate) distinct: bool,
+    /// A filter over this stage's window output, for a target that has
+    /// `QUALIFY`. `None` everywhere else: the filter becomes a derived table
+    /// instead, which is what every dialect can read.
+    pub(crate) qualify: Option<Expr>,
     pub(crate) has_agg: bool,
     pub(crate) has_win: bool,
 }
@@ -277,6 +281,7 @@ impl Stage {
             limit: None,
             offset: None,
             distinct: false,
+            qualify: None,
             has_agg: false,
             has_win: false,
         }
@@ -371,7 +376,7 @@ impl Stage {
             limit: self.limit.map(|n| Expr::Number(n.to_string())),
             offset: self.offset.map(|n| Expr::Number(n.to_string())),
             fetch_first: None,
-            qualify: None,
+            qualify: self.qualify,
             window_definitions: vec![],
             query_options: None,
         }

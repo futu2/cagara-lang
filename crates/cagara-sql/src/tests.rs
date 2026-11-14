@@ -1652,6 +1652,62 @@ fn a_projection_does_not_capture_a_carried_sort_key() {
     );
 }
 
+/// A filter over a window is `QUALIFY` where the target has the clause.
+///
+/// The filter belongs after the window functions, which is exactly what `QUALIFY`
+/// is, so the derived table the general rule builds is not needed. sqlglot does not
+/// rewrite the clause per dialect — it emits `QUALIFY` for every target — so the
+/// decision has to be made before the statement exists, which is why the lowerer is
+/// told the capability rather than the dialect.
+#[test]
+fn a_filter_over_a_window_is_qualify_where_the_target_has_it() {
+    let q =
+        "q = users & select { id = .id, r = rowNumber { order = [asc .id] } } & where (.r > 2)\n";
+    for d in ["duckdb", "snowflake", "bigquery"] {
+        let s = dialect(q, "q", d).unwrap_or_else(|e| panic!("{d}: {e}"));
+        // The window function itself, not the output name: a later projection can
+        // drop the name, and then the engine has nothing to bind it to.
+        assert!(s.contains("QUALIFY ROW_NUMBER() OVER"), "{d}: {s}");
+        assert!(!s.contains("AS t1"), "{d}: no derived table: {s}");
+    }
+    // Everywhere else the derived table is what the dialect can read.
+    for d in ["postgres", "mysql", "sqlite", "trino", "tsql"] {
+        let s = dialect(q, "q", d).unwrap_or_else(|e| panic!("{d}: {e}"));
+        assert!(!s.contains("QUALIFY"), "{d}: {s}");
+        assert!(s.contains("AS t1"), "{d}: {s}");
+    }
+    // Paging runs *after* the filter in the pipeline but *before* `QUALIFY` in
+    // SQL, so the pair cannot fold: `select & limit 2 & where` takes two rows and
+    // filters them, where `QUALIFY … LIMIT 2` filters the whole relation.
+    let s = dialect(
+        "q = users & select { id = .id, r = rowNumber { order = [asc .id] } } & limit 2 & where (.r > 1)\n",
+        "q",
+        "duckdb",
+    )
+    .unwrap();
+    assert!(s.contains("AS t1"), "paging must not fold: {s}");
+    // The other order is the one `QUALIFY` spells.
+    let s = dialect(
+        "q = users & select { id = .id, r = rowNumber { order = [asc .id] } } & where (.r > 1) & limit 2\n",
+        "q",
+        "duckdb",
+    )
+    .unwrap();
+    assert_eq!(
+        s,
+        "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS r FROM public.users \
+         QUALIFY ROW_NUMBER() OVER (ORDER BY id NULLS LAST) > 1 LIMIT 2"
+    );
+    // A `distinct` also runs after the window, so it keeps the derived table.
+    let s = dialect(
+        "q = users & select { id = .id, r = rowNumber { order = [asc .id] } } & distinct & where (.r > 1)\n",
+        "q",
+        "duckdb",
+    )
+    .unwrap();
+    assert!(s.contains("AS t1"), "distinct must not fold: {s}");
+}
+
 /// A projection may fold over a `limit` even when it drops columns, because the
 /// `ORDER BY` it folds under names *input* columns. That is only true while the
 /// projection does not reuse one of those names for another column: after the fold

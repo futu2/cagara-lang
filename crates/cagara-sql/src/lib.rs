@@ -65,7 +65,7 @@ pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
     // decide one at a time). `rewrite` has no dialect in it; see its module doc.
     let rewritten = rewrite::rewrite(rel);
     let rel = &rewritten;
-    let mut lowerer = lower::Lowerer::for_rel(rel);
+    let mut lowerer = lower::Lowerer::for_rel(rel, dialect::supports_qualify(opts.dialect));
     let st = lowerer.rel(rel)?;
     let mut select = st.into_statement();
     select.ctes = lowerer.take_ctes();

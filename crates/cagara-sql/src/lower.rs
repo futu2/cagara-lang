@@ -45,10 +45,18 @@ pub struct Lowerer {
     tables: HashSet<String>,
     /// Current `rel_inner` nesting, bounded by `MAX_LOWER_DEPTH`.
     depth: usize,
+    /// Whether the target has `QUALIFY` (`dialect::supports_qualify`). A filter
+    /// over a window folds into the clause when it does, and into a derived table
+    /// when it does not.
+    has_qualify: bool,
 }
 
 impl Lowerer {
-    pub fn for_rel(rel: &Rel) -> Self {
+    /// `has_qualify` is a *capability*, not a dialect: the lowerer never matches
+    /// on a target, it is told whether this one has the clause. That keeps the
+    /// rule "a dialect rule lives in `dialect.rs`" true — `dialect::supports_qualify`
+    /// is the only place the list is written.
+    pub fn for_rel(rel: &Rel, has_qualify: bool) -> Self {
         let mut counts = Vec::new();
         count_rel(rel, &mut counts);
         let mut tables = HashSet::new();
@@ -62,6 +70,7 @@ impl Lowerer {
             ctes: Vec::new(),
             tables,
             depth: 0,
+            has_qualify,
         }
     }
 
@@ -363,19 +372,7 @@ impl Lowerer {
             // grouped filter belongs, so the SQL now says what the pipeline
             // means instead of nesting it.
             for p in stages.into_iter().rev() {
-                if grouped(&st) {
-                    let e = st.resolve(p)?;
-                    st.having = match st.having.take() {
-                        Some(h) => and_all(vec![h, e]),
-                        None => Some(e),
-                    };
-                    continue;
-                }
-                if st.needs_barrier(Fuse::Filter, false) {
-                    st = self.wrap(st);
-                }
-                let e = st.resolve(p)?;
-                st.wheres.push(e);
+                st = self.place_filter(st, p)?;
             }
             return Ok(st);
         }
@@ -437,8 +434,42 @@ impl Lowerer {
         ))
     }
 
-    fn lower_where(&mut self, r: &Rel, p: &IrExpr) -> Result<Stage, String> {
-        let mut st = self.rel(r)?;
+    /// Where a filter belongs on this stage: `HAVING` after a group, `QUALIFY`
+    /// after a window on a target that has the clause, `WHERE` otherwise — and a
+    /// derived table when it cannot fold at all.
+    ///
+    /// One function because there are two callers — the peeled filter chain, which
+    /// is the path a pipeline actually takes, and the `Rel::Where` arm, which the
+    /// match keeps for exhaustiveness — and they must not disagree. The peel used
+    /// to carry its own copy of this decision, which is how the first version of
+    /// the `QUALIFY` rule ended up in the arm that never runs.
+    fn place_filter(&mut self, mut st: Stage, p: &IrExpr) -> Result<Stage, String> {
+        // A filter over a window is `QUALIFY` on a target that has the clause: it
+        // runs after the window functions, which is exactly where this filter
+        // belongs, so the derived table the general rule would build is not needed.
+        // An aggregate is excluded because its filter is `HAVING`, and a `distinct`
+        // because a filter before a dedupe is not a filter after one.
+        // Paging is excluded, and it is the one that bites: SQL runs `QUALIFY`
+        // *before* `LIMIT`, so `select {r = …} & limit 2 & where (.r > 1)` would
+        // filter the whole relation and then take two rows, where the pipeline
+        // takes two and filters them. Measured on DuckDB before the fix: two rows
+        // out where the answer is one.
+        let paged = st.limit.is_some() || st.offset.is_some();
+        if self.has_qualify && st.has_win && !st.has_agg && !st.distinct && !paged {
+            // The predicate is resolved like any other, so a window column becomes
+            // the window function itself: `QUALIFY ROW_NUMBER() OVER (…) > 2`. The
+            // output *name* would be shorter, and it is wrong here — a projection
+            // above this filter can replace the select list and drop the name, and
+            // the engine then has nothing to bind it to. Measured: `& where (.r > 2)
+            // & select {.id}` emitted `QUALIFY r > 2` against a select list without
+            // `r`, and DuckDB refused the statement.
+            let e = st.resolve(p)?;
+            st.qualify = Some(match st.qualify.take() {
+                Some(q) => and_all(vec![q, e]).expect("two conditions"),
+                None => e,
+            });
+            return Ok(st);
+        }
         // A filter over an aggregate is that aggregate's `HAVING`: every column
         // the predicate can name is either a grouping key or an aggregate
         // value, and `st.resolve` turns each into the expression it stands for
@@ -462,6 +493,11 @@ impl Lowerer {
         let e = st.resolve(p)?;
         st.wheres.push(e);
         Ok(st)
+    }
+
+    fn lower_where(&mut self, r: &Rel, p: &IrExpr) -> Result<Stage, String> {
+        let st = self.rel(r)?;
+        self.place_filter(st, p)
     }
 
     /// `unnest xs` — a LATERAL join over the array, one row per element.

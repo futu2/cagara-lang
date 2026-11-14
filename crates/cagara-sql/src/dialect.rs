@@ -40,6 +40,20 @@ pub(crate) enum Fam {
 /// Standard SQL since 2003, and every engine here that has it treats it as a
 /// suffix of the aggregate call. The ones that do not get the portable spelling
 /// instead, applied by [`rewrite`] — `SUM(CASE WHEN p THEN x END)`.
+/// Does this target have a `QUALIFY` clause — a filter that runs after the window
+/// functions, so it can read their output in the same `SELECT`?
+///
+/// Four do. Everywhere else the filter becomes a derived table, which is what
+/// `lower.rs` does when this is false: the clause is not rewritten per dialect by
+/// sqlglot (it passes `QUALIFY` through to every target, which would be a syntax
+/// error on the rest), so the decision has to be made before the statement exists.
+pub(crate) fn supports_qualify(d: Dialect) -> bool {
+    matches!(
+        d,
+        Dialect::DuckDb | Dialect::Snowflake | Dialect::BigQuery | Dialect::Teradata
+    )
+}
+
 pub(crate) fn supports_filter(d: Dialect) -> bool {
     !matches!(fam(d), Fam::Mysql | Fam::Tsql | Fam::BigQuery | Fam::Spark)
 }

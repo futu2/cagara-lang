@@ -379,6 +379,22 @@ const CASES: &[(&str, &[&str])] = &[
         "null_aggs = nums & agg { s = sum .v, a = avg .v, lo = min .v, hi = max .v, n = countOf .v, nd = countDistinct .v }",
         &["60|20.0|10|30|3|3"],
     ),
+    // A filter over a window folds into `QUALIFY` on DuckDB and into a derived
+    // table on PostgreSQL. Same query, same rows — which is the whole claim.
+    (
+        "win_filter = nums & select { id = .id, r = rowNumber { order = [asc .id] } } & where (.r > 2) & select {.id} & order [asc .id]",
+        &["3", "4"],
+    ),
+    // The paging order matters and must not fold: `limit 2 & where` takes two
+    // rows and filters them, where `QUALIFY … LIMIT 2` filters the relation.
+    (
+        "win_filter_paged = nums & select { id = .id, r = rowNumber { order = [asc .id] } } & limit 2 & where (.r > 1) & select {.id} & order [asc .id]",
+        &["2"],
+    ),
+    (
+        "win_filter_then_paged = nums & select { id = .id, r = rowNumber { order = [asc .id] } } & where (.r > 1) & limit 2 & select {.id} & order [asc .id]",
+        &["2", "3"],
+    ),
     // A filter after a bare `distinct` folds into it, which is only right
     // because deduping whole rows and filtering on them commute.
     (

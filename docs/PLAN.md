@@ -37,7 +37,10 @@ this page tracks the remaining boundaries and language work.
   language has, and a near miss is reported with a "did you mean". An explicit
   binder for type parameters would let a one-letter typo be reported too, and is
   a language change rather than a check.
-- SQL optimization remains opt-in and runs after Cagara lowering.
+- SQL optimization remains opt-in (`--optimize`) and runs after Cagara lowering, on
+  the statement. The differential suite runs every shared case through both settings
+  on both engines, so an optimization that changes an answer is a wrong row rather
+  than a surprise in production.
 
 ## Lists
 

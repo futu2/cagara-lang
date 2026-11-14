@@ -67,6 +67,18 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
 
 1. Separate relational rewrites from SQL emission. A `Rel -> Rel` pass can fuse
    stages or choose derived tables while keeping dialect rules in the backend.
+
+   *Where to start*, now that the code has been read with this in mind: the stage
+   plan and the SQL text are already two layers — `stage.rs` holds a mutable
+   `SELECT` with no dialect in it, and `lower.rs` decides when a node *fuses* into
+   the current stage or becomes a derived table (`Fuse`, `grouped`, the depth
+   bound, `derived`). The decisions live in `lower.rs`, where the emitter is, so a
+   test can only see them as SQL text. The first step is therefore to lift the
+   fuse-or-wrap decision into a function `Rel -> [Stage]` that names no sqlglot
+   type except through `Stage`, then have `lower.rs` render the stages and let the
+   tests assert on the stage list. That is a small change to a large file, and it
+   is the part every later rewrite (identity projection, filter-into-join,
+   `distinct` placement) needs.
 2. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
    beyond SQLite, DuckDB and PostgreSQL (PGlite). Every shared case already runs
    under both lowerings (the default and `--optimize`); MySQL, T-SQL and the

@@ -217,6 +217,11 @@ pub(crate) fn con(n: &'static str) -> Ty {
     Ty::Con(n, vec![])
 }
 
+/// A constructor applied to arguments: `maybe a`, `list a`, `decimal p s`.
+pub(crate) fn con_of(n: &'static str, args: Vec<Ty>) -> Ty {
+    Ty::Con(n, args)
+}
+
 pub(crate) fn fun(a: Ty, b: Ty) -> Ty {
     Ty::Fun(Box::new(a), Box::new(b))
 }

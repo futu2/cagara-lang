@@ -74,8 +74,25 @@ pub enum Expr {
     Agg(String, Vec<Expr>, Option<Box<Expr>>),
     /// Grouping key (`group e`).
     Group(Box<Expr>),
+    /// A grouping key that also gets subtotal rows (`rollup e`, `cube e`). The
+    /// shape is the stage's, not the key's: `ROLLUP(a, b)` is one clause over
+    /// every marked key, so the keys carry the marker and the lowerer reads the
+    /// shape from the first of them.
+    Grouping(GroupingShape, Box<Expr>),
     /// Window function template plus its OVER specification.
     Win(String, Vec<Expr>, Box<WinSpec>),
+}
+
+/// Which subtotal rows a grouping key asks for.
+///
+/// `ROLLUP(a, b)` is `{a, b}, {a}, {}` and `CUBE(a, b)` is every subset. Both are
+/// one `GROUP BY` clause over the stage's marked keys, so the shape is uniform
+/// within a stage — `agg { a = rollup .a, b = group .b }` is the only way to mix
+/// them, and it is refused rather than guessed at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GroupingShape {
+    Rollup,
+    Cube,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +123,7 @@ impl Expr {
                 }
                 Ok(Phase::Agg)
             }
-            Expr::Group(k) => {
+            Expr::Group(k) | Expr::Grouping(_, k) => {
                 row_only(k, "a group key")?;
                 Ok(Phase::Agg)
             }
@@ -125,7 +142,7 @@ impl Expr {
             Expr::In(value, list, _) => {
                 list.iter().chain(std::iter::once(value.as_ref())).collect()
             }
-            Expr::Group(k) => vec![k.as_ref()],
+            Expr::Group(k) | Expr::Grouping(_, k) => vec![k.as_ref()],
             Expr::Win(_, a, s) => a
                 .iter()
                 .chain(&s.partition)
@@ -165,7 +182,7 @@ impl Expr {
                 list.iter().for_each(&mut f);
                 f(value);
             }
-            Expr::Group(key) => f(key),
+            Expr::Group(key) | Expr::Grouping(_, key) => f(key),
             Expr::Win(_, args, spec) => {
                 args.iter().for_each(&mut f);
                 spec.partition.iter().for_each(&mut f);
@@ -189,7 +206,7 @@ impl Expr {
                 list.iter().try_for_each(&mut f)?;
                 f(value)
             }
-            Expr::Group(key) => f(key),
+            Expr::Group(key) | Expr::Grouping(_, key) => f(key),
             Expr::Win(_, args, spec) => {
                 args.iter().try_for_each(&mut f)?;
                 spec.partition.iter().try_for_each(&mut f)?;
@@ -206,7 +223,7 @@ impl Expr {
                 args.iter().any(&mut predicate) || filter.as_ref().is_some_and(|p| predicate(p))
             }
             Expr::In(value, list, _) => list.iter().any(&mut predicate) || predicate(value),
-            Expr::Group(key) => predicate(key),
+            Expr::Group(key) | Expr::Grouping(_, key) => predicate(key),
             Expr::Win(_, args, spec) => {
                 args.iter().any(&mut predicate)
                     || spec.partition.iter().any(&mut predicate)

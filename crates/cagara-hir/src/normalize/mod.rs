@@ -195,6 +195,14 @@ pub(crate) enum Value<'a> {
         arg: Option<crate::checked::CheckedExpr>,
         origin: Origin,
     },
+    /// `rollup expr` / `cube expr`, awaiting the key. The shape is in the
+    /// variant rather than a field, so the two cannot be confused with `group`
+    /// by a reader or a match.
+    Grouping {
+        shape: crate::ir::GroupingShape,
+        arg: Option<crate::checked::CheckedExpr>,
+        origin: Origin,
+    },
     /// `in [..] v`, collecting the list, then the value.
     Membership {
         list: Option<Vec<crate::checked::CheckedExpr>>,

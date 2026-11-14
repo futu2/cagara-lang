@@ -36,6 +36,8 @@ pub enum ExprKind {
     In,
     /// `group`.
     Group,
+    /// `rollup` / `cube`.
+    Grouping,
     /// A call still to be inlined by elaboration.
     Call,
 }
@@ -115,6 +117,7 @@ impl CheckedExpr {
             CheckedExprNode::WinTemplate { .. } => ExprKind::WinTemplate,
             CheckedExprNode::In { .. } => ExprKind::In,
             CheckedExprNode::Group(_) => ExprKind::Group,
+            CheckedExprNode::Grouping(..) => ExprKind::Grouping,
             CheckedExprNode::Call { .. } => ExprKind::Call,
         }
     }
@@ -152,6 +155,7 @@ impl CheckedExpr {
                 value.node_count() + list.iter().map(CheckedExpr::node_count).sum::<usize>()
             }
             CheckedExprNode::Group(key) => key.node_count(),
+            CheckedExprNode::Grouping(_, key) => key.node_count(),
         }
     }
     /// A column reference (`.x`, `.<x`, `.>x`). Row phase; the type is the one
@@ -315,6 +319,33 @@ impl CheckedExpr {
         })
     }
 
+    /// `rollup e` / `cube e`: a grouping key with subtotal rows.
+    ///
+    /// The type is `maybe` rather than the key's own, and that is the whole
+    /// point: `ROLLUP(a)` adds a row where `a` is NULL, so a caller that reads the
+    /// key as `a` would be reading a NULL as a value. Making it `maybe` forces the
+    /// question — `?? 0`, `lift`, or a comparison that handles it — and no cast is
+    /// offered, because there is no cast that makes the subtotal row's key exist.
+    pub fn grouping(
+        shape: crate::ir::GroupingShape,
+        key: CheckedExpr,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        row_phase("a group key", &key, origin)?;
+        let ty = match key.ty.clone() {
+            // `maybe (maybe t)` is `maybe t`: rolling up a nullable key does not
+            // add a second layer of absence.
+            t @ ScalarType::Maybe(_) => t,
+            t => ScalarType::maybe(t),
+        };
+        Ok(CheckedExpr {
+            phase: Phase::Agg,
+            ty,
+            node: CheckedExprNode::Grouping(shape, Box::new(key)),
+            origin,
+        })
+    }
+
     /// `in`: value and list mix per [`rules::mix`]; the result is bool at the
     /// mixed phase.
     pub fn in_(
@@ -407,6 +438,9 @@ pub(crate) enum CheckedExprNode {
         elem: ScalarType,
     },
     Group(Box<CheckedExpr>),
+    /// A grouping key that also gets subtotal rows. Its type is `maybe` in the
+    /// stage's output, because the subtotal rows leave it out.
+    Grouping(crate::ir::GroupingShape, Box<CheckedExpr>),
     /// A checked definition used as an expression: the callee's name and the
     /// instantiation chosen for its holes.
     Call {
@@ -448,6 +482,7 @@ impl CheckedExprNode {
                 }
             }
             CheckedExprNode::Group(k) => k.node.collect_columns(out),
+            CheckedExprNode::Grouping(_, k) => k.node.collect_columns(out),
         }
     }
 }
@@ -661,6 +696,7 @@ pub(crate) fn erase_expr(e: CheckedExpr) -> Result<Expr, Error> {
             ..
         } => Expr::In(Box::new(erase_expr(*value)?), erase_exprs(list)?, negated),
         CheckedExprNode::Group(k) => Expr::Group(Box::new(erase_expr(*k)?)),
+        CheckedExprNode::Grouping(shape, k) => Expr::Grouping(shape, Box::new(erase_expr(*k)?)),
         CheckedExprNode::Call { name, .. } => {
             return Err(Error::new(format!(
                 "internal error: the call `{name}` reached erasure; every call must be \

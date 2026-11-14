@@ -1652,6 +1652,61 @@ fn a_projection_does_not_capture_a_carried_sort_key() {
     );
 }
 
+/// `rollup` and `cube` emit one `GROUP BY` clause over the marked keys.
+///
+/// The shape is the *stage's*, not the expression's: `ROLLUP(a, b)` is one clause
+/// over every marked key, so a plain `group` beside them must come first in the
+/// clause to mean "within the subtotals".
+#[test]
+fn rollup_and_cube_emit_the_grouping_clause() {
+    let src = "g : query { a = int, b = int, n = int } = table \"main\" \"g\"\n";
+    assert_eq!(
+        sql(
+            &format!("{src}q = g & agg {{ a = rollup .a, b = rollup .b, s = sum .n }}\n"),
+            "q"
+        ),
+        "SELECT a, b, SUM(n) AS s FROM main.g GROUP BY ROLLUP(a, b)"
+    );
+    assert_eq!(
+        sql(
+            &format!("{src}q = g & agg {{ a = cube .a, b = cube .b, s = sum .n }}\n"),
+            "q"
+        ),
+        "SELECT a, b, SUM(n) AS s FROM main.g GROUP BY CUBE(a, b)"
+    );
+    // A plain key beside a rolled-up one groups *within* it, which is only the
+    // meaning if the plain key comes first.
+    assert_eq!(
+        sql(
+            &format!("{src}q = g & agg {{ a = group .a, b = rollup .b, s = sum .n }}\n"),
+            "q"
+        ),
+        "SELECT a, b, SUM(n) AS s FROM main.g GROUP BY a, ROLLUP(b)"
+    );
+}
+
+/// The targets without grouping sets refuse them, and the two refusals say why.
+#[test]
+fn grouping_sets_are_refused_where_they_do_not_exist() {
+    let src = "g : query { a = int, n = int } = table \"main\" \"g\"\n\
+               q = g & agg { a = rollup .a, s = sum .n }\n";
+    for d in ["sqlite", "mysql"] {
+        let e = dialect(src, "q", d).expect_err(d);
+        assert!(e.contains("rollup"), "{d}: {e}");
+    }
+    for d in [
+        "duckdb",
+        "postgres",
+        "trino",
+        "tsql",
+        "bigquery",
+        "snowflake",
+    ] {
+        let s = dialect(src, "q", d).unwrap_or_else(|e| panic!("{d}: {e}"));
+        assert!(s.contains("ROLLUP(a)"), "{d}: {s}");
+    }
+}
+
 /// BigQuery writes a set operation with an explicit `ALL` or `DISTINCT`.
 ///
 /// Its grammar is `UNION { ALL | DISTINCT }` — a bare `UNION` is a syntax error, not

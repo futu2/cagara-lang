@@ -41,6 +41,11 @@ pub enum Prim {
     /// A set operation: `union`, `unionAll`, `intersect`, `except`.
     Set(SetKind),
     Group,
+    /// `rollup e`: a grouping key that also gets subtotal rows, so its column is
+    /// `maybe` and is NULL on the rows of the coarser groups.
+    Rollup,
+    /// `cube e`: like `rollup`, but every subset of the marked keys is grouped.
+    Cube,
     Asc,
     Desc,
     Rows,
@@ -93,6 +98,8 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__intersect", Prim::Set(SetKind::Intersect)),
     ("__except", Prim::Set(SetKind::Except)),
     ("__group", Prim::Group),
+    ("__rollup", Prim::Rollup),
+    ("__cube", Prim::Cube),
     ("__asc", Prim::Asc),
     ("__desc", Prim::Desc),
     ("__rows", Prim::Rows),
@@ -148,7 +155,7 @@ impl Prim {
         use Prim::*;
         match self {
             UnboundedPreceding | UnboundedFollowing | CurrentRow => 0,
-            Group | Asc | Desc | Preceding | Following => 1,
+            Group | Rollup | Cube | Asc | Desc | Preceding | Following => 1,
             Where | Unnest | Select | Update | Omit | AggStage | Order | Limit | Offset | Table
             | Rows | Prefix | Suffix | Merge | MapValue | Lift => 2,
             Distinct => 1,

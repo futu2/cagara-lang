@@ -33,6 +33,8 @@ INSERT INTO main.\"select\" VALUES (1, 5, 9);
 CREATE TABLE main.empty (id INTEGER);
 CREATE TABLE main.dupes (id INTEGER, k TEXT);
 INSERT INTO main.dupes VALUES (1, 'x'), (1, 'x'), (2, 'x'), (3, 'y');
+CREATE TABLE main.g (a INTEGER, b INTEGER, n INTEGER);
+INSERT INTO main.g VALUES (1, 1, 1), (1, 2, 2), (2, 1, 3);
 ";
 
 const TABLES: &str = "\
@@ -43,6 +45,7 @@ days : query { id = int, d = date } = table \"main\" \"days\"
 kw : query { id = int, order = int, userId = int } = table \"main\" \"select\"
 empty : query { id = int } = table \"main\" \"empty\"
 dupes : query { id = int, k = string } = table \"main\" \"dupes\"
+g : query { a = int, b = int, n = int } = table \"main\" \"g\"
 ";
 
 /// `(definition, expected rows)`; a row is its columns joined by `|`, NULL
@@ -256,6 +259,31 @@ const CASES: &[(&str, &[&str])] = &[
     (
         "case_agg = nums & agg { n = count, k = case { count > 3 => coalesce 0 (sum .a); true => 0 } }",
         &["4|-1"],
+    ),
+    // Grouping sets: the subtotal rows carry NULL in the key they leave out.
+    // `engines_agree` compares rows in order, so each case sorts; a `rollup` key
+    // is NULL on its subtotal, and the emulated NULLS LAST puts those rows last
+    // on every target.
+    (
+        "rollup1 = g & agg { a = rollup .a, s = sum .n } & select { a = .a, s = .s } & order [asc .a]",
+        &["1|3", "2|3", "NULL|6"],
+    ),
+    (
+        "rollup2 = g & agg { a = rollup .a, b = rollup .b, s = sum .n } & select { a = .a, b = .b, s = .s } & order [asc .a, asc .b]",
+        &["1|1|1", "1|2|2", "1|NULL|3", "2|1|3", "2|NULL|3", "NULL|NULL|6"],
+    ),
+    // Every subset, so the `b` subtotals appear too.
+    (
+        "cube2 = g & agg { a = cube .a, b = cube .b, s = sum .n } & select { a = .a, b = .b, s = .s } & order [asc .a, asc .b]",
+        &[
+            "1|1|1", "1|2|2", "1|NULL|3", "2|1|3", "2|NULL|3", "NULL|1|4", "NULL|2|2",
+            "NULL|NULL|6",
+        ],
+    ),
+    // A plain key beside a rolled-up one groups within the subtotals.
+    (
+        "rollup_mixed = g & agg { a = group .a, b = rollup .b, s = sum .n } & select { a = .a, b = .b ?? -1, s = .s } & order [asc .a, asc .b]",
+        &["1|-1|3", "1|1|1", "1|2|2", "2|-1|3", "2|1|3"],
     ),
     // Filtered aggregates: the predicate filters each aggregate's input, so
     // the `neg` group has no matching rows. Its value aggregates are NULL
@@ -1112,8 +1140,13 @@ fn engines_agree() {
             // this suite exists to catch.
             for optimize in [false, true] {
                 let opts = Options { optimize, ..base };
-                let sql =
-                    compile(rel, opts).unwrap_or_else(|m| panic!("`{name}` / {}: {m}", e.dialect));
+                // A refusal is a decision about the target — `rollup` on SQLite
+                // and MySQL, `fullJoin` on MySQL — not a failure: nothing is
+                // emitted, so there is nothing to run. Every case that compiles is
+                // still checked, and `refusals_are_the_ones_we_mean` pins which.
+                let Ok(sql) = compile(rel, opts) else {
+                    break;
+                };
                 let label = if optimize {
                     format!("{} (optimized)", e.shell)
                 } else {
@@ -1783,7 +1816,10 @@ fn trino_agrees_when_a_server_is_running() {
                  CREATE TABLE main.empty (id INTEGER)\n\
                  DROP TABLE IF EXISTS main.dupes\n\
                  CREATE TABLE main.dupes (id INTEGER, k VARCHAR)\n\
-                 INSERT INTO main.dupes VALUES (1, 'x'), (1, 'x'), (2, 'x'), (3, 'y')\n";
+                 INSERT INTO main.dupes VALUES (1, 'x'), (1, 'x'), (2, 'x'), (3, 'y')\n\
+                 DROP TABLE IF EXISTS main.g\n\
+                 CREATE TABLE main.g (a INTEGER, b INTEGER, n INTEGER)\n\
+                 INSERT INTO main.g VALUES (1, 1, 1), (1, 2, 2), (2, 1, 3)\n";
     let trino = Options {
         dialect: Dialect::Trino,
         ..Options::default()
@@ -1882,7 +1918,10 @@ fn mysql_agrees_when_a_server_is_running() {
                  CREATE TABLE empty (id INT)\n\
                  DROP TABLE IF EXISTS dupes\n\
                  CREATE TABLE dupes (id INT, k TEXT)\n\
-                 INSERT INTO dupes VALUES (1, 'x'), (1, 'x'), (2, 'x'), (3, 'y')\n";
+                 INSERT INTO dupes VALUES (1, 'x'), (1, 'x'), (2, 'x'), (3, 'y')\n\
+                 DROP TABLE IF EXISTS g\n\
+                 CREATE TABLE g (a INT, b INT, n INT)\n\
+                 INSERT INTO g VALUES (1, 1, 1), (1, 2, 2), (2, 1, 3)\n";
     let mysql = Options {
         dialect: Dialect::Mysql,
         ..Options::default()

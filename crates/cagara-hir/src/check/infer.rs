@@ -2927,6 +2927,20 @@ impl<'w> Checker<'w> {
                     expr(con("agg"), r, a),
                 )
             }
+            // `rollup e` / `cube e`: a grouping key whose column can be NULL,
+            // because the subtotal rows it adds leave it out. The type says so —
+            // `maybe a` out of `a` — which is what keeps the row honest: a
+            // caller cannot read the key as `a` and silently get a NULL. The
+            // same two arms for both, because the shape of the grouping is not in
+            // the type: it is a property of the stage, and the lowerer reads it
+            // off these markers.
+            Rollup | Cube => {
+                let (r, a) = (self.fresh(), self.fresh());
+                fun(
+                    expr(con("row"), r.clone(), a.clone()),
+                    expr(con("agg"), r, con_of("maybe", vec![a])),
+                )
+            }
             Asc | Desc => {
                 // `asc .x`: a row-phase expression becomes a sort key. Taking
                 // an `expr` rather than a `sortkey` rejects `asc (desc .x)`.

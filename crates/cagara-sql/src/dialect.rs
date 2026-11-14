@@ -90,6 +90,23 @@ pub(crate) fn supports_full_join(d: Dialect) -> bool {
     fam(d) != Fam::Mysql
 }
 
+/// Does the target have `GROUP BY ROLLUP(…)` / `CUBE(…)`?
+///
+/// Two do not, and for different reasons, so they get different messages:
+///
+/// * SQLite has no grouping sets at all.
+/// * MySQL has `GROUP BY … WITH ROLLUP`, which is *not* the same operation: it
+///   rolls up the whole key list (so a plain key beside the rolled-up ones would
+///   gain a grand total it did not ask for) and cannot be combined with `ORDER
+///   BY`. Measured on MariaDB 11.4: `Incorrect usage of CUBE/ROLLUP and ORDER BY`
+///   for the second, and `GROUP BY ROLLUP(a, b)` is a syntax error for the first.
+///
+/// Refusing is what keeps the subtotal rows honest: silently emitting plain
+/// `GROUP BY` would drop them, which is a wrong answer rather than a refusal.
+pub(crate) fn supports_grouping_sets(d: Dialect) -> bool {
+    !matches!(d, Dialect::Sqlite) && !mysql(d)
+}
+
 /// Is this the Trino grammar family (`OFFSET` before `LIMIT`)?
 fn trino(d: Dialect) -> bool {
     matches!(d, Dialect::Trino | Dialect::Presto | Dialect::Athena)

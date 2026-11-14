@@ -414,6 +414,16 @@ impl<'a> Normalizer<'a, 'a> {
                     .map(Value::Scalar)
                     .map_err(Control::Program)
             }
+            Value::Grouping {
+                shape,
+                arg: None,
+                origin,
+            } => {
+                let key = self.as_expr(arg, self.call_module(), self.call_expr()?)?;
+                CheckedExpr::grouping(shape, key, origin)
+                    .map(Value::Scalar)
+                    .map_err(Control::Program)
+            }
             Value::Membership {
                 list: None,
                 value,
@@ -1308,6 +1318,11 @@ pub(crate) fn own(value: &Value<'_>) -> Value<'static> {
             arg: arg.clone(),
             origin: *origin,
         },
+        Value::Grouping { shape, arg, origin } => Value::Grouping {
+            shape: *shape,
+            arg: arg.clone(),
+            origin: *origin,
+        },
         Value::Membership {
             list,
             value,
@@ -1354,6 +1369,7 @@ pub(crate) fn value_class(value: &Value<'_>) -> &'static str {
         Value::Direction { .. } => "a sort direction",
         Value::SortKey(..) => "a sort key",
         Value::Group { .. } => "a grouping key",
+        Value::Grouping { .. } => "a grouping key with subtotals",
         Value::Membership { .. } => "a membership test",
         Value::WinSpec(_) => "a window specification",
         Value::Frame(_) => "a row frame",

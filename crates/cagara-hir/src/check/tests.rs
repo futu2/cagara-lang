@@ -527,6 +527,27 @@ fn query_output_rows() {
     );
 }
 
+/// A rolled-up key is `maybe`, because the subtotal rows leave it out.
+///
+/// This is the reason `rollup` is a primitive rather than sugar over `group`: the
+/// type is where a caller sees that the column may be absent, and there is no cast
+/// back, because on those rows there is no value to give.
+#[test]
+fn a_rolled_up_key_is_nullable() {
+    let src = "g : query { a = int, n = int } = table \"s\" \"g\"\n\
+               q = g & agg { a = rollup .a, s = sum .n }\n";
+    assert_eq!(ty(src, "q"), "query { a = maybe int, s = maybe int }");
+    // `maybe (maybe t)` is `maybe t`: rolling up a nullable key does not add a
+    // second layer of absence.
+    let nullable = "g : query { a = maybe int, n = int } = table \"s\" \"g\"\n\
+                    q = g & agg { a = rollup .a, s = sum .n }\n";
+    assert_eq!(ty(nullable, "q"), "query { a = maybe int, s = maybe int }");
+    // `cube` is the same shape of promise.
+    let cube = "g : query { a = int, n = int } = table \"s\" \"g\"\n\
+                q = g & agg { a = cube .a, s = sum .n }\n";
+    assert_eq!(ty(cube, "q"), "query { a = maybe int, s = maybe int }");
+}
+
 #[test]
 fn constants_lift_and_widen() {
     assert_eq!(

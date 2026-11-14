@@ -96,6 +96,16 @@ pub(crate) fn primitive<'a>(
             origin,
         }),
         crate::primitive::Prim::Group => Ok(Value::Group { arg: None, origin }),
+        crate::primitive::Prim::Rollup => Ok(Value::Grouping {
+            shape: crate::ir::GroupingShape::Rollup,
+            arg: None,
+            origin,
+        }),
+        crate::primitive::Prim::Cube => Ok(Value::Grouping {
+            shape: crate::ir::GroupingShape::Cube,
+            arg: None,
+            origin,
+        }),
         crate::primitive::Prim::Lift => Ok(Value::Lift {
             args: Vec::new(),
             origin,

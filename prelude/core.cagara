@@ -284,6 +284,33 @@ unnest : expr r (list a) -> query r -> query (merge r { value = a }) = primitive
 group : expr r a -> agg (expr r a) = primitive "__group"
 group : expr r (maybe a) -> agg (expr r (maybe a)) = primitive "__group"
 
+## `rollup e` — a grouping key that also gets subtotal rows.
+##
+## `agg { k = rollup .kind, n = count }` is `GROUP BY ROLLUP(kind)`: the rows of
+## each `kind`, then one row for all of them. With several keys they nest in
+## order — `rollup .a, rollup .b` is `ROLLUP(a, b)`, which is `(a, b)`, `(a)`,
+## and `()` — and a plain `group` beside them groups *within* the subtotals.
+##
+## The type says what happens: the column is `maybe a`, because the subtotal rows
+## leave it out. There is no cast back to `a`, since on those rows there is no
+## value to give — `?? "-"` or `lift` is how a caller says what a subtotal is
+## called. A key that is already `maybe` stays one layer, not two.
+##
+## Not every target has the clause: SQLite has no grouping sets at all, and
+## MySQL's `WITH ROLLUP` rolls up its *whole* key list and cannot combine with
+## `ORDER BY`, which is not the same operation. Both refuse it rather than
+## silently dropping subtotals.
+rollup : expr r a -> agg (expr r (maybe a)) = primitive "__rollup"
+rollup : expr r (maybe a) -> agg (expr r (maybe a)) = primitive "__rollup"
+
+## `cube e` — like `rollup`, but every subset of the marked keys is grouped.
+##
+## `cube .a, cube .b` is `CUBE(a, b)`: `(a, b)`, `(a)`, `(b)`, and `()`. Use it
+## when the subtotals are wanted per key rather than nested; `rollup` is the
+## cheaper of the two and the usual one.
+cube : expr r a -> agg (expr r (maybe a)) = primitive "__cube"
+cube : expr r (maybe a) -> agg (expr r (maybe a)) = primitive "__cube"
+
 # Set-operation stages: `union`, `unionAll`, `intersect`, `except`. Every stage
 # takes its subject **last**, and for a set operation the subject is the left
 # operand, so `except vips users` and `users & except vips` are the same query:

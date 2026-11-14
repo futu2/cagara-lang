@@ -52,6 +52,19 @@ pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
                 .into(),
         );
     }
+    if !dialect::supports_grouping_sets(opts.dialect) && has_grouping_sets(rel) {
+        return Err(if dialect::fam(opts.dialect) == dialect::Fam::Mysql {
+            "`rollup` and `cube` are not supported by the MySQL dialect family: its \
+             `GROUP BY … WITH ROLLUP` rolls up the whole key list and cannot be \
+             combined with `ORDER BY`, so it is not the same operation. Compute the \
+             subtotals with a separate `agg` and `union` them in"
+                .into()
+        } else {
+            "`rollup` and `cube` are not supported by the SQLite dialect, which has \
+             no grouping sets"
+                .into()
+        });
+    }
     // `unnest` is a relational node, so its refusal is here rather than in the
     // intrinsic pass: the lowerer has no dialect, and the wording belongs with
     // the other `list` refusals.
@@ -82,6 +95,16 @@ pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
     };
     // The one fixup that has to happen after generation: see `dialect::finalize`.
     Ok(dialect::finalize(sql, opts.dialect))
+}
+
+/// Whether a relation asks for subtotal rows, anywhere in the tree.
+fn has_grouping_sets(rel: &Rel) -> bool {
+    match rel.bare() {
+        Rel::Agg(_, fs) => fs
+            .iter()
+            .any(|(_, e)| e.any(&|x| matches!(x, cagara_hir::ir::Expr::Grouping(..)))),
+        rel => rel.children().into_iter().any(has_grouping_sets),
+    }
 }
 
 /// Whether a relation contains a `fullJoin`, including under `At` wrappers.

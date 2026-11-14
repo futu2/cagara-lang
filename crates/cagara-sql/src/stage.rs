@@ -902,7 +902,11 @@ pub fn lower_expr(e: &ir::Expr, r: &Resolver) -> Result<Expr, String> {
                 None => template(sql, args),
             }
         }
-        ir::Expr::Group(k) => lower_expr(k, r),
+        // A grouping key resolves to its expression wherever it is read. The
+        // subtotal rows are the *stage's* clause (`GROUP BY ROLLUP(…)`), not the
+        // expression's, so the marker is consumed by `lower_agg` and this arm only
+        // sees the key.
+        ir::Expr::Group(k) | ir::Expr::Grouping(_, k) => lower_expr(k, r),
         ir::Expr::Win(sql, args, spec) => {
             let mut args = all(args)?;
             let place = |x: Expr, args: &mut Vec<Expr>| {

@@ -7,7 +7,7 @@
 //! reinstating it would take.
 
 use crate::stage::{and_all, col, ident_style, lower_expr, qualify, Fuse, Stage};
-use cagara_hir::ir::{Expr as IrExpr, JoinKind, Rel, SetKind, Side};
+use cagara_hir::ir::{Expr as IrExpr, GroupingShape, JoinKind, Rel, SetKind, Side};
 use sqlglot_rust::ast::{
     BinaryOperator, Expr, JoinClause, JoinType, OrderByItem, QuoteStyle, SetOperationStatement,
     SetOperationType, Statement, TableRef, TableSource,
@@ -741,7 +741,11 @@ impl Lowerer {
             st = self.wrap(st);
         }
         st.order_by.clear();
-        let mut keys: Vec<&IrExpr> = Vec::new();
+        // Keys in discovery order, each marked with the subtotal shape it asks
+        // for. `group` and `rollup` are the same clause with a different reach:
+        // `GROUP BY ROLLUP(a, b)` is `{(a,b), (a), ()}`, so the shape belongs to
+        // the stage's key list, not to the expression.
+        let mut keys: Vec<(Option<GroupingShape>, &IrExpr)> = Vec::new();
         for (_, e) in fs {
             collect_groups(e, &mut keys);
         }
@@ -757,16 +761,35 @@ impl Lowerer {
             st.has_agg = true;
             st = self.wrap(st);
         } else {
-            let keys: Vec<Expr> = keys
-                .iter()
-                .map(|k| st.resolve(k))
-                .collect::<Result<_, _>>()?;
+            // Plain keys first, then one `ROLLUP`/`CUBE` per shape: a plain key
+            // beside a rollup groups *within* it — `GROUP BY x, ROLLUP(a, b)` is
+            // `{(x,a,b), (x,a), (x)}` — which is only the meaning if it comes
+            // first in the clause.
+            let mut plain: Vec<Expr> = Vec::new();
+            let mut marked: Vec<(GroupingShape, Vec<Expr>)> = Vec::new();
+            for (shape, k) in &keys {
+                let e = st.resolve(k)?;
+                match shape {
+                    None => plain.push(e),
+                    Some(shape) => match marked.iter_mut().find(|(s, _)| s == shape) {
+                        Some((_, list)) => list.push(e),
+                        None => marked.push((*shape, vec![e])),
+                    },
+                }
+            }
             // A constant key does not split groups, and SQL reads
             // `GROUP BY 2` as a position (and rejects `GROUP BY 'x'`).
             // Dropping every key would turn "no rows in, no rows out"
             // into one row, which HAVING keeps.
             let all = keys.len();
-            st.group_by = keys.into_iter().filter(|k| !is_literal(k)).collect();
+            let mut group_by: Vec<Expr> = plain.into_iter().filter(|k| !is_literal(k)).collect();
+            for (shape, keys) in marked {
+                group_by.push(match shape {
+                    GroupingShape::Rollup => Expr::Rollup { exprs: keys },
+                    GroupingShape::Cube => Expr::Cube { exprs: keys },
+                });
+            }
+            st.group_by = group_by;
             if st.group_by.is_empty() && all > 0 {
                 st.having = Some(crate::stage::template("COUNT(*) > 0", vec![])?);
             }
@@ -1223,15 +1246,33 @@ impl Lowerer {
     }
 }
 
-fn collect_groups<'a>(e: &'a IrExpr, out: &mut Vec<&'a IrExpr>) {
-    if let IrExpr::Group(k) = e {
-        if !out.contains(&k.as_ref()) {
-            out.push(k);
+fn collect_groups<'a>(e: &'a IrExpr, out: &mut Vec<(Option<GroupingShape>, &'a IrExpr)>) {
+    match e {
+        IrExpr::Group(k) => {
+            push_group(None, k, out);
+            return;
         }
-        return;
+        IrExpr::Grouping(shape, k) => {
+            push_group(Some(*shape), k, out);
+            return;
+        }
+        _ => {}
     }
     for c in e.children() {
         collect_groups(c, out);
+    }
+}
+
+/// Add a key once. A key repeated with a *different* shape keeps both: `rollup
+/// .a` beside `group .a` is a mistake the checker's row equation catches, and
+/// silently folding one into the other would hide it here.
+fn push_group<'a>(
+    shape: Option<GroupingShape>,
+    k: &'a IrExpr,
+    out: &mut Vec<(Option<GroupingShape>, &'a IrExpr)>,
+) {
+    if !out.iter().any(|(s, x)| *s == shape && *x == k) {
+        out.push((shape, k));
     }
 }
 

@@ -15,7 +15,7 @@
 //! It knows nothing about dialects, and nothing here mentions SQL: the output is
 //! another `Rel`, which the lowerer turns into stages exactly as before.
 
-use cagara_hir::ir::Rel;
+use cagara_hir::ir::{Expr, Rel, Side};
 
 /// The relation after every rule, applied bottom-up.
 ///
@@ -44,6 +44,22 @@ pub fn rewrite(rel: &Rel) -> Rel {
             }
         }
     }
+}
+
+/// Does `fs` reproduce `src`'s row exactly?
+///
+/// The names have to line up in order, and each value has to be that column:
+/// a reordered or renamed projection changes what a later stage reads, so only
+/// the literal identity qualifies.
+fn identity_projection(src: &Rel, fs: &[(String, Expr)]) -> bool {
+    let Ok(cols) = cagara_hir::schema::schema(src) else {
+        return false;
+    };
+    fs.len() == cols.len()
+        && fs
+            .iter()
+            .zip(&cols)
+            .all(|((n, e), c)| n == c && matches!(e, Expr::Col(Side::Single, k) if k == c))
 }
 
 /// One rule on one node.
@@ -80,6 +96,13 @@ fn step(r: &Rel) -> Option<Rel> {
             }
             _ => None,
         },
+        // A projection that reproduces its input row — same names, same order,
+        // each one the column itself — is the identity, and a stage that does
+        // nothing is a derived table for nothing. `select { id = .id, a = .a }`
+        // already fuses into the stage below it; this is the case the lowerer
+        // cannot see, where a barrier (a limit, a `distinct`) sits between the
+        // projection and its input and would have to be wrapped.
+        Rel::Select(src, fs) => identity_projection(src, fs).then(|| (**src).clone()),
         // Deduping a deduped relation is deduping it.
         Rel::Distinct(outer) => match outer.bare() {
             Rel::Distinct(src) => Some(Rel::Distinct(src.clone())),
@@ -100,10 +123,14 @@ mod tests {
     use cagara_hir::ir::Rel;
 
     fn table() -> Rel {
+        // The columns are named because the identity rule has to know the
+        // input's row to prove it is reproducing it; an unknown row is not the
+        // identity, which is why the rule reads `schema` and gives up when it
+        // cannot.
         Rel::Table {
             schema: "m".into(),
             name: "t".into(),
-            columns: None,
+            columns: Some(vec!["t".into()]),
         }
     }
 
@@ -158,6 +185,49 @@ mod tests {
         );
         // Two limits -> 4; two offsets -> 2; limit 4 then offset 2 -> limit 2.
         assert_eq!(shape(&rewrite(&r)), "limit 2 (offset 2 (t))");
+    }
+
+    #[test]
+    fn an_identity_projection_is_dropped() {
+        let proj = |names: &[&str]| {
+            Rel::Select(
+                Box::new(table()),
+                names
+                    .iter()
+                    .map(|n| ((*n).to_string(), Expr::Col(Side::Single, (*n).to_string())))
+                    .collect(),
+            )
+        };
+        assert_eq!(shape(&rewrite(&proj(&["t"]))), "t");
+        // A barrier between the projection and its input is what the rule is
+        // for: the projection no longer forces the limit into a derived table.
+        let r = Rel::Select(
+            Box::new(Rel::Limit(Box::new(table()), 3)),
+            vec![("t".into(), Expr::Col(Side::Single, "t".into()))],
+        );
+        assert_eq!(shape(&rewrite(&r)), "limit 3 (t)");
+    }
+
+    #[test]
+    fn a_projection_that_changes_the_row_is_kept() {
+        // Renamed: a later stage reads `x`, so the projection has to happen.
+        let renamed = Rel::Select(
+            Box::new(table()),
+            vec![("x".into(), Expr::Col(Side::Single, "t".into()))],
+        );
+        assert!(matches!(rewrite(&renamed).bare(), Rel::Select(..)));
+        // Computed: not the identity either.
+        let computed = Rel::Select(
+            Box::new(table()),
+            vec![("t".into(), Expr::Lit(cagara_hir::ir::Lit::Int(1)))],
+        );
+        assert!(matches!(rewrite(&computed).bare(), Rel::Select(..)));
+        // A projection of a different column under the same name.
+        let swapped = Rel::Select(
+            Box::new(table()),
+            vec![("t".into(), Expr::Col(Side::Single, "other".into()))],
+        );
+        assert!(matches!(rewrite(&swapped).bare(), Rel::Select(..)));
     }
 
     #[test]

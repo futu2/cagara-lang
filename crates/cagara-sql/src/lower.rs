@@ -655,7 +655,7 @@ impl Lowerer {
         }
         let mut order = Vec::new();
         for (k, asc) in ks {
-            let expr = st.resolve(k)?;
+            let expr = self.sort_key(&st, k)?;
             // A constant sorts nothing, and `ORDER BY 1` is a position.
             // NULLs sort last in either direction; `dialect` spells
             // that per target.
@@ -680,6 +680,29 @@ impl Lowerer {
         }
         st.order_by = merged;
         Ok(st)
+    }
+
+    /// The expression a sort key is written as.
+    ///
+    /// A bare column names one of the stage's *output* columns, so it is written
+    /// as that name. Resolving it to the item's expression instead is what the
+    /// rest of the lowerer does, and it is wrong here: `select { id = .a, a = .id }`
+    /// puts `a` in the select list as an alias for a different column, and a
+    /// resolved `ORDER BY a` then binds to that alias — ordering by `id` where the
+    /// key asked for `a`. Only the renaming case is rewritten; when the item is
+    /// the column of the same name the two spellings are the same text.
+    fn sort_key(&mut self, st: &Stage, k: &IrExpr) -> Result<Expr, String> {
+        let IrExpr::Col(Side::Single, name) = k else {
+            return st.resolve(k);
+        };
+        match st.item(name)? {
+            Expr::Column {
+                name: source,
+                table: None,
+                ..
+            } if &source != name => Ok(col(None, name)),
+            _ => st.resolve(k),
+        }
     }
 
     fn lower_limit(&mut self, r: &Rel, n: &i64) -> Result<Stage, String> {

@@ -1514,13 +1514,39 @@ fn null_extended_join_inputs_compute_before_the_join() {
     );
 }
 
+/// A sort key is the *output* column it names, even when a projection put a
+/// different column under that name.
+///
+/// `select { id = .a, a = .id }` is legal and swaps two columns. Resolving
+/// `order [asc .id]` to the item's expression — the base column `a` — emitted
+/// `ORDER BY a`, and `a` is an output alias for the base `id`, so both engines
+/// ordered by the wrong column. The key is the output name.
+#[test]
+fn a_sort_key_is_the_output_column_not_its_expression() {
+    let q = "nums : query { id = int, a = int } = table \"main\" \"nums\"\n\
+             q = nums & select { id = .a, a = .id } & order [asc .id] & select { id = .id, a = .a }\n";
+    assert_sql(
+        &sql(q, "q"),
+        "SELECT a AS id, id AS a FROM main.nums ORDER BY id NULLS LAST",
+    );
+    // The same name for the same column is unchanged: there is nothing to
+    // disambiguate, so the key stays the bare column.
+    let q = "q = users & select { n = .name } & order [asc .n]\n";
+    assert_sql(
+        &sql(q, "q"),
+        "SELECT name AS n FROM public.users ORDER BY n NULLS LAST",
+    );
+}
+
 #[test]
 fn constant_keys_are_not_positions() {
     // `ORDER BY 1` / `GROUP BY 2` would refer to output columns.
+    // The constant key is dropped; the column key is written as the output
+    // name it sorts by (`a`, which is `name`), never as a position.
     let o = "o = users & select { a = .name, b = 1 } & order [asc .b, asc .a]\n";
     assert_eq!(
         sql(o, "o"),
-        "SELECT name AS a, 1 AS b FROM public.users ORDER BY name NULLS LAST"
+        "SELECT name AS a, 1 AS b FROM public.users ORDER BY a NULLS LAST"
     );
     // A constant group key is dropped; HAVING keeps an empty input empty.
     let g = "g = users & select { c = 2, name = .name } & agg { c = group .c, n = count }\n";

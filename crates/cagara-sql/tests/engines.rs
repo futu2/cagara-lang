@@ -356,6 +356,31 @@ const CASES: &[(&str, &[&str])] = &[
         "bar_agg_limit_where = nums & agg { b = group .b, n = count } & order [asc .b] & limit 2 & where (.n > 1)",
         &["2|2"],
     ),
+    // An identity projection is dropped, so it must not change the rows when it
+    // sits between a barrier and a later stage — the case where the lowerer
+    // would otherwise have to wrap.
+    (
+        "rw_ident_limit = nums & order [asc .id] & limit 2 & select { id = .id, a = .a, b = .b, v = .v }",
+        &["1|7|2|10", "2|-7|2|NULL"],
+    ),
+    (
+        "rw_ident_distinct = dupes & select { id = .id, k = .k } & distinct & order [asc .id, asc .k]",
+        &["1|x", "2|x", "3|y"],
+    ),
+    // A projection that renames is *not* the identity, and a later stage reads
+    // the new name: dropping it would break the query rather than the plan.
+    (
+        "rw_ident_renamed = nums & select { x = .id, a = .a } & order [asc .x] & select { x = .x }",
+        &["1", "2", "3", "4"],
+    ),
+    // A projection that swaps two columns under their own names is not the
+    // identity: the values move. It is also where a sort key resolved to its
+    // expression instead of its output name ordered by the wrong column —
+    // `ORDER BY a` binds to the *output* `a`, which is the base `id`.
+    (
+        "rw_ident_swapped = nums & select { id = .a, a = .id } & order [asc .id] & select { id = .id, a = .a }",
+        &["-8|4", "-7|2", "7|1", "7|3"],
+    ),
     // The `Rel -> Rel` rules, measured on rows. Each of these used to keep a
     // derived table (or, for pagination, return the wrong rows), so a wrong rule
     // here is a wrong answer rather than a slower query.

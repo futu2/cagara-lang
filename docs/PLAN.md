@@ -173,6 +173,10 @@ need their own intrinsic per dialect.
    see — a `date` literal reaching `DATE_DIFF` as a string, which Trino rejects rather
    than coerces, and the `OFFSET`/`LIMIT` order, which its grammar reverses.
 
+   The MySQL family closed the same way Trino did: MariaDB ships as a self-contained
+   tarball, so `tests/mysql.sh` runs a real server and `mysql_agrees_when_a_server_is_running`
+   puts every shared case through it.
+
    | check | what it proves | what it does not |
    |---|---|---|
    | `every_statement_is_well_formed_sql` | the generator produced well-formed SQL for that target (balanced, no placeholder left, no empty clause) | that the target *accepts* it — sqlglot's parser is dialect-agnostic here, which is measured in the test itself |
@@ -184,12 +188,20 @@ need their own intrinsic per dialect.
    MySQL and T-SQL inside the subquery. That is exactly the class of defect the
    engines here could not see, and the reason the text checks were worth adding.
 
-   What would move this item further: a MySQL server. It is the last target whose
-   expression semantics differ in ways text cannot check — `||` is OR, integer
-   division and `%` differ, `FULL JOIN` is absent — and, unlike Trino, it has no
-   single self-contained archive, so it needs a package or a container runtime. The
-   warehouses are lower value: they differ from Trino and Postgres in spelling more
-   than in semantics.
+   **MySQL is a real engine too.** MariaDB 11.4 unpacks from a tarball and runs with
+   no root, no container and no package manager, so `tests/mysql.sh` drives it with
+   the same batch protocol and `mysql_agrees_when_a_server_is_running` runs every
+   shared case on it (100 of them). No new dialect bugs — the MySQL rules this
+   repository already had all held — but the three harness bugs found on the way are
+   exactly the kind that look like dialect bugs, and one of them (the client escaping
+   backslashes without `-r`) would have been blamed on the compiler.
+
+   Five targets now execute. What is left: BigQuery and Snowflake need a cloud
+   account, and T-SQL needs SQL Server, which has no self-contained archive — so those
+   three stay text-only, and `each_dialect_avoids_what_it_cannot_read` /
+   `each_dialect_uses_the_spelling_it_has` is what covers them. The SQL Server gap is
+   the one worth closing if a way to run one appears: it is the target whose boolean
+   handling and paging differ most from everything else.
 
 ## Direction
 

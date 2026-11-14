@@ -98,9 +98,9 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
 
 ## Deferred language work
 
-Catalog declarations, typed bind parameters, a decimal/numeric scalar type for
-exact money, name-aligned set operations, `qualify`, grouping sets, lateral or
-correlated subqueries, and richer window frames remain future work.
+Catalog declarations, typed bind parameters, name-aligned set operations,
+`qualify`, grouping sets, lateral or correlated subqueries, and richer window
+frames remain future work.
 
 `decimal` was the one with a correctness argument behind it, and it is in — see
 above for what ships and what was decided against. The decisions as they stand:

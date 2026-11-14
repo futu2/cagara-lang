@@ -392,10 +392,12 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
         _ => None,
     };
     Some(match (name, a.len()) {
-        ("CAGARA_ADD", 4) => add(ts(0)?, &lit(1)?, a[2].clone(), a[3].clone(), f)?,
-        ("CAGARA_TRUNC", 3) => trunc(ts(0)?, &lit(1)?, a[2].clone(), f)?,
+        ("CAGARA_ADD", 4) => add(ts(0)?, &lit(1)?, date_arg(a[2].clone(), f), a[3].clone(), f)?,
+        ("CAGARA_TRUNC", 3) => trunc(ts(0)?, &lit(1)?, date_arg(a[2].clone(), f), f)?,
         ("CAGARA_PART", 3) => part(ts(0)?, &lit(1)?, a[2].clone(), f)?,
-        ("CAGARA_DAYS_BETWEEN", 2) => days_between(a[0].clone(), a[1].clone(), f),
+        ("CAGARA_DAYS_BETWEEN", 2) => {
+            days_between(date_arg(a[0].clone(), f), date_arg(a[1].clone(), f), f)
+        }
         ("CAGARA_NOW", 0) => match f {
             Fam::Ansi => kw("CURRENT_TIMESTAMP"),
             Fam::Sqlite => func("DATETIME", vec![s("now")]),
@@ -859,6 +861,27 @@ fn part(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
             }
         }
     })
+}
+
+/// A `date` argument, spelled so a strict target accepts it.
+///
+/// A Cagara string literal in a `date` position is typed `date` by the checker
+/// and reaches the backend as a string literal, which Postgres, DuckDB, SQLite
+/// and MySQL coerce. Trino, BigQuery and Spark do not: `date_diff('day', d,
+/// '2024-03-01')` is *rejected* there rather than coerced —
+///
+/// ```text
+/// Unexpected parameters (varchar(3), date, varchar(10)) for function date_diff
+/// ```
+///
+/// — so the literal is cast where the type is known. A column or any other
+/// expression is left alone: it already has its type.
+fn date_arg(e: Expr, f: Fam) -> Expr {
+    let strict = matches!(f, Fam::Trino | Fam::BigQuery | Fam::Spark);
+    match e {
+        Expr::StringLiteral(_) if strict => cast(e, DataType::Date),
+        other => other,
+    }
 }
 
 fn days_between(a: Expr, b: Expr, f: Fam) -> Expr {

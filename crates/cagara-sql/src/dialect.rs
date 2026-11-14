@@ -90,6 +90,11 @@ pub(crate) fn supports_full_join(d: Dialect) -> bool {
     fam(d) != Fam::Mysql
 }
 
+/// Is this the Trino grammar family (`OFFSET` before `LIMIT`)?
+fn trino(d: Dialect) -> bool {
+    matches!(d, Dialect::Trino | Dialect::Presto | Dialect::Athena)
+}
+
 fn tsql(d: Dialect) -> bool {
     fam(d) == Fam::Tsql
 }
@@ -211,6 +216,20 @@ fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
         return Err("internal: dialect transform dropped a SELECT block".into());
     };
     *sel = s;
+    // Trino puts `OFFSET` *before* `LIMIT` — its grammar is `[ OFFSET n [ ROW |
+    // ROWS ] ] [ LIMIT n ]`, in that order — and sqlglot writes `LIMIT` then
+    // `OFFSET` for every target. `LIMIT 2 OFFSET 1` is a parse error there
+    // (`mismatched input 'OFFSET'`), so the pair is spelled with the standard
+    // clause instead: `OFFSET 1 FETCH FIRST 2 ROWS ONLY`, which the same
+    // generator writes in the right order and Trino reads. Only the pair needs
+    // it; a limit alone is `LIMIT n` and an offset alone is `OFFSET n`.
+    //
+    // After the transform, not before: the transform is what rewrites the
+    // statement into the target's own shape, and it turns `fetch_first` back
+    // into a `LIMIT` on the way in.
+    if trino(to) && sel.limit.is_some() && sel.offset.is_some() {
+        sel.fetch_first = sel.limit.take();
+    }
     Ok(())
 }
 

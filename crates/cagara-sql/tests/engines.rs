@@ -1642,7 +1642,21 @@ fn a_list_query_runs_on_duckdb() {
 /// `99.0`, Postgres as `99` — so a textual comparison would report a difference
 /// where the values agree.
 fn same_row(a: &str, b: &str) -> bool {
-    let (x, y): (Vec<&str>, Vec<&str>) = (a.split('|').collect(), b.split('|').collect());
+    // Each shell prints a value its own way: `true` (PGlite, and `True` on Trino)
+    // against `1` (SQLite, DuckDB), and a float with however many digits the
+    // engine keeps. A cell compares equal when it is the same text, the same
+    // number, or the same boolean.
+    let cell = |s: &str| -> String {
+        match s {
+            "true" | "True" | "TRUE" => "1".to_string(),
+            "false" | "False" | "FALSE" => "0".to_string(),
+            other => other.to_string(),
+        }
+    };
+    let (x, y): (Vec<String>, Vec<String>) = (
+        a.split('|').map(cell).collect(),
+        b.split('|').map(cell).collect(),
+    );
     x.len() == y.len()
         && x.iter().zip(&y).all(|(p, q)| {
             p == q
@@ -1689,6 +1703,132 @@ fn pg_batch(harness: &str, setup: &str, queries: &[String]) -> Vec<Vec<String>> 
     // one, so a length mismatch is a harness bug worth seeing.
     assert_eq!(out.len(), queries.len(), "one block per query: {out:?}");
     out
+}
+
+/// A batch through the Trino harness, which speaks the same protocol as
+/// `pglite.mjs`: `setup \x1e query \x1e query…`, blocks separated by the same
+/// record separator in the output.
+fn trino_batch(harness: &str, setup: &str, queries: &[String]) -> Vec<Vec<String>> {
+    let mut script = setup.to_string();
+    for q in queries {
+        script.push('\u{1e}');
+        script.push_str(q);
+    }
+    let args = [std::ffi::OsStr::new(harness)];
+    let lines = run_script("bash", &args, "", &script)
+        .expect("bash ran")
+        .unwrap_or_else(|m| panic!("trino: {m}"));
+    let mut out: Vec<Vec<String>> = vec![Vec::new()];
+    for line in lines {
+        if line == "\u{1e}" {
+            out.push(Vec::new());
+        } else {
+            out.last_mut().expect("a block").push(line);
+        }
+    }
+    assert_eq!(out.len(), queries.len(), "one block per query: {out:?}");
+    out
+}
+
+/// Trino, through a server this machine starts by hand (`tests/trino.sh`).
+///
+/// Trino is the strictest target in the family: no implicit casts between
+/// numeric types, `||` for concatenation, `OFFSET … FETCH` and no `LIMIT` in the
+/// old releases, and its own spelling for half the functions. It is also the one
+/// dialect where a wrong type in a `CASE` or a `UNION` is an *error* rather than
+/// a coercion, which is exactly what a text check cannot see.
+///
+/// The server is not part of `nix develop` — it is 680 MiB of jars — so the test
+/// skips unless one answers. `docs/ENGINE-TESTS.md` says how to start it.
+#[test]
+fn trino_agrees_when_a_server_is_running() {
+    let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/trino.sh");
+    let ready = Command::new("bash")
+        .args([harness, "--check"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ready {
+        assert!(
+            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            "no Trino at ${{TRINO_URL:-http://localhost:18080}} (CAGARA_REQUIRE_ENGINES is set)"
+        );
+        eprintln!("skipping trino: no server answers");
+        return;
+    }
+    // The tables, in Trino's `memory` connector. It has no `DELETE`, so the
+    // setup drops what a previous run may have made.
+    // The shared [`SETUP`], in Trino's `memory` connector: no `DELETE`, so each
+    // table is dropped and made again, and `VARCHAR` where the shared script says
+    // `TEXT`. One statement per line, because Trino takes one per request.
+    let setup = "DROP TABLE IF EXISTS main.nums\n\
+                 CREATE TABLE main.nums (id INTEGER, a INTEGER, b INTEGER, v INTEGER)\n\
+                 INSERT INTO main.nums VALUES (1, 7, 2, 10), (2, -7, 2, NULL), \
+                 (3, 7, -2, 30), (4, -8, 3, 20)\n\
+                 DROP TABLE IF EXISTS main.users\n\
+                 CREATE TABLE main.users (id INTEGER, name VARCHAR)\n\
+                 INSERT INTO main.users VALUES (1, 'ann'), (2, 'bob'), \
+                 (3, 'it''s a\\b ')\n\
+                 DROP TABLE IF EXISTS main.orders\n\
+                 CREATE TABLE main.orders (id INTEGER, user_id INTEGER, amount DOUBLE)\n\
+                 INSERT INTO main.orders VALUES (10, 1, 5.5), (11, 1, 4.5), (12, 3, 1.0)\n\
+                 DROP TABLE IF EXISTS main.days\n\
+                 CREATE TABLE main.days (id INTEGER, d DATE)\n\
+                 INSERT INTO main.days VALUES (1, DATE '2024-01-31'), \
+                 (2, DATE '2024-01-07'), (3, DATE '2023-12-25')\n\
+                 DROP TABLE IF EXISTS main.\"select\"\n\
+                 CREATE TABLE main.\"select\" (id INTEGER, \"order\" INTEGER, \"userId\" INTEGER)\n\
+                 INSERT INTO main.\"select\" VALUES (1, 5, 9)\n\
+                 DROP TABLE IF EXISTS main.empty\n\
+                 CREATE TABLE main.empty (id INTEGER)\n\
+                 DROP TABLE IF EXISTS main.dupes\n\
+                 CREATE TABLE main.dupes (id INTEGER, k VARCHAR)\n\
+                 INSERT INTO main.dupes VALUES (1, 'x'), (1, 'x'), (2, 'x'), (3, 'y')\n";
+    let trino = Options {
+        dialect: Dialect::Trino,
+        ..Options::default()
+    };
+    let src = format!(
+        "{TABLES}{}\n",
+        CASES.iter().map(|(d, _)| *d).collect::<Vec<_>>().join("\n")
+    );
+    let ws = Workspace::from_source(&src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+
+    let mut wanted: Vec<(&str, &[&str])> = Vec::new();
+    let mut queries = Vec::new();
+    for (def, want) in CASES {
+        let name = def.split_whitespace().next().expect("name");
+        let (_, rel) = rels
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no query `{name}`"));
+        let rel = rel
+            .as_ref()
+            .unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
+        // A refusal is a decision about the target, not a failure: Trino has no
+        // `list` type in this connector's spelling and no `fullJoin` gap of its
+        // own, so whatever it refuses simply does not run here.
+        let Ok(sql) = compile(rel, trino) else {
+            continue;
+        };
+        wanted.push((name, *want));
+        queries.push(sql);
+    }
+    assert!(!queries.is_empty(), "nothing compiled for Trino");
+    let blocks = trino_batch(harness, setup, &queries);
+    let mut failures = Vec::new();
+    for ((name, want), got) in wanted.iter().zip(&blocks) {
+        let mut got = got.clone();
+        let mut want: Vec<&str> = want.to_vec();
+        got.sort();
+        want.sort();
+        if got.len() != want.len() || !got.iter().zip(&want).all(|(a, b)| same_row(a, b)) {
+            failures.push(format!("`{name}` on trino: got {got:?}, want {want:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Postgres, through PGlite — Postgres compiled to WebAssembly and driven by

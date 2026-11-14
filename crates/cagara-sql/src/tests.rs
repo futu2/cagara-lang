@@ -2698,6 +2698,24 @@ fn a_try_cast_is_refused_on_postgres() {
         .contains("TRY_CAST(a AS BIGINT)"));
 }
 
+/// A decimal is exact or it is refused: SQLite cannot hold one.
+///
+/// Its `NUMERIC` affinity stores what it is given as INTEGER or REAL, so a value
+/// cast to `DECIMAL(10, 2)` there is a binary float wearing the type's name —
+/// which is the one thing `decimal` exists to prevent.
+#[test]
+fn a_decimal_is_refused_where_it_cannot_be_exact() {
+    let src = "o : query { total = string } = table \"s\" \"o\"\n\
+               q = o & select { x = toDecimal 10 2 .total }\n";
+    let duck = dialect(src, "q", "duckdb").expect("duckdb");
+    assert!(duck.contains("CAST(total AS DECIMAL(10, 2))"), "{duck}");
+    let pg = dialect(src, "q", "postgres").expect("postgres");
+    assert!(pg.contains("total::DECIMAL(10, 2)"), "{pg}");
+    let e = dialect(src, "q", "sqlite").unwrap_err();
+    assert!(e.contains("needs an exact decimal type"), "{e}");
+    assert!(e.contains("NUMERIC affinity"), "{e}");
+}
+
 /// `lift` writes the NULL guard, and the function it takes is written once.
 #[test]
 fn lift_guards_the_null_and_keeps_the_function() {

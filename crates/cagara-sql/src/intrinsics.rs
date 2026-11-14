@@ -70,6 +70,9 @@ fn node(e: Expr, f: Fam) -> Result<Expr, String> {
     if let Some(msg) = list_refusal(&upper, f) {
         return Err(msg);
     }
+    if let Some(msg) = decimal_refusal(&upper, f) {
+        return Err(msg);
+    }
     // A format conversion takes a *format string*, which the language writes in
     // one vocabulary and each target spells in its own; that translation is
     // fallible (an unsupported specifier, a format that is not a literal, a
@@ -323,6 +326,34 @@ fn has_list(f: Fam) -> bool {
     matches!(f, Fam::Ansi | Fam::Duck)
 }
 
+/// The dialects that can hold an exact decimal.
+///
+/// SQLite's `NUMERIC` affinity stores what it is given as INTEGER or REAL, so a
+/// value cast to `DECIMAL(10, 2)` there is a binary float wearing the type's
+/// name — the one thing this type exists to prevent. Refusing is the honest
+/// answer, the same way `list` and `try*` are refused.
+fn has_decimal(f: Fam) -> bool {
+    !matches!(f, Fam::Sqlite)
+}
+
+/// The refusal for a decimal cast on a dialect that cannot hold one.
+fn decimal_refusal(name: &str, f: Fam) -> Option<String> {
+    let what = match name {
+        "CAGARA_TO_DECIMAL" => "`toDecimal`",
+        "CAGARA_TRY_DECIMAL" => "`tryDecimal`",
+        _ => return None,
+    };
+    (!has_decimal(f)).then(|| {
+        format!(
+            "{what} needs an exact decimal type, and this dialect has none: SQLite's \
+             NUMERIC affinity stores the value as REAL or INTEGER, so the precision \
+             would be lost silently. Use `toFloat` if a binary float is what the value \
+             is, and PostgreSQL, DuckDB, MySQL, Trino, Spark, BigQuery, Snowflake or \
+             T-SQL for money"
+        )
+    })
+}
+
 /// The refusal for `unnest`, which is a relational node rather than a template:
 /// the lowerer emits its SQL directly, so it asks here for the wording.
 pub(crate) fn unnest_refusal(f: Fam) -> Option<String> {
@@ -396,9 +427,8 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
         // the template is re-read after substitution and a type's precision is
         // syntax, not an expression.
         //
-        // The result stays `float` in the language -- there is no distinct
-        // decimal scalar type -- so this is how a money column is given an
-        // exact SQL type without adding one.
+        // The language's type for it is `decimal p s` (the parameters come from
+        // the two literals the call is written with).
         ("CAGARA_TO_DECIMAL", 3) => cast(
             a[0].clone(),
             DataType::Decimal {

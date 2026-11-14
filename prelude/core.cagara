@@ -564,11 +564,20 @@ _||_ : expr r bool -> expr r bool -> expr r bool = sql "$1 OR $2"
 # ints, `/` truncates toward zero and `%` keeps the dividend's sign, in every
 # dialect.
 
-## Addition, overloaded on `int` and `float`.
+## Addition, overloaded on `int`, `float` and `decimal p s`.
+##
+## Two decimals add only when they are the *same* `(p,s)` — no implicit conversion
+## between them — and the result is that type: money keeps its scale, and the width
+## is the declaration's promise about how large a value can be. A product is absent
+## on purpose: its scale is the sum of the operands', which a signature cannot
+## state (see `docs/PLAN.md`).
+_+_ : expr r (decimal p s) -> expr r (decimal p s) -> expr r (decimal p s) = sql "$1 + $2"
 _+_ : expr r int -> expr r int -> expr r int = sql "$1 + $2"
 _+_ : expr r float -> expr r float -> expr r float = sql "$1 + $2"
 
-## Subtraction, overloaded on `int` and `float`.
+## Subtraction, overloaded on `int`, `float` and `decimal p s`. Money subtracts
+## under the same rule as addition.
+_-_ : expr r (decimal p s) -> expr r (decimal p s) -> expr r (decimal p s) = sql "$1 - $2"
 _-_ : expr r int -> expr r int -> expr r int = sql "$1 - $2"
 _-_ : expr r float -> expr r float -> expr r float = sql "$1 - $2"
 

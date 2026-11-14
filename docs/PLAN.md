@@ -113,16 +113,21 @@ The aggregates are in too: `sum`/`avg` of a `decimal p s` are `maybe (decimal 38
 s)` — stated in the signature, because 38 is a constant in the portable family —
 and `min`/`max` keep the operand's type.
 
-S2 remains: the arithmetic result-type rules (`+ -` widen by a digit, `*` by the
-sum of the scales, past 38 refused), comparisons between two `(p,s)` (allowed by
-design — they produce no value — but they still need the overload that takes them),
-the SQLite refusal (its `NUMERIC` affinity stores REAL or INTEGER, so the precision
-is not preserved there), and the DuckDB/PostgreSQL differential for exactness. Until then
-arithmetic on a `decimal` is a compile error naming the missing conversion — the
-result type is a function of the operands, so it cannot be a signature; it has to
-be bound where an application's argument types are still in hand, and the first
-attempt at that hook did not fire for an overloaded operator name, which is where
-the next round starts.
+S2 is in as well: `+`/`-`/`*` on two decimals of the *same* `(p,s)` compute the SQL
+result type (`(+1, s)` and `(p₁+p₂, s₁+s₂)`, refused past 38), reported by a
+`Cons::DecimalArith` the application posts and the solver fills in — the parameters
+are still open when the operator is chosen, so the rule cannot run at the
+application. A cast on SQLite is refused (its `NUMERIC` affinity stores REAL or
+INTEGER, so the precision is lost silently), and `money_is_exact_on_the_engines`
+runs the sum of three 19.99s and `0.1 + 0.2` on DuckDB and PostgreSQL.
+
+One part of S2 is deliberately not in: a comparison between two *different*
+`(p,s)`. The generic `_==_ : expr r a -> expr r a -> expr r bool` is what makes
+comparison work for every type, and a decimal-specific candidate competes with it
+whenever the argument type is still open — the first version shadowed it and broke
+`where (.name == n)` in the manual's own example. Doing it needs the overload
+machinery to prefer the generic candidate, which is a change to arbitration rather
+than another signature.
 
 See [`CORE.md`](CORE.md) for semantics and [`ROW-TYPES.md`](ROW-TYPES.md) for
 row algebra.

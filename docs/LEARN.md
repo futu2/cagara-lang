@@ -421,9 +421,26 @@ money : query { id = int, total = decimal 10 2 } = table "sales" "orders"
 q = money & select { .id, .total }          # total : decimal 10 2
 ```
 
-The parameters are checked where they are written (`1 ≤ s ≤ p ≤ 38`), a numeric
-literal takes the `(p,s)` its context demands, and arithmetic does not convert
-between two decimal types: see §"Decimal arithmetic" below.
+The parameters are checked where they are written (`1 ≤ s ≤ p ≤ 38`). Arithmetic
+does **not** convert: `+` and `-` take two operands of the same `decimal p s` and
+return that type, so a chain works without casts —
+
+```haskell
+q = money & select { gross = .total + .tax }        # decimal 10 2, still
+bad = money & select { mixed = .total + .other }    # decimal 10 2 + decimal 12 2: error
+```
+
+— and the declared width is the promise about how large a value can be.
+Multiplication and division are refused: a product's scale is the sum of the
+operands' and a quotient's is engine-defined, so neither can be stated by the
+signature. `toDecimal 12 2 .total` is how a value changes scale.
+
+Aggregates do the widening instead: `sum .total` is `maybe (decimal 38 2)` and
+`avg .total` the same, because 38 digits with the operand's scale is what the
+portable family holds; `min`/`max` keep the operand's type. A comparison of two
+decimals with *different* parameters is not available yet — the generic comparison
+takes one type on both sides, and a decimal-specific overload would shadow it
+wherever the argument type is still open (see `docs/PLAN.md`).
 
 `toInt` truncates a `float` toward zero in every dialect, and `toFloat` produces
 a 64-bit double; the backend casts to the matching SQL width (`BIGINT`,

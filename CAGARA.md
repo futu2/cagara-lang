@@ -357,49 +357,26 @@ precision is past the family's cap. `decimal` on its own is an error — the par
 it a type. A numeric literal takes the `(p,s)` its context demands (`total * 1.2` is
 `decimal p s` arithmetic), and columns never convert: see §4.6.
 
-There is no `uuid`, `json`, `array`, or user-declared type.
+### 3.2 Decimal arithmetic
 
-A bare name in a type position is a **type parameter** only when it is a single lowercase letter
-(`a`, `b`, `r`, `s`, `k` — the spelling every signature in this document uses). Any other name must
-be one of the constructors above: `amount = decimal` is a compile error naming the closed set, with a
-"did you mean" for a near miss like `str`. So a typo cannot become a silent type variable, and a
-column's type cannot differ between two definitions that read it.
+Money is exact, so the rules are stricter than the numeric ones: two decimals
+combine only when they are the **same** type, and nothing converts.
 
-### 3.2 Row and query types
+| expression | result |
+|---|---|
+| `decimal 10 2 + decimal 10 2` | `decimal 10 2` |
+| `decimal 10 2 - decimal 10 2` | `decimal 10 2` |
+| `decimal 10 2 + decimal 12 2` | **compile error**: convert one with `toDecimal` first |
+| `decimal 10 2 * decimal 10 2` | **refused**: a product's scale is the sum of the operands', which the type cannot state |
+| `decimal 10 2 / decimal 10 2` | **refused**: a quotient's scale is engine-defined |
+| `decimal 10 2 == decimal 10 2` | `bool` |
 
-```text
-query { id = int, name = string }          a relation with these columns, in this order
-expr r a                                   an expression over row r producing a
-agg (expr r a)                             an aggregate expression
-win (expr r a)                             a window expression
-list (sortkey r)                           sort keys for `order`
-winspec r                                  a window specification record
-```
-
-Most of these appear only in signatures and diagnostics. An agent normally writes only closed
-`query { ... }` annotations, scalar types, and `maybe`.
-
-### 3.3 Inference, widening, and conversion
-
-- `1` is polymorphic: it can satisfy `int` or `float`. `1.5` is always `float`.
-- A string literal widens to `date` or `timestamp` only when the expected type is known.
-- There are no other implicit conversions. `int` and `float` never mix: use `toFloat`/`toInt`.
-- An overloaded name with an unconstrained literal is ambiguous. `fromString "1"` is ambiguous;
-  `toInt` is not (destination known). When in doubt, use `toInt`/`toFloat`/`toDate`/`toTimestamp`.
-- Widening is driven by the **expected** type. A bare string passed to a function overloaded across
-  `date` and `timestamp` stays `string` and fails: `addDays 7 "2024-01-01"` is an error. Wrap it:
-  `addDays 7 (toDate "2024-01-01")`.
-
-```cagara
-orders : query { id = int, amount = float, created_at = date } = table "public" "orders"
-
-main =
-  orders
-  & where (.created_at >= "2024-01-01")
-  & select { .id, doubled = .amount * 2.0, n = .id + 1 }
-```
-
----
+The width a declaration states is the promise about how large the value can be, so
+adding money keeps the type rather than widening it. A numeric literal takes the
+shape its context demands, so `total * 1.2` is a *product with a literal* and is
+refused like any other product; write `roundTo 2 (total * 1.2)`'s inputs as
+decimals with `toDecimal` when the scale matters. To change a scale, say so:
+`toDecimal 12 2 .total`.
 
 ## 4. Expressions
 

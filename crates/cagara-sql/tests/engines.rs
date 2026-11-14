@@ -512,6 +512,79 @@ fn a_parsed_and_printed_date_agrees_on_the_engines() {
     assert_eq!(blocks[0], want, "{sql}");
 }
 
+/// Money on the engines: the sum of three 19.99s is 59.97 exactly, and
+/// `0.1 + 0.2` is `0.3` — the two places a binary float shows itself.
+///
+/// One Cagara query, two spellings underneath (`DECIMAL(10, 2)` and `NUMERIC`),
+/// the same rows back.
+#[test]
+fn money_is_exact_on_the_engines() {
+    let setup = "CREATE TABLE main.money (id INTEGER, total DECIMAL(10, 2), part DECIMAL(10, 1));\n\
+                 INSERT INTO main.money VALUES (1, 19.99, 0.1), (2, 19.99, 0.2), (3, 19.99, 0.3);\n";
+    let src = "money : query { id = int, total = decimal 10 2, part = decimal 10 1 } = \
+               table \"main\" \"money\"\n\
+               q = money & agg { revenue = sum .total, parts = sum .part }\n";
+    let ws = Workspace::from_source(src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let (_, rel) = rels
+        .iter()
+        .find(|(n, _)| n == "q")
+        .unwrap_or_else(|| panic!("no `q`"));
+    let rel = rel
+        .as_ref()
+        .unwrap_or_else(|d| panic!("`q`: {}", d.message));
+    let want = ["59.97|0.6"];
+
+    let duck = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    let sql = compile(
+        rel,
+        Options {
+            dialect: Dialect::DuckDb,
+            ..Options::default()
+        },
+    )
+    .expect("duckdb");
+    let out = run_setup(&duck, setup, &sql);
+    match out {
+        Some(Ok(rows)) => assert_eq!(rows, want, "{sql}"),
+        Some(Err(m)) => panic!("duckdb: {m}\n  {sql}"),
+        None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
+            panic!("`duckdb` is not installed (CAGARA_REQUIRE_ENGINES is set)")
+        }
+        None => eprintln!("skipping duckdb: not installed"),
+    }
+
+    let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
+    let ready = Command::new("node")
+        .args([harness, "--check"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ready {
+        assert!(
+            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            "`node` with @electric-sql/pglite is not installed (CAGARA_REQUIRE_ENGINES is set)"
+        );
+        return;
+    }
+    let pg = compile(
+        rel,
+        Options {
+            dialect: Dialect::Postgres,
+            ..Options::default()
+        },
+    )
+    .expect("postgres");
+    let pg_setup = format!("CREATE SCHEMA main;\n{setup}");
+    let blocks = pg_batch(harness, &pg_setup, std::slice::from_ref(&pg));
+    assert_eq!(blocks[0], want, "{pg}");
+}
+
 /// `lift` on the engines: one row has a value and one does not, so the NULL
 /// branch of the guard is what the second row measures.
 #[test]

@@ -247,6 +247,33 @@ fn a_decimal_cast_names_its_parameters() {
     assert!(e.contains("expected 12, found 10"), "{e}");
 }
 
+/// Decimal arithmetic keeps the type and refuses two different `(p,s)`.
+///
+/// `+`/`-` are declared as signatures — same type in, same type out — because a
+/// *widening* result (SQL's `max(p-s) + s + 1`) is a function of the operands,
+/// which a signature cannot state; see `docs/PLAN.md`. `*` and `/` are absent for
+/// the same reason: a product's scale is the sum of the operands'.
+#[test]
+fn decimal_arithmetic_keeps_the_type_and_refuses_mixes() {
+    let prelude = "m : query { a = decimal 10 2, b = decimal 10 2, c = decimal 12 2, \
+                   n = int } = table \"s\" \"m\"\n";
+    let src = format!("{prelude}q = m & select {{ p = .a + .b, mi = .a - .b, i = .n + .n }}\n");
+    assert_eq!(
+        ty(&src, "q"),
+        "query { p = decimal 10 2, mi = decimal 10 2, i = int }"
+    );
+    // Adding and subtracting money keeps the declared width, which is the
+    // declaration's promise about how large a value can be.
+    let src = format!("{prelude}q = m & select {{ chain = .a + .b + .a }}\n");
+    assert_eq!(ty(&src, "q"), "query { chain = decimal 10 2 }");
+    // Two different parameters do not mix.
+    let e = err(&format!("{prelude}q = m & select {{ x = .a + .c }}\n"), "q");
+    assert!(e.contains("expected 10, found 12"), "{e}");
+    // Multiplication is refused: its scale is the sum of the operands'.
+    let e = err(&format!("{prelude}q = m & select {{ x = .a * .b }}\n"), "q");
+    assert!(e.contains("no overload of `*` matches"), "{e}");
+}
+
 /// `decimal p s` is a type, its parameters are numbers, and both are checked.
 #[test]
 fn decimal_is_a_type_with_two_numbers() {
@@ -911,8 +938,14 @@ fn overloads_resolve_by_type() {
     // `+` is numeric only; strings use `<>`, and there are no conversions.
     assert!(err("q = users & select { s = .name + .name }\n", "q")
         .contains("no overload of `+` matches"));
-    assert!(err("q = orders & select { x = .amount + .user_id }\n", "q")
-        .contains("expected int, found float"));
+    // Mixing `float` and `int` is refused, whichever sentence reports it: the
+    // arithmetic overloads are per type, so one of the two operands is at fault.
+    let e = err("q = orders & select { x = .amount + .user_id }\n", "q");
+    assert!(
+        e.contains("no overload of `+`") || e.contains("type mismatch"),
+        "{e}"
+    );
+    assert!(e.contains("int") && e.contains("float"), "{e}");
     assert!(err("q = users & select { s = .name ++ .age }\n", "q").contains("type mismatch"));
     // `%` has an `int` overload only: a float remainder has to be spelled
     // out, and the docs say so. Pinned here because `+ - * /` do have both.

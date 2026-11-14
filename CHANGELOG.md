@@ -28,6 +28,10 @@
   drop. A `distinct` still needs the barrier, because dropping a column there changes how many
   rows are deduped. A projection that reuses a sort key's name for another column keeps it too.
 
+- The differential suite runs on Trino and MariaDB too, so five of the ten dialects are checked by
+  executing the SQL rather than reading it. Both found problems that no text check could see (see
+  the two entries below and the `OFFSET`/`LIMIT` one).
+
 - A `date` literal passed to `daysBetween`, `addDays`, `truncMonth` and their siblings is cast
   where the target needs it (`DATE '2024-03-01'`). Trino, BigQuery and Spark reject the bare
   string — `Unexpected parameters (varchar(3), date, varchar(10)) for function date_diff` —

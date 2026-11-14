@@ -55,6 +55,10 @@ need their own intrinsic per dialect.
 
 ## Recently closed
 
+- A sort key is re-aimed whenever the stage's columns change (`retarget_order`): the
+  name still selects the same column, the name selects something else and the FROM has
+  an alias, or the name is gone. Both failures it fixes were found by probing on a
+  real engine, and one of them was introduced by the fix for the other.
 - The `Rel -> Rel` pass (`rewrite.rs`) and the lowering rules around it: pagination
   now means what it says (`limit 5 & offset 2` is rows 3..=5), a sort key is written
   as the output column it names, and four derived tables that protected nothing are

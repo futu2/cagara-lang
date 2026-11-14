@@ -28,6 +28,11 @@
   drop. A `distinct` still needs the barrier, because dropping a column there changes how many
   rows are deduped. A projection that reuses a sort key's name for another column keeps it too.
 
+- A sort key keeps pointing at a column that exists. `order [asc .age] & limit 2 & select { age = .id }`
+  emitted `ORDER BY age`, which SQL binds to the *output* `age` — so it reordered the rows the limit
+  had just chosen — and `prefix "x_" & order [asc .x_id] & select { a = .x_id }` emitted
+  `ORDER BY x_id` against a `FROM` with no such column, which DuckDB refuses.
+
 - A `semiJoin` / `antiJoin` no longer wraps a plain table in a derived table on either side.
   It is an existence test and neither side is null-extended, so the subquery only appears where
   a stage needs one (paging, dedupe, grouping).

@@ -2157,6 +2157,122 @@ fn emulate(
         .collect()
 }
 
+/// Every construct we emit *conditionally* must be one the target can actually read.
+///
+/// The dialect tables — `supports_qualify`, `supports_filter`, `supports_full_join`,
+/// `null_order`, the paging order, `concat_as_function` — are written by hand, and a
+/// wrong entry produces SQL that looks right. `each_dialect_avoids_what_it_cannot_read`
+/// catches the negative half by searching the text; this is the positive half, settled
+/// by the engine: whatever we decided to emit for a target, run it there.
+///
+/// The assertion is deliberately not "the output contains X": a capability whose
+/// spelling differs per target is *two* valid answers (`QUALIFY …` or a derived table,
+/// `LIMIT … OFFSET …` or `OFFSET … FETCH`, `FILTER (WHERE …)` or `SUM(CASE WHEN …)`),
+/// and pinning one of them would just re-record the table. What must hold is that
+/// whichever one we chose runs.
+#[test]
+fn every_construct_we_emit_is_one_the_engine_reads() {
+    // `(name, cagara query)` — one query per conditional rule, so the rule decides.
+    const PROBES: &[(&str, &str)] = &[
+        // A filter over a window: `QUALIFY` on four targets, a derived table on the
+        // rest.
+        (
+            "qualify",
+            "q = nums & select { id = .id, r = rowNumber { order = [asc .id] } } \
+             & where (.r > 2) & select {.id} & order [asc .id]",
+        ),
+        // An aggregate with a filter: `FILTER (WHERE …)` where the target has it,
+        // `SUM(CASE WHEN …)` where it does not.
+        (
+            "filter",
+            "q = nums & agg { s = filtered (.a > 0) (sum .a) }",
+        ),
+        // A full join: refused on the MySQL family, emitted everywhere else.
+        (
+            "full_join",
+            "q = nums & fullJoin (dupes & select { id2 = .id }) (.<id == .>id2) \
+             & select { id = .id } & order [asc .id]",
+        ),
+        // Paging: `LIMIT … OFFSET …` everywhere except the Trino family, which needs
+        // `OFFSET … FETCH FIRST`.
+        (
+            "paging",
+            "q = nums & order [asc .id] & limit 2 & offset 1 & select {.id}",
+        ),
+        // NULL ordering: `NULLS LAST` where it is not the default, a leading `CASE`
+        // key where there is no such clause.
+        (
+            "null_order",
+            "q = nums & order [asc .v] & select { id = .id }",
+        ),
+        // Concatenation: `||` except on the targets where it is boolean OR.
+        (
+            "concat",
+            "q = users & select { id = .id, k = .name ++ \"!\" }",
+        ),
+    ];
+    let engines = [
+        (
+            Engine {
+                shell: "sqlite3",
+                args: &[
+                    "-batch",
+                    "-list",
+                    "-noheader",
+                    "-nullvalue",
+                    "NULL",
+                    ":memory:",
+                ],
+                dialect: "sqlite",
+            },
+            SETUP,
+        ),
+        (
+            Engine {
+                shell: "duckdb",
+                args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+                dialect: "duckdb",
+            },
+            SETUP,
+        ),
+    ];
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    for (engine, setup) in &engines {
+        let opts = Options {
+            dialect: Dialect::from_str(engine.dialect).expect("dialect"),
+            ..Options::default()
+        };
+        for (name, def) in PROBES {
+            let ws = Workspace::from_source(&format!("{TABLES}{def}\n"));
+            assert!(ws.diags.is_empty(), "`{name}`: {:?}", ws.diags);
+            // `q`, not the first root: `TABLES` defines the tables as queries too, so
+            // `next()` would hand back `nums` itself.
+            let (_, rel) = root_queries(&ws)
+                .into_iter()
+                .find(|(n, _)| n == "q")
+                .unwrap_or_else(|| panic!("`{name}`: no query `q`"));
+            let rel = rel.unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
+            let Ok(sql) = compile(&rel, opts) else {
+                // A refusal is a decision about the target — `fullJoin` on the MySQL
+                // family — and nothing is emitted, so there is nothing to run.
+                continue;
+            };
+            ran += 1;
+            match run_setup(engine, setup, &sql) {
+                Some(Ok(_)) => {}
+                Some(Err(m)) => failures.push(format!(
+                    "`{name}` on {}: the engine refused what we emitted\n  {sql}\n  {m}",
+                    engine.dialect
+                )),
+                None => panic!("{} is not installed", engine.shell),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(ran >= 10, "only {ran} constructs ran");
+}
+
 /// Postgres, through PGlite — Postgres compiled to WebAssembly and driven by
 /// `node`, so no server is needed (`crates/cagara-sql/tests/pglite.mjs`).
 ///

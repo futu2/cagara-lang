@@ -356,6 +356,28 @@ const CASES: &[(&str, &[&str])] = &[
         "bar_agg_limit_where = nums & agg { b = group .b, n = count } & order [asc .b] & limit 2 & where (.n > 1)",
         &["2|2"],
     ),
+    // A semi/anti join is an existence test, so inlining its inputs must not
+    // change which rows exist: the left keeps every row that has (or has not) a
+    // match, with its own filters applied, and the right's filter decides what
+    // counts as a match.
+    (
+        "rw_semi = nums & semiJoin (nums & select { nid = .id }) (.<id == .>nid) & select {.id} & order [asc .id]",
+        &["1", "2", "3", "4"],
+    ),
+    (
+        "rw_anti = nums & antiJoin (nums & where (.a > 0) & select { nid = .id }) (.<id == .>nid) & select {.id} & order [asc .id]",
+        &["2", "4"],
+    ),
+    (
+        "rw_anti_filtered_left = (nums & where (.a > 0)) & antiJoin (nums & where (.b > 2) & select { nid = .id }) (.<id == .>nid) & select {.id} & order [asc .id]",
+        &["1", "3"],
+    ),
+    // The right side needs its own derived table when it pages: only the first
+    // two ids count as matches.
+    (
+        "rw_semi_paged = nums & semiJoin (nums & order [asc .id] & limit 2 & select { nid = .id }) (.<id == .>nid) & select {.id} & order [asc .id]",
+        &["1", "2"],
+    ),
     // An identity projection is dropped, so it must not change the rows when it
     // sits between a barrier and a later stage — the case where the lowerer
     // would otherwise have to wrap.

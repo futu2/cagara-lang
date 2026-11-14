@@ -771,8 +771,16 @@ impl Lowerer {
             // exists.
             let left_stage = self.rel(left)?;
             let right_stage = self.rel_beside(right)?;
-            let left = self.derived(left_stage);
-            let right = self.derived(right_stage);
+            // Both sides are inlined where they can be. A semi/anti join keeps
+            // the left relation's cardinality and columns, so a filter on the
+            // left is a filter on the subject and belongs in the outer `WHERE`;
+            // the right side only decides whether a matching row exists, which
+            // is what a filter there already means. Neither side is ever
+            // null-extended, so there is nothing a derived table protects — and
+            // wrapping a plain table produced `FROM (SELECT id, name FROM users)
+            // AS t1` for a join that needs no subquery at all.
+            let left = self.join_input(left_stage, true, false);
+            let right = self.join_input(right_stage, true, false);
             let predicate = lower_expr(on, &|side, n| match side {
                 Side::Left => item(&left.items, n),
                 Side::Right => item(&right.items, n),
@@ -780,6 +788,9 @@ impl Lowerer {
             })?;
             let mut subquery = Stage::new(right.from, right.items);
             subquery.joins = right.joins;
+            // The right side's own filters, then the join predicate: both are
+            // `WHERE` conditions of the existence check.
+            subquery.wheres = right.wheres;
             subquery.wheres.push(predicate);
             let exists = Expr::Exists {
                 subquery: Box::new(sqlglot_rust::Statement::Select(subquery.into_statement())),

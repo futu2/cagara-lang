@@ -743,6 +743,43 @@ fn semi_and_anti_joins_use_exists_without_right_columns() {
     assert!(!anti.contains("JOIN"), "{anti}");
 }
 
+/// Both sides of a semi/anti join are inlined where they can be.
+///
+/// The left keeps its cardinality and columns, so its filters are the subject's
+/// and belong in the outer `WHERE`; the right only decides whether a match
+/// exists, which is what a filter there means. Neither side is null-extended, so
+/// a derived table protects nothing — and wrapping a plain table put
+/// `FROM (SELECT id, name FROM users) AS t1` in front of a join that needs no
+/// subquery.
+#[test]
+fn a_semi_join_inlines_its_inputs() {
+    assert_eq!(
+        sql("q = users & semiJoin orders (.<id == .>user_id)\n", "q"),
+        "SELECT t1.id, t1.name, t1.age, t1.active FROM public.users AS t1 \
+         WHERE (EXISTS (SELECT t2.id, t2.user_id, t2.amount, t2.status, t2.created_at \
+         FROM public.orders AS t2 WHERE (t1.id = t2.user_id)))"
+    );
+    // A filter on either side stays a filter; on the left it is the subject's.
+    let s = sql(
+        "q = (users & where (.id > 1)) & antiJoin (orders & where (.amount > 5.0)) (.<id == .>user_id)\n",
+        "q",
+    );
+    assert_sql(
+        &s,
+        "SELECT t1.id, t1.name, t1.age, t1.active FROM public.users AS t1 \
+         WHERE (t1.id > 1) AND (NOT EXISTS (SELECT t2.id, t2.user_id, t2.amount, \
+         t2.status, t2.created_at FROM public.orders AS t2 \
+         WHERE (t2.amount > 5.0) AND (t1.id = t2.user_id)))",
+    );
+    // A stage a derived table is *for* keeps one: paging, dedupe, grouping.
+    let s = sql(
+        "q = users & semiJoin (orders & order [asc .id] & limit 3) (.<id == .>user_id)\n",
+        "q",
+    );
+    assert!(s.contains("AS t2 WHERE (t1.id = t2.user_id)"), "{s}");
+    assert!(s.contains("LIMIT 3"), "{s}");
+}
+
 #[test]
 fn field_shorthand_and_update() {
     // `{.a, .b}` is `{a = .a, b = .b}`.

@@ -113,21 +113,24 @@ The aggregates are in too: `sum`/`avg` of a `decimal p s` are `maybe (decimal 38
 s)` — stated in the signature, because 38 is a constant in the portable family —
 and `min`/`max` keep the operand's type.
 
-S2 is in as well: `+`/`-`/`*` on two decimals of the *same* `(p,s)` compute the SQL
-result type (`(+1, s)` and `(p₁+p₂, s₁+s₂)`, refused past 38), reported by a
-`Cons::DecimalArith` the application posts and the solver fills in — the parameters
-are still open when the operator is chosen, so the rule cannot run at the
-application. A cast on SQLite is refused (its `NUMERIC` affinity stores REAL or
-INTEGER, so the precision is lost silently), and `money_is_exact_on_the_engines`
-runs the sum of three 19.99s and `0.1 + 0.2` on DuckDB and PostgreSQL.
+S2 is in as well, with one deliberate disagreement with the plan above: `+`/`-` on
+two decimals of the same `(p,s)` return that *same* type rather than SQL's wider
+one, and `*`/`/` are refused. The wider result type is a function of the operands,
+and the overload machinery cannot express that: declaring the result as a variable
+and filling it in from a `Cons` worked for the arithmetic, but the candidate then
+shadowed the generic `_==_` wherever the argument type was still open (the manual's
+own `where (.name == n)` stopped type-checking) and made `twice = x => x + x` infer
+`expr a b -> expr a c`. `Cons::DecimalArith` exists in that history and was removed
+with the experiment; doing it properly needs overload arbitration to prefer the
+generic candidate, or a real type-level arithmetic in the type language.
 
-One part of S2 is deliberately not in: a comparison between two *different*
-`(p,s)`. The generic `_==_ : expr r a -> expr r a -> expr r bool` is what makes
-comparison work for every type, and a decimal-specific candidate competes with it
-whenever the argument type is still open — the first version shadowed it and broke
-`where (.name == n)` in the manual's own example. Doing it needs the overload
-machinery to prefer the generic candidate, which is a change to arbitration rather
-than another signature.
+A cast on SQLite is refused (its `NUMERIC` affinity stores REAL or INTEGER, so the
+precision is lost silently), and `money_is_exact_on_the_engines` runs the sum of
+three 19.99s and `0.1 + 0.2` on DuckDB and PostgreSQL.
+
+What is left of the decimal work is therefore: mixed-parameter comparisons (same
+blocker — a specific candidate shadows the generic one), a result type that widens
+(needs type-level arithmetic), and `--ddl` if the schema side ever emits types.
 
 See [`CORE.md`](CORE.md) for semantics and [`ROW-TYPES.md`](ROW-TYPES.md) for
 row algebra.

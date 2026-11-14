@@ -282,6 +282,44 @@ impl Stage {
         }
     }
 
+    /// Is a projection a *permutation* of this stage's columns — every input
+    /// column present exactly once, each one as itself, under any names and in
+    /// any order?
+    ///
+    /// Such a projection cannot change which rows a clause below it selects: it
+    /// renames and reorders values, and every `ORDER BY` key was already resolved
+    /// to an expression over the *input* columns (SQL lets an `ORDER BY` name a
+    /// column the projection does not output). So it may fold into a stage that a
+    /// general projection may not — one with a `LIMIT`, an `OFFSET` or a
+    /// `DISTINCT` — and the derived table it used to force disappears:
+    ///
+    /// ```text
+    /// order [asc .id] & limit 3 & select { x = .id, y = .name, z = .age }
+    ///   SELECT id AS x, name AS y, age AS z FROM t ORDER BY id LIMIT 3
+    /// ```
+    ///
+    /// A projection that *drops* a column does not qualify: dropping after a
+    /// `DISTINCT` changes the number of rows, and after a `LIMIT` it is only
+    /// safe when the sort keys survive, which this does not try to prove.
+    pub fn keeps_every_column(&self, fs: &[(String, cagara_hir::ir::Expr)]) -> bool {
+        use cagara_hir::ir::{Expr as IrExpr, Side};
+        if fs.len() != self.items.len() {
+            return false;
+        }
+        let names: Vec<&String> = self.items.iter().map(|(n, _)| n).collect();
+        let mut seen: Vec<&String> = Vec::with_capacity(fs.len());
+        for (_, e) in fs {
+            let IrExpr::Col(Side::Single, src) = e else {
+                return false;
+            };
+            if !names.contains(&src) || seen.contains(&src) {
+                return false;
+            }
+            seen.push(src);
+        }
+        seen.len() == names.len()
+    }
+
     pub fn names(&self) -> Vec<String> {
         self.items.iter().map(|(n, _)| n.clone()).collect()
     }

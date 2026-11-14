@@ -542,7 +542,10 @@ impl Lowerer {
         let new_win = fs
             .iter()
             .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
-        if st.needs_barrier(Fuse::Project, new_win) {
+        // A projection that renames and reorders without dropping anything does
+        // not need the barrier a general one does: it cannot change which rows a
+        // `LIMIT` or a `DISTINCT` below it selects. See `keeps_every_column`.
+        if st.needs_barrier(Fuse::Project, new_win) && !st.keeps_every_column(fs) {
             st = self.wrap(st);
         }
         let items = fs

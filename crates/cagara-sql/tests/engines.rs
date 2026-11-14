@@ -356,6 +356,23 @@ const CASES: &[(&str, &[&str])] = &[
         "bar_agg_limit_where = nums & agg { b = group .b, n = count } & order [asc .b] & limit 2 & where (.n > 1)",
         &["2|2"],
     ),
+    // A projection that renames and reorders without dropping anything folds
+    // into the stage below it, so it must not change the rows: the limit and the
+    // sort key are the same ones, and only the names move.
+    (
+        "rw_perm_limit = nums & order [asc .id] & limit 2 & select { b = .b, id = .id, a = .a, v = .v }",
+        &["2|1|7|10", "2|2|-7|NULL"],
+    ),
+    (
+        "rw_perm_distinct = dupes & distinct & select { k = .k, id = .id } & order [asc .id, asc .k]",
+        &["x|1", "x|2", "y|3"],
+    ),
+    // Dropping a column is not a permutation and keeps its derived table, so it
+    // still has to return the rows the drop implies.
+    (
+        "rw_perm_dropped = dupes & distinct & select { id = .id } & order [asc .id]",
+        &["1", "2", "3"],
+    ),
     // A semi/anti join is an existence test, so inlining its inputs must not
     // change which rows exist: the left keeps every row that has (or has not) a
     // match, with its own filters applied, and the right's filter decides what

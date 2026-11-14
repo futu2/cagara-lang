@@ -1551,6 +1551,43 @@ fn null_extended_join_inputs_compute_before_the_join() {
     );
 }
 
+/// A projection that renames and reorders without dropping anything folds into
+/// a stage a general projection may not: it cannot change which rows a `LIMIT` or
+/// a `DISTINCT` below it selects.
+#[test]
+fn a_permutation_projection_crosses_a_barrier() {
+    // Across a limit: one statement, and the sort key is still a base column.
+    assert_eq!(
+        sql(
+            "q = users & order [asc .id] & limit 3 & select { x = .id, y = .name, z = .age, w = .active }\n",
+            "q"
+        ),
+        "SELECT id AS x, name AS y, age AS z, active AS w FROM public.users ORDER BY id NULLS LAST LIMIT 3"
+    );
+    // Across a `distinct`.
+    assert_eq!(
+        sql(
+            "q = users & distinct & select { y = .name, x = .id, z = .age, w = .active }\n",
+            "q"
+        ),
+        "SELECT DISTINCT name AS y, id AS x, age AS z, active AS w FROM public.users"
+    );
+    // Dropping a column is not a permutation: after a `DISTINCT` it changes the
+    // number of rows, and after a `LIMIT` it is only safe when the sort keys
+    // survive — which this rule does not try to prove.
+    let dropped = sql(
+        "q = users & order [asc .id] & limit 3 & select { x = .id }\n",
+        "q",
+    );
+    assert!(dropped.contains("AS t1"), "{dropped}");
+    // Nor is computing one.
+    let computed = sql(
+        "q = users & distinct & select { x = .id, y = .name, z = .age, w = .id + 1 }\n",
+        "q",
+    );
+    assert!(computed.contains("AS t1"), "{computed}");
+}
+
 /// A sort key is the *output* column it names, even when a projection put a
 /// different column under that name.
 ///

@@ -19,10 +19,11 @@ this page tracks the remaining boundaries and language work.
   PostgreSQL), so the derived table is a workaround for the AST rather than a
   portability requirement — and it is correct SQL either way. Lifting it means an
   AST node for a nested join, which is sqlglot's to add.
-- A filter after an aggregate is `HAVING`. A filter over a window or a `limit`
-  still wraps a derived table, because both decide *which rows* the stage returns
-  and the filter has to see the result. A filter over a bare `distinct` does not
-  wrap: deduping whole rows and filtering on them commute, since two identical rows
+- A filter after an aggregate is `HAVING`. A filter over a window is `QUALIFY`
+  where the target has the clause (DuckDB, Snowflake, BigQuery, Teradata) and a
+  derived table elsewhere; a filter over a `limit` always wraps, because paging
+  decides *which rows* the stage returns and the filter has to see the result. A
+  filter over a bare `distinct` does not wrap: deduping whole rows and filtering on them commute, since two identical rows
   agree on every predicate, so it goes inside the `SELECT DISTINCT`. (A stage that
   has *both* an aggregate and a `distinct` still wraps — the aggregate is what
   blocks it, not the dedupe.)
@@ -192,12 +193,14 @@ names the observation that puts it there, because a plan without one is a wish.
    expression semantics differ most: `||` is OR, integer division truncates
    differently) buys the most per unit of setup, then Trino for its strict typing.
    This is infrastructure, not language work, and it is the highest-value item.
-2. **`qualify`.** The only boundary in the list that is a *missing stage* rather
-   than a missing feature: a filter on a window needs a derived table in SQL, and
-   `qualify` is exactly the clause that removes it. sqlglot's `SelectStatement`
-   already has the field, so the work is a stage in the checker, an arena
-   constructor, and a dialect rule for the targets that spell it `QUALIFY` and the
-   rest that do not.
+2. ~~**`qualify`.**~~ **Done, as a lowering rule rather than a language feature.**
+   A filter over a window folds into `QUALIFY` on the four targets that have the
+   clause (DuckDB, Snowflake, BigQuery, Teradata) and into a derived table on the
+   rest. No new syntax: `where` already means "filter the rows", and the pipeline
+   order says whether a window came before it. Two exclusions, both measured: a
+   `limit`/`offset` cannot fold (SQL runs `QUALIFY` before `LIMIT`), and the
+   predicate names the window *function*, not the output alias, because a later
+   projection can drop the alias.
 3. **The decimal widening result type.** Refused by decision, and it should stay
    refused until type-level arithmetic exists — but the *shape* of that work is
    known (a `Ty` that can compute `Nat + Nat`, and an arbitration that ranks a

@@ -267,13 +267,17 @@ names the observation that puts it there, because a plan without one is a wish.
    | "top N per group" | `rowNumber { partition = … }` + `where` |
    | "a value from the whole table beside each row" | a cross join: `leftJoin (q & agg {…}) (1 == 1)` |
 
-   So the item was mis-stated. What is actually missing is **ergonomics**, and it is
+   So the item was mis-stated. What was actually missing is **ergonomics**, and it is
    narrower than "a scope in the IR": `semiJoin`/`antiJoin` are *stages*, so an `EXISTS`
-   cannot be a column or sit inside `&&`, and every case above needs an explicit
-   aggregate on the joined side. Forgetting that aggregate multiplies rows — a footgun,
-   not a missing capability. Making `EXISTS` a boolean *expression* is the small,
-   well-evidenced version of this item; a general correlated subquery is not needed and
-   would be a large change with no evidence behind it.
+   could not be a column or sit inside `||`. **Fixed:** `markExists q on` appends one
+   `bool` column named `exists` and takes a join predicate, so
+
+       q = users & markExists orders (.<id == .>user_id) & select { id = .id, has = .exists }
+
+   is `EXISTS` as a value. One wart remains: a side-less `.x` in its predicate is
+   refused with a unification message rather than the join's `.<x` / `.>x` hint, because
+   the column's row type is concrete by then. A general correlated subquery is still not
+   needed and would be a large change with no evidence behind it.
 
 What is *not* on the list, and why: replacing sqlglot (it is a parser/transpiler and
 the crate does not parse; the two weaknesses found — a dialect-agnostic parser and no
@@ -341,7 +345,7 @@ known shape, and none is a boundary of what exists today:
 | name-aligned set operations | `union` requires both sides to have the same row *in the same order*; aligning by name needs a projection per branch |
 | `qualify` | a stage that filters on a window without the derived table SQL requires; sqlglot's AST has the field (`SelectStatement::qualify`) and no Cagara syntax reaches it |
 | grouping sets, `rollup`, `cube` | a new `agg` form and a backend rule; the dialect pass already knows which targets have them |
-| correlated subqueries | every pattern is reachable with the join spellings (proved by a test); what is missing is an `EXISTS` that is a boolean *expression* rather than a stage |
+| correlated subqueries | every pattern is reachable with the join spellings (proved by a test), and `markExists` makes `EXISTS` a value |
 | richer window frames | `rows …` covers row-counted frames; `range`/`groups` would be two more constructors |
 
 `decimal` was the one with a correctness argument behind it, and it is in — see

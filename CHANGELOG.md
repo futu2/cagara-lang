@@ -28,6 +28,10 @@
   drop. A `distinct` still needs the barrier, because dropping a column there changes how many
   rows are deduped. A projection that reuses a sort key's name for another column keeps it too.
 
+- `markExists q on` appends an `exists` boolean column: `EXISTS` as a value, so an existence test
+  can be a projection field or sit inside `||`. `semiJoin`/`antiJoin` remain the form to use when
+  the answer is which rows survive.
+
 - `rollup` and `cube` add subtotal rows (`GROUP BY ROLLUP(…)` / `CUBE(…)`). The rolled-up key is
   `maybe`, because the subtotal rows leave it out. SQLite and the MySQL family refuse them: MySQL's
   `WITH ROLLUP` rolls up the whole key list and cannot be combined with `ORDER BY`, which is not the

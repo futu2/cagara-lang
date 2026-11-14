@@ -476,6 +476,23 @@ fn differ(ck: &Checker<'_>, cand: &Ty, target: &Ty, depth: usize) -> Option<Stri
     }
 }
 
+/// The hint for the one disagreement an overload can have that a reader can act
+/// on without knowing the language: a `maybe` passed where a present value is
+/// wanted.
+///
+/// Overload resolution fails before any unification does, so the `??` advice that
+/// a *mismatch* carries never gets a chance here — `.n + .n` on a `maybe int` said
+/// which candidate disagreed with it and stopped. The same two sentences answer it.
+pub(crate) fn nullable_note(expected: &Ty, found: &Ty, ck: &Checker<'_>) -> Option<String> {
+    let (e, f) = (ck.show(expected), ck.show(found));
+    (f.starts_with("maybe ") && !e.starts_with("maybe ")).then(|| {
+        format!(
+            "; `{f}` is nullable and this position does not take a `maybe`: only one \
+             side is nullable, so `x ?? default` takes the `maybe` and `just x` makes one"
+        )
+    })
+}
+
 /// "argument 2 expects `int`, the use has `string`", or the same about the
 /// result when the disagreement is past the last parameter.
 fn where_at(depth: usize, expected: &Ty, found: &Ty, ck: &Checker<'_>) -> String {

@@ -995,6 +995,31 @@ fn overloads_resolve_by_type() {
 /// **type parameter**, not an unknown type.
 ///
 /// Signatures carry their parameters implicitly, so `id : a -> a` works; the
+/// An overload that fails on a `maybe` says which one, and how to fix it.
+///
+/// The mismatch path has carried this advice since the `??` fix landed; overload
+/// resolution fails before unification does, so `.n + .n` on a `maybe int` used to
+/// stop at "no overload of `+` matches". Both paths now say the same two things.
+#[test]
+fn an_overload_on_a_maybe_says_how_to_take_it_out() {
+    let e = err(
+        "m : query { n = maybe int } = table \"s\" \"m\"\n\
+         q = m & select { x = .n + .n }\n",
+        "q",
+    );
+    assert!(e.contains("no overload of `+` matches"), "{e}");
+    assert!(e.contains("`maybe int` is nullable"), "{e}");
+    assert!(e.contains("`x ?? default`"), "{e}");
+    // The same sentence for money, whose parameters are not optional either.
+    let e = err(
+        "m : query { a = maybe (decimal 10 2) } = table \"s\" \"m\"\n\
+         q = m & select { x = .a + .a }\n",
+        "q",
+    );
+    assert!(e.contains("`maybe (decimal 10 2)` is nullable"), "{e}");
+    assert!(e.contains("`x ?? default`"), "{e}");
+}
+
 /// A diagnostic that knows its fix carries it, as data the editor can apply.
 ///
 /// The join warning names a rename it could not previously perform, and the

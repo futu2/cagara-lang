@@ -2593,6 +2593,55 @@ impl<'w> Checker<'w> {
         Ok(())
     }
 
+    /// The nullable advice for a failed overload, if one applies.
+    ///
+    /// The `maybe` is *inside* a row expression (`expr r (maybe int)`), so the
+    /// comparison is between the candidates' value slots. The sentence names the
+    /// *argument's* type rather than a candidate's parameter: the parameter is
+    /// written with the signature's variables (`decimal a b`), and what the reader
+    /// has in hand is the column.
+    fn overload_nullable_note(
+        &mut self,
+        module: usize,
+        cands: &[usize],
+        target: &Ty,
+    ) -> Option<String> {
+        let value = |this: &Self, t: &Ty| -> Ty {
+            match this.resolve(t) {
+                Ty::Con("expr", ea) if ea.len() >= 2 => this.resolve(&ea[ea.len() - 1]),
+                other => other,
+            }
+        };
+        for &i in cands {
+            let sig = self.cand_scheme(module, i);
+            let (trail, nvars) = (self.trail.len(), self.vars.len());
+            let t = self.inst(&sig.ty, &mut HashMap::new(), &sig.gens);
+            let mut c = t;
+            let mut u = target.clone();
+            let mut note = None;
+            while let (Ty::Fun(cp, cr), Ty::Fun(up, ur)) = (self.resolve(&c), self.resolve(&u)) {
+                let (cv, av) = (value(self, &cp), value(self, &up));
+                if let Some(n) = crate::check::overload::nullable_note(&cv, &av, self) {
+                    note = Some(n);
+                    break;
+                }
+                c = (*cr).clone();
+                u = (*ur).clone();
+            }
+            while self.trail.len() > trail {
+                let (v, old) = self.trail.pop().expect("trail entry");
+                if (v as usize) < nvars {
+                    self.vars[v as usize] = old;
+                }
+            }
+            self.vars.truncate(nvars);
+            if note.is_some() {
+                return note;
+            }
+        }
+        None
+    }
+
     /// The `no overload` diagnostic, with each candidate's first disagreement.
     ///
     /// Listing the signatures alone makes the reader compare three of them
@@ -2616,6 +2665,13 @@ impl<'w> Checker<'w> {
         // keeps a decimal quotient exact and DuckDB promotes it to `DOUBLE`, so a
         // same-type rule would be a promise one target breaks. Saying that here is
         // more useful than a list of candidates that were never going to match.
+        // A `maybe` where a present value is wanted: the mismatch path offers the
+        // `??` fix, and the overload path should not be silent about it.
+        if self.show(target).contains("maybe") {
+            if let Some(note) = self.overload_nullable_note(module, cands, target) {
+                msg.push_str(&note);
+            }
+        }
         if name == "_/_" && self.show(target).contains("decimal") {
             msg.push_str(
                 "\n  `decimal` division has no overload: PostgreSQL keeps a quotient exact and \

@@ -674,7 +674,9 @@ impl<'a> Normalizer<'a, 'a> {
     ) -> Result<Value<'a>, Control> {
         let collected = own(&arg);
         let args = match &mut combine {
-            CombineFn::Join { args, .. } | CombineFn::Set { args, .. } => {
+            CombineFn::Join { args, .. }
+            | CombineFn::Set { args, .. }
+            | CombineFn::Exists { args, .. } => {
                 args.push(collected);
                 args.clone()
             }
@@ -813,10 +815,10 @@ impl<'a> Normalizer<'a, 'a> {
                     "a table is not a pipeline stage",
                 ))
             }
-            QueryNodeKind::Join(_) | QueryNodeKind::Set(_) => {
+            QueryNodeKind::Join(_) | QueryNodeKind::Set(_) | QueryNodeKind::MarkExists => {
                 return Err(Control::unsupported(
                     origin,
-                    "a join or set operation is not a pipeline stage",
+                    "a join, set operation or `markExists` is not a pipeline stage",
                 ))
             }
         };
@@ -926,16 +928,44 @@ impl<'a> Normalizer<'a, 'a> {
         args: Vec<Value<'static>>,
     ) -> Result<Value<'a>, Control> {
         let operation_site = match &combine {
-            CombineFn::Join { site, .. } | CombineFn::Set { site, .. } => *site,
+            CombineFn::Join { site, .. }
+            | CombineFn::Set { site, .. }
+            | CombineFn::Exists { site, .. } => *site,
         };
         let (origin, site) = self.stage_site(
             match &combine {
                 CombineFn::Join { kind, .. } => QueryNodeKind::Join(*kind),
                 CombineFn::Set { kind, .. } => QueryNodeKind::Set(*kind),
+                CombineFn::Exists { .. } => QueryNodeKind::MarkExists,
             },
             operation_site,
         );
         match combine {
+            CombineFn::Exists { .. } => {
+                // `markExists` is `query s -> expr (join r s) bool -> query r`,
+                // the same shape as a join: the joined query first, the predicate
+                // second, the piped input last.
+                let Some(Value::Query(joined)) = args.first() else {
+                    return Err(Control::unsupported(origin, "`markExists` takes a query"));
+                };
+                let Some(Value::Scalar(on)) = args.get(1) else {
+                    return Err(Control::unsupported(
+                        origin,
+                        "`markExists` takes a query and a predicate",
+                    ));
+                };
+                let Some(Value::Query(input)) = args.get(2) else {
+                    return Err(Control::unsupported(
+                        origin,
+                        "`markExists` needs its piped input",
+                    ));
+                };
+                let (joined, on, input) = (*joined, on.clone(), *input);
+                self.builder
+                    .mark_exists(site, origin, input, joined, on)
+                    .map(Value::Query)
+                    .map_err(Control::Program)
+            }
             CombineFn::Join { kind, .. } => {
                 // `innerJoin` is `query s -> expr (join r s) bool -> query r`,
                 // so the joined input arrives first, the predicate second, and

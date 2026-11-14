@@ -2437,6 +2437,66 @@ q_not = users & antiJoin orders (.<id == .>user_id) & select {.id} & order [asc 
     }
 }
 
+/// `markExists` is `EXISTS` as a value, so it composes where `semiJoin` cannot.
+///
+/// `semiJoin` is a stage: its answer is which rows survive. That is the right tool
+/// when the answer *is* the question, and the wrong one when it is one column among
+/// others — `select { has = .exists }` — or when it has to be `||`-ed with a
+/// condition that is not an existence test. `markExists` is the same `EXISTS`, in a
+/// column.
+#[test]
+fn mark_exists_is_exists_as_a_value() {
+    const DEFS: &str = "\
+q_column = users & markExists orders (.<id == .>user_id) \
+           & select { id = .id, has = .exists } & order [asc .id]
+q_or = users & markExists orders (.<id == .>user_id) \
+       & where (.exists || .id > 2) & select {.id} & order [asc .id]
+q_and = users & markExists orders (.<id == .>user_id && .>amount > 4.5) \
+        & where .exists & select {.id} & order [asc .id]
+";
+    // `users` is ann(1), bob(2), "it's a\b "(3); `orders` has 1→5.5, 1→4.5, 3→1.0.
+    // So only user 1 has an order over 4.5, and `exists || id > 2` is users 1 and 3.
+    let engine = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    let ws = Workspace::from_source(&format!("{TABLES}{DEFS}"));
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    // DuckDB prints a boolean as `true`; `same_row` folds that to `1`, because
+    // every engine prints a bool its own way and this compares values.
+    for (name, want) in [
+        (
+            "q_column",
+            vec!["1|1".to_string(), "2|0".into(), "3|1".into()],
+        ),
+        ("q_or", vec!["1".to_string(), "3".into()]),
+        ("q_and", vec!["1".to_string()]),
+    ] {
+        let (_, rel) = root_queries(&ws)
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no query `{name}`"));
+        let rel = rel.unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
+        let sql = compile(&rel, Options::default()).unwrap_or_else(|e| panic!("`{name}`: {e}"));
+        match run_setup(&engine, SETUP, &sql) {
+            Some(Ok(rows)) => {
+                assert_eq!(
+                    rows.len(),
+                    want.len(),
+                    "`{name}`: {rows:?} against {want:?}"
+                );
+                assert!(
+                    rows.iter().zip(&want).all(|(a, b)| same_row(a, b)),
+                    "`{name}`: {rows:?} against {want:?}\n  {sql}"
+                );
+            }
+            Some(Err(m)) => panic!("`{name}`: {m}\n  {sql}"),
+            None => panic!("duckdb is not installed"),
+        }
+    }
+}
+
 /// Postgres, through PGlite — Postgres compiled to WebAssembly and driven by
 /// `node`, so no server is needed (`crates/cagara-sql/tests/pglite.mjs`).
 ///

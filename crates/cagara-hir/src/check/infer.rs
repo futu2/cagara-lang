@@ -2855,6 +2855,49 @@ impl<'w> Checker<'w> {
                     ),
                 )
             }
+            // `markExists q on`: the same predicate as `semiJoin`, but the answer
+            // is a *value* rather than a filter. The row it reads is the ambient
+            // one — that is what `Cons::JoinOn` says, exactly as for a join — so
+            // the result is a plain bool expression and composes with `&&`, `||`
+            // and a projection field.
+            MarkExists => {
+                let (l, r, pred, out) = (
+                    self.fresh_row(),
+                    self.fresh_row(),
+                    self.fresh(),
+                    self.fresh_row(),
+                );
+                self.pending.push((
+                    Cons::JoinOn {
+                        pred: pred.clone(),
+                        left: l.clone(),
+                        right: r.clone(),
+                    },
+                    sp,
+                ));
+                // The output row is `merge l { exists = bool }`; `Cons::JoinOut` is
+                // the rule that computes a merge, reused rather than re-derived so
+                // the two cannot disagree.
+                let exists = self.fresh_row();
+                let _ = self.unify(
+                    &exists,
+                    &Ty::Row(
+                        vec![("exists".to_string(), con("bool"))],
+                        Box::new(Ty::Empty),
+                    ),
+                );
+                self.pending.push((
+                    Cons::JoinOut {
+                        left: l.clone(),
+                        right: exists,
+                        out: out.clone(),
+                        nullable: (false, false),
+                        left_only: false,
+                    },
+                    sp,
+                ));
+                fun(query(r), fun(pred, fun(query(l), query(out))))
+            }
             Join(kind) => {
                 let nullable = match kind {
                     JoinKind::Inner => (false, false),

@@ -40,6 +40,11 @@ pub enum Prim {
     Over,
     /// A set operation: `union`, `unionAll`, `intersect`, `except`.
     Set(SetKind),
+    /// `markExists q on`: the row plus one `exists` column, true where the
+    /// predicate finds a match in `q`. `semiJoin`'s filter as a value, so an
+    /// existence test can be a column and can be combined with any other
+    /// condition.
+    MarkExists,
     Group,
     /// `rollup e`: a grouping key that also gets subtotal rows, so its column is
     /// `maybe` and is NULL on the rows of the coarser groups.
@@ -92,6 +97,7 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__rightJoin", Prim::Join(JoinKind::Right)),
     ("__fullJoin", Prim::Join(JoinKind::Full)),
     ("__semiJoin", Prim::Join(JoinKind::Semi)),
+    ("__markExists", Prim::MarkExists),
     ("__antiJoin", Prim::Join(JoinKind::Anti)),
     ("__union", Prim::Set(SetKind::Union)),
     ("__unionAll", Prim::Set(SetKind::UnionAll)),
@@ -160,7 +166,7 @@ impl Prim {
             | Rows | Prefix | Suffix | Merge | MapValue | Lift => 2,
             Distinct => 1,
             In => 2,
-            Join(_) => 3,
+            Join(_) | MarkExists => 3,
             Filtered | Over => 2,
             DistinctAgg => 1,
             Set(_) => 2,

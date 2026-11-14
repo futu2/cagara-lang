@@ -66,6 +66,10 @@ pub(crate) fn primitive<'a>(
             spec: None,
             origin,
         })),
+        crate::primitive::Prim::MarkExists => Ok(Value::Combine(CombineFn::Exists {
+            args: Vec::new(),
+            site: None,
+        })),
         crate::primitive::Prim::Join(kind) => Ok(Value::Combine(CombineFn::Join {
             kind,
             args: Vec::new(),

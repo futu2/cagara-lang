@@ -108,6 +108,7 @@ fn child_of(rel: &Rel) -> Option<&Rel> {
         | Rel::At(_, r) => Some(r),
         Rel::Join { left, .. } => Some(left),
         Rel::Set { left, .. } => Some(left),
+        Rel::MarkExists { input, .. } => Some(input),
     }
 }
 
@@ -116,6 +117,7 @@ fn second_child_of(rel: &Rel) -> Option<&Rel> {
     match rel {
         Rel::Join { right, .. } => Some(right),
         Rel::Set { right, .. } => Some(right),
+        Rel::MarkExists { right, .. } => Some(right),
         _ => None,
     }
 }
@@ -170,6 +172,35 @@ fn finish_schema(
         // change. The checker computed the same thing with `keyMap (prefix s)`.
         Rel::Prefix(r, affix) => Ok(rename_columns(&of(r)?, affix, true)),
         Rel::Suffix(r, affix) => Ok(rename_columns(&of(r)?, affix, false)),
+        Rel::MarkExists { input, right, on } => {
+            // The predicate reads both rows, exactly as a join's does.
+            let ic = of(input)?;
+            let rc = of(right)?;
+            for (side, name) in on.columns() {
+                let (cols, what) = match side {
+                    crate::ir::Side::Left => (&ic, "input"),
+                    crate::ir::Side::Right => (&rc, "joined"),
+                    crate::ir::Side::Single => {
+                        return Err((loc, format!("`{name}` needs `.<{name}` or `.>{name}`")))
+                    }
+                };
+                if !cols.contains(&name) {
+                    return Err((
+                        loc,
+                        format!(
+                            "the {what} row has no column `{name}`; available: {}",
+                            cols.join(", ")
+                        ),
+                    ));
+                }
+            }
+            rules::place(Place::JoinOn, on.phase().map_err(|m| (loc, m))?).map_err(|m| (loc, m))?;
+            let mut out = ic;
+            if !out.iter().any(|c| c == "exists") {
+                out.push("exists".into());
+            }
+            Ok(out)
+        }
         Rel::Agg(r, fs) => projection(fs, &of(r)?, true).map_err(|m| (loc, m)),
         Rel::Order(r, ks) => {
             let c = of(r)?;

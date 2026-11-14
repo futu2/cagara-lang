@@ -89,6 +89,8 @@ pub(crate) enum QueryNodeKind {
     Distinct,
     Join(JoinKind),
     Set(SetKind),
+    /// `markExists q on`: the input row plus an `exists` column.
+    MarkExists,
 }
 
 /// What a node owns besides its children.
@@ -119,7 +121,8 @@ pub(crate) enum Payload {
     Wrapper(String),
     /// `limit n` / `offset n`.
     Count(i64),
-    /// A join's `on`.
+    /// A join's `on`, and `markExists`'s predicate: the same shape, over the
+    /// left and right rows.
     /// A set operation and a distinct carry no payload.
     None,
 }
@@ -461,6 +464,57 @@ impl Builder {
         }))
     }
 
+    /// `markExists q on`: the input row plus one `exists` column.
+    ///
+    /// The predicate is checked exactly like a join's — `.<x` names the input
+    /// row, `.>y` the joined one — because that is what it means: the input row
+    /// on the left, the existence check on the right, and the *value* is whether
+    /// the check finds anything.
+    pub(crate) fn mark_exists(
+        &mut self,
+        site: NodeRef,
+        origin: Origin,
+        input: NodeId,
+        right: NodeId,
+        on: CheckedExpr,
+    ) -> Result<NodeId, Error> {
+        crate::checked::place(Place::JoinOn, &on, origin)?;
+        if !on.ty().is_bool() {
+            return Err(Error::new(format!(
+                "a `markExists` predicate must be bool, found {}",
+                on.ty()
+            ))
+            .at(origin));
+        }
+        let input_row = self.node(input).row.clone();
+        let right_row = self.node(right).row.clone();
+        for (side, name) in columns_of(&on) {
+            let (columns, what) = match side {
+                cagara_syntax::ast::Side::Left => (&input_row, "input"),
+                cagara_syntax::ast::Side::Right => (&right_row, "joined"),
+                cagara_syntax::ast::Side::Single => {
+                    return Err(Error::new(crate::rules::needs_side(&name)).at(origin))
+                }
+            };
+            if !columns.has(&name) {
+                let avail = columns.names().join(", ");
+                return Err(Error::new(format!(
+                    "the {what} row has no column `{name}`; available: {avail}"
+                ))
+                .at(origin));
+            }
+        }
+        let row = input_row.with("exists", crate::core::ScalarType::Bool);
+        Ok(self.push(RelNode {
+            kind: QueryNodeKind::MarkExists,
+            site,
+            origin,
+            inputs: vec![input, right],
+            row,
+            payload: Payload::On(on),
+        }))
+    }
+
     /// A **set operation**: both inputs must expose the same row — the same
     /// names, in the same order, with the same types.
     pub(crate) fn set(
@@ -658,6 +712,11 @@ impl CompiledQuery {
             (Payload::Unnest(expr), QueryNodeKind::Unnest) => {
                 crate::ir::Rel::Unnest(child(0)?, crate::checked::erase_expr(expr.clone())?)
             }
+            (Payload::On(on), QueryNodeKind::MarkExists) => crate::ir::Rel::MarkExists {
+                input: child(0)?,
+                right: child(1)?,
+                on: crate::checked::erase_expr(on.clone())?,
+            },
             (Payload::On(on), QueryNodeKind::Join(kind)) => crate::ir::Rel::Join {
                 kind,
                 left: child(0)?,

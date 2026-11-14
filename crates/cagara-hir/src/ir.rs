@@ -304,6 +304,13 @@ pub enum Rel {
         left: Box<Rel>,
         right: Box<Rel>,
     },
+    /// `markExists q on`: the input row plus an `exists` column, true where the
+    /// predicate finds a match in `q`. `semiJoin`'s `EXISTS` as a *value*.
+    MarkExists {
+        input: Box<Rel>,
+        right: Box<Rel>,
+        on: Expr,
+    },
     /// The stage written at `Loc` (transparent for schema and lowering).
     At(Loc, Box<Rel>),
 }
@@ -327,6 +334,7 @@ impl Rel {
             | Rel::At(_, r) => vec![r],
             Rel::Join { left, right, .. } => vec![left, right],
             Rel::Set { left, right, .. } => vec![left, right],
+            Rel::MarkExists { input, right, .. } => vec![input, right],
         }
     }
 
@@ -347,7 +355,11 @@ impl Rel {
             | Rel::Distinct(r)
             | Rel::Unnest(r, _)
             | Rel::At(_, r) => vec![r],
-            Rel::Join { left, right, .. } | Rel::Set { left, right, .. } => vec![left, right],
+            Rel::Join { left, right, .. }
+            | Rel::Set { left, right, .. }
+            | Rel::MarkExists {
+                input: left, right, ..
+            } => vec![left, right],
         }
     }
 

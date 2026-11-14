@@ -527,6 +527,37 @@ fn query_output_rows() {
     );
 }
 
+/// `markExists` appends one `bool` column, and its predicate is a join predicate.
+#[test]
+fn mark_exists_appends_one_boolean_column() {
+    let src = "q = users & markExists orders (.<id == .>user_id)\n";
+    assert_eq!(
+        ty(src, "q"),
+        "query { id = int, name = string, age = int, active = bool, exists = bool }"
+    );
+    // `.x` without a side is refused. The message is a unification failure rather
+    // than the `.<x` / `.>x` hint a join gives, because the column's own row is
+    // concrete by then — it is still an error, and the doc says which spelling to
+    // use, so this pins that it *is* refused rather than how it is worded.
+    let bad = types("q = users & markExists orders (.id == .user_id)\n");
+    let e = bad
+        .into_iter()
+        .find(|(n, _)| n == "q")
+        .expect("q")
+        .1
+        .expect_err("a side-less column must be refused");
+    assert!(!e.is_empty(), "{e}");
+    // A non-bool predicate is refused too.
+    let not_bool = types("q = users & markExists orders (.<id)\n");
+    let e = not_bool
+        .into_iter()
+        .find(|(n, _)| n == "q")
+        .expect("q")
+        .1
+        .expect_err("a non-bool predicate must be refused");
+    assert!(e.contains("bool"), "{e}");
+}
+
 /// A rolled-up key is `maybe`, because the subtotal rows leave it out.
 ///
 /// This is the reason `rollup` is a primitive rather than sugar over `group`: the

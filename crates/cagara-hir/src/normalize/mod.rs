@@ -325,6 +325,11 @@ pub(crate) enum CombineFn {
         args: Vec<Value<'static>>,
         site: Option<Site>,
     },
+    /// `markExists q on`, awaiting the query, the predicate, and the input.
+    Exists {
+        args: Vec<Value<'static>>,
+        site: Option<Site>,
+    },
 }
 
 impl CombineFn {
@@ -332,6 +337,7 @@ impl CombineFn {
         match self {
             CombineFn::Join { .. } => 3,
             CombineFn::Set { .. } => 2,
+            CombineFn::Exists { .. } => 3,
         }
     }
 }

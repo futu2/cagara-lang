@@ -363,6 +363,25 @@ semiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__
 ## negated, and the idiomatic "rows without children".
 antiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__antiJoin"
 
+## `markExists q on` — the row plus an `exists` column: does this row have a
+## match in `q`?
+##
+## `semiJoin` as a value rather than a filter. It appends one `bool` column named
+## `exists` (replacing a column of that name if the row already has one), so an
+## existence test can be read as a column and combined with any other condition:
+##
+## ```
+## q = users & markExists orders (.<id == .>user_id)
+##              & select { id = .id, has = .exists }
+## ```
+##
+## `semiJoin` cannot do that — it is a stage, so its answer is which rows survive,
+## not a value. Reach for it when the answer is the point; reach for `markExists`
+## when the answer is one column among others, or when it has to be `||`-ed with a
+## condition that is not itself an existence test.
+markExists : query s -> expr (join r s) bool -> query r -> query (merge r { exists = bool }) =
+  primitive "__markExists"
+
 # The join shorthands: one operator per join kind, each an alias of the named
 # form. `_?_` and `innerJoin` have the same signature, so the operator adds a
 # spelling and nothing else — and because the alias carries the named stage's

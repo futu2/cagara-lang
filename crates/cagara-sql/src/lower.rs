@@ -415,6 +415,7 @@ impl Lowerer {
                 on,
             } => self.lower_join(kind, left, right, on),
             Rel::Set { kind, left, right } => self.lower_set(kind, left, right),
+            Rel::MarkExists { input, right, on } => self.lower_mark_exists(input, right, on),
         }
     }
 
@@ -810,6 +811,47 @@ impl Lowerer {
             .map(|(n, e)| Ok((n.clone(), st.resolve(e)?)))
             .collect::<Result<_, String>>()?;
         st.set_items(items, false);
+        Ok(st)
+    }
+
+    /// `markExists q on` — the row plus an `exists` column.
+    ///
+    /// The `EXISTS` is `semiJoin`'s, only as a *value*: both sides are qualified
+    /// the same way (which is what makes `.>x` readable inside the subquery) and
+    /// the predicate becomes the subquery's `WHERE`. The input is passed through
+    /// `join_input` because the outer reference has to be a *qualified* column —
+    /// a bare `id` inside the subquery would resolve to the subquery's own table.
+    fn lower_mark_exists(
+        &mut self,
+        input: &Rel,
+        right: &Rel,
+        on: &IrExpr,
+    ) -> Result<Stage, String> {
+        let outer_stage = self.rel(input)?;
+        let inner_stage = self.rel_beside(right)?;
+        let outer = self.join_input(outer_stage, true, false);
+        let inner = self.join_input(inner_stage, true, false);
+        let predicate = lower_expr(on, &|side, n| match side {
+            Side::Left => item(&outer.items, n),
+            Side::Right => item(&inner.items, n),
+            Side::Single => Err(format!("`markExists` needs `.<{n}` or `.>{n}`")),
+        })?;
+        let mut subquery = Stage::new(inner.from, inner.items);
+        subquery.joins = inner.joins;
+        subquery.wheres = inner.wheres;
+        subquery.wheres.push(predicate);
+        let exists = Expr::Exists {
+            subquery: Box::new(sqlglot_rust::Statement::Select(subquery.into_statement())),
+            negated: false,
+        };
+        // `join_input` wraps whatever it cannot inline, so the rebuilt stage is a
+        // plain projection over an already-qualified source: nothing of the
+        // input's own flags survives, and nothing should — a `limit`, a `distinct`
+        // or an aggregate is inside the derived table it wrapped.
+        let mut st = Stage::new(outer.from, outer.items);
+        st.joins = outer.joins;
+        st.wheres = outer.wheres;
+        st.items.push(("exists".into(), exists));
         Ok(st)
     }
 

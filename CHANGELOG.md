@@ -18,6 +18,11 @@
   precision would be lost silently). `money_is_exact_on_the_engines` runs the sum of three 19.99s and
   `0.1 + 0.2` on DuckDB and PostgreSQL.
 
+- The formatter lays out `decimal 10 2` and `primitive "…"` bodies. Both used to make it
+  print the whole definition exactly as written — the fallback it has for a half-typed
+  buffer — so `x = decimal 10 2 , y = int` kept its space before the comma and every
+  primitive definition was never reformatted at all.
+
 - An overload that fails because an argument is a `maybe` now says how to take it out
   (``x ?? default`` / `just x`), the same advice the type-mismatch path gives — `.n + .n` on a
   `maybe int` used to stop at "no overload of `+` matches".

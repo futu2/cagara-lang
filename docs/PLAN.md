@@ -209,6 +209,16 @@ need their own intrinsic per dialect.
    Server, because boolean handling and paging differ from everything else there and the
    emulation cannot judge a type.
 
+   **The capability tables are checked too.** `supports_qualify`, `supports_filter`,
+   `supports_full_join`, `null_order` and the paging order are hand-written, and a wrong
+   entry is SQL that looks right — which is how the two BigQuery bugs got in.
+   `every_construct_we_emit_is_one_the_engine_reads` compiles one query per conditional
+   rule and *runs* whatever came out, asserting the implication rather than a recorded
+   string. It was verified by mutation: adding SQLite to `supports_qualify` makes it fail,
+   and the first version of it silently passed because it compiled the table definition
+   instead of the query. No table turned out to be wrong — they were unchecked, not
+   broken — and the same mutation test is what makes that statement worth anything.
+
 ## Direction
 
 Where the work goes from here, in the order the evidence supports it. Each item

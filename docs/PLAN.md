@@ -47,6 +47,16 @@ need their own intrinsic per dialect.
 
 ## Recently closed
 
+- The `Rel -> Rel` pass (`rewrite.rs`) and the lowering rules around it: pagination
+  now means what it says (`limit 5 & offset 2` is rows 3..=5), a sort key is written
+  as the output column it names, and four derived tables that protected nothing are
+  gone (identity projection, semi/anti join inputs, a null-extending join input whose
+  computed column stays NULL, and a projection over paging).
+- A statement nested inside an expression is rewritten for the target dialect.
+  `EXISTS (…)` from a semi/anti join used to carry `NULLS LAST` to MySQL and T-SQL,
+  which cannot read it. Every dialect is now checked for the spellings it cannot read
+  (`each_dialect_avoids_what_it_cannot_read`) as well as for well-formedness.
+
 - The `??` advice reaches overload failures too: `.n + .n` on a `maybe int` names
   the nullable argument and the two ways out, where it used to list candidates.
 - A `decimal` cast finds its parameters through a partly applied cast

@@ -22,11 +22,11 @@ this page tracks the remaining boundaries and language work.
 - A filter after an aggregate is `HAVING`; a filter over a window, a `distinct`
   or a `limit` still wraps a derived table, because those run after grouping.
 - Aggregates are values, modified by three combinators (`filtered`,
-  `distinctAgg`, `over`) that rewrite the aggregate's template — `SUM(CASE WHEN
-  … THEN x END)` and `SUM(DISTINCT x)`, which every engine accepts. A
-  first-class `FILTER (WHERE …)` clause would be smaller SQL and needs an IR
-  field plus a backend rule; the combinators are the portable spelling until
-  then.
+  `distinctAgg`, `over`). `filtered p a` is written as a first-class
+  `FILTER (WHERE …)` clause where the target has one (PostgreSQL, DuckDB, SQLite,
+  Trino, Snowflake) and as `SUM(CASE WHEN p THEN x END)` where it does not (MySQL,
+  T-SQL, BigQuery, Spark) — the IR carries the predicate and `dialect.rs` picks the
+  spelling. `distinctAgg` is `SUM(DISTINCT x)` everywhere.
 - A single lowercase letter in a type position is a type *parameter* (that is
   what makes `id : a -> a` work); anything else must be a constructor the
   language has, and a near miss is reported with a "did you mean". An explicit

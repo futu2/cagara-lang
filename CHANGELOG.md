@@ -18,6 +18,14 @@
   precision would be lost silently). `money_is_exact_on_the_engines` runs the sum of three 19.99s and
   `0.1 + 0.2` on DuckDB and PostgreSQL.
 
+- A sort key is written as the output column it names. `select { user_id = .id } & order [asc .user_id]`
+  emitted `ORDER BY id` — the resolved expression — which is only right by luck; with a
+  projection that renames a column to another column's name (`select { id = .a, a = .id }`) it
+  ordered by the wrong one.
+
+- An identity projection (`select { id = .id, a = .a }`) is dropped instead of forcing a derived
+  table when a `limit` or a `distinct` sits between it and its input.
+
 - A `limit` followed by an `offset` now means what it says. `limit 5 & offset 2` keeps rows
   3..=5, and it used to fold into `LIMIT 5 OFFSET 2`, which keeps five rows starting at the
   third; a new `Rel -> Rel` pass (`crates/cagara-sql/src/rewrite.rs`) folds the pair into

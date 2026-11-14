@@ -19,8 +19,11 @@ this page tracks the remaining boundaries and language work.
   PostgreSQL), so the derived table is a workaround for the AST rather than a
   portability requirement — and it is correct SQL either way. Lifting it means an
   AST node for a nested join, which is sqlglot's to add.
-- A filter after an aggregate is `HAVING`; a filter over a window, a `distinct`
-  or a `limit` still wraps a derived table, because those run after grouping.
+- A filter after an aggregate is `HAVING`. A filter over a window or a `limit`
+  still wraps a derived table, because both decide *which rows* the stage returns
+  and the filter has to see the result. A filter over a `distinct` does not wrap:
+  deduping whole rows and filtering on them commute, since two identical rows agree
+  on every predicate — so it goes inside the `SELECT DISTINCT`.
 - Aggregates are values, modified by three combinators (`filtered`,
   `distinctAgg`, `over`). `filtered p a` is written as a first-class
   `FILTER (WHERE …)` clause where the target has one (PostgreSQL, DuckDB, SQLite,

@@ -104,10 +104,16 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
    in `lower.rs` (`join_input` with `can_place`) rather than in the pass, because it
    is a decision about one input against a stage, not about a pair of nodes.
 
+   A projection that only renames and reorders (a permutation of the stage's
+   columns) now crosses the barrier a general one cannot: it cannot change which
+   rows a `LIMIT` or a `DISTINCT` below it selects. That rule is in `stage.rs`
+   (`keeps_every_column`) and consulted from `lower_select`, because the question is
+   one node against a stage — the same boundary as the semi-join inlining.
+
    Next candidates, in the order they look worth it: filter-into-join for an inner
-   join, folding a projection into a join operand, and dropping a projection that
-   only *renames* columns when nothing above reads the new names. None of them is
-   needed for correctness today.
+   join, folding a projection into a join operand, and dropping a *dropping*
+   projection across a barrier when the sort keys survive it. None of them is needed
+   for correctness today.
 
 2. ~~Extend the execution-backed coverage beyond SQLite, DuckDB and PostgreSQL.~~
    **Done to the extent this repository can reach, and the limit is documented.**

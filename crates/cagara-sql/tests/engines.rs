@@ -966,6 +966,78 @@ fn each_dialect_avoids_what_it_cannot_read() {
     assert!(checked > 300, "only {checked} statements were checked");
 }
 
+/// Each dialect uses the spelling it *does* have, not merely avoiding the ones it
+/// does not.
+///
+/// [`each_dialect_avoids_what_it_cannot_read`] checks the absence of the wrong
+/// spelling; this checks the presence of the right one. Both are needed: `CONCAT`
+/// missing from a MySQL statement and `||` missing from it are the same fact from
+/// two sides, but a generator that dropped the concatenation altogether would pass
+/// the first and fail this one.
+///
+/// Every expectation here was read off the emitted SQL and confirmed against the
+/// engines that can run — see `engines_agree` for the value-level half.
+#[test]
+fn each_dialect_uses_the_spelling_it_has() {
+    let src = format!(
+        "{TABLES}concat = users & select {{ s = .name ++ \"!\" }} & limit 3\n\
+                       paged = users & order [asc .id] & limit 3 & offset 1 & select {{.id}}\n\
+                       bools = nums & select {{ b = .a > 1, n = isNull .v }}\n"
+    );
+    let ws = Workspace::from_source(&src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let compile_in = |name: &str, d: &str| {
+        let (_, rel) = rels
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no query `{name}`"));
+        let rel = rel
+            .as_ref()
+            .unwrap_or_else(|e| panic!("`{name}`: {}", e.message));
+        compile(
+            rel,
+            Options {
+                dialect: Dialect::from_str(d).expect("dialect"),
+                ..Options::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{name} / {d}: {e}"))
+    };
+
+    // MySQL and T-SQL have no `||`: the concatenation is a function call.
+    for d in ["mysql", "tsql"] {
+        let sql = compile_in("concat", d);
+        assert!(sql.contains("CONCAT("), "{d}: {sql}");
+    }
+    // The rest keep the operator, which is what `||` means there.
+    for d in ["postgres", "duckdb", "sqlite", "trino", "spark", "bigquery"] {
+        let sql = compile_in("concat", d);
+        assert!(sql.contains("||"), "{d}: {sql}");
+    }
+    // Paging: T-SQL has no LIMIT at all, and spells the pair as one clause.
+    let ts = compile_in("paged", "tsql");
+    assert!(
+        ts.contains("OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY"),
+        "T-SQL paging: {ts}"
+    );
+    let my = compile_in("paged", "mysql");
+    assert!(my.contains("LIMIT 2 OFFSET 1"), "MySQL paging: {my}");
+    // A limit with no offset is `TOP` on T-SQL, where a FETCH would need an ORDER BY.
+    let ts = compile_in("concat", "tsql");
+    assert!(ts.contains("TOP 3"), "T-SQL limit: {ts}");
+    // T-SQL has no boolean values, so a condition as a column becomes 1 / 0 with a
+    // third branch left out — an unknown comparison is NULL, not false.
+    let ts = compile_in("bools", "tsql");
+    assert!(
+        ts.contains("CASE WHEN a > 1 THEN 1 WHEN NOT (a > 1) THEN 0 END"),
+        "T-SQL boolean column: {ts}"
+    );
+    // Everywhere else a boolean column is the condition itself.
+    let pg = compile_in("bools", "postgres");
+    assert!(pg.contains("a > 1 AS b"), "{pg}");
+}
+
 /// The SQL with every quoted string replaced by `''`, so a check for a construct
 /// cannot be fooled by data that happens to contain it.
 fn strip_literals(sql: &str) -> String {

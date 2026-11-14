@@ -12,10 +12,13 @@ this page tracks the remaining boundaries and language work.
 - A join chained on the left (`a & innerJoin b … & innerJoin c …`, which is what
   a pipeline writes) lowers to one `FROM` chain, with no derived table. A join
   *nested on the right* (`a & innerJoin (b & innerJoin c …) …`) puts its right
-  input behind a derived table, because SQL has no parenthesized-join node in the
-  AST this backend builds: `a JOIN (b JOIN c)` is only expressible as a subquery.
-  That is a projection away from the parenthesized form, and it is correct SQL,
-  so it stays until an AST node exists for it.
+  input behind a derived table. That is a limit of the AST, not of SQL: sqlglot's
+  `TableSource` has `Table`, `Subquery`, `TableFunction`, `Lateral`, `Unnest` and
+  nothing for a parenthesized join, so `a JOIN (b JOIN c ON …) ON …` cannot be
+  built. Both engines here *do* accept that form (measured on DuckDB and
+  PostgreSQL), so the derived table is a workaround for the AST rather than a
+  portability requirement — and it is correct SQL either way. Lifting it means an
+  AST node for a nested join, which is sqlglot's to add.
 - A filter after an aggregate is `HAVING`; a filter over a window, a `distinct`
   or a `limit` still wraps a derived table, because those run after grouping.
 - Aggregates are values, modified by three combinators (`filtered`,

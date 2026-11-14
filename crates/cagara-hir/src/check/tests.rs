@@ -247,6 +247,30 @@ fn a_decimal_cast_names_its_parameters() {
     assert!(e.contains("expected 12, found 10"), "{e}");
 }
 
+/// The parameters of a cast are read wherever the literals are: a partly applied
+/// cast under `lift`, and a named constant.
+///
+/// Both would otherwise leave `decimal a b` open, and an open type is a type the
+/// program does not actually have — the SQL cast would say `DECIMAL(10, 2)` while
+/// the Cagara type said nothing.
+#[test]
+fn a_decimal_cast_finds_its_parameters() {
+    // `toDecimal 10 2` on its own is a function, and `lift` applies it.
+    let src = "m : query { d = maybe string } = table \"s\" \"m\"\n\
+               q = m & select { p = lift (toDecimal 10 2) .d }\n";
+    assert_eq!(ty(src, "q"), "query { p = maybe (decimal 10 2) }");
+    // A constant is the same program: the normalizer inlines it for the SQL, so
+    // the type has to see it too.
+    let src = "p = 10\n\
+               o : query { v = string } = table \"s\" \"o\"\n\
+               q = o & select { x = toDecimal p 2 .v }\n";
+    assert_eq!(ty(src, "q"), "query { x = decimal 10 2 }");
+    // A scale of zero is a whole number of units, and it is allowed.
+    let src = "t : query { z = decimal 38 0 } = table \"s\" \"t\"\n\
+               q = t & select { z = .z }\n";
+    assert_eq!(ty(src, "q"), "query { z = decimal 38 0 }");
+}
+
 /// Decimal arithmetic keeps the type and refuses two different `(p,s)`.
 ///
 /// `+`/`-` are declared as signatures — same type in, same type out — because a

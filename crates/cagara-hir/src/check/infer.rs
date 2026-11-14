@@ -1781,6 +1781,34 @@ impl<'w> Checker<'w> {
     /// statement's syntax. A non-literal is refused by the backend (which needs
     /// `Expr::Number`), and here it simply leaves the parameters open, which the
     /// next use reports.
+    /// The value of an integer literal argument, looking through a definition
+    /// that is one.
+    ///
+    /// `toDecimal 10 2 x` is the usual spelling; `p = 10` followed by
+    /// `toDecimal p 2 x` is the same program, and the normalizer inlines the
+    /// constant for the SQL, so the type has to see it too rather than leaving
+    /// the parameters open.
+    fn int_literal(&mut self, e: &ast::Expr) -> Option<u32> {
+        match &e.kind {
+            ExprKind::Lit(ast::Lit::Int(n)) if *n >= 0 => Some(*n as u32),
+            ExprKind::Name(_) => {
+                let resolved = self.resolutions.get(&(self.module, e.id))?.clone();
+                let Resolved::Def((m, i)) = resolved else {
+                    return None;
+                };
+                if m != self.module {
+                    return None;
+                }
+                let body = &self.defs.get(i).body;
+                match &body.kind {
+                    ExprKind::Lit(ast::Lit::Int(n)) if *n >= 0 => Some(*n as u32),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn decimal_params(&mut self, f: &ast::Expr, args: &[ast::Expr], result: &Ty) {
         let ExprKind::Name(name) = &f.kind else {
             return;
@@ -1794,18 +1822,22 @@ impl<'w> Checker<'w> {
         }
         let mut nums = Vec::new();
         for arg in &args[..expect] {
-            match &arg.kind {
-                ExprKind::Lit(ast::Lit::Int(n)) if *n >= 0 => nums.push(*n as u32),
-                _ => return,
+            match self.int_literal(arg) {
+                Some(n) => nums.push(n),
+                None => return,
             }
         }
-        // The result is `expr r (decimal p s)`, or `expr r (maybe (decimal p s))`
-        // for `tryDecimal`: the parameters are inside the wrappers.
+        // The result is `expr r (decimal p s)` — or `expr r (maybe (decimal p s))`
+        // for `tryDecimal`, and a *function* when the cast is partially applied
+        // (`lift (toDecimal 10 2) .d`): the parameters are inside the wrappers,
+        // and behind however many arrows one argument left.
         let mut t = self.resolve(result);
         loop {
+            t = self.resolve(&t);
             match &t {
-                Ty::Con("expr", a) if a.len() == 3 => t = self.resolve(&a[2]),
-                Ty::Con("maybe", a) if a.len() == 1 => t = self.resolve(&a[0]),
+                Ty::Con("expr", a) if a.len() == 3 => t = a[2].clone(),
+                Ty::Con("maybe", a) if a.len() == 1 => t = a[0].clone(),
+                Ty::Fun(_, r) => t = (**r).clone(),
                 _ => break,
             }
         }

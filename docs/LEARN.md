@@ -421,7 +421,7 @@ money : query { id = int, total = decimal 10 2 } = table "sales" "orders"
 q = money & select { .id, .total }          # total : decimal 10 2
 ```
 
-The parameters are checked where they are written (`1 ≤ s ≤ p ≤ 38`). Arithmetic
+The parameters are checked where they are written (`0 ≤ s ≤ p ≤ 38`). Arithmetic
 does **not** convert: `+` and `-` take two operands of the same `decimal p s` and
 return that type, so a chain works without casts —
 

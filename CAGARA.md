@@ -350,7 +350,7 @@ parentheses: write `coalesce 0 .x`, never `coalesce(0, .x)`.
 | `maybe a` | nullable `a` | explicit nullability; see §6.3 |
 | `list a` | fixed list | only key lists and `inList`; no list operations |
 
-`decimal p s` is the type of money: both parameters are integers, `1 ≤ s ≤ p ≤ 38` (38 is what every
+`decimal p s` is the type of money: both parameters are integers, `0 ≤ s ≤ p ≤ 38` (38 is what every
 engine in the portable family supports), and they are checked where the type is written:
 `amount = decimal 2 10` says the scale has more digits than the precision, and `decimal 39 2` says the
 precision is past the family's cap. `decimal` on its own is an error — the parameters are what make

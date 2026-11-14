@@ -524,7 +524,8 @@ fn money_is_exact_on_the_engines() {
     let src = "money : query { id = int, total = decimal 10 2, part = decimal 10 1 } = \
                table \"main\" \"money\"\n\
                q = money & agg { revenue = sum .total, parts = sum .part }\n\
-               prod = money & select { id = .id, gross = .total * .total }\n";
+               prod = money & select { id = .id, gross = .total * .total }\n\
+               sum2 = money & select { id = .id, both = .total + .total }\n";
     let ws = Workspace::from_source(src);
     assert!(ws.diags.is_empty(), "{:?}", ws.diags);
     let rels = root_queries(&ws);
@@ -543,11 +544,24 @@ fn money_is_exact_on_the_engines() {
     let prod = prod
         .as_ref()
         .unwrap_or_else(|d| panic!("`prod`: {}", d.message));
+    // The addition is the other case where the value may need more digits than
+    // the type states (10 2 + 10 1 is 11 1 by SQL's rule, 10 2 by the language's).
+    let (_, sum2) = rels
+        .iter()
+        .find(|(n, _)| n == "sum2")
+        .unwrap_or_else(|| panic!("no `sum2`"));
+    let sum2 = sum2
+        .as_ref()
+        .unwrap_or_else(|d| panic!("`sum2`: {}", d.message));
     // 19.99 * 19.99 is 399.6001 exactly, and both engines render it the same way
     // even though their decimal *types* differ (DuckDB `DECIMAL(18,4)`,
     // PostgreSQL `numeric`): the product keeps the operand type in Cagara and the
     // exact value in the engine.
     let prod_want = ["1|399.6001", "2|399.6001", "3|399.6001"];
+    // `total + total` is `decimal 10 2` in Cagara and both engines add two
+    // `DECIMAL(10,2)` exactly: 19.99 + 19.99 is 39.98. (Adding `part`, a
+    // `decimal 10 1`, is a compile error — one type everywhere.)
+    let sum2_want = ["1|39.98", "2|39.98", "3|39.98"];
 
     let duck = Engine {
         shell: "duckdb",
@@ -620,6 +634,16 @@ fn money_is_exact_on_the_engines() {
     .expect("postgres product");
     let blocks = pg_batch(harness, &pg_setup, std::slice::from_ref(&prod_pg));
     assert_eq!(blocks[0], prod_want, "{prod_pg}");
+    let sum2_pg = compile(
+        sum2,
+        Options {
+            dialect: Dialect::Postgres,
+            ..Options::default()
+        },
+    )
+    .expect("postgres sum");
+    let blocks = pg_batch(harness, &pg_setup, std::slice::from_ref(&sum2_pg));
+    assert_eq!(blocks[0], sum2_want, "{sum2_pg}");
 }
 
 /// `lift` on the engines: one row has a value and one does not, so the NULL

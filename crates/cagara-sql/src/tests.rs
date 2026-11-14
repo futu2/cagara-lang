@@ -2698,6 +2698,30 @@ fn a_try_cast_is_refused_on_postgres() {
         .contains("TRY_CAST(a AS BIGINT)"));
 }
 
+/// The decimal cast is spelled the same way in every backend that has the type,
+/// and that is worth pinning: `DECIMAL(10, 2)` is what PostgreSQL, MySQL, Trino,
+/// Spark, BigQuery, Snowflake and T-SQL all read, while DuckDB's second parse of
+/// the same text agrees, so one spelling covers the family.
+#[test]
+fn a_decimal_cast_says_decimal_everywhere() {
+    let src = "o : query { total = string } = table \"s\" \"o\"\n\
+               q = o & select { x = toDecimal 10 2 .total }\n";
+    for d in [
+        "duckdb", "postgres", "mysql", "trino", "spark", "bigquery", "snowflake", "tsql",
+    ] {
+        let sql = dialect(src, "q", d).unwrap_or_else(|e| panic!("{d}: {e}"));
+        assert!(
+            sql.contains("DECIMAL(10, 2)"),
+            "{d}: the width is in the statement\n  {sql}"
+        );
+    }
+    // PostgreSQL spells a cast with `::`; that is the only difference.
+    let pg = dialect(src, "q", "postgres").expect("postgres");
+    assert!(pg.contains("::DECIMAL(10, 2)"), "{pg}");
+    let duck = dialect(src, "q", "duckdb").expect("duckdb");
+    assert!(duck.contains("CAST(total AS DECIMAL(10, 2))"), "{duck}");
+}
+
 /// A decimal is exact or it is refused: SQLite cannot hold one.
 ///
 /// Its `NUMERIC` affinity stores what it is given as INTEGER or REAL, so a value

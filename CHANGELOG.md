@@ -28,6 +28,11 @@
   drop. A `distinct` still needs the barrier, because dropping a column there changes how many
   rows are deduped. A projection that reuses a sort key's name for another column keeps it too.
 
+- A filter over a window is `QUALIFY` on DuckDB, Snowflake, BigQuery and Teradata, instead of
+  wrapping the window in a derived table. Two cases keep the wrap and both are correct: a
+  `limit`/`offset` below the filter (SQL runs `QUALIFY` before `LIMIT`, which would filter the
+  whole relation) and a `distinct`.
+
 - `countOf` and `countDistinct` take a nullable column. They were the two NULL-skipping
   aggregates without a `maybe` overload, which is backwards: `COUNT(x)` skips NULLs by
   definition, and counting the non-null values of a nullable column is what it is for.

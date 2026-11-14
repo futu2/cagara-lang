@@ -148,6 +148,17 @@ two uses resolve *before* their argument types are known. The next attempt shoul
 start from `arbitrate_pending` and the ordered-candidate path, not from
 `value_score`.
 
+The third reading of it, and the most precise: `prefer` waits while an argument is a
+variable (`decisive_only`), so the overload is decided in *some later pass* — and in
+that later pass, with `.score : maybe int`, the ranking prefers the `maybe` twin,
+which is right for a nullable-aware comparison but wrong for
+`case { .score > 10 => … }`, whose refusal is supposed to come from the non-null
+reading. A third candidate delays that first decision, which is how adding the
+decimal one changes an outcome it never participates in. So a comparison that mixes
+two `(p,s)` should not be a second candidate at all: it has to be a *rule* keyed on
+the operands (the shape `decimal_params` and the unnest message already use), or the
+comparison family needs one candidate whose parameter does not unify the two sides.
+
 What is left of the decimal work is therefore: mixed-parameter comparisons (same
 blocker — a specific candidate shadows the generic one), a result type that widens
 (needs type-level arithmetic), and `--ddl` if the schema side ever emits types.

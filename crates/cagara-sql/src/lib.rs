@@ -75,11 +75,13 @@ pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
     }
     let stmt = dialect::rewrite(stmt, opts.dialect)?;
     sqlglot_rust::validate_dialect_support(&stmt, opts.dialect).map_err(|e| format!("{e}"))?;
-    Ok(if opts.pretty {
+    let sql = if opts.pretty {
         sqlglot_rust::generate_pretty(&stmt, opts.dialect)
     } else {
         sqlglot_rust::generate(&stmt, opts.dialect)
-    })
+    };
+    // The one fixup that has to happen after generation: see `dialect::finalize`.
+    Ok(dialect::finalize(sql, opts.dialect))
 }
 
 /// Whether a relation contains a `fullJoin`, including under `At` wrappers.

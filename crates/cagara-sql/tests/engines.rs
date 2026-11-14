@@ -1952,6 +1952,211 @@ fn mysql_batch(harness: &str, setup: &str, queries: &[String]) -> Vec<Vec<String
     out
 }
 
+/// Cases the emulation cannot judge, and why. Every one of them is *also* run on
+/// the five real engines, so nothing here is unchecked — it is unchecked *by this
+/// route*.
+///
+/// `div` is `a / b` on two integer columns. Integer division is what ANSI and T-SQL
+/// mean by it, and DuckDB's `/` is float division for every type; the emulator
+/// cannot translate it faithfully because it does not know the operand types, and
+/// teaching it means passing a schema Python sqlglot does not use for arithmetic
+/// (checked: `annotate_types` with the real column types still emits `a / b`).
+const EMULATION_BLIND: &[(&str, &str)] = &[("div", "ansi"), ("div", "tsql")];
+
+/// The statements the emulation cannot *run*, pinned so that a statement which used
+/// to run and stops running is a failure rather than a silent loss of coverage.
+///
+/// All three are T-SQL, and all three are limits of the *second opinion*, not of our
+/// output. Each was read by hand before it was listed here:
+///
+/// - `str` — `LEN(name + 'x') - 1` is right: `+` concatenates in T-SQL, and `LEN`
+///   ignores trailing spaces, hence the `- 1`. Python sqlglot passes the `+` through
+///   and DuckDB refuses to add two strings.
+/// - `rw_null_ext_fn` — `CAST(amount AS VARCHAR(MAX))` is right. Python sqlglot turns
+///   it into `CAST(amount AS TEXT(MAX))`, which DuckDB does not parse.
+/// - `dt` — `@@DATEFIRST` is a T-SQL global, and the expression is the documented way
+///   to make `DATEPART(WEEKDAY, …)` start on Monday. Python sqlglot rewrites it to
+///   `$$DATEFIRST`, a DuckDB parameter reference, which is a parse error.
+const EMULATION_UNREADABLE: &[(&str, &str)] =
+    &[("str", "tsql"), ("rw_null_ext_fn", "tsql"), ("dt", "tsql")];
+
+/// The emulated dialects: our SQL, read by an independent parser, run on DuckDB.
+///
+/// T-SQL, BigQuery, Snowflake and ANSI have no server here. `tests/emulate.py`
+/// transpiles their SQL to DuckDB with Python's `sqlglot` — a different
+/// implementation from the Rust one this backend generates with — and the rows are
+/// compared with the ones the real engines produce for the same case. That answers
+/// the question the text checks cannot: do these dialects *mean* the same thing.
+///
+/// What it does not prove, and the test's doc says so: a construct both
+/// implementations misunderstand passes, and DuckDB is doing the computing for every
+/// dialect. It is a second opinion, not the server.
+#[test]
+fn the_emulated_dialects_mean_the_same_thing() {
+    let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/emulate.py");
+    let python = std::env::var("CAGARA_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let ready = Command::new(&python)
+        .args([harness, "--check"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ready {
+        assert!(
+            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            "no `sqlglot` for {python} (set CAGARA_PYTHON; CAGARA_REQUIRE_ENGINES is set)"
+        );
+        eprintln!("skipping the emulated dialects: sqlglot is not importable");
+        return;
+    }
+    let duck = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    let src = format!(
+        "{TABLES}{}\n",
+        CASES.iter().map(|(d, _)| *d).collect::<Vec<_>>().join("\n")
+    );
+    let ws = Workspace::from_source(&src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut ran = 0;
+    let mut unreadable: Vec<(String, String)> = Vec::new();
+    for dialect_name in ["tsql", "bigquery", "snowflake", "ansi"] {
+        let dialect = Dialect::from_str(dialect_name).expect("dialect");
+        let mut names: Vec<(&str, &[&str])> = Vec::new();
+        let mut statements: Vec<String> = Vec::new();
+        for (def, want) in CASES {
+            let name = def.split_whitespace().next().expect("name");
+            let (_, rel) = rels
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("no query `{name}`"));
+            let rel = rel
+                .as_ref()
+                .unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
+            let Ok(sql) = compile(
+                rel,
+                Options {
+                    dialect,
+                    ..Options::default()
+                },
+            ) else {
+                continue;
+            };
+            names.push((name, *want));
+            statements.push(sql);
+        }
+        let translated = emulate(&python, harness, dialect_name, &statements);
+        for ((name, want), got) in names.iter().zip(&translated) {
+            if EMULATION_BLIND.contains(&(name, dialect_name)) {
+                continue;
+            }
+            let Ok(sql) = got else {
+                // Either Python sqlglot cannot parse our output in this dialect, or
+                // the DuckDB SQL it produces does not run. Both are worth knowing and
+                // neither is automatically our bug, so the *set* is pinned rather
+                // than the count: a statement that used to run and stops running is a
+                // regression, and it fails the test instead of quietly shrinking the
+                // coverage.
+                unreadable.push((name.to_string(), dialect_name.to_string()));
+                continue;
+            };
+            match run_setup(&duck, SETUP, sql) {
+                Some(Ok(rows)) => {
+                    ran += 1;
+                    let mut rows = rows.clone();
+                    let mut want: Vec<&str> = want.to_vec();
+                    rows.sort();
+                    want.sort();
+                    if rows.len() != want.len()
+                        || !rows.iter().zip(&want).all(|(a, b)| same_instant(a, b))
+                    {
+                        failures.push(format!(
+                            "`{name}` as {dialect_name}: got {rows:?}, want {want:?}\n  {sql}"
+                        ));
+                    }
+                }
+                Some(Err(m)) => {
+                    if std::env::var_os("CAGARA_DEBUG_EMU").is_some() {
+                        eprintln!("SKIP {name} as {dialect_name}: {m}");
+                    }
+                    unreadable.push((name.to_string(), dialect_name.to_string()));
+                }
+                None => panic!("`duckdb` is not installed"),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let mut seen = unreadable.clone();
+    seen.sort();
+    let mut expected: Vec<(String, String)> = EMULATION_UNREADABLE
+        .iter()
+        .map(|(case, dialect)| (case.to_string(), dialect.to_string()))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        seen, expected,
+        "the set of statements the emulator cannot run changed: {ran} ran"
+    );
+}
+
+/// `same_row`, plus one rendering difference the emulation introduces: DuckDB's
+/// interval arithmetic returns a `TIMESTAMP` where BigQuery and Snowflake return a
+/// `DATE`, so `2024-02-29` comes back as `2024-02-29 00:00:00`. That is the same
+/// instant and the same value; it is not the same type, and a type check is
+/// something this route cannot do (DuckDB computes every dialect's answer).
+fn same_instant(a: &str, b: &str) -> bool {
+    let (x, y): (Vec<&str>, Vec<&str>) = (a.split('|').collect(), b.split('|').collect());
+    x.len() == y.len()
+        && x.iter().zip(&y).all(|(p, q)| {
+            same_row(p, q) || {
+                let midnight = |s: &str| s.strip_suffix(" 00:00:00").map(str::to_string);
+                midnight(p).as_deref() == Some(q) || midnight(q).as_deref() == Some(p)
+            }
+        })
+}
+
+/// Transpile a batch of statements through `tests/emulate.py`, which speaks the same
+/// record-separator protocol as the shells: `dialect \x1e statement \x1e …` in, one
+/// `OK|…` / `ERR|…` block per statement out.
+fn emulate(
+    python: &str,
+    harness: &str,
+    dialect: &str,
+    statements: &[String],
+) -> Vec<Result<String, String>> {
+    let mut script = dialect.to_string();
+    for sql in statements {
+        script.push('\u{1e}');
+        script.push_str(sql);
+    }
+    let mut child = Command::new(python)
+        .arg(harness)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("python");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(script.as_bytes())
+        .expect("write request");
+    let out = child.wait_with_output().expect("run python");
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split('\u{1e}')
+        .map(|block| match block.split_once('|') {
+            Some(("OK", sql)) => Ok(sql.to_string()),
+            Some((_, message)) => Err(message.to_string()),
+            None => Err(format!("no result for a statement: {block:?}")),
+        })
+        .collect()
+}
+
 /// Postgres, through PGlite — Postgres compiled to WebAssembly and driven by
 /// `node`, so no server is needed (`crates/cagara-sql/tests/pglite.mjs`).
 ///

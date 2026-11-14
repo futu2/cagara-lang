@@ -1652,6 +1652,59 @@ fn a_projection_does_not_capture_a_carried_sort_key() {
     );
 }
 
+/// BigQuery writes a set operation with an explicit `ALL` or `DISTINCT`.
+///
+/// Its grammar is `UNION { ALL | DISTINCT }` — a bare `UNION` is a syntax error, not
+/// a default — and the same for `INTERSECT` and `EXCEPT`. sqlglot's AST has one
+/// `all: bool`, so the generator cannot say `DISTINCT`; the keyword is added to the
+/// text afterwards (`dialect::finalize`). Python sqlglot does the same, which is
+/// where the spelling comes from.
+#[test]
+fn bigquery_writes_set_operations_with_a_modifier() {
+    let q = "a = users & select {.id}\nb = users & select {.id}\nq = a & union b & select {.id}\n";
+    for (op, want) in [
+        ("union", "UNION DISTINCT"),
+        ("intersect", "INTERSECT DISTINCT"),
+        ("except", "EXCEPT DISTINCT"),
+        ("unionAll", "UNION ALL"),
+    ] {
+        let src = q.replace("union", op);
+        let s = dialect(&src, "q", "bigquery").unwrap_or_else(|e| panic!("{op}: {e}"));
+        assert!(s.contains(want), "{op}: {s}");
+    }
+    // Every other target keeps the plain keyword, which is what it reads.
+    for d in ["postgres", "duckdb", "mysql", "trino", "snowflake"] {
+        let s = dialect(q, "q", d).unwrap_or_else(|e| panic!("{d}: {e}"));
+        assert!(s.contains("UNION SELECT"), "{d}: {s}");
+    }
+    // The word inside a string literal is not a keyword.
+    let s = dialect(
+        "q = users & select { id = .id, k = \"UNION\" }\n",
+        "q",
+        "bigquery",
+    )
+    .unwrap();
+    assert!(s.contains("'UNION'"), "{s}");
+    assert!(!s.contains("UNION DISTINCT"), "{s}");
+}
+
+/// BigQuery escapes a quote inside a string literal with a backslash.
+///
+/// `''` is standard SQL and what six of the targets read; BigQuery parses it as two
+/// adjacent literals and *errors*. sqlglot's generator doubles the quote for every
+/// dialect, so the spelling is fixed in the text after generation.
+#[test]
+fn bigquery_escapes_a_quote_with_a_backslash() {
+    let q = "q = users & where (.name == \"it's\") & select {.id}\n";
+    let bq = dialect(q, "q", "bigquery").unwrap();
+    assert!(bq.contains(r"'it\'s'"), "{bq}");
+    assert!(!bq.contains("''s"), "{bq}");
+    for d in ["postgres", "duckdb", "sqlite", "mysql", "trino", "tsql"] {
+        let s = dialect(q, "q", d).unwrap_or_else(|e| panic!("{d}: {e}"));
+        assert!(s.contains("'it''s'"), "{d}: {s}");
+    }
+}
+
 /// A filter over a window is `QUALIFY` where the target has the clause.
 ///
 /// The filter belongs after the window functions, which is exactly what `QUALIFY`
@@ -1879,10 +1932,16 @@ fn backslashes_are_escaped_where_they_are_escapes() {
         dialect(q, "q", "postgres").unwrap(),
         "SELECT id FROM public.users WHERE (name = 'a\\'' OR 1=1 -- ')"
     );
-    for d in ["mysql", "bigquery", "snowflake", "spark"] {
+    for d in ["mysql", "snowflake", "spark"] {
         let s = dialect(q, "q", d).unwrap();
         assert!(s.contains("'a\\\\'' OR 1=1 -- '"), "{d}: {s}");
     }
+    // BigQuery is the exception, and it was asserting the bug until an independent
+    // parser read it: it has no `''` escape, so `'a\\'' OR 1=1 -- '` is a string, a
+    // *second* string next to it, and `ParseError: Adjacent string literals`. The
+    // quote is escaped with a backslash there instead.
+    let bq = dialect(q, "q", "bigquery").unwrap();
+    assert!(bq.contains("'a\\\\\\' OR 1=1 -- '"), "{bq}");
     // Also inside a window spec, which `Expr::transform` skips.
     let w = "w = users & select { id = .id, rn = rowNumber { partition = [.name ++ \"\\\\\"] } }\n";
     let s = dialect(w, "w", "mysql").unwrap();

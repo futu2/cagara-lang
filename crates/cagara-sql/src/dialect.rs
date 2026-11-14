@@ -233,6 +233,129 @@ fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
     Ok(())
 }
 
+/// The last thing done to a statement, after it is generated.
+///
+/// One fixup lives here, and it is here rather than in the AST because the AST
+/// cannot say it: sqlglot's `SetOperationStatement` has a single `all: bool`, so the
+/// generator writes `UNION` or `UNION ALL` and nothing else. BigQuery's grammar is
+/// `UNION { ALL | DISTINCT }` — plain `UNION` is a *syntax error*, not a default —
+/// and the same for `INTERSECT` and `EXCEPT`. Python sqlglot encodes exactly this
+/// (`SET_OP_DISTINCT_BY_DEFAULT` is `None` for all three on BigQuery) and writes the
+/// keyword out; the Rust crate has no equivalent hook, so the keyword is added to the
+/// text.
+///
+/// The scan is quote-aware, so a `'UNION'` in a string literal or a `"union"` column
+/// name is left alone.
+pub(crate) fn finalize(sql: String, to: Dialect) -> String {
+    if !matches!(to, Dialect::BigQuery) {
+        return sql;
+    }
+    backslash_escaped_literals(&explicit_set_operation_distinct(&sql))
+}
+
+/// Write a quote inside a string literal the way BigQuery writes it.
+///
+/// sqlglot's generator doubles a quote (`''`) for every dialect, which is the
+/// standard-SQL spelling and what PostgreSQL, DuckDB, SQLite, MySQL, Trino and T-SQL
+/// read. BigQuery does not: it has C-style escapes, and two adjacent string literals
+/// are an *error*, not a concatenation —
+///
+/// ```text
+/// ParseError: Adjacent string literals need to be separated by whitespace or comments.
+/// ```
+///
+/// — so a value holding a quote produces SQL BigQuery cannot parse. Only the quote
+/// needs rewriting: the crate's dialect transform already escapes backslashes for the
+/// targets that read them as escapes, which is why `'a\\b'` is right there and
+/// `'it''s'` is not.
+///
+/// Snowflake and Spark accept the doubled quote too, so they are left alone: this
+/// changes what is broken and nothing else.
+fn backslash_escaped_literals(sql: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut out = String::with_capacity(sql.len() + 8);
+    let mut i = 0;
+    let mut in_literal = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c != '\'' {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if !in_literal {
+            in_literal = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        // Inside a literal, `''` is one quote and BigQuery spells it `\'`; a lone
+        // quote closes the literal.
+        if chars.get(i + 1) == Some(&'\'') {
+            out.push_str("\\'");
+            i += 2;
+            continue;
+        }
+        in_literal = false;
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Add `DISTINCT` to a set operation that has neither `ALL` nor `DISTINCT`.
+fn explicit_set_operation_distinct(sql: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut out = String::with_capacity(sql.len() + 32);
+    let mut i = 0;
+    // A quote opens a run that no keyword is looked for in; `''` inside a string is
+    // an escaped quote rather than the end of it.
+    let mut quote: Option<char> = None;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            out.push(c);
+            if c == q {
+                if chars.get(i + 1) == Some(&q) {
+                    out.push(q);
+                    i += 1;
+                } else {
+                    quote = None;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if c == '\'' || c == '"' || c == '`' {
+            quote = Some(c);
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        // A word: read it whole, then decide.
+        if c.is_alphanumeric() || c == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let upper = word.to_ascii_uppercase();
+            out.push_str(&word);
+            if matches!(upper.as_str(), "UNION" | "INTERSECT" | "EXCEPT") {
+                let rest: String = chars[i..].iter().collect();
+                let next = rest.trim_start().to_ascii_uppercase();
+                if !(next.starts_with("ALL") || next.starts_with("DISTINCT")) {
+                    out.push_str(" DISTINCT");
+                }
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /// A statement nested in a query: a derived table, a CTE body, or a branch of
 /// a set operation. A set operation is not a `Select`, so its own ORDER BY /
 /// LIMIT / OFFSET are rewritten here; everything else is reached by `block`.

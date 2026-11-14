@@ -1242,6 +1242,7 @@ fn line_of(text: &str, offset: usize) -> usize {
 fn same_signature(a: &TypeExpr, b: &TypeExpr) -> bool {
     fn normalize(t: &TypeExpr, vars: &mut Vec<String>, out: &mut String) {
         match t {
+            TypeExpr::Nat(n, _) => out.push_str(&n.to_string()),
             TypeExpr::Fun(p, r) => {
                 out.push('(');
                 normalize(p, vars, out);

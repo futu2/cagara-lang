@@ -159,10 +159,12 @@ abs : expr r float -> expr r float = sql "ABS($1)"
 ## differently; this leaves that to the target rather than pretending one rule
 ## is universal.
 round : expr r float -> expr r float = sql "ROUND($1)"
+round : expr r (decimal p s) -> expr r (decimal p s) = sql "ROUND($1)"
 
 ## `roundTo 2 .amount`: round to `digits` decimal places. Digits first, subject
 ## last, so `roundTo 2` is a reusable transformation.
 roundTo : expr r int -> expr r float -> expr r float = sql "ROUND($2, $1)"
+roundTo : expr r int -> expr r (decimal p s) -> expr r (decimal p s) = sql "ROUND($2, $1)"
 
 ## Round down to the nearest integer, as a `float`.
 floor : expr r float -> expr r float = sql "FLOOR($1)"
@@ -196,6 +198,7 @@ least : expr r a -> expr r a -> expr r a = sql "CASE WHEN $1 <= $2 THEN $1 ELSE 
 ## engines disagree about how they print a boolean.
 toString : expr r int -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r float -> expr r string = sql "CAGARA_TO_STRING($1)"
+toString : expr r (decimal p s) -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r date -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r timestamp -> expr r string = sql "CAGARA_TO_STRING($1)"
 toString : expr r bool -> expr r string = sql "CASE WHEN $1 THEN 'true' ELSE 'false' END"
@@ -208,12 +211,15 @@ toString : expr r bool -> expr r string = sql "CASE WHEN $1 THEN 'true' ELSE 'fa
 ## (`CAGARA_TRUNC_INT`); from a `string` it parses an integer and fails on a
 ## value that is not one (`tryInt` yields NULL instead).
 toInt : expr r float -> expr r int = sql "CAGARA_TRUNC_INT($1)"
+toInt : expr r (decimal p s) -> expr r int = sql "CAGARA_TRUNC_INT($1)"
 toInt : expr r string -> expr r int = sql "CAGARA_TO_INT($1)"
 
 ## Convert to `float`, a 64-bit IEEE double: from an `int` exactly, from a
 ## `string` by parsing.
 toFloat : expr r int -> expr r float = sql "CAGARA_TO_FLOAT($1)"
 toFloat : expr r string -> expr r float = sql "CAGARA_TO_FLOAT($1)"
+## The one door out of `decimal`: it is a lossy conversion, so it is written out.
+toFloat : expr r (decimal p s) -> expr r float = sql "CAGARA_TO_FLOAT($1)"
 
 ## Convert to `bool` from a number: zero is false, everything else true.
 toBool : expr r int -> expr r bool = sql "CAST($1 AS BOOLEAN)"
@@ -224,11 +230,13 @@ toBool : expr r float -> expr r bool = sql "CAST($1 AS BOOLEAN)"
 ## `DECIMAL(18, 2)` is exact. The *language* type stays `float` — there is no
 ## separate decimal scalar — so this changes the SQL type without adding one.
 ## Usable from `string`, `int` and `float` sources.
-toDecimal : expr r int -> expr r int -> expr r string -> expr r float =
+toDecimal : expr r int -> expr r int -> expr r string -> expr r (decimal p s) =
   sql "CAGARA_TO_DECIMAL($3, $1, $2)"
-toDecimal : expr r int -> expr r int -> expr r int -> expr r float =
+toDecimal : expr r int -> expr r int -> expr r int -> expr r (decimal p s) =
   sql "CAGARA_TO_DECIMAL($3, $1, $2)"
-toDecimal : expr r int -> expr r int -> expr r float -> expr r float =
+toDecimal : expr r int -> expr r int -> expr r float -> expr r (decimal p s) =
+  sql "CAGARA_TO_DECIMAL($3, $1, $2)"
+toDecimal : expr r int -> expr r int -> expr r (decimal p s) -> expr r (decimal p s) =
   sql "CAGARA_TO_DECIMAL($3, $1, $2)"
 
 # A `from*` name says where the value came from rather than where it is going,
@@ -297,7 +305,7 @@ tryTimestamp : expr r string -> expr r (maybe timestamp) = sql "CAGARA_TRY_TIMES
 
 ## `tryDecimal precision scale x`: `toDecimal` for a `string` that may not be a
 ## number, NULL on failure.
-tryDecimal : expr r int -> expr r int -> expr r string -> expr r (maybe float) =
+tryDecimal : expr r int -> expr r int -> expr r string -> expr r (maybe (decimal p s)) =
   sql "CAGARA_TRY_DECIMAL($3, $1, $2)"
 
 # ── dates and timestamps ───────────────────────────────────────────────────

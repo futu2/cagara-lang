@@ -468,6 +468,9 @@ impl<'w> Checker<'w> {
             // A literal type unifies only with the same literal: `symbol k`
             // bound to `"k"` and nothing else.
             (Ty::Sym(sa), Ty::Sym(sb)) if sa == sb => Ok(()),
+            // A type-level number unifies only with itself: a precision is not a
+            // type, and `decimal 10 2` is not `decimal 12 2`.
+            (Ty::Nat(x), Ty::Nat(y)) if x == y => Ok(()),
             // Two symbolic row terms unify componentwise. This must be checked
             // before the one-sided reduction arm below: otherwise the wildcard
             // would swallow this case and leave the mapper variables unrelated.

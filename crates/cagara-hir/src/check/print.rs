@@ -43,6 +43,7 @@ impl Printer {
             Ty::Var(v) => self.var(*v),
             Ty::Rigid(_, n) => n.clone(),
             Ty::Sym(s) => format!("{s:?}"),
+            Ty::Nat(n) => n.to_string(),
             Ty::Gen(k) => match self.gens.get(*k as usize).cloned().flatten() {
                 Some(n) => n,
                 None => {

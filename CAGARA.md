@@ -346,11 +346,18 @@ parentheses: write `coalesce 0 .x`, never `coalesce(0, .x)`.
 | `bool` | boolean | only `true`/`false` and comparisons |
 | `date` | date | string literals widen to it where a `date` is expected |
 | `timestamp` | timestamp | string literals widen to it where a `timestamp` is expected |
+| `decimal p s` | `DECIMAL(p,s)` / `NUMERIC` / `NUMBER` | exact fixed point: `p` digits, `s` after the point |
 | `maybe a` | nullable `a` | explicit nullability; see §6.3 |
 | `list a` | fixed list | only key lists and `inList`; no list operations |
 
-There is no `decimal`, `uuid`, `json`, `array`, or user-declared type. `toDecimal` changes the SQL
-type while the language type stays `float`.
+`decimal p s` is the type of money: both parameters are integers, `1 ≤ s ≤ p ≤ 38` (38 is what every
+engine in the portable family supports), and they are checked where the type is written:
+`amount = decimal 2 10` says the scale has more digits than the precision, and `decimal 39 2` says the
+precision is past the family's cap. `decimal` on its own is an error — the parameters are what make
+it a type. A numeric literal takes the `(p,s)` its context demands (`total * 1.2` is
+`decimal p s` arithmetic), and columns never convert: see §4.6.
+
+There is no `uuid`, `json`, `array`, or user-declared type.
 
 A bare name in a type position is a **type parameter** only when it is a single lowercase letter
 (`a`, `b`, `r`, `s`, `k` — the spelling every signature in this document uses). Any other name must

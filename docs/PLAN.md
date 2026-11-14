@@ -103,14 +103,18 @@ The decisions, so the next round does not relitigate them:
   elaboration and every walker stay untouched; the parser gains numeric type
   atoms and the checker validates the range.
 
-S1 is three commits: (1) the type — parser atoms, `CONS`, range validation,
-`ScalarType::Decimal` and its arms; (2) `toDecimal`/`tryDecimal` and the
-conversions (`toString`, `toInt`, `toFloat`, `round`, `roundTo`), with the
-literal-parameter rule for the first two arguments (the `keyLabel` mechanism, over
-numbers instead of labels); (3) SQL emission (`DECIMAL(p,s)`, `NUMERIC`,
-`NUMBER`), the SQLite refusal, and the DuckDB/PostgreSQL differential. Arithmetic
-and the aggregates are S2; until then a `decimal` in `+ - * /` is a compile error
-that says so.
+S1 is in: the type exists (`decimal p s` in declarations and signatures, with
+`Ty::Nat` parameters, `ScalarType::Decimal`, and the range check),
+`toDecimal`/`tryDecimal` return it with the parameters read from the literals, and
+`toString`/`toInt`/`round`/`roundTo`/`toFloat` have their decimal forms — the SQL
+is the cast the template already wrote (`DECIMAL(10, 2)`, `NUMERIC`, `NUMBER`).
+
+S2 remains: the arithmetic result-type rules (`+ -` widen by a digit, `*` by the
+sum of the scales, past 38 refused), the `sum`/`avg`/`min`/`max` signatures
+(`decimal 38 s`), mixed-parameter comparisons, the SQLite refusal (its `NUMERIC`
+affinity stores REAL or INTEGER, so the precision is not preserved there), and the
+DuckDB/PostgreSQL differential for exactness. Until then arithmetic on a `decimal`
+is a compile error naming the missing conversion.
 
 See [`CORE.md`](CORE.md) for semantics and [`ROW-TYPES.md`](ROW-TYPES.md) for
 row algebra.

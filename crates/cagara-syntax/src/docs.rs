@@ -159,6 +159,7 @@ impl<'a> Docs<'a> {
 
     fn collect_record_fields(&self, ty: &TypeExpr, out: &mut Vec<Vec<FieldDoc>>) {
         match ty {
+            TypeExpr::Nat(..) => {}
             TypeExpr::Record { fields, .. } => {
                 out.push(
                     fields

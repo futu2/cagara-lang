@@ -746,6 +746,9 @@ impl<'w> Checker<'w> {
         names: &mut HashMap<String, Ty>,
     ) -> Result<Ty, String> {
         match t {
+            TypeExpr::Nat(..) => Err("a number is not a type on its own; `decimal p s` is the \
+                                      constructor that takes one"
+                .into()),
             TypeExpr::App { head, args, .. } => {
                 let Some(&(name, arity)) = CONS.iter().find(|(n, _)| *n == head.as_str()) else {
                     // `row s` marks a *record of columns* in expression
@@ -785,6 +788,48 @@ impl<'w> Checker<'w> {
                     ));
                 }
                 match name {
+                    "decimal" => {
+                        // Each parameter is a number, or a variable that a use
+                        // site binds to one — `decimal p s` in a signature is
+                        // the same type as `decimal 10 2` written out.
+                        let mut params = Vec::new();
+                        for arg in &args[..2] {
+                            match arg {
+                                TypeExpr::Nat(n, _) => params.push(Ty::Nat(*n)),
+                                TypeExpr::App { head, args, .. }
+                                    if args.is_empty() && is_type_variable(head) =>
+                                {
+                                    params.push(self.rigid(head, names))
+                                }
+                                _ => {
+                                    return Err("`decimal` takes two numbers — `decimal 10 2` \
+                                                is ten digits with two after the point; a \
+                                                signature may also write `decimal p s` and let \
+                                                the use site decide"
+                                        .into())
+                                }
+                            }
+                        }
+                        // A pair of literals is checked where it is written; a
+                        // parameter is not, because its value comes from the use.
+                        if let (Ty::Nat(p), Ty::Nat(s_)) = (&params[0], &params[1]) {
+                            if s_ > p {
+                                return Err(format!(
+                                    "`decimal {p} {s_}` has more digits after the point than \
+                                     it has digits; write `decimal {s_} {s_}` or widen the \
+                                     precision"
+                                ));
+                            }
+                            if *p == 0 || *p > 38 {
+                                return Err(format!(
+                                    "`decimal` precision must be between 1 and 38, and this is \
+                                     {p}; 38 is what every engine in the portable family \
+                                     supports"
+                                ));
+                            }
+                        }
+                        Ok(Ty::Con("decimal", params))
+                    }
                     "expr" => {
                         let r = self.conv(&args[0], phase, names)?;
                         // `expr r (row s)` is the public spelling for a
@@ -996,6 +1041,9 @@ impl<'w> Checker<'w> {
             return self.conv_keymap(t, names);
         }
         match t {
+            TypeExpr::Nat(..) => {
+                Err("a number is not a type; `decimal p s` is the type that takes one".into())
+            }
             TypeExpr::App { head, args, .. } => {
                 // `row s` is the record-in-expression-position marker; its
                 // argument is a Row regardless of the kind expected here. See
@@ -1250,6 +1298,7 @@ impl<'w> Checker<'w> {
                 n
             }
             Ty::KeyAffix(n, s) => Ty::KeyAffix(n, s.clone()),
+            Ty::Nat(n) => Ty::Nat(n),
             Ty::Con(n, args) => Ty::Con(n, args.iter().map(|a| self.inst(a, map, gens)).collect()),
             Ty::Fun(a, b) => fun(self.inst(&a, map, gens), self.inst(&b, map, gens)),
             Ty::Row(fs, tail) => {
@@ -1325,6 +1374,7 @@ impl<'w> Checker<'w> {
 
     pub(crate) fn gen(&self, t: &Ty, map: &mut HashMap<u32, u32>, gens: &mut Vec<GenInfo>) -> Ty {
         match self.resolve(t) {
+            Ty::Nat(n) => Ty::Nat(n),
             r @ (Ty::Var(_) | Ty::Rigid(..)) => {
                 let (v, name) = match r {
                     Ty::Var(v) => (v, None),
@@ -1723,6 +1773,49 @@ impl<'w> Checker<'w> {
         Ok(a)
     }
 
+    /// `toDecimal 10 2 x` — the two numbers are the parameters of the result
+    /// type, so the checker reads them where they are written.
+    ///
+    /// This is not a coercion: the parameters of a `decimal` are part of its
+    /// type, and they are literals because the SQL cast needs the width in the
+    /// statement's syntax. A non-literal is refused by the backend (which needs
+    /// `Expr::Number`), and here it simply leaves the parameters open, which the
+    /// next use reports.
+    fn decimal_params(&mut self, f: &ast::Expr, args: &[ast::Expr], result: &Ty) {
+        let ExprKind::Name(name) = &f.kind else {
+            return;
+        };
+        let expect = match name.as_str() {
+            "toDecimal" | "tryDecimal" => 2,
+            _ => return,
+        };
+        if args.len() < expect {
+            return;
+        }
+        let mut nums = Vec::new();
+        for arg in &args[..expect] {
+            match &arg.kind {
+                ExprKind::Lit(ast::Lit::Int(n)) if *n >= 0 => nums.push(*n as u32),
+                _ => return,
+            }
+        }
+        // The result is `expr r (decimal p s)`, or `expr r (maybe (decimal p s))`
+        // for `tryDecimal`: the parameters are inside the wrappers.
+        let mut t = self.resolve(result);
+        loop {
+            match &t {
+                Ty::Con("expr", a) if a.len() == 3 => t = self.resolve(&a[2]),
+                Ty::Con("maybe", a) if a.len() == 1 => t = self.resolve(&a[0]),
+                _ => break,
+            }
+        }
+        if let Ty::Con("decimal", slots) = &t {
+            for (slot, n) in slots.iter().zip(nums) {
+                let _ = self.unify(slot, &Ty::Nat(n));
+            }
+        }
+    }
+
     fn infer_app(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
         let ExprKind::App(f, args) = &e.kind else {
             unreachable!("dispatched on ExprKind::App")
@@ -1997,6 +2090,7 @@ impl<'w> Checker<'w> {
                 }
             }
         }
+        self.decimal_params(f, args, &ft);
         self.uses.push((e.id, e.span, self.resolve(&ft), None));
         Ok(ft)
     }

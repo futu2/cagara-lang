@@ -59,6 +59,9 @@ pub enum TypeExpr {
         tail: Option<String>,
         span: Span,
     },
+    /// A numeric type atom: the parameters of `decimal p s`, which are the
+    /// precision and the scale, both written as integers.
+    Nat(u32, Span),
     /// A string literal in type position: the affix of a key mapper, as in
     /// `keyMap (prefix "u_") r`. It is read where the text still is, so the
     /// mapping is known when the query is checked.
@@ -294,6 +297,13 @@ impl Lower<'_> {
                     head: head.text().to_string(),
                     args: n.children().map(|c| self.ty(&c)).collect(),
                     span: span(n),
+                },
+                None => TypeExpr::Error(span(n)),
+            },
+            K::TyNat => match token(n, K::Int) {
+                Some(t) => match t.text().parse::<u32>() {
+                    Ok(v) => TypeExpr::Nat(v, span(n)),
+                    Err(_) => TypeExpr::Error(span(n)),
                 },
                 None => TypeExpr::Error(span(n)),
             },

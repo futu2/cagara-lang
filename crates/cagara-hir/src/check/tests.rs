@@ -205,6 +205,56 @@ fn unnest_says_it_needs_a_list() {
     assert!(row.iter().any(|f| f.starts_with("value")), "{row:?}");
 }
 
+/// `toDecimal 10 2` is a `decimal 10 2`, the conversions keep the type, and the
+/// parameters come from the literals the cast is written with.
+#[test]
+fn a_decimal_cast_names_its_parameters() {
+    let src = "o : query { id = int, total = string } = table \"s\" \"o\"\n\
+               q = o & select { id = .id, x = toDecimal 10 2 .total }\n";
+    assert_eq!(ty(src, "q"), "query { id = int, x = decimal 10 2 }");
+    // `tryDecimal` is the nullable one, with the parameters as well.
+    let src = "o : query { total = string } = table \"s\" \"o\"\n\
+               q = o & select { x = tryDecimal 10 2 .total }\n";
+    assert_eq!(ty(src, "q"), "query { x = maybe (decimal 10 2) }");
+    // The conversions take the declared type, and `roundTo` keeps it.
+    let src = "m : query { id = int, total = decimal 10 2 } = table \"s\" \"m\"\n\
+               q = m & select { s = toString .total, r = round .total, t = roundTo 2 .total }\n";
+    assert_eq!(
+        ty(src, "q"),
+        "query { s = string, r = decimal 10 2, t = decimal 10 2 }"
+    );
+    // Two different precisions are two different types.
+    let e = err(
+        "m : query { total = decimal 10 2 } = table \"s\" \"m\"\n\
+         f : expr r (decimal 12 2) -> expr r string = sql \"CAGARA_TO_STRING($1)\"\n\
+         q = m & select { x = f .total }\n",
+        "q",
+    );
+    // The parameters are what differ, and the message says which.
+    assert!(e.contains("expected 12, found 10"), "{e}");
+}
+
+/// `decimal p s` is a type, its parameters are numbers, and both are checked.
+#[test]
+fn decimal_is_a_type_with_two_numbers() {
+    let prelude = "t : query { id = int, total = decimal 10 2 } = table \"s\" \"t\"\n";
+    let src = format!("{prelude}q = t & select {{ .id, .total }}\n");
+    assert_eq!(ty(&src, "q"), "query { id = int, total = decimal 10 2 }");
+    // The parameters travel with the type, so a mismatch can name them.
+    for (decl, want) in [
+        ("decimal 10", "takes 2 type argument(s)"),
+        ("decimal 2 10", "more digits after the point"),
+        ("decimal 39 2", "between 1 and 38"),
+        ("decimal (list int) 2", "takes two numbers"),
+    ] {
+        let e = err(
+            &format!("t : query {{ x = {decl} }} = table \"s\" \"t\"\n"),
+            "t",
+        );
+        assert!(e.contains(want), "`{decl}`: {e}");
+    }
+}
+
 /// `lift` turns a `maybe` argument into a `maybe` result, and the function it
 /// takes never sees the missing value.
 ///
@@ -910,10 +960,10 @@ fn a_diagnostic_carries_the_fix_it_knows() {
 /// as many words; the fix is the closed set plus a "did you mean".
 #[test]
 fn a_type_name_must_be_known() {
-    let src = "money : query { amount = decimal } = table \"public\" \"money\"\n\
+    let src = "money : query { amount = uuid } = table \"public\" \"money\"\n\
                q = money & select { s = upper .amount }\n";
     let e = err(src, "money");
-    assert!(e.contains("unknown type `decimal`"), "{e}");
+    assert!(e.contains("unknown type `uuid`"), "{e}");
     assert!(
         e.contains("single lowercase letter"),
         "the diagnostic must say what a bare name is: {e}"

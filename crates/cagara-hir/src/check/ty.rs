@@ -15,6 +15,13 @@ pub(crate) enum Ty {
     /// Schemes use these instead of arena variables, so they stand alone.
     Gen(u32),
     Con(&'static str, Vec<Ty>),
+    /// A type-level number: the precision or the scale of `decimal p s`.
+    ///
+    /// It needs its own variant rather than a `Con` because `Con`'s name is
+    /// `&'static str`, and a precision is not one of a closed set of names. It
+    /// is not a type on its own — `conv` only produces it as a `decimal`
+    /// argument — and it unifies by equality like any other constructor.
+    Nat(u32),
     Fun(Box<Ty>, Box<Ty>),
     /// Fields plus a tail (`Empty`, a variable, or a rigid variable).
     Row(Vec<(String, Ty)>, Box<Ty>),
@@ -353,7 +360,7 @@ pub(crate) fn ty_to_scalar(t: &Ty) -> ScalarType {
     match t {
         // A variable that reaches here was never solved. "Unknown" is the
         // honest answer: the rest of the definition is already reported.
-        Ty::Var(_) | Ty::Rigid(..) | Ty::Gen(_) | Ty::Sym(_) => ScalarType::Unknown,
+        Ty::Var(_) | Ty::Rigid(..) | Ty::Gen(_) | Ty::Sym(_) | Ty::Nat(_) => ScalarType::Unknown,
         Ty::Con(name, args) => match (*name, args.len()) {
             ("int", 0) => ScalarType::Int,
             ("float", 0) => ScalarType::Float,
@@ -361,6 +368,16 @@ pub(crate) fn ty_to_scalar(t: &Ty) -> ScalarType {
             ("bool", 0) => ScalarType::Bool,
             ("date", 0) => ScalarType::Date,
             ("timestamp", 0) => ScalarType::Timestamp,
+            ("decimal", 2) => match (&args[0], &args[1]) {
+                (Ty::Nat(precision), Ty::Nat(scale)) => ScalarType::Decimal {
+                    precision: *precision,
+                    scale: *scale,
+                },
+                // A `decimal` whose parameters never resolved cannot be built
+                // (`conv` requires two numbers), so this is a variable that is
+                // still open; "unknown" is the honest answer.
+                _ => ScalarType::Unknown,
+            },
             ("maybe", 1) => ScalarType::maybe(ty_to_scalar(&args[0])),
             ("list", 1) => ScalarType::List(Box::new(ty_to_scalar(&args[0]))),
             _ => ScalarType::Unknown,
@@ -448,7 +465,7 @@ pub(crate) fn scheme_view(t: &Ty) -> SchemeView {
                 .collect(),
         },
         Ty::Fun(..) => SchemeView::Function,
-        Ty::Sym(_) => SchemeView::Open,
+        Ty::Sym(_) | Ty::Nat(_) => SchemeView::Open,
         Ty::Merge(..)
         | Ty::MapValue(..)
         | Ty::MapKey(..)

@@ -296,6 +296,9 @@ impl<'w> Checker<'w> {
                 out.push_str(&format!("{s:?}"));
                 out.push(')');
             }
+            Ty::Nat(n) => {
+                out.push_str(&format!("nat({n})"));
+            }
             Ty::Var(v) => {
                 out.push('v');
                 out.push_str(&v.to_string());

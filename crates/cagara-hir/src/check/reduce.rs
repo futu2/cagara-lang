@@ -190,6 +190,8 @@ pub(crate) fn kind_of(t: &Ty, vars: &[VarInfo]) -> Kind {
         Ty::Gen(_) => Kind::Type, // schemes handle their own kinding
         // A literal type is an ordinary type: it unifies only with itself.
         Ty::Sym(_) => Kind::Type,
+        // A type-level number is not a type of anything; it is a parameter.
+        Ty::Nat(_) => Kind::Type,
         Ty::Con("KeyMapId" | "KeyMapCompose" | "labelPrefix" | "labelSuffix", _) => Kind::KeyMap,
         Ty::Con(_, _) => Kind::Type,
         Ty::Fun(_, _) => Kind::Type,
@@ -214,6 +216,11 @@ pub(crate) const CONS: &[(&str, usize)] = &[
     ("bool", 0),
     ("date", 0),
     ("timestamp", 0),
+    // `decimal p s`: both arguments are `TypeExpr::Nat`, and the checker reads
+    // them as the precision and the scale. The widest portable family is 38
+    // digits (Trino, Spark, DuckDB and MySQL all cap there), so the language
+    // states that rather than either engine's best.
+    ("decimal", 2),
     ("maybe", 1),
     ("list", 1),
     ("query", 1),

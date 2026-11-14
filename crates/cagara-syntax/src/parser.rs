@@ -439,7 +439,7 @@ impl<'a> Parser<'a> {
         !self.at_boundary()
             && matches!(
                 self.peek(),
-                Some(Token::Ident | Token::LBrace | Token::LParen | Token::String)
+                Some(Token::Ident | Token::LBrace | Token::LParen | Token::String | Token::Int)
             )
     }
 
@@ -461,6 +461,12 @@ impl<'a> Parser<'a> {
         match self.peek().filter(|_| !self.at_boundary()) {
             Some(Token::Ident) => {
                 self.start(K::TyApp);
+                self.bump();
+                self.finish();
+            }
+            // A number in type position: a `decimal p s` parameter.
+            Some(Token::Int) => {
+                self.start(K::TyNat);
                 self.bump();
                 self.finish();
             }

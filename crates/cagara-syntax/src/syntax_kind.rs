@@ -312,6 +312,7 @@ kind_table! {
         /// A string literal in type position: `keyMap (prefix "u_") r`. The
         /// affix of a key mapper, read where the text still is.
         TyStr,
+        TyNat,
         /// `x => body`, or `(x : ty) => body`. The optional `TypeAnn` child is
         /// the parameter's annotation.
         Lambda,
@@ -380,7 +381,7 @@ mod tests {
             QuestionQuestion Question LtQuestion QuestionGt LtQuestionGt Dollar Bar LParen RParen \
             LBrace RBrace LBracket RBracket Comma Eq Colon Semicolon Field LeftField RightField \
             Ident Int Float String UnterminatedString Error LetKw SourceFile ImportDecl \
-            Definition TypeAnn TyApp TyRecord TyField TyFun TyParen TyStr Lambda BinExpr App \
+            Definition TypeAnn TyApp TyRecord TyField TyFun TyParen TyStr TyNat Lambda BinExpr App \
             NegExpr ParenExpr RecordExpr RecordField ListExpr NameRef Literal FieldExpr ProjExpr \
             SqlExpr PrimitiveExpr CaseExpr CaseArm ErrorNode LetExpr";
         let got: Vec<String> = ALL.iter().map(|k| format!("{k:?}")).collect();

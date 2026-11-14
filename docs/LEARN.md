@@ -411,10 +411,19 @@ instead, which reads better where the column's type is the surprising part:
 `fromString .man_grade` says the value is text being read as a number. They are
 the same function.
 
-`toDecimal precision scale x` gives a value an exact SQL type —
-`toDecimal 18 2 .amount` is `CAST(amount AS DECIMAL(18, 2))`. The language type
-stays `float` (there is no separate decimal scalar), but the SQL type is exact,
-which matters for money: binary floating point cannot represent it.
+`toDecimal precision scale x` gives a value the exact type —
+`toDecimal 18 2 .amount` is `CAST(amount AS DECIMAL(18, 2))` and its Cagara type is
+`decimal 18 2`. That type is what money should be declared as: binary floating
+point cannot represent it, and `--types` says which scale a value has.
+
+```haskell
+money : query { id = int, total = decimal 10 2 } = table "sales" "orders"
+q = money & select { .id, .total }          # total : decimal 10 2
+```
+
+The parameters are checked where they are written (`1 ≤ s ≤ p ≤ 38`), a numeric
+literal takes the `(p,s)` its context demands, and arithmetic does not convert
+between two decimal types: see §"Decimal arithmetic" below.
 
 `toInt` truncates a `float` toward zero in every dialect, and `toFloat` produces
 a 64-bit double; the backend casts to the matching SQL width (`BIGINT`,

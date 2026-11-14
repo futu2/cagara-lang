@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `decimal p s` is a type: `total = decimal 10 2` declares exact fixed point, `1 ≤ s ≤ p ≤ 38`, and the
+  parameters are checked where they are written. `toDecimal 10 2 x` and `tryDecimal 10 2 x` return
+  `decimal 10 2` / `maybe (decimal 10 2)` (the parameters come from the literals), `toString`,
+  `toInt`, `round` and `roundTo` keep or leave the type as they should, and `toFloat` is the one lossy
+  door out. Arithmetic on decimals is still refused until the result-type rules land: `+`, `-`, `*`
+  and `/` on a `decimal` is a compile error rather than a silently inexact double.
+
 - A `maybe` used where a present value is wanted now comes with its fix on the diagnostic itself, so
   any client can offer it: `(.s ?? "")` with a per-type default when the value is missing, `just (…)`
   when the position takes a `maybe`. It wraps the column, not the field around it, so `upper .s`

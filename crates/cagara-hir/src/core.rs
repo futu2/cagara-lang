@@ -39,6 +39,13 @@ pub enum ScalarType {
     Bool,
     Date,
     Timestamp,
+    /// `decimal p s`: an exact fixed-point number, `p` digits wide with `s` of
+    /// them after the point. The parameters travel with the type so that a
+    /// mismatch can say which of the two is wrong.
+    Decimal {
+        precision: u32,
+        scale: u32,
+    },
     Maybe(Box<ScalarType>),
     List(Box<ScalarType>),
     /// A type the checker reached the end of a query with still open, or one
@@ -97,6 +104,9 @@ impl std::fmt::Display for ScalarType {
         match self {
             ScalarType::Int => f.write_str("int"),
             ScalarType::Float => f.write_str("float"),
+            ScalarType::Decimal { precision, scale } => {
+                write!(f, "decimal {precision} {scale}")
+            }
             ScalarType::String => f.write_str("string"),
             ScalarType::Bool => f.write_str("bool"),
             ScalarType::Date => f.write_str("date"),

@@ -1551,6 +1551,30 @@ fn null_extended_join_inputs_compute_before_the_join() {
     );
 }
 
+/// A projection may fold over a `limit` even when it drops columns, because the
+/// `ORDER BY` it folds under names *input* columns. That is only true while the
+/// projection does not reuse one of those names for another column: after the fold
+/// they share a `SELECT`, and a bare `ORDER BY name` then binds to the output.
+#[test]
+fn a_sort_key_shadowed_by_the_projection_keeps_its_barrier() {
+    // `order [asc .name]` with a projection that renames `id` to `name`: the
+    // folded `ORDER BY name` would sort by `id`.
+    let s = sql(
+        "q = users & order [asc .name] & limit 3 & select { name = .id, x = .name }\n",
+        "q",
+    );
+    assert!(s.contains("AS t1"), "must keep the derived table: {s}");
+    // The same projection without the clash folds.
+    let s = sql(
+        "q = users & order [asc .name] & limit 3 & select { x = .id }\n",
+        "q",
+    );
+    assert_eq!(
+        s,
+        "SELECT id AS x FROM public.users ORDER BY name NULLS LAST LIMIT 3"
+    );
+}
+
 /// A projection that renames and reorders without dropping anything folds into
 /// a stage a general projection may not: it cannot change which rows a `LIMIT` or
 /// a `DISTINCT` below it selects.

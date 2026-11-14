@@ -155,12 +155,19 @@ rule would be a promise one target breaks. The refusal's message says exactly th
 and names the way through — `toFloat`, then `toDecimal p s` — instead of listing the
 `int` and `float` signatures that were never going to match.
 
-What is left of the decimal work is therefore: a result type that *widens* the way
-SQL's does (which needs type-level arithmetic in the language, or an arbitration
-that can rank a computed result), a division that stays exact on every target (which
-needs a cast whose parameters come from the type, i.e. the same type-level
-machinery), and `--ddl` if the schema side ever emits column types. Mixed
-comparisons are not on the list: they are refused by decision.
+What is left of the decimal work is therefore three things, none of which is
+required for the type to be usable:
+
+- a result type that *widens* the way SQL's does — the plan asked for it, and the
+  language keeps the operand type instead, by the owner's decision ("same type in,
+  same type out"). Doing the SQL rule needs type-level arithmetic or an arbitration
+  that can rank a computed result;
+- a division that stays exact on every target — the same type-level machinery, since
+  the cast that would hold it needs the parameters in SQL;
+- `--ddl` if the schema side ever emits column types.
+
+Mixed comparisons and decimal division are not on the list: both are refused by
+decision, and both messages say why.
 
 See [`CORE.md`](CORE.md) for semantics and [`ROW-TYPES.md`](ROW-TYPES.md) for
 row algebra.

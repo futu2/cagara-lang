@@ -1438,10 +1438,11 @@ mod tests {
             here.contains("sum : expr { age = int, id = int, name = string } int -> "),
             "{h}"
         );
-        // Every signature of the set is listed: the numeric pair and the
-        // nullable pair (which is why `sum` over a `maybe` column needs no
-        // `sumMaybe`).
-        assert_eq!(general.matches("sum : ").count(), 4, "{h}");
+        // Every signature of the set is listed: the numeric pair, the nullable
+        // pair (which is why `sum` over a `maybe` column needs no `sumMaybe`),
+        // and the decimal pair, whose width is stated as the portable 38.
+        assert_eq!(general.matches("sum : ").count(), 6, "{h}");
+        assert!(general.contains("(decimal 38 s)"), "{h}");
         assert!(general.contains("(maybe int) -> agg"), "{h}");
         // Operators hover at their symbol, under their definition name.
         let h = hover(&ws, at("x + x", 2)).unwrap();

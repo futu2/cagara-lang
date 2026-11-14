@@ -223,6 +223,14 @@ fn a_decimal_cast_names_its_parameters() {
         ty(src, "q"),
         "query { s = string, r = decimal 10 2, t = decimal 10 2 }"
     );
+    // Aggregates: the sum and the average are stated as 38 digits with the
+    // operand's scale, which is the portable family's width.
+    let src = "m : query { total = decimal 10 2 } = table \"s\" \"m\"\n\
+               q = m & agg { s = sum .total, a = avg .total, lo = min .total }\n";
+    assert_eq!(
+        ty(src, "q"),
+        "query { s = maybe (decimal 38 2), a = maybe (decimal 38 2), lo = maybe (decimal 10 2) }"
+    );
     // Two different precisions are two different types.
     let e = err(
         "m : query { total = decimal 10 2 } = table \"s\" \"m\"\n\

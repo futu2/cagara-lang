@@ -109,12 +109,19 @@ S1 is in: the type exists (`decimal p s` in declarations and signatures, with
 `toString`/`toInt`/`round`/`roundTo`/`toFloat` have their decimal forms — the SQL
 is the cast the template already wrote (`DECIMAL(10, 2)`, `NUMERIC`, `NUMBER`).
 
+The aggregates are in too: `sum`/`avg` of a `decimal p s` are `maybe (decimal 38
+s)` — stated in the signature, because 38 is a constant in the portable family —
+and `min`/`max` keep the operand's type.
+
 S2 remains: the arithmetic result-type rules (`+ -` widen by a digit, `*` by the
-sum of the scales, past 38 refused), the `sum`/`avg`/`min`/`max` signatures
-(`decimal 38 s`), mixed-parameter comparisons, the SQLite refusal (its `NUMERIC`
-affinity stores REAL or INTEGER, so the precision is not preserved there), and the
-DuckDB/PostgreSQL differential for exactness. Until then arithmetic on a `decimal`
-is a compile error naming the missing conversion.
+sum of the scales, past 38 refused), mixed-parameter comparisons, the SQLite
+refusal (its `NUMERIC` affinity stores REAL or INTEGER, so the precision is not
+preserved there), and the DuckDB/PostgreSQL differential for exactness. Until then
+arithmetic on a `decimal` is a compile error naming the missing conversion — the
+result type is a function of the operands, so it cannot be a signature; it has to
+be bound where an application's argument types are still in hand, and the first
+attempt at that hook did not fire for an overloaded operator name, which is where
+the next round starts.
 
 See [`CORE.md`](CORE.md) for semantics and [`ROW-TYPES.md`](ROW-TYPES.md) for
 row algebra.

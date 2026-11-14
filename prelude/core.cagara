@@ -427,6 +427,10 @@ sum : expr r int -> agg (expr r (maybe int)) = sql "SUM($1)"
 sum : expr r float -> agg (expr r (maybe float)) = sql "SUM($1)"
 sum : expr r (maybe int) -> agg (expr r (maybe int)) = sql "SUM($1)"
 sum : expr r (maybe float) -> agg (expr r (maybe float)) = sql "SUM($1)"
+## Money: the sum of a `decimal p s` is 38 digits wide with the same scale, the
+## widest the portable family supports.
+sum : expr r (decimal p s) -> agg (expr r (maybe (decimal 38 s))) = sql "SUM($1)"
+sum : expr r (maybe (decimal p s)) -> agg (expr r (maybe (decimal 38 s))) = sql "SUM($1)"
 
 ## Arithmetic mean, overloading `int` and `float`; always a `float`, NULL for
 ## an empty group.
@@ -434,6 +438,8 @@ avg : expr r int -> agg (expr r (maybe float)) = sql "AVG($1)"
 avg : expr r float -> agg (expr r (maybe float)) = sql "AVG($1)"
 avg : expr r (maybe int) -> agg (expr r (maybe float)) = sql "AVG($1)"
 avg : expr r (maybe float) -> agg (expr r (maybe float)) = sql "AVG($1)"
+avg : expr r (decimal p s) -> agg (expr r (maybe (decimal 38 s))) = sql "AVG($1)"
+avg : expr r (maybe (decimal p s)) -> agg (expr r (maybe (decimal 38 s))) = sql "AVG($1)"
 
 ## Smallest value in the group; NULL for an empty group.
 min : expr r a -> agg (expr r (maybe a)) = sql "MIN($1)"

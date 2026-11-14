@@ -77,6 +77,7 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
    | `offset a & offset b` → `offset (a+b)` | same |
    | `limit a & offset b` → `limit (a-b) & offset b` | the fold is legal in one order only, and which order a pipeline is in is a property of the pair |
    | `distinct & distinct` → `distinct` | same |
+   | an identity projection → the input | it has to cross a barrier to be worth removing, which is a property of the pair |
 
    The pagination rule fixed a real bug: `limit 5 & offset 2` keeps rows 3..=5, and
    the pair folded into `LIMIT 5 OFFSET 2` keeps five rows starting at the third. The
@@ -93,11 +94,15 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
    | `stage.rs` | `Stage` → a `sqlglot` `SelectStatement` | no |
    | `dialect.rs` | `rewrite` / `validate_dialect_support` on the finished statement | yes — all of it |
 
-   Next rules that would fit there, in the order they look worth it: identity
-   projection elimination (`select { a = .a, b = .b }` already fuses, but a
-   projection whose names and order match its input could skip the stage entirely),
-   filter-into-join for an inner join, and folding a projection into a join operand.
-   None of them is needed for correctness; the pagination rule was.
+   Two of those rules fixed answers rather than plans: the pagination fold, and a
+   sort key written as the column it names instead of that column's *expression*
+   (`select { id = .a, a = .id } & order [asc .id]` used to order by `a`, which is
+   an output alias for `id`).
+
+   Next rules that would fit there, in the order they look worth it: filter-into-join
+   for an inner join, folding a projection into a join operand, and dropping a
+   projection that only *renames* columns when nothing above reads the new names.
+   None of them is needed for correctness today.
 
 2. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
    beyond SQLite, DuckDB and PostgreSQL (PGlite). Every shared case already runs

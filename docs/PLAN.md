@@ -99,10 +99,15 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
    (`select { id = .a, a = .id } & order [asc .id]` used to order by `a`, which is
    an output alias for `id`).
 
-   Next rules that would fit there, in the order they look worth it: filter-into-join
-   for an inner join, folding a projection into a join operand, and dropping a
-   projection that only *renames* columns when nothing above reads the new names.
-   None of them is needed for correctness today.
+   A semi/anti join now inlines both of its inputs: it is an existence test, neither
+   side is null-extended, and a derived table there protects nothing. That one lives
+   in `lower.rs` (`join_input` with `can_place`) rather than in the pass, because it
+   is a decision about one input against a stage, not about a pair of nodes.
+
+   Next candidates, in the order they look worth it: filter-into-join for an inner
+   join, folding a projection into a join operand, and dropping a projection that
+   only *renames* columns when nothing above reads the new names. None of them is
+   needed for correctness today.
 
 2. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
    beyond SQLite, DuckDB and PostgreSQL (PGlite). Every shared case already runs

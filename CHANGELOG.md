@@ -18,6 +18,10 @@
   precision would be lost silently). `money_is_exact_on_the_engines` runs the sum of three 19.99s and
   `0.1 + 0.2` on DuckDB and PostgreSQL.
 
+- A `semiJoin` / `antiJoin` no longer wraps a plain table in a derived table on either side.
+  It is an existence test and neither side is null-extended, so the subquery only appears where
+  a stage needs one (paging, dedupe, grouping).
+
 - A sort key is written as the output column it names. `select { user_id = .id } & order [asc .user_id]`
   emitted `ORDER BY id` — the resolved expression — which is only right by luck; with a
   projection that renames a column to another column's name (`select { id = .a, a = .id }`) it

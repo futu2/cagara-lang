@@ -18,6 +18,12 @@
   precision would be lost silently). `money_is_exact_on_the_engines` runs the sum of three 19.99s and
   `0.1 + 0.2` on DuckDB and PostgreSQL.
 
+- A `limit` followed by an `offset` now means what it says. `limit 5 & offset 2` keeps rows
+  3..=5, and it used to fold into `LIMIT 5 OFFSET 2`, which keeps five rows starting at the
+  third; a new `Rel -> Rel` pass (`crates/cagara-sql/src/rewrite.rs`) folds the pair into
+  `LIMIT 3 OFFSET 2` instead, and it also drops a derived table for two limits, two offsets
+  and a doubled `distinct`.
+
 - The formatter lays out `decimal 10 2` and `primitive "…"` bodies. Both used to make it
   print the whole definition exactly as written — the fallback it has for a half-typed
   buffer — so `x = decimal 10 2 , y = int` kept its space before the comma and every

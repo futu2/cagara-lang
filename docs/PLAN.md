@@ -109,11 +109,28 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
    only *renames* columns when nothing above reads the new names. None of them is
    needed for correctness today.
 
-2. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
-   beyond SQLite, DuckDB and PostgreSQL (PGlite). Every shared case already runs
-   under both lowerings (the default and `--optimize`); MySQL, T-SQL and the
-   warehouses stay text-only because they need a server this repository does not
-   start.
+2. ~~Extend the execution-backed coverage beyond SQLite, DuckDB and PostgreSQL.~~
+   **Done to the extent this repository can reach, and the limit is documented.**
+   Three engines can be started here (`sqlite3`, `duckdb`, and PostgreSQL through
+   PGlite); MySQL, Trino, Spark, BigQuery, Snowflake and T-SQL need a server this
+   repository does not start, and there is no container runtime or `nix` on the
+   machine the suite runs on. So the other seven targets are covered by the two
+   checks a text pipeline can actually make, over every shared case:
+
+   | check | what it proves | what it does not |
+   |---|---|---|
+   | `every_statement_is_well_formed_sql` | the generator produced well-formed SQL for that target (balanced, no placeholder left, no empty clause) | that the target *accepts* it — sqlglot's parser is dialect-agnostic here, which is measured in the test itself |
+   | `each_dialect_avoids_what_it_cannot_read` | the dialect pass removed the spellings that target cannot read (`LIMIT` and `NULLS LAST` for T-SQL, `||` and `FULL JOIN` for MySQL, `::` everywhere but PostgreSQL, backticks outside MySQL) | anything about values — only an engine can answer that |
+
+   The first of those found a real bug: a statement nested inside an expression
+   (`EXISTS (…)` from a semi/anti join) was never rewritten, so `NULLS LAST` reached
+   MySQL and T-SQL inside the subquery. That is exactly the class of defect the
+   engines here could not see, and the reason the text checks were worth adding.
+
+   What would move this item further, in order: a MySQL server (the only target
+   whose expression semantics differ in ways text cannot check — `||` is OR, integer
+   division differs), then Trino (strict typing), then the warehouses. Each needs a
+   service to start, which is why they are not here.
 
 ## Deferred language work
 

@@ -684,7 +684,9 @@ fn a_list_compares_as_a_value_on_the_engines() {
         .iter()
         .find(|(n, _)| n == "q")
         .unwrap_or_else(|| panic!("no `q`"));
-    let rel = rel.as_ref().unwrap_or_else(|d| panic!("`q`: {}", d.message));
+    let rel = rel
+        .as_ref()
+        .unwrap_or_else(|d| panic!("`q`: {}", d.message));
     // DuckDB prints a boolean as 1/0 and PostgreSQL as `true`/`false`, so the
     // assertion compares rows the way the shared cases do.
     let want = ["1|0|1|1"];

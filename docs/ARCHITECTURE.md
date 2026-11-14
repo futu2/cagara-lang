@@ -92,3 +92,28 @@ relations and diagnostics. The shell handles file access, overlays, editor
 state, and SQL options. The SQL backend lowers `Rel` to ANSI SQL and rewrites
 the result for each supported dialect. It does not perform language
 type-checking; those facts are complete before SQL lowering begins.
+
+## Where code lives
+
+Six crates, one direction of dependency: `cagara-syntax` ← `cagara-hir` ←
+`cagara-sql`/`cagara-lsp`/`cagara-fmt` ← `cagara-cli`. Nothing lower knows about
+anything above it.
+
+| crate | what it owns | depends on |
+|---|---|---|
+| `cagara-syntax` | lexer, parser, AST, the operator table, the `##` doc comments | — |
+| `cagara-hir` | resolution, the checker, the typed core, the normalizer, the relational arena, erasure to `Rel`, schema validation | syntax |
+| `cagara-sql` | `Rel` → SQL: `rewrite` (`Rel` → `Rel`), `lower` (`Rel` → `Stage`), `stage` (`Stage` → statement), `dialect` (statement → target), `intrinsics` (the `CAGARA_*` templates) | hir |
+| `cagara-fmt` | source formatting, on the lossless rowan tree | syntax |
+| `cagara-lsp` | diagnostics, hover, completion, code actions, inlay hints, rename — all read the same `Workspace` the CLI does | hir, syntax, fmt |
+| `cagara-cli` | one module per subcommand (`main` for the file compiler, `fmt`, `check`, `doc`) | everything |
+
+Two rules keep that table true, and both are cheap to check:
+
+- **A dialect rule lives in `dialect.rs`.** `lower.rs` and `stage.rs` mention no
+  `Dialect`, so a question about a target is asked once, on the finished statement,
+  and the pass that builds it stays dialect-free.
+- **A rule about two stages at once lives in `rewrite.rs`.** The lowerer decides one
+  node against the stage built so far; anything that needs to look at a *pair*
+  (`limit` then `offset`, an identity projection over a barrier) is a `Rel` → `Rel`
+  rewrite, so it can be tested without SQL.

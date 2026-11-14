@@ -399,6 +399,20 @@ impl<'w> Checker<'w> {
                 (_, Ty::Var(v)) => {
                     self.vars[*v as usize].kind = kind_a;
                 }
+                // A plain row where a `join` row is expected is a column in a
+                // join predicate written without its side. That has a message of
+                // its own, and a much better one than naming two kinds: the row
+                // knows the column, and the fix is a one-character edit.
+                (_, Ty::Con("join", _)) if kind_a == Kind::Row => {
+                    let n = match &a {
+                        Ty::Row(fs, _) => fs.first().map_or("x", |(k, _)| k.as_str()),
+                        // A row former still waiting to reduce: the column is
+                        // inside it, but not in a shape this can read, so the
+                        // message names the spelling without naming the column.
+                        _ => "x",
+                    };
+                    return Err(crate::rules::needs_side(n));
+                }
                 _ => {
                     return Err(format!(
                         "kind mismatch: cannot unify {:?} with {:?}",

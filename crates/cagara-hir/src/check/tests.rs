@@ -535,10 +535,9 @@ fn mark_exists_appends_one_boolean_column() {
         ty(src, "q"),
         "query { id = int, name = string, age = int, active = bool, exists = bool }"
     );
-    // `.x` without a side is refused. The message is a unification failure rather
-    // than the `.<x` / `.>x` hint a join gives, because the column's own row is
-    // concrete by then — it is still an error, and the doc says which spelling to
-    // use, so this pins that it *is* refused rather than how it is worded.
+    // `.x` without a side is refused, with the same message a join gives: inside
+    // the subquery a bare name would resolve to the subquery's own table, which is
+    // the wrong one.
     let bad = types("q = users & markExists orders (.id == .user_id)\n");
     let e = bad
         .into_iter()
@@ -546,7 +545,7 @@ fn mark_exists_appends_one_boolean_column() {
         .expect("q")
         .1
         .expect_err("a side-less column must be refused");
-    assert!(!e.is_empty(), "{e}");
+    assert!(e.contains("`.<id`") && e.contains("`.>id`"), "{e}");
     // A non-bool predicate is refused too.
     let not_bool = types("q = users & markExists orders (.<id)\n");
     let e = not_bool

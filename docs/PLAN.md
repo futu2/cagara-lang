@@ -164,6 +164,15 @@ need their own intrinsic per dialect.
    machine the suite runs on. So the other seven targets are covered by the two
    checks a text pipeline can actually make, over every shared case:
 
+   **Trino is now a real engine too.** It was the biggest gap and it closed: Java 17
+   is on this machine, Trino 435 is the newest release built for it, and
+   `tests/trino.sh` drives a single-node server over the REST API with the same batch
+   protocol as `pglite.mjs`. `trino_agrees_when_a_server_is_running` runs every shared
+   case on it, and `docs/ENGINE-TESTS.md` says how to start the server (it is not in
+   the dev shell: 680 MiB of jars). The first run found two bugs no text check could
+   see — a `date` literal reaching `DATE_DIFF` as a string, which Trino rejects rather
+   than coerces, and the `OFFSET`/`LIMIT` order, which its grammar reverses.
+
    | check | what it proves | what it does not |
    |---|---|---|
    | `every_statement_is_well_formed_sql` | the generator produced well-formed SQL for that target (balanced, no placeholder left, no empty clause) | that the target *accepts* it — sqlglot's parser is dialect-agnostic here, which is measured in the test itself |
@@ -175,10 +184,12 @@ need their own intrinsic per dialect.
    MySQL and T-SQL inside the subquery. That is exactly the class of defect the
    engines here could not see, and the reason the text checks were worth adding.
 
-   What would move this item further, in order: a MySQL server (the only target
-   whose expression semantics differ in ways text cannot check — `||` is OR, integer
-   division differs), then Trino (strict typing), then the warehouses. Each needs a
-   service to start, which is why they are not here.
+   What would move this item further: a MySQL server. It is the last target whose
+   expression semantics differ in ways text cannot check — `||` is OR, integer
+   division and `%` differ, `FULL JOIN` is absent — and, unlike Trino, it has no
+   single self-contained archive, so it needs a package or a container runtime. The
+   warehouses are lower value: they differ from Trino and Postgres in spelling more
+   than in semantics.
 
 ## Direction
 

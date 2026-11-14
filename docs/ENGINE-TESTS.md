@@ -11,6 +11,7 @@ them.
 | DuckDB | `duckdb` shell | yes |
 | PostgreSQL | PGlite (Postgres in WebAssembly) through `node` | `npm install --no-save @electric-sql/pglite` |
 | Trino | `tests/trino.sh` → a server on `http://localhost:18080` | no — see below |
+| MySQL family | `tests/mysql.sh` → a MariaDB on `$MYSQL_SOCKET` | no — see below |
 
 Every test skips when its engine is missing, unless `CAGARA_REQUIRE_ENGINES` is set,
 in which case a missing engine fails the run. That is what CI does.
@@ -70,6 +71,44 @@ which the dev shell already has.
 
 The `memory` connector has no `DELETE` and no `DROP SCHEMA … CASCADE`, so the setup
 drops and recreates each table; a test run leaves them behind, which is harmless.
+
+## MySQL
+
+The MySQL dialect is worth checking by *execution* more than any other: its
+expressions mean different things, not merely look different — `||` is boolean OR,
+integer division and `%` round differently, `FULL JOIN` does not exist, a boolean is
+`1`/`0`.
+
+MariaDB is used because it is a drop-in for the dialect and ships as a self-contained
+tarball, so none of this needs root, a package manager or a container:
+
+```sh
+curl -o mariadb.tar.gz \
+  https://archive.mariadb.org/mariadb-11.4.14/bintar-linux-systemd-x86_64/mariadb-11.4.14-linux-systemd-x86_64.tar.gz
+tar xzf mariadb.tar.gz
+M=mariadb-11.4.14-linux-systemd-x86_64
+
+# a data directory of its own, and a root user with no password
+./$M/scripts/mariadb-install-db --no-defaults --basedir=$PWD/$M --datadir=$PWD/data \
+  --auth-root-authentication-method=normal
+
+# the server: a socket, a private port, and no grants to configure
+./$M/bin/mariadbd --no-defaults --basedir=$PWD/$M --datadir=$PWD/data \
+  --port=13306 --socket=$PWD/mysql.sock --skip-grant-tables &
+
+# the schema the shared cases use
+./$M/bin/mariadb --no-defaults --socket=$PWD/mysql.sock -u root \
+  -e 'CREATE DATABASE IF NOT EXISTS main'
+
+# then the test, with the two variables it looks for
+MYSQL_SOCKET=$PWD/mysql.sock MYSQL=$PWD/$M/bin/mariadb \
+  cargo test -p cagara-sql --test engines -- mysql_agrees
+```
+
+`MYSQL_DB` overrides the database (default `main`, because that is the schema the
+shared cases name). The harness runs the client with `-N -B -r`: no header, batch
+mode, and *raw* output — without `-r` the client escapes a backslash as `\\`, which
+looks exactly like a dialect bug and is not one.
 
 ## Why not the other dialects
 

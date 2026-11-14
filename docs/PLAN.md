@@ -196,12 +196,18 @@ need their own intrinsic per dialect.
    exactly the kind that look like dialect bugs, and one of them (the client escaping
    backslashes without `-r`) would have been blamed on the compiler.
 
-   Five targets now execute. What is left: BigQuery and Snowflake need a cloud
-   account, and T-SQL needs SQL Server, which has no self-contained archive — so those
-   three stay text-only, and `each_dialect_avoids_what_it_cannot_read` /
-   `each_dialect_uses_the_spelling_it_has` is what covers them. The SQL Server gap is
-   the one worth closing if a way to run one appears: it is the target whose boolean
-   handling and paging differ most from everything else.
+   **The rest are emulated.** T-SQL, BigQuery, Snowflake and ANSI are translated to
+   DuckDB by Python's sqlglot — an independent implementation — and executed there
+   (`the_emulated_dialects_mean_the_same_thing`, 403 statements). It found two BigQuery
+   bugs on its first run, both invisible to a text check: a bare `UNION` (that grammar
+   wants `UNION { ALL | DISTINCT }`) and a doubled `''` quote (it parses as two adjacent
+   literals). It is a second opinion, not a server: blind to anything both
+   implementations get wrong, to any type, and it runs on DuckDB's engine. Those limits
+   are written down in `docs/ENGINE-TESTS.md` and pinned in the test.
+
+   So every dialect now executes somewhere. What would still move this item: a real SQL
+   Server, because boolean handling and paging differ from everything else there and the
+   emulation cannot judge a type.
 
 ## Direction
 

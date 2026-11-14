@@ -28,6 +28,12 @@
   drop. A `distinct` still needs the barrier, because dropping a column there changes how many
   rows are deduped. A projection that reuses a sort key's name for another column keeps it too.
 
+- BigQuery set operations carry an explicit `DISTINCT` (`UNION DISTINCT`, `INTERSECT DISTINCT`,
+  `EXCEPT DISTINCT`). A bare `UNION` is a syntax error there, not a default.
+
+- A string literal holding a quote is escaped with a backslash on BigQuery (`'it\'s'`). It has no
+  `''` escape: it parses the doubled quote as two adjacent literals and errors.
+
 - The differential suite runs on Trino and MariaDB too, so five of the ten dialects are checked by
   executing the SQL rather than reading it. Both found problems that no text check could see (see
   the two entries below and the `OFFSET`/`LIMIT` one).

@@ -176,9 +176,18 @@ need their own intrinsic per dialect.
 
 ## Deferred language work
 
-Catalog declarations, typed bind parameters, name-aligned set operations,
-`qualify`, grouping sets, lateral or correlated subqueries, and richer window
-frames remain future work.
+These are **features**, not open questions — each is a language or IR addition with a
+known shape, and none is a boundary of what exists today:
+
+| item | what it would take |
+|---|---|
+| catalog declarations | a module that declares tables without a `query … = table` binding, so a project can share one schema |
+| typed bind parameters | `--param NAME:TYPE` is read today; the type is checked at the call site only, and a declared parameter type would need a binding in the prelude |
+| name-aligned set operations | `union` requires both sides to have the same row *in the same order*; aligning by name needs a projection per branch |
+| `qualify` | a stage that filters on a window without the derived table SQL requires; sqlglot's AST has the field (`SelectStatement::qualify`) and no Cagara syntax reaches it |
+| grouping sets, `rollup`, `cube` | a new `agg` form and a backend rule; the dialect pass already knows which targets have them |
+| lateral or correlated subqueries | `unnest` is the only correlated construct today; a general one needs a scope in the IR |
+| richer window frames | `rows …` covers row-counted frames; `range`/`groups` would be two more constructors |
 
 `decimal` was the one with a correctness argument behind it, and it is in — see
 above for what ships and what was decided against. The decisions as they stand:

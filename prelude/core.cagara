@@ -193,8 +193,7 @@ agg : agg (expr r (row s)) -> query r -> query s = primitive "__agg"
 ## siblings were seven spellings of one idea, and they could not compose —
 ## `filtered p (distinctAgg (sum .x))` has no name and needs none.
 filtered : expr r bool -> agg (expr r a) -> agg (expr r a) = primitive "__filtered"
-filtered : expr r bool -> agg (expr r (maybe a)) -> agg (expr r (maybe a)) =
-  primitive "__filtered"
+filtered : expr r bool -> agg (expr r (maybe a)) -> agg (expr r (maybe a)) = primitive "__filtered"
 
 ## `distinctAgg a`: the aggregate over distinct arguments —
 ## `distinctAgg (sum .x)` is `SUM(DISTINCT x)`, and `distinctAgg (countOf .x)`
@@ -272,15 +271,13 @@ listContains : expr r (list a) -> expr r a -> expr r bool = sql "CAGARA_LIST_CON
 ## The SQL is `CASE WHEN x IS NULL THEN NULL ELSE f(x) END`, so the function is
 ## never handed the NULL. `x` appears twice, so an expensive expression is
 ## evaluated twice — bind it with `let` first if that matters.
-lift : (expr r a -> expr r b) -> expr r (maybe a) -> expr r (maybe b) =
-  primitive "__lift"
+lift : (expr r a -> expr r b) -> expr r (maybe a) -> expr r (maybe b) = primitive "__lift"
 
 ## `unnest xs` — every input row once per element of the list, the element
 ## under `value`: `agg { k = group .id, ids = arrayAgg .id } & unnest .ids`
 ## gives the rows back. The SQL is a LATERAL join over the array, so the other
 ## columns repeat. Needs a dialect with an array type (PostgreSQL, DuckDB).
-unnest : expr r (list a) -> query r -> query (merge r { value = a }) =
-  primitive "__unnest"
+unnest : expr r (list a) -> query r -> query (merge r { value = a }) = primitive "__unnest"
 
 ## The grouping key: `agg { user_id = group .user_id, n = count }`. Every
 ## non-aggregate expression in the same `agg` is grouped by it.
@@ -319,14 +316,16 @@ leftJoin : query s -> expr (join r s) bool -> query r -> query (merge r (mapValu
 
 ## Right outer join: the mirror of `leftJoin`, with the left side's columns
 ## nullable instead.
-rightJoin : query s -> expr (join r s) bool ->
-  query r -> query (merge (mapValue (AsNullable) r) s) =
-  primitive "__rightJoin"
+rightJoin : query s
+    -> expr (join r s) bool
+    -> query r
+    -> query (merge (mapValue (AsNullable) r) s) = primitive "__rightJoin"
 
 ## Full outer join: both sides survive, so both sides' columns become `maybe`.
-fullJoin : query s -> expr (join r s) bool ->
-  query r -> query (merge (mapValue (AsNullable) r) (mapValue (AsNullable) s)) =
-  primitive "__fullJoin"
+fullJoin : query s
+    -> expr (join r s) bool
+    -> query r
+    -> query (merge (mapValue (AsNullable) r) (mapValue (AsNullable) s)) = primitive "__fullJoin"
 
 ## Semi join: the left rows that have a match on the right, with the left row
 ## unchanged. `EXISTS` rather than a join, so a right row can never duplicate a

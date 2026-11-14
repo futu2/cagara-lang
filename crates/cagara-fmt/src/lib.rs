@@ -641,7 +641,14 @@ impl Fmt<'_> {
     /// top of one), where a pipeline of two or more stages always breaks.
     fn expr(&self, n: &SyntaxNode, top: bool) -> R {
         match n.kind() {
-            K::NameRef | K::Literal | K::FieldExpr | K::SqlExpr => self.spaced(n),
+            // `sql "…"` and `primitive "…"` are a keyword and its one string;
+            // nothing inside them is reflowed. `primitive` was missing here,
+            // which made every primitive definition print verbatim — the
+            // fallback that exists for a half-typed buffer, reached by ordinary
+            // valid code.
+            K::NameRef | K::Literal | K::FieldExpr | K::SqlExpr | K::PrimitiveExpr => {
+                self.spaced(n)
+            }
             K::ProjExpr => {
                 let els = sig(n);
                 let [base, field] = els.as_slice() else {
@@ -1096,6 +1103,16 @@ impl Fmt<'_> {
                     });
                 }
                 Ok(concat(parts))
+            }
+            // A number in type position: the precision or the scale of a
+            // `decimal p s`. It is a node rather than a token so the parser can
+            // tell it from a name, and printing it is printing its one token.
+            K::TyNat => {
+                let els = sig(n);
+                let [only] = els.as_slice() else {
+                    return Err(Bail);
+                };
+                Ok(concat(vec![self.tok(&token(Some(only), K::Int)?)]))
             }
             K::TyParen => self.paren(n, |inner| self.ty(inner)),
             K::TyRecord => self.delimited(n, K::LBrace, K::RBrace, Doc::Line),

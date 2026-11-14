@@ -80,6 +80,18 @@ fn every_construct_is_actually_reformatted() {
         // `infixl` / `infixr` are ordinary names now, not declarations, so a
         // line beginning with one is a plain definition and formats as one.
         ("infixl=1\n", "infixl = 1\n"),
+        // A number in type position: `decimal 10 2`. The parameters are their
+        // own syntax nodes, and without an arm for them the whole definition
+        // was printed as written — which is how this one was found, by the
+        // space before the comma surviving.
+        (
+            "t : query {x = decimal 10 2,y=int} = table \"s\" \"t\"\n",
+            "t : query { x = decimal 10 2, y = int } = table \"s\" \"t\"\n",
+        ),
+        (
+            "f : expr r (decimal 10 2) -> expr r (decimal 38 0)  =  primitive \"x\"\n",
+            "f : expr r (decimal 10 2) -> expr r (decimal 38 0) = primitive \"x\"\n",
+        ),
     ] {
         assert_eq!(fmt(src), want, "input: {src:?}");
         assert_ne!(fmt(src), src, "not reformatted at all: {src:?}");
@@ -93,6 +105,8 @@ fn every_construct_is_actually_reformatted() {
         "q = t & update {.a, .b}\n",
         "q = t & agg {k = group .k, n = count}\n",
         "q = t & select {\n  .a,\n  .b\n}\n",
+        "t : query { x = decimal 10 2 } = table \"s\" \"t\"\n",
+        "t : query { x = maybe (decimal 38 0), y = list (decimal 10 2) } = table \"s\" \"t\"\n",
     ] {
         let _ = fmt(src);
     }

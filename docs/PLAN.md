@@ -65,20 +65,31 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
 
 ## Next steps
 
-1. Separate relational rewrites from SQL emission. A `Rel -> Rel` pass can fuse
-   stages or choose derived tables while keeping dialect rules in the backend.
+1. ~~Separate relational rewrites from SQL emission.~~ **The layering is already
+   there; the `Rel -> Rel` pass is not needed yet.** Reading the crate for it shows
+   three modules with no overlap, and the split is by concern rather than by file
+   size:
 
-   *Where to start*, now that the code has been read with this in mind: the stage
-   plan and the SQL text are already two layers — `stage.rs` holds a mutable
-   `SELECT` with no dialect in it, and `lower.rs` decides when a node *fuses* into
-   the current stage or becomes a derived table (`Fuse`, `grouped`, the depth
-   bound, `derived`). The decisions live in `lower.rs`, where the emitter is, so a
-   test can only see them as SQL text. The first step is therefore to lift the
-   fuse-or-wrap decision into a function `Rel -> [Stage]` that names no sqlglot
-   type except through `Stage`, then have `lower.rs` render the stages and let the
-   tests assert on the stage list. That is a small change to a large file, and it
-   is the part every later rewrite (identity projection, filter-into-join,
-   `distinct` placement) needs.
+   | module | does | knows about dialects? |
+   |---|---|---|
+   | `lower.rs` | `Rel` → `Stage`: fuse into the current `SELECT` or wrap in a derived table (`Fuse`, `needs_barrier`, `grouped`, the depth bound) | no |
+   | `stage.rs` | `Stage` → a `sqlglot` `SelectStatement` | no |
+   | `dialect.rs` | `rewrite` / `validate_dialect_support` on the finished statement | yes — all of it |
+
+   `compile` runs exactly that order (`lower` → `into_statement` → optional
+   sqlglot `optimize` → `dialect::rewrite` → validate → generate), and `grep
+   'Dialect::' lower.rs stage.rs` finds nothing. So the item's stated goal — "keeping
+   dialect rules in the backend" — is met.
+
+   What is *not* met is its stated mechanism: there is no `Rel -> Rel` pass, because
+   the fuse-or-wrap decision is taken while lowering rather than as a rewrite on the
+   IR. That is only worth changing when a rewrite needs it, and the differential
+   suite already covers the decisions (`engines_agree`, 74 cases, both lowerings on
+   two engines). The concrete trigger to build one: a rewrite that is *not*
+   expressible as "fold into the current stage or wrap it" — filter-into-join and
+   identity-projection elimination are the two candidates, and neither is wanted
+   today.
+
 2. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
    beyond SQLite, DuckDB and PostgreSQL (PGlite). Every shared case already runs
    under both lowerings (the default and `--optimize`); MySQL, T-SQL and the

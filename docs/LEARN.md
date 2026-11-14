@@ -437,10 +437,10 @@ signature. `toDecimal 12 2 .total` is how a value changes scale.
 
 Aggregates do the widening instead: `sum .total` is `maybe (decimal 38 2)` and
 `avg .total` the same, because 38 digits with the operand's scale is what the
-portable family holds; `min`/`max` keep the operand's type. A comparison of two
-decimals with *different* parameters is not available yet — the generic comparison
-takes one type on both sides, and a decimal-specific overload would shadow it
-wherever the argument type is still open (see `docs/PLAN.md`).
+portable family holds; `min`/`max` keep the operand's type. A comparison follows the
+same rule as arithmetic — one type on both sides — so comparing two different
+parameters means bringing them together first:
+`(toDecimal 12 2 .a) == (toDecimal 12 2 .b)`.
 
 `toInt` truncates a `float` toward zero in every dialect, and `toFloat` produces
 a 64-bit double; the backend casts to the matching SQL width (`BIGINT`,

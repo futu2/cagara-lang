@@ -625,6 +625,18 @@ impl<'w> Checker<'w> {
     }
 
     pub(crate) fn mismatch(&self, a: &Ty, e: &Ty) -> String {
+        // A precision or a scale is only ever the parameter of a `decimal`, so a
+        // pair of them that differ is a decimal mismatch however deep the
+        // unification got — and saying so is what makes the rule usable: two
+        // decimals of different parameters do not mix, and a cast is how one of
+        // them moves.
+        if let (Ty::Nat(x), Ty::Nat(y)) = (a, e) {
+            return format!(
+                "`decimal` parameters differ (expected {y}, found {x}); two decimals combine \
+                 only when they are the same `(precision, scale)`, so bring them to one type \
+                 with `toDecimal` first"
+            );
+        }
         if let (Some(x), Some(y)) = (phase_of(a), phase_of(e)) {
             // An `agg` / `win` where a row expression is expected is an
             // argument that nests one (a plain `expr` parameter, or the

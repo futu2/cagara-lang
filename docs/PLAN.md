@@ -128,36 +128,22 @@ A cast on SQLite is refused (its `NUMERIC` affinity stores REAL or INTEGER, so t
 precision is lost silently), and `money_is_exact_on_the_engines` runs the sum of
 three 19.99s and `0.1 + 0.2` on DuckDB and PostgreSQL.
 
-The mixed-parameter comparison is kept out by one number:
-`overload.rs::value_score` scores a candidate whose value type is a *constructor*
-at 3 against an argument that is still a variable, and one whose value type *is* a
-variable at 1 — so `decimal p s` beats `a` exactly where nothing is known, which is
-the opposite of what is wanted there. It was tried: lowering that 3 to 0 makes
-`decimal 10 2 == decimal 12 2` work, and breaks two things that the number was
-holding up — `case { .score > 10 => … }` stops resolving `>` for a `maybe int`
-against a literal, and a join on two different column types reports no mismatch.
-The pair (`maybe` at -1, non-null constructor at 3) is what tells a nullable
-argument from a present one, so the change has to come with a re-think of that
-pairing rather than a one-line edit.
+The mixed-parameter comparison is a **decision**, not a gap: one type everywhere.
+`decimal 10 2 == decimal 12 2` is a compile error whose message names both
+parameters and says to bring them together with `toDecimal`. That keeps the type's
+promise simple — a value of one `(p,s)` never silently becomes another — and it is
+what arithmetic already does.
 
-Lowering only the *parameterized* constructors (`decimal p s`, `list a`) to 1, or to
-0, does not help either: the two failures above happen at the same two tests, which
-means it is not the score that decides — the decimal candidate's mere presence in
-`>`'s candidate list changes what pending-overload arbitration settles on, and those
-two uses resolve *before* their argument types are known. The next attempt should
-start from `arbitrate_pending` and the ordered-candidate path, not from
-`value_score`.
-
-The third reading of it, and the most precise: `prefer` waits while an argument is a
-variable (`decisive_only`), so the overload is decided in *some later pass* — and in
-that later pass, with `.score : maybe int`, the ranking prefers the `maybe` twin,
-which is right for a nullable-aware comparison but wrong for
-`case { .score > 10 => … }`, whose refusal is supposed to come from the non-null
-reading. A third candidate delays that first decision, which is how adding the
-decimal one changes an outcome it never participates in. So a comparison that mixes
-two `(p,s)` should not be a second candidate at all: it has to be a *rule* keyed on
-the operands (the shape `decimal_params` and the unnest message already use), or the
-comparison family needs one candidate whose parameter does not unify the two sides.
+It was nearly the other way. An earlier design allowed mixed comparisons (they
+produce no value, so nothing is converted) and it could not be built without
+damage: a decimal-pair candidate for `==` competes with the generic
+`expr r a -> expr r a -> expr r bool` whenever an argument is still open, and
+`prefer` waits for the arguments before deciding, so a third candidate delays that
+decision and the later ranking prefers the `maybe` twin for a `.score : maybe int`
+— right for a nullable-aware comparison, wrong for the case-arm refusal that the
+non-null reading produces. Lowering the candidate's score, or only the
+parameterized constructors' score, left exactly those two tests failing. Recorded
+because it is the shape any future "let these two types meet" feature will hit.
 
 What is left of the decimal work is therefore: mixed-parameter comparisons (same
 blocker — a specific candidate shadows the generic one), a result type that widens

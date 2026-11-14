@@ -666,6 +666,83 @@ fn run_script(
     Some(Ok(rows))
 }
 
+/// A list compares as a value on the engines that have the type.
+///
+/// `[1, 2] == [1, 2]` was listed as missing in the plan; it is not — the generic
+/// comparison takes `a` on both sides and a `list a` is an `a`, and both engines
+/// compare arrays element-wise. Pinned here because the plan said otherwise and a
+/// claim like that is worth a measurement either way.
+#[test]
+fn a_list_compares_as_a_value_on_the_engines() {
+    let src = "nums2 : query { id = int } = table \"main\" \"nums\"\n\
+               q = nums2 & where (.id == 1) & select { same = [1, 2] == [1, 2], \
+               diff = [1, 2] == [2, 1], ne = [1] != [2], ord = [1] < [2] }\n";
+    let ws = Workspace::from_source(src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let (_, rel) = rels
+        .iter()
+        .find(|(n, _)| n == "q")
+        .unwrap_or_else(|| panic!("no `q`"));
+    let rel = rel.as_ref().unwrap_or_else(|d| panic!("`q`: {}", d.message));
+    // DuckDB prints a boolean as 1/0 and PostgreSQL as `true`/`false`, so the
+    // assertion compares rows the way the shared cases do.
+    let want = ["1|0|1|1"];
+
+    // DuckDB, through its shell.
+    let duck = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    let sql = compile(
+        rel,
+        Options {
+            dialect: Dialect::DuckDb,
+            ..Options::default()
+        },
+    )
+    .expect("duckdb");
+    match run_setup(&duck, SETUP, &sql) {
+        Some(Ok(rows)) => assert_eq!(rows, want, "{sql}"),
+        Some(Err(m)) => panic!("duckdb: {m}\n  {sql}"),
+        None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
+            panic!("`duckdb` is not installed (CAGARA_REQUIRE_ENGINES is set)")
+        }
+        None => eprintln!("skipping duckdb: not installed"),
+    }
+
+    // PostgreSQL, through PGlite.
+    let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
+    let ready = Command::new("node")
+        .args([harness, "--check"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ready {
+        assert!(
+            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            "`node` with @electric-sql/pglite is not installed (CAGARA_REQUIRE_ENGINES is set)"
+        );
+        return;
+    }
+    let pg = compile(
+        rel,
+        Options {
+            dialect: Dialect::Postgres,
+            ..Options::default()
+        },
+    )
+    .expect("postgres");
+    let blocks = pg_batch(harness, &pg_setup(SETUP), std::slice::from_ref(&pg));
+    assert_eq!(blocks[0].len(), want.len(), "{pg}");
+    assert!(
+        blocks[0].iter().zip(want).all(|(a, b)| same_row(a, b)),
+        "{:?} vs {want:?}\n  {pg}",
+        blocks[0]
+    );
+}
+
 /// Every statement is well-formed SQL.
 ///
 /// Only three engines can be started here, so the other seven dialects — ANSI,

@@ -37,8 +37,10 @@ this page tracks the remaining boundaries and language work.
 spelling is the target's — `ARRAY[…]`/`ARRAY_AGG`/`||` on PostgreSQL, `list_value`/`list`/
 `list_concat` on DuckDB — and a dialect with no array type refuses the query instead of writing
 JSON text, which would change the type silently. A list can be built (`[1, 2]`, `arrayAgg`), combined (`<>`), measured and searched (`listLength`,
-`listContains`) and unpacked (`unnest`). What is missing is comparison as a value (`==` over two
-lists) and the JSON-facing functions; both would need their own intrinsic per dialect.
+`listContains`), compared as a value (`==`, `!=`, `<` — the generic comparisons take `a` on both
+sides and a `list a` is an `a`; measured on DuckDB and PostgreSQL, which compare arrays
+element-wise) and unpacked (`unnest`). What is missing is the JSON-facing functions, which would
+need their own intrinsic per dialect.
 
 ## Recently closed
 

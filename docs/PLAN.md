@@ -178,6 +178,43 @@ need their own intrinsic per dialect.
    division differs), then Trino (strict typing), then the warehouses. Each needs a
    service to start, which is why they are not here.
 
+## Direction
+
+Where the work goes from here, in the order the evidence supports it. Each item
+names the observation that puts it there, because a plan without one is a wish.
+
+1. **Real engines beyond the three.** Three can be started here (SQLite, DuckDB,
+   PGlite); seven targets are checked only as text. The gap is not hypothetical —
+   `countOf` on a nullable column was wrong for a whole release and no text check
+   could see it, and the semi-join `NULLS LAST` bug was found by the text checks
+   only after it had reached MySQL and T-SQL. A MySQL server (the target whose
+   expression semantics differ most: `||` is OR, integer division truncates
+   differently) buys the most per unit of setup, then Trino for its strict typing.
+   This is infrastructure, not language work, and it is the highest-value item.
+2. **`qualify`.** The only boundary in the list that is a *missing stage* rather
+   than a missing feature: a filter on a window needs a derived table in SQL, and
+   `qualify` is exactly the clause that removes it. sqlglot's `SelectStatement`
+   already has the field, so the work is a stage in the checker, an arena
+   constructor, and a dialect rule for the targets that spell it `QUALIFY` and the
+   rest that do not.
+3. **The decimal widening result type.** Refused by decision, and it should stay
+   refused until type-level arithmetic exists — but the *shape* of that work is
+   known (a `Ty` that can compute `Nat + Nat`, and an arbitration that ranks a
+   computed result), and it would also unblock exact decimal division. Worth doing
+   only if someone needs SQL's `(p+1, s)`; the current same-type rule is what makes
+   the type honest.
+4. **Grouping sets / `rollup` / `cube`.** A new `agg` form. The dialect pass already
+   knows which targets have them; the checker and arena do not know the form.
+5. **Correlated subqueries.** `unnest` is the only correlated construct today. A
+   general one needs a scope in the IR, which is the largest of these changes and
+   the one with the least evidence that it is wanted.
+
+What is *not* on the list, and why: replacing sqlglot (it is a parser/transpiler and
+the crate does not parse; the two weaknesses found — a dialect-agnostic parser and no
+parenthesized-join node — are local and covered), and adding an execution path
+(sqlx is an orthogonal layer; a compiler that runs queries needs a database to build
+against, which is the opposite of what this is).
+
 ## Maintenance
 
 What the next reader needs to know before changing something, in the order the

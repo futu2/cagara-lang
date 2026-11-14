@@ -140,6 +140,14 @@ The pair (`maybe` at -1, non-null constructor at 3) is what tells a nullable
 argument from a present one, so the change has to come with a re-think of that
 pairing rather than a one-line edit.
 
+Lowering only the *parameterized* constructors (`decimal p s`, `list a`) to 1, or to
+0, does not help either: the two failures above happen at the same two tests, which
+means it is not the score that decides — the decimal candidate's mere presence in
+`>`'s candidate list changes what pending-overload arbitration settles on, and those
+two uses resolve *before* their argument types are known. The next attempt should
+start from `arbitrate_pending` and the ordered-candidate path, not from
+`value_score`.
+
 What is left of the decimal work is therefore: mixed-parameter comparisons (same
 blocker — a specific candidate shadows the generic one), a result type that widens
 (needs type-level arithmetic), and `--ddl` if the schema side ever emits types.

@@ -6,8 +6,15 @@
   parameters are checked where they are written. `toDecimal 10 2 x` and `tryDecimal 10 2 x` return
   `decimal 10 2` / `maybe (decimal 10 2)` (the parameters come from the literals), `toString`,
   `toInt`, `round` and `roundTo` keep or leave the type as they should, and `toFloat` is the one lossy
-  door out. Arithmetic on decimals is still refused until the result-type rules land: `+`, `-`, `*`
-  and `/` on a `decimal` is a compile error rather than a silently inexact double.
+  door out.
+- One type everywhere for decimals. `+`/`-` take two operands of the same `(p,s)` and return it —
+  no implicit conversion, and a mismatch names both parameters and `toDecimal` as the way to bring
+  them together. Comparisons follow the same rule. `*` and `/` are refused: a product's scale is the
+  sum of the operands' and a quotient's is engine-defined, so neither can be stated by a signature.
+  `sum`/`avg` of a `decimal p s` are `maybe (decimal 38 s)` and `min`/`max` keep the operand's type.
+  A decimal cast on SQLite is a compile error (its `NUMERIC` affinity stores REAL or INTEGER, so the
+  precision would be lost silently). `money_is_exact_on_the_engines` runs the sum of three 19.99s and
+  `0.1 + 0.2` on DuckDB and PostgreSQL.
 
 - A `maybe` used where a present value is wanted now comes with its fix on the diagnostic itself, so
   any client can offer it: `(.s ?? "")` with a per-type default when the value is missing, `just (…)`

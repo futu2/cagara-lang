@@ -356,6 +356,23 @@ const CASES: &[(&str, &[&str])] = &[
         "bar_agg_limit_where = nums & agg { b = group .b, n = count } & order [asc .b] & limit 2 & where (.n > 1)",
         &["2|2"],
     ),
+    // A null-extended join side inlines a computed column only when the value
+    // stays NULL for an unmatched row. `amount * 2` does; a literal does not, and
+    // inlining it would print a number where the join promises NULL.
+    (
+        "rw_null_ext_prop = users & leftJoin (orders & select { user_id = .user_id, dbl = .amount * 2 }) (.<id == .>user_id) & select { id = .id, dbl = .dbl } & order [asc .id, asc .dbl]",
+        &["1|9.0", "1|11.0", "2|NULL", "3|2.0"],
+    ),
+    (
+        "rw_null_ext_lit = users & leftJoin (orders & select { user_id = .user_id, one = 1 }) (.<id == .>user_id) & select { id = .id, one = .one } & order [asc .id]",
+        &["1|1", "1|1", "2|NULL", "3|1"],
+    ),
+    // A function call is not assumed to keep NULLs, so it is computed before the
+    // join and is NULL for an unmatched row all the same.
+    (
+        "rw_null_ext_fn = users & leftJoin (orders & select { user_id = .user_id, s = toString .amount }) (.<id == .>user_id) & select { id = .id, s = .s } & order [asc .id, asc .s]",
+        &["1|4.5", "1|5.5", "2|NULL", "3|1.0"],
+    ),
     // A projection that renames and reorders without dropping anything folds
     // into the stage below it, so it must not change the rows: the limit and the
     // sort key are the same ones, and only the names move.

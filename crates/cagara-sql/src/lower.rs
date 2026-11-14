@@ -9,8 +9,8 @@
 use crate::stage::{and_all, col, ident_style, lower_expr, qualify, Fuse, Stage};
 use cagara_hir::ir::{Expr as IrExpr, JoinKind, Rel, SetKind, Side};
 use sqlglot_rust::ast::{
-    Expr, JoinClause, JoinType, OrderByItem, QuoteStyle, SetOperationStatement, SetOperationType,
-    Statement, TableRef, TableSource,
+    BinaryOperator, Expr, JoinClause, JoinType, OrderByItem, QuoteStyle, SetOperationStatement,
+    SetOperationType, Statement, TableRef, TableSource,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -162,12 +162,11 @@ impl Lowerer {
     /// bare columns: a computed column (`1`, `coalesce ..`) must be computed
     /// before the join, or it is not NULL on unmatched rows.
     fn join_input(&mut self, st: Stage, can_place: bool, null_ext: bool) -> JoinInput {
-        let bare = st
-            .items
-            .iter()
-            .all(|(_, e)| matches!(e, Expr::Column { .. }));
+        // A side that may be null-extended may only be inlined when everything it
+        // computes stays NULL for an unmatched row; see `null_propagating`.
+        let keeps_nulls = st.items.iter().all(|(_, e)| null_propagating(e));
         let fusable = (st.wheres.is_empty() || can_place)
-            && (bare || !null_ext)
+            && (keeps_nulls || !null_ext)
             && st.group_by.is_empty()
             && st.order_by.is_empty()
             && st.limit.is_none()
@@ -1147,6 +1146,50 @@ fn collect_groups<'a>(e: &'a IrExpr, out: &mut Vec<&'a IrExpr>) {
 }
 
 /// A bare literal, which SQL may read as a column position.
+/// Is this expression NULL whenever the row it reads is absent?
+///
+/// A join input that may be null-extended can only be inlined when every column it
+/// computes would be NULL on an unmatched row — otherwise the derived table is what
+/// makes the computation happen *after* the null extension, and inlining it would
+/// compute on NULLs and produce a value where the join promises NULL:
+///
+/// ```text
+/// LEFT JOIN (SELECT user_id, amt * 2 AS x FROM orders)   -- inline-able: NULL * 2 is NULL
+/// LEFT JOIN (SELECT user_id, coalesce 0 amt AS x …)      -- not: 0 is not NULL
+/// ```
+///
+/// The property is decided structurally. A column is NULL when absent; a literal
+/// never is; a binary operator that propagates NULL (arithmetic, comparison,
+/// concatenation) is NULL when *either* side is; a function call is not assumed to
+/// be, because `coalesce`, `ifnull` and their relatives exist and the template text
+/// is all this layer sees.
+fn null_propagating(e: &Expr) -> bool {
+    match e {
+        Expr::Column { .. } => true,
+        Expr::Number(_) | Expr::StringLiteral(_) | Expr::Boolean(_) | Expr::Null => false,
+        Expr::Nested(e) => null_propagating(e),
+        Expr::Cast { expr, .. } | Expr::TryCast { expr, .. } => null_propagating(expr),
+        Expr::BinaryOp { left, right, op } => {
+            matches!(
+                op,
+                BinaryOperator::Plus
+                    | BinaryOperator::Minus
+                    | BinaryOperator::Multiply
+                    | BinaryOperator::Divide
+                    | BinaryOperator::Modulo
+                    | BinaryOperator::Eq
+                    | BinaryOperator::Neq
+                    | BinaryOperator::Lt
+                    | BinaryOperator::LtEq
+                    | BinaryOperator::Gt
+                    | BinaryOperator::GtEq
+                    | BinaryOperator::Concat
+            ) && (null_propagating(left) || null_propagating(right))
+        }
+        _ => false,
+    }
+}
+
 fn is_literal(e: &Expr) -> bool {
     match e {
         Expr::Number(_) | Expr::StringLiteral(_) | Expr::Boolean(_) | Expr::Null => true,

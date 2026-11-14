@@ -1530,12 +1530,21 @@ fn null_extended_join_inputs_compute_before_the_join() {
         "{s}"
     );
     assert!(s.contains("t2.one IS NULL"), "{s}");
-    // The left side of a right join, and both sides of a full join.
+    // A computed column that stays NULL when its row is absent may inline: the
+    // join's unmatched rows see NULL either way, because `NULL + 1` is NULL.
     let r = "r = (users & select { id = .id, k = .id + 1 }) & rightJoin (orders & select { user_id = .user_id, amount = .amount, status = .status, created_at = .created_at }) (.<id == .>user_id) & select { k = .k }\n";
+    assert_sql(
+        &sql(r, "r"),
+        "SELECT t1.id + 1 AS k FROM public.users AS t1 RIGHT JOIN public.orders AS t2 ON t1.id = t2.user_id",
+    );
+    // A function call is not assumed to keep NULLs (`coalesce` and `ifnull`
+    // exist), so it is computed before the join.
+    let fnq = "fq = users & leftJoin (orders & select { user_id = .user_id, s = toString .amount }) (.<id == .>user_id) & select { s = .s }\n";
     assert!(
-        sql(r, "r").contains("(SELECT id, id + 1 AS k FROM public.users) AS t1"),
+        sql(fnq, "fq")
+            .contains("(SELECT user_id, CAST(amount AS TEXT) AS s FROM public.orders) AS t2"),
         "{}",
-        sql(r, "r")
+        sql(fnq, "fq")
     );
     let f = "f = users & fullJoin (orders & select { user_id = .user_id, st = coalesce \"none\" (just .status) }) (.<id == .>user_id) & select { s = .st }\n";
     assert!(

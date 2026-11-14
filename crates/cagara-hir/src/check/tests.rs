@@ -279,10 +279,13 @@ fn decimal_arithmetic_keeps_the_type_and_refuses_mixes() {
     );
     let e = err(&format!("{prelude}q = m & select {{ x = .a * .c }}\n"), "q");
     assert!(e.contains("`decimal` parameters differ"), "{e}");
-    // Division is refused: DuckDB promotes a decimal quotient to `DOUBLE`, so no
-    // same-type rule stays exact on every target.
+    // Division is refused, and the message says why rather than only listing the
+    // candidates: DuckDB promotes a decimal quotient to `DOUBLE`, so a same-type
+    // rule would not hold on every target.
     let e = err(&format!("{prelude}q = m & select {{ x = .a / .b }}\n"), "q");
     assert!(e.contains("no overload of `/` matches"), "{e}");
+    assert!(e.contains("DuckDB promotes it to `DOUBLE`"), "{e}");
+    assert!(e.contains("`toFloat`"), "{e}");
 }
 
 /// `decimal p s` is a type, its parameters are numbers, and both are checked.

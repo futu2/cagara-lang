@@ -2579,6 +2579,18 @@ impl<'w> Checker<'w> {
             op_name(name),
             self.show(target)
         );
+        // Division is the one arithmetic operator money does not have a form of,
+        // and the reason is the engines rather than the type system: PostgreSQL
+        // keeps a decimal quotient exact and DuckDB promotes it to `DOUBLE`, so a
+        // same-type rule would be a promise one target breaks. Saying that here is
+        // more useful than a list of candidates that were never going to match.
+        if name == "_/_" && self.show(target).contains("decimal") {
+            msg.push_str(
+                "\n  `decimal` division has no overload: PostgreSQL keeps a quotient exact and \
+                 DuckDB promotes it to `DOUBLE`, so no same-type rule holds on both; divide \
+                 with `toFloat`, then `toDecimal p s` the result",
+            );
+        }
         for &i in cands {
             let sig = self.cand_shown(module, i);
             match self.divergence(module, i, target) {

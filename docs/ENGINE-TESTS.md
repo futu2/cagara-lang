@@ -12,6 +12,7 @@ them.
 | PostgreSQL | PGlite (Postgres in WebAssembly) through `node` | `npm install --no-save @electric-sql/pglite` |
 | Trino | `tests/trino.sh` → a server on `http://localhost:18080` | no — see below |
 | MySQL family | `tests/mysql.sh` → a MariaDB on `$MYSQL_SOCKET` | no — see below |
+| T-SQL, BigQuery, Snowflake, ANSI | `tests/emulate.py` → DuckDB, via Python sqlglot | `uv pip install sqlglot` |
 
 Every test skips when its engine is missing, unless `CAGARA_REQUIRE_ENGINES` is set,
 in which case a missing engine fails the run. That is what CI does.
@@ -110,10 +111,43 @@ shared cases name). The harness runs the client with `-N -B -r`: no header, batc
 mode, and *raw* output — without `-r` the client escapes a backslash as `\\`, which
 looks exactly like a dialect bug and is not one.
 
+## The emulated dialects
+
+T-SQL, BigQuery, Snowflake and ANSI have no server here. They are still *executed*, by
+translating them to DuckDB with an independent implementation:
+
+```sh
+uv pip install sqlglot        # or: CAGARA_PYTHON=/path/to/python cargo test ...
+```
+
+`tests/emulate.py` reads our output in the target dialect and writes it as DuckDB;
+`the_emulated_dialects_mean_the_same_thing` runs those statements on DuckDB and compares
+the rows with what the real engines return for the same case. 403 statements go through
+it.
+
+**What it is worth.** It found two BigQuery bugs on its first run, both invisible to a
+text check because the SQL looks right: a bare `UNION`, which that dialect's grammar
+does not allow, and a doubled `''` quote, which it parses as two adjacent literals.
+
+**What it is not.** A second opinion, not the server:
+
+- A construct *both* implementations misunderstand passes. The Rust generator and
+  Python sqlglot share a lineage.
+- DuckDB computes every dialect's answer, so a semantic difference DuckDB also has is
+  invisible.
+- It cannot judge a type. `a / b` on two integers is integer division in ANSI and
+  T-SQL and float division in DuckDB, and the emulator has no column types to know
+  which — `annotate_types` with the real schema still emits `a / b`. Those cases are
+  listed in `EMULATION_BLIND` and are run on the five real engines instead.
+
+Three T-SQL statements cannot run through it at all (`EMULATION_UNREADABLE`), each for
+a limit of the second opinion rather than of our output: `+` on strings, `CAST(… AS
+VARCHAR(MAX))`, and `@@DATEFIRST`. The set is pinned, so a statement that stops running
+fails the test rather than quietly shrinking the coverage.
+
 ## Why not the other dialects
 
-MySQL, T-SQL, BigQuery and Snowflake each need a server this repository does not
-start, and none of them is available as a single self-contained archive. They are
-covered by the two text checks in `engines.rs` — `each_dialect_avoids_what_it_cannot_read`
-and `each_dialect_uses_the_spelling_it_has` — which is weaker than an engine, and the
-tests say so where they are defined.
+SQL Server has no self-contained archive, and BigQuery and Snowflake need a cloud
+account — so those three are covered by the emulation above plus the two text checks in
+`engines.rs` (`each_dialect_avoids_what_it_cannot_read`,
+`each_dialect_uses_the_spelling_it_has`).

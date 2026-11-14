@@ -40,28 +40,26 @@ JSON text, which would change the type silently. A list can be built (`[1, 2]`, 
 `listContains`) and unpacked (`unnest`). What is missing is comparison as a value (`==` over two
 lists) and the JSON-facing functions; both would need their own intrinsic per dialect.
 
+## Recently closed
+
+- `unnest .x` of a non-list says `unnest needs a list, and this is not one`. The
+  conflict still surfaces in the row unification, but the application records its
+  argument's span (`unnest_args`) and the definition's error is rewritten when it
+  falls inside one.
+- A `maybe` used where a value is needed carries its `??`/`just` fix on the
+  diagnostic itself, and `cagara check` prints it (`fix: Use `?? ""` — .s → (.s
+  ?? "")`) and carries it in `--json` as `fixes`. The projection's refusal comes
+  out of its constraint, so the checker keeps two side tables — where each field
+  value is written (`field_spans`, keyed by the stage's span) and where each
+  column access is written (`field_uses`) — and builds the suggestion from the
+  message's innermost `field `name`` plus that column's span. The language
+  server's message rule stays as the fallback for a diagnostic without one.
+
 ## Next steps
 
-0. `unnest .x` where `x` is not a list now says so: the application records its
-   argument's span (`unnest_args`), and the definition's error is rewritten when
-   it falls inside one — the conflict still surfaces in the row unification
-   ("expected `int`, found `list a`"), because the column's value variable is
-   bound to the parameter's element before the table's row arrives, but the
-   message no longer repeats that.
-
-1. A `maybe` used where a value is needed carries its `??`/`just` fix on the
-   diagnostic itself, so any client can offer it. The projection's refusal comes
-   out of its constraint, long after the record literal is gone, so the checker
-   keeps two side tables — where each field's value is written (`field_spans`,
-   keyed by the stage's span) and where each column access is written
-   (`field_uses`) — and the step builds the suggestion from the message's
-   innermost `field \`name\`` plus that column's span. The language server's
-   message rule stays as the fallback for a diagnostic that arrives without a
-   suggestion.
-
-2. Separate relational rewrites from SQL emission. A `Rel -> Rel` pass can fuse
+1. Separate relational rewrites from SQL emission. A `Rel -> Rel` pass can fuse
    stages or choose derived tables while keeping dialect rules in the backend.
-3. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
+2. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
    beyond SQLite, DuckDB and PostgreSQL (PGlite). Every shared case already runs
    under both lowerings (the default and `--optimize`); MySQL, T-SQL and the
    warehouses stay text-only because they need a server this repository does not
@@ -70,10 +68,16 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
 ## Deferred language work
 
 Catalog declarations, typed bind parameters, a decimal/numeric scalar type for
-exact money (`toDecimal` is a SQL cast today; the Cagara type stays `float`, and
-no `decimal` constructor exists to inhabit), name-aligned set operations,
-`qualify`, grouping sets, lateral or correlated subqueries, and richer window
-frames remain future work. The remaining features should extend
+exact money, name-aligned set operations, `qualify`, grouping sets, lateral or
+correlated subqueries, and richer window frames remain future work.
+
+`decimal` is the one with a correctness argument behind it: `toDecimal` is a SQL
+cast today and the Cagara type stays `float`, so a money column summed in Cagara
+is summed as an IEEE double. Adding it as a parameterless scalar (`ScalarType`,
+`ty_to_scalar`, `SCALARS`, `CONS`, `Display`) and then the places that name a
+scalar's SQL type — `CAGARA_TO_DECIMAL`, `tryDecimal`, the declaration types, the
+`+ - *` overloads and `sum`'s signature — would make the type follow the cast.
+Precision and scale stay call-site arguments, as `toDecimal 10 2` has them today. The remaining features should extend
 the typed core, normalizer, relational arena, and SQL backend together.
 
 See [`CORE.md`](CORE.md) for semantics and [`ROW-TYPES.md`](ROW-TYPES.md) for

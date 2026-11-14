@@ -222,12 +222,24 @@ fn filter_after_agg_stays_outside_paging() {
     assert!(paged.contains(") AS t1 WHERE"), "{paged}");
     assert!(!paged.contains("HAVING"), "{paged}");
 
-    // `DISTINCT` also changes which rows exist, so the filter stays outside.
+    // A stage with both an aggregate and a `DISTINCT` wraps too — the aggregate
+    // is what blocks the filter, not the dedupe.
     let distinct = sql(
         "q = orders & agg { u = group .user_id, n = count } & distinct & where (.n > 3)\n",
         "q",
     );
     assert!(distinct.contains(") AS t1 WHERE"), "{distinct}");
+
+    // A bare `DISTINCT` does not block it: deduping whole rows and filtering on
+    // them commute, since two identical rows agree on every predicate.
+    let bare = sql(
+        "q = users & select {.name} & distinct & where (.name != \"bob\")\n",
+        "q",
+    );
+    assert_eq!(
+        bare,
+        "SELECT DISTINCT name FROM public.users WHERE (name <> 'bob')"
+    );
 
     // `order` does not: it runs after `HAVING`, so both stay in one statement.
     let ordered = sql(

@@ -373,6 +373,12 @@ const CASES: &[(&str, &[&str])] = &[
         "rw_null_ext_fn = users & leftJoin (orders & select { user_id = .user_id, s = toString .amount }) (.<id == .>user_id) & select { id = .id, s = .s } & order [asc .id, asc .s]",
         &["1|4.5", "1|5.5", "2|NULL", "3|1.0"],
     ),
+    // A filter after a bare `distinct` folds into it, which is only right
+    // because deduping whole rows and filtering on them commute.
+    (
+        "rw_distinct_where = dupes & select {.k} & distinct & where (.k != \"x\")",
+        &["y"],
+    ),
     // A projection that renames and reorders without dropping anything folds
     // into the stage below it, so it must not change the rows: the limit and the
     // sort key are the same ones, and only the names move.

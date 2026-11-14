@@ -231,6 +231,11 @@ fn a_decimal_cast_names_its_parameters() {
         ty(src, "q"),
         "query { s = maybe (decimal 38 2), a = maybe (decimal 38 2), lo = maybe (decimal 10 2) }"
     );
+    // Re-scaling an existing decimal is an explicit cast, and the target's
+    // parameters are its own.
+    let src = "m : query { total = decimal 10 2 } = table \"s\" \"m\"\n\
+               q = m & select { x = toDecimal 12 2 .total }\n";
+    assert_eq!(ty(src, "q"), "query { x = decimal 12 2 }");
     // Two different precisions are two different types.
     let e = err(
         "m : query { total = decimal 10 2 } = table \"s\" \"m\"\n\

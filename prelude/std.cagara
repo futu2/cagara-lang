@@ -236,7 +236,9 @@ toDecimal : expr r int -> expr r int -> expr r int -> expr r (decimal p s) =
   sql "CAGARA_TO_DECIMAL($3, $1, $2)"
 toDecimal : expr r int -> expr r int -> expr r float -> expr r (decimal p s) =
   sql "CAGARA_TO_DECIMAL($3, $1, $2)"
-toDecimal : expr r int -> expr r int -> expr r (decimal p s) -> expr r (decimal p s) =
+## Re-scaling an existing decimal is a cast too, and the result's parameters are
+## its own: the source's `(p,s)` do not constrain where the value is going.
+toDecimal : expr r int -> expr r int -> expr r (decimal p s) -> expr r (decimal q t) =
   sql "CAGARA_TO_DECIMAL($3, $1, $2)"
 
 # A `from*` name says where the value came from rather than where it is going,

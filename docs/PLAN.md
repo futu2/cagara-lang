@@ -79,103 +79,33 @@ Catalog declarations, typed bind parameters, a decimal/numeric scalar type for
 exact money, name-aligned set operations, `qualify`, grouping sets, lateral or
 correlated subqueries, and richer window frames remain future work.
 
-`decimal` is the one with a correctness argument behind it: `toDecimal` is a SQL
-cast today and the Cagara type stays `float`, so a money column is *typed* as an
-IEEE double even where the engine's column type is exact. It gets parameters —
-`decimal p s`, both literal integers, `1 ≤ s ≤ p ≤ 38` — because that is what the
-engines actually have, and because a mismatch can then say which way it is wrong.
+`decimal` was the one with a correctness argument behind it, and it is in — see
+above for what ships and what was decided against. The decisions as they stand:
 
-The decisions, so the next round does not relitigate them:
-
-- **No implicit conversion in arithmetic.** `+`, `-`, `*` take two operands of
-  the *same* `(p,s)`; a different one is a compile error that suggests
-  `toDecimal p s`. There is no widening coercion between decimal types.
-- **Results still widen**, which is why arithmetic is a checker rule rather than
-  a signature: `+`/`-` give `(max(p-s) + s + 1, s)`, `*` gives `(p₁+p₂, s₁+s₂)`,
-  and a result past 38 digits is refused with the operands named, since no cast
-  can rescue it — the operands have to be narrowed.
-- **Literals lift.** A numeric literal takes the `(p,s)` its context demands, the
-  way `1` is already an `int` or a `float` depending on context, with its digits
-  checked at compile time. Columns and expressions never lift.
-- **Comparisons may mix `(p,s)`.** `decimal 10 2` against `decimal 12 2` compares
-  exact values in SQL and produces no value, so no conversion is implied;
-  arithmetic is the strict one.
+- **One type everywhere.** `+`, `-`, `*` take two operands of the same `(p,s)` and
+  return it; a comparison needs the same type on both sides; a different `(p,s)` is
+  a compile error whose message names both parameters and says `toDecimal` is how a
+  value moves. There is no widening coercion and no mixed comparison.
+- **The declared width is the promise.** `+`/`-`/`*` keep the operand type rather
+  than widening the way SQL does: the engine's own arithmetic is exact anyway, and a
+  *computed* result type cannot be stated as a signature without type-level
+  arithmetic. A product's scale is the engine's, so `toDecimal p s` is how a value
+  comes back to the declared one.
+- **Division is refused**, because PostgreSQL keeps a decimal quotient exact and
+  DuckDB promotes it to `DOUBLE`: no same-type rule holds on both targets.
+- **Literals lift.** A numeric literal takes the `(p,s)` its context demands, with
+  its digits checked at compile time, the way `1` is already an `int` or a `float`
+  depending on context. Columns and expressions never lift.
+- **Parameters may be zero-scaled.** `decimal 38 0` is a whole number of units;
+  `1 ≤ p ≤ 38` and `0 ≤ s ≤ p`.
 - `sum`/`avg` are signatures, not rules: `sum : expr r (decimal p s) -> agg
-  (expr r (maybe (decimal 38 s)))`, because the width is a constant in the
-  portable family (PostgreSQL's `numeric` is unbounded, which is why the language
-  states the portable 38 rather than either engine's best).
-- `/` stays refused: the scale of a quotient is engine-defined (PostgreSQL goes to
-  1000 digits, Trino errors, DuckDB truncates), so the answer is `roundTo` plus
-  `toDecimal`, written out.
-- Type-level numbers are `Ty::Con("10", [])` rather than a new `Ty` variant, so
-  elaboration and every walker stay untouched; the parser gains numeric type
-  atoms and the checker validates the range.
+  (expr r (maybe (decimal 38 s)))`, because the width is a constant in the portable
+  family (PostgreSQL's `numeric` is unbounded, which is why the language states the
+  portable 38 rather than either engine's best).
 
-S1 is in: the type exists (`decimal p s` in declarations and signatures, with
-`Ty::Nat` parameters, `ScalarType::Decimal`, and the range check),
-`toDecimal`/`tryDecimal` return it with the parameters read from the literals, and
-`toString`/`toInt`/`round`/`roundTo`/`toFloat` have their decimal forms — the SQL
-is the cast the template already wrote (`DECIMAL(10, 2)`, `NUMERIC`, `NUMBER`).
-
-The aggregates are in too: `sum`/`avg` of a `decimal p s` are `maybe (decimal 38
-s)` — stated in the signature, because 38 is a constant in the portable family —
-and `min`/`max` keep the operand's type.
-
-S2 is in as well, with one deliberate disagreement with the plan above: `+`/`-` on
-two decimals of the same `(p,s)` return that *same* type rather than SQL's wider
-one, and `*`/`/` are refused. The wider result type is a function of the operands,
-and the overload machinery cannot express that: declaring the result as a variable
-and filling it in from a `Cons` worked for the arithmetic, but the candidate then
-shadowed the generic `_==_` wherever the argument type was still open (the manual's
-own `where (.name == n)` stopped type-checking) and made `twice = x => x + x` infer
-`expr a b -> expr a c`. `Cons::DecimalArith` exists in that history and was removed
-with the experiment; doing it properly needs overload arbitration to prefer the
-generic candidate, or a real type-level arithmetic in the type language.
-
-A cast on SQLite is refused (its `NUMERIC` affinity stores REAL or INTEGER, so the
-precision is lost silently), and `money_is_exact_on_the_engines` runs the sum of
-three 19.99s and `0.1 + 0.2` on DuckDB and PostgreSQL.
-
-The mixed-parameter comparison is a **decision**, not a gap: one type everywhere.
-`decimal 10 2 == decimal 12 2` is a compile error whose message names both
-parameters and says to bring them together with `toDecimal`. That keeps the type's
-promise simple — a value of one `(p,s)` never silently becomes another — and it is
-what arithmetic already does.
-
-It was nearly the other way. An earlier design allowed mixed comparisons (they
-produce no value, so nothing is converted) and it could not be built without
-damage: a decimal-pair candidate for `==` competes with the generic
-`expr r a -> expr r a -> expr r bool` whenever an argument is still open, and
-`prefer` waits for the arguments before deciding, so a third candidate delays that
-decision and the later ranking prefers the `maybe` twin for a `.score : maybe int`
-— right for a nullable-aware comparison, wrong for the case-arm refusal that the
-non-null reading produces. Lowering the candidate's score, or only the
-parameterized constructors' score, left exactly those two tests failing. Recorded
-because it is the shape any future "let these two types meet" feature will hit.
-
-Multiplication is in as well, under the same rule: the product is exact, and its
-scale — the sum of the operands' — is the engine's, so `toDecimal p s` is how the
-value comes back to the declared one. Division is the one operation left out, by **decision**, and not for a type-system
-reason: PostgreSQL keeps a decimal quotient exact, DuckDB promotes it to `DOUBLE`
-(measured: `typeof(20.00::DECIMAL(10,2) / 4.00::DECIMAL(10,2))` is `DOUBLE`, and the
-value comes back `5.0` against PostgreSQL's `5.0000000000000000`), so a same-type
-rule would be a promise one target breaks. The refusal's message says exactly that
-and names the way through — `toFloat`, then `toDecimal p s` — instead of listing the
-`int` and `float` signatures that were never going to match.
-
-What is left of the decimal work is therefore three things, none of which is
-required for the type to be usable:
-
-- a result type that *widens* the way SQL's does — the plan asked for it, and the
-  language keeps the operand type instead, by the owner's decision ("same type in,
-  same type out"). Doing the SQL rule needs type-level arithmetic or an arbitration
-  that can rank a computed result;
-- a division that stays exact on every target — the same type-level machinery, since
-  the cast that would hold it needs the parameters in SQL;
-- `--ddl` if the schema side ever emits column types.
-
-Mixed comparisons and decimal division are not on the list: both are refused by
-decision, and both messages say why.
+The remaining deferred items are unchanged: catalog declarations, typed bind
+parameters, name-aligned set operations, `qualify`, grouping sets, lateral or
+correlated subqueries, and richer window frames.
 
 See [`CORE.md`](CORE.md) for semantics and [`ROW-TYPES.md`](ROW-TYPES.md) for
 row algebra.

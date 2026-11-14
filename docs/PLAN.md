@@ -132,9 +132,13 @@ The mixed-parameter comparison is kept out by one number:
 `overload.rs::value_score` scores a candidate whose value type is a *constructor*
 at 3 against an argument that is still a variable, and one whose value type *is* a
 variable at 1 — so `decimal p s` beats `a` exactly where nothing is known, which is
-the opposite of what is wanted there. Changing that needs the other overload
-families (`toString`, `sum`, `asc`) re-measured, so it is a round of its own rather
-than another signature.
+the opposite of what is wanted there. It was tried: lowering that 3 to 0 makes
+`decimal 10 2 == decimal 12 2` work, and breaks two things that the number was
+holding up — `case { .score > 10 => … }` stops resolving `>` for a `maybe int`
+against a literal, and a join on two different column types reports no mismatch.
+The pair (`maybe` at -1, non-null constructor at 3) is what tells a nullable
+argument from a present one, so the change has to come with a re-think of that
+pairing rather than a one-line edit.
 
 What is left of the decimal work is therefore: mixed-parameter comparisons (same
 blocker — a specific candidate shadows the generic one), a result type that widens

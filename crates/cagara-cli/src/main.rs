@@ -10,13 +10,14 @@
 //! `cagara doc` prints the reference a file carries in its `##` and `#!`
 //! comments. `cagara lsp` runs the language server over stdio.
 
+mod check;
 mod doc;
+mod fmt;
 
 use cagara_hir::check::SchemeView;
-use cagara_hir::{check, compile_checked, TypeCheck, Workspace};
+use cagara_hir::{compile_checked, TypeCheck, Workspace};
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -98,13 +99,13 @@ fn main_inner() -> std::io::Result<ExitCode> {
     let mut rest = args.into_iter();
     let first = rest.next();
     if first.as_deref() == Some(OsStr::new("fmt")) {
-        return fmt(rest);
+        return fmt::run(rest);
     }
     if first.as_deref() == Some(OsStr::new("doc")) {
         return doc::run(rest);
     }
     if first.as_deref() == Some(OsStr::new("check")) {
-        return check_tree(rest);
+        return check::run(rest);
     }
     if first.as_deref() == Some(OsStr::new("lsp")) {
         let rest: Vec<OsString> = rest.collect();
@@ -334,7 +335,7 @@ fn run(ws: &Workspace, opts: &Options) -> std::io::Result<ExitCode> {
 
     // Errors in imported modules are always reported; root errors are
     // reported per definition below (so `--only` applies to them).
-    let tc = check(ws);
+    let tc = cagara_hir::check(ws);
     let mut failed = false;
     // Warnings first, so a file that has both reads top-down: they do not fail
     // the run, and their position in the output is the only thing that says so.
@@ -699,160 +700,6 @@ fn report_sql(
     Ok(done(failed))
 }
 
-/// `cagara fmt`: rewrite files in place, or with `--check` list the files
-/// that are not formatted. Files with syntax errors are reported and left
-/// unchanged. `-` formats stdin to stdout (echoing it on failure, so editor
-/// filters never lose text). Output uses LF line endings; a leading UTF-8 BOM
-/// is preserved.
-fn fmt(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
-    let mut check = false;
-    let mut files = Vec::new();
-    for a in args {
-        match a.to_str() {
-            Some("--check") => check = true,
-            Some("-h") | Some("--help") => {
-                out(USAGE)?;
-                return Ok(ExitCode::SUCCESS);
-            }
-            Some("-") => files.push(a),
-            _ if !a.to_string_lossy().starts_with('-') => files.push(a),
-            _ => {
-                return Ok(usage(&format!(
-                    "unexpected argument `{}` for `cagara fmt`",
-                    display(&a)
-                )))
-            }
-        }
-    }
-    if files.is_empty() {
-        return Ok(usage(
-            "`cagara fmt` needs files to format (or `-` for stdin)",
-        ));
-    }
-    let mut failed = false;
-    for file in &files {
-        let stdin = file == OsStr::new("-");
-        let displayed = display(file);
-        let name = if stdin { "<stdin>" } else { displayed.as_str() };
-        let read = if stdin {
-            let mut s = String::new();
-            std::io::stdin().read_to_string(&mut s).map(|_| s)
-        } else {
-            std::fs::read_to_string(file)
-        };
-        let src = match read {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("{name}: {e}");
-                failed = true;
-                continue;
-            }
-        };
-        // A BOM is transport metadata. Format the body, then put the marker
-        // back so formatting a Windows file does not silently change its
-        // encoding.
-        let has_bom = src.starts_with('\u{feff}');
-        let body = cagara_syntax::strip_bom(&src);
-        let formatted = match cagara_fmt::format(body) {
-            Ok(f) if f.errors.is_empty() => Some(if has_bom {
-                format!("\u{feff}{}", f.text)
-            } else {
-                f.text
-            }),
-            Ok(f) => {
-                for e in &f.errors {
-                    let (line, col) = cagara_fmt::line_col(body, e.offset);
-                    eprintln!(
-                        "{name}:{line}:{col}: error: {} (file not formatted)",
-                        e.message
-                    );
-                }
-                None
-            }
-            Err(e) => {
-                eprintln!("{name}: {e}");
-                None
-            }
-        };
-        failed |= formatted.is_none();
-        if stdin {
-            let text = if check {
-                None
-            } else {
-                Some(formatted.as_deref().unwrap_or(&src))
-            };
-            if let Some(t) = text {
-                std::io::stdout().write_all(t.as_bytes())?;
-            }
-        }
-        let Some(formatted) = formatted else { continue };
-        if formatted == src {
-            continue;
-        }
-        if check {
-            out(name)?;
-            failed = true;
-        } else if !stdin {
-            if let Err(e) = write_atomic(Path::new(file), formatted.as_bytes()) {
-                eprintln!("{name}: {e}");
-                failed = true;
-            }
-        }
-    }
-    Ok(done(failed))
-}
-
-/// Replace `path` with `contents`, writing a sibling temporary first.
-///
-/// A crash during a plain `fs::write` can leave a truncated source file. The
-/// rename is atomic on Unix; Windows has no portable rename-over-existing, so
-/// the old file is removed first there. The file's permissions are copied to
-/// the temporary so replacing it does not change its mode.
-fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    // Follow a symlink, so formatting a link updates its target rather than
-    // replacing the link with a regular file.
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let parent = target
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut last = None;
-    for attempt in 0..100_u32 {
-        let tmp = parent.join(format!(".cagara-fmt-{}-{attempt}", std::process::id()));
-        let mut file = match OpenOptions::new().write(true).create_new(true).open(&tmp) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        };
-        let result = (|| {
-            if let Ok(meta) = fs::metadata(&target) {
-                fs::set_permissions(&tmp, meta.permissions())?;
-            }
-            file.write_all(contents)?;
-            file.sync_all()?;
-            drop(file);
-            #[cfg(windows)]
-            if target.exists() {
-                fs::remove_file(&target)?;
-            }
-            fs::rename(&tmp, &target)
-        })();
-        match result {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                let _ = fs::remove_file(&tmp);
-                last = Some(e);
-            }
-        }
-    }
-    Err(last.unwrap_or_else(|| {
-        std::io::Error::other(format!(
-            "could not create a temporary file next to {}",
-            path.display()
-        ))
-    }))
-}
-
 fn usage(msg: &str) -> ExitCode {
     eprintln!("error: {msg}\n{USAGE}");
     ExitCode::from(2)
@@ -892,247 +739,4 @@ pub(crate) fn done(failed: bool) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
-}
-
-// ── `cagara check` ───────────────────────────────────────────────────────────
-//
-// One answer for a tree of files: which of them do not check, and why. The
-// single-file path above answers "what SQL does this program mean"; this
-// answers "is this directory sound", which is what a pre-commit hook and an
-// editor's project mode need. It compiles nothing to SQL: a file is checked as
-// a *library*, so a directory of table declarations is reportable without one
-// of them being `main`.
-
-/// A diagnostic in the form `check` prints.
-struct Found {
-    /// `error` or `warning`: only the former fails the run.
-    severity: &'static str,
-    path: String,
-    line: usize,
-    col: usize,
-    message: String,
-    /// The rewrite the diagnostic knows, when it knows one. `check` is also a
-    /// library entry point for scripts, so the fix travels with the diagnostic
-    /// rather than being re-derived from the text by each consumer.
-    suggestions: Vec<(String, String)>,
-}
-
-impl Found {
-    fn text(&self) -> String {
-        let mut line = format!(
-            "{}:{}:{}: {}: {}",
-            self.path, self.line, self.col, self.severity, self.message
-        );
-        for (title, edit) in &self.suggestions {
-            line.push_str(&format!("\n  fix: {title}"));
-            if !edit.is_empty() {
-                line.push_str(&format!(" — {edit}"));
-            }
-        }
-        line
-    }
-
-    /// Whether this diagnostic fails the run. A warning is reported and the
-    /// run succeeds: the program compiles and means what its types say.
-    fn fails(&self) -> bool {
-        self.severity == "error"
-    }
-
-    /// One JSON object per line, so a consumer can read the stream without a
-    /// parser for the whole document, and a truncated run still yields the
-    /// diagnostics it got to.
-    fn json(&self) -> String {
-        fn esc(s: &str) -> String {
-            let mut o = String::with_capacity(s.len() + 2);
-            for c in s.chars() {
-                match c {
-                    '"' => o.push_str("\\\""),
-                    '\\' => o.push_str("\\\\"),
-                    '\n' => o.push_str("\\n"),
-                    '\r' => o.push_str("\\r"),
-                    '\t' => o.push_str("\\t"),
-                    c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
-                    c => o.push(c),
-                }
-            }
-            o
-        }
-        let fixes: Vec<String> = self
-            .suggestions
-            .iter()
-            .map(|(title, edit)| {
-                format!(
-                    "{{\"title\":\"{}\",\"edit\":\"{}\"}}",
-                    esc(title),
-                    esc(edit)
-                )
-            })
-            .collect();
-        format!(
-            "{{\"severity\":\"{}\",\"path\":\"{}\",\"line\":{},\"column\":{},\"message\":\"{}\",\"fixes\":[{}]}}",
-            self.severity,
-            esc(&self.path),
-            self.line,
-            self.col,
-            esc(&self.message),
-            fixes.join(",")
-        )
-    }
-}
-
-/// The fixes a diagnostic carries, as (title, what the text would become).
-///
-/// The edits are spans and insertions; applying them needs the source, which is
-/// here. A consumer that wants to *offer* the fix rather than read it (the
-/// language server) applies the edits itself, from `Diag::suggestions`.
-fn fixes(ws: &Workspace, d: &cagara_hir::workspace::Diag) -> Vec<(String, String)> {
-    use cagara_hir::workspace::SuggestionEdit;
-    let text = &ws.modules[ws.root].text;
-    d.suggestions
-        .iter()
-        .map(|s| {
-            let rendered: Vec<String> = s
-                .edits
-                .iter()
-                .map(|e| {
-                    let slice = |sp: &cagara_syntax::ast::Span| {
-                        text.get(sp.start as usize..sp.end as usize)
-                            .unwrap_or_default()
-                    };
-                    match e {
-                        SuggestionEdit::Replace { span, text: new } => {
-                            format!("{} → {new}", slice(span))
-                        }
-                        SuggestionEdit::Surround {
-                            span,
-                            before,
-                            after,
-                        } => format!("{} → {before}{}{after}", slice(span), slice(span)),
-                        SuggestionEdit::Retoken { from, to, .. } => format!("{from} → {to}"),
-                    }
-                })
-                .collect();
-            (s.title.clone(), rendered.join(", ").replace(", ", " "))
-        })
-        .collect()
-}
-
-/// Every `*.cagara` file under `path`, in a stable order. A file path is itself.
-fn sources_under(path: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    if !path.is_dir() {
-        out.push(path.to_path_buf());
-        return Ok(out);
-    }
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .collect();
-        entries.sort();
-        for entry in entries {
-            if entry.is_dir() {
-                // A dot directory is a build artifact or an editor's cache,
-                // not part of the tree being checked.
-                if entry
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with('.'))
-                {
-                    continue;
-                }
-                stack.push(entry);
-            } else if entry.extension().is_some_and(|e| e == "cagara") {
-                out.push(entry);
-            }
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// `cagara check [--json] <path>...`: report every file that does not check.
-///
-/// Exit codes: `0` all files check, `1` at least one diagnostic, `2` a usage
-/// error. The distinction is what lets a hook say "this is broken" and "you
-/// called me wrong" differently.
-fn check_tree(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
-    let mut json = false;
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for a in args {
-        match a.to_str() {
-            Some("--json") => json = true,
-            Some("-h") | Some("--help") => {
-                out(USAGE)?;
-                return Ok(ExitCode::SUCCESS);
-            }
-            _ if a.to_string_lossy().starts_with("--") => {
-                return Ok(usage(&format!(
-                    "unexpected argument `{}` for `cagara check`",
-                    display(&a)
-                )))
-            }
-            _ => paths.push(PathBuf::from(a)),
-        }
-    }
-    if paths.is_empty() {
-        return Ok(usage("`cagara check` needs a file or a directory"));
-    }
-    let mut files = Vec::new();
-    for p in &paths {
-        match sources_under(p) {
-            Ok(found) => files.extend(found),
-            Err(e) => {
-                eprintln!("{}: {e}", p.display());
-                return Ok(ExitCode::FAILURE);
-            }
-        }
-    }
-    let mut failed = false;
-    for file in &files {
-        let ws = Workspace::open(file);
-        let mut found: Vec<Found> = Vec::new();
-        for d in &ws.diags {
-            found.push(Found {
-                severity: d.severity.as_str(),
-                path: d.path.clone(),
-                line: d.line,
-                col: d.col,
-                message: d.message.clone(),
-                suggestions: fixes(&ws, d),
-            });
-        }
-        if ws.diags.is_empty() {
-            let tc = check(&ws);
-            for e in tc.errors() {
-                found.push(Found {
-                    severity: e.diag.severity.as_str(),
-                    path: e.diag.path.clone(),
-                    line: e.diag.line,
-                    col: e.diag.col,
-                    message: e.diag.message.clone(),
-                    suggestions: fixes(&ws, &e.diag),
-                });
-            }
-            for w in tc.warnings() {
-                found.push(Found {
-                    severity: w.diag.severity.as_str(),
-                    path: w.diag.path.clone(),
-                    line: w.diag.line,
-                    col: w.diag.col,
-                    message: w.diag.message.clone(),
-                    suggestions: fixes(&ws, &w.diag),
-                });
-            }
-        }
-        for f in found {
-            if json {
-                out(&f.json())?;
-            } else {
-                eprintln!("{}", f.text());
-            }
-            failed |= f.fails();
-        }
-    }
-    Ok(done(failed))
 }

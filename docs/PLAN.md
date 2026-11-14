@@ -114,9 +114,10 @@ s)` — stated in the signature, because 38 is a constant in the portable family
 and `min`/`max` keep the operand's type.
 
 S2 remains: the arithmetic result-type rules (`+ -` widen by a digit, `*` by the
-sum of the scales, past 38 refused), mixed-parameter comparisons, the SQLite
-refusal (its `NUMERIC` affinity stores REAL or INTEGER, so the precision is not
-preserved there), and the DuckDB/PostgreSQL differential for exactness. Until then
+sum of the scales, past 38 refused), comparisons between two `(p,s)` (allowed by
+design — they produce no value — but they still need the overload that takes them),
+the SQLite refusal (its `NUMERIC` affinity stores REAL or INTEGER, so the precision
+is not preserved there), and the DuckDB/PostgreSQL differential for exactness. Until then
 arithmetic on a `decimal` is a compile error naming the missing conversion — the
 result type is a function of the operands, so it cannot be a signature; it has to
 be bound where an application's argument types are still in hand, and the first

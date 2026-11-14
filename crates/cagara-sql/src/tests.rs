@@ -1572,6 +1572,86 @@ fn null_extended_join_inputs_compute_before_the_join() {
     );
 }
 
+/// A sort key written as an output name must still be one when it is printed.
+///
+/// `prefix`/`suffix` rename the row's columns, and a later `select` can rename
+/// them again. A key that was an output alias of the stage the `order` was written
+/// on is not necessarily an output alias of the stage that prints it, and a bare
+/// `ORDER BY x_id` against a `FROM` with no such column is not SQL at all:
+///
+/// ```text
+/// prefix "x_" & order [asc .x_id] & select { a = .x_id }
+///   SELECT id AS a FROM t ORDER BY id     -- not ORDER BY x_id
+/// ```
+#[test]
+fn a_renamed_column_does_not_leave_a_dangling_sort_key() {
+    let q = "t : query { id = int, k = string } = table \"m\" \"t\"\n\
+             q = t & prefix \"x_\" & order [asc .x_id] & select { a = .x_id }\n";
+    assert_eq!(
+        sql(q, "q"),
+        "SELECT id AS a FROM m.t ORDER BY id NULLS LAST"
+    );
+    // The same through `suffix`, and through two renames in a row.
+    let q = "t : query { id = int } = table \"m\" \"t\"\n\
+             q = t & suffix \"_v\" & order [asc .id_v] & select { b = .id_v }\n";
+    assert_eq!(
+        sql(q, "q"),
+        "SELECT id AS b FROM m.t ORDER BY id NULLS LAST"
+    );
+    let q = "t : query { id = int } = table \"m\" \"t\"\n\
+             q = t & prefix \"x_\" & suffix \"_v\" & order [asc .x_id_v] \
+             & select { c = .x_id_v }\n";
+    assert_eq!(
+        sql(q, "q"),
+        "SELECT id AS c FROM m.t ORDER BY id NULLS LAST"
+    );
+    // A key whose name survives into the printed select list stays the name, and
+    // the swap case still means the output column.
+    let q = "t : query { id = int, a = int } = table \"m\" \"t\"\n\
+             q = t & select { id = .a, a = .id } & order [asc .id] & select { id = .id, a = .a }\n";
+    assert_eq!(
+        sql(q, "q"),
+        "SELECT a AS id, id AS a FROM m.t ORDER BY id NULLS LAST"
+    );
+}
+
+/// A carried-over sort key must not be captured by the projection above it.
+///
+/// `wrap` carries a stage's order out as bare names. When the projection that
+/// follows gives one of its outputs that same name for a *different* column, SQL
+/// resolves the bare name to the output — so the outer query sorted by the new
+/// column and reordered the rows the limit had just chosen. Measured on DuckDB
+/// before the fix: `order [asc .age] & limit 2 & select { age = .id }` returned
+/// `1, 5` where the answer is `5, 1`.
+#[test]
+fn a_projection_does_not_capture_a_carried_sort_key() {
+    // The name is reused for another column: the key is qualified.
+    assert_eq!(
+        sql(
+            "q = users & order [asc .name] & limit 2 & select { name = .id, id = .name, age = .age, active = .active }\n",
+            "q"
+        ),
+        "SELECT id AS name, name AS id, age, active FROM (SELECT id, name, age, active \
+         FROM public.users ORDER BY name NULLS LAST LIMIT 2) AS t1 ORDER BY t1.name NULLS LAST"
+    );
+    // The column is dropped and its name reused: still qualified, so the outer
+    // sort reads the derived table's column rather than the new one.
+    let dropped = sql(
+        "q = users & order [asc .name] & limit 2 & select { name = .id }\n",
+        "q",
+    );
+    assert!(dropped.contains("ORDER BY t1.name"), "{dropped}");
+    // A projection that keeps the name for the same column needs no qualification.
+    let plain = sql(
+        "q = users & order [asc .id] & limit 2 & select { x = .id }\n",
+        "q",
+    );
+    assert_eq!(
+        plain,
+        "SELECT id AS x FROM public.users ORDER BY id NULLS LAST LIMIT 2"
+    );
+}
+
 /// A projection may fold over a `limit` even when it drops columns, because the
 /// `ORDER BY` it folds under names *input* columns. That is only true while the
 /// projection does not reuse one of those names for another column: after the fold

@@ -379,6 +379,29 @@ const CASES: &[(&str, &[&str])] = &[
         "rw_distinct_where = dupes & select {.k} & distinct & where (.k != \"x\")",
         &["y"],
     ),
+    // A renamed column must not leave a dangling sort key: `prefix` renames the
+    // row, and a later `select` renames it again, so the name the `order` was
+    // written with is not a column of the printed `FROM`.
+    (
+        "rw_renamed_key = nums & prefix \"x_\" & order [asc .x_id] & limit 2 & select { a = .x_id }",
+        &["1", "2"],
+    ),
+    (
+        "rw_renamed_key2 = nums & suffix \"_v\" & order [desc .id_v] & limit 2 & select { a = .id_v }",
+        &["4", "3"],
+    ),
+    // A carried-over sort key must not be captured by the projection above it.
+    // `nums.a` is 7, -7, 7, -8, so `order [asc .a] & limit 2` keeps ids 4 and 2;
+    // before the fix the outer `ORDER BY a` bound to the *output* `a` (which the
+    // projection set to `id`) and returned them as 2, 4.
+    (
+        "rw_carried_key = nums & order [asc .a] & limit 2 & select { a = .id, id = .a }",
+        &["4|-8", "2|-7"],
+    ),
+    (
+        "rw_carried_key_dropped = nums & order [asc .a] & limit 2 & select { a = .id }",
+        &["4", "2"],
+    ),
     // A projection that renames and reorders without dropping anything folds
     // into the stage below it, so it must not change the rows: the limit and the
     // sort key are the same ones, and only the names move.
@@ -408,11 +431,13 @@ const CASES: &[(&str, &[&str])] = &[
     ),
     // A projection that reuses a sort key's name for a different column changes
     // what `ORDER BY` means, so it keeps its derived table.
-    // The rows the barrier produces: ids 4 and 2 (the two smallest `a`), then
-    // swapped names, then ordered by the output `a` — which is `id`.
+    // The rows the barrier produces, in the order the limit chose: ids 4 and 2
+    // (the two smallest `a`), then swapped names. The earlier expectation here
+    // was `2|-7, 4|-8` — recorded from the output rather than reasoned from the
+    // query — and it was the bug: the outer `ORDER BY a` bound to the output `a`.
     (
         "rw_page_shadow = nums & order [asc .a] & limit 2 & select { a = .id, id = .a }",
-        &["2|-7", "4|-8"],
+        &["4|-8", "2|-7"],
     ),
     // Dropping a column is not a permutation and keeps its derived table, so it
     // still has to return the rows the drop implies.

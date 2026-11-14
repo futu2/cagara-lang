@@ -571,8 +571,60 @@ impl Lowerer {
             .iter()
             .map(|(n, e)| Ok((n.clone(), st.resolve(e)?)))
             .collect::<Result<_, String>>()?;
+        let before = st.items.clone();
         st.set_items(items, new_win);
+        self.retarget_order(&mut st, &before);
         Ok(st)
+    }
+
+    /// Re-aim a sort key after the stage's items changed.
+    ///
+    /// A sort key is written as the *output* name it names, because SQL resolves a
+    /// bare `ORDER BY name` to an output alias before a base column — that is what
+    /// makes `select { id = .a, a = .id } & order [asc .id]` order by the output
+    /// `id` rather than by the base `a`. But the name is only an output alias while
+    /// the select list still has it, and a later stage can take it away or give it
+    /// to a different column. Three outcomes, in this order:
+    ///
+    /// | after the change | the key becomes |
+    /// |---|---|
+    /// | the name still selects the same column | unchanged |
+    /// | the name now selects something else, and the FROM has an alias | `alias.name` |
+    /// | the name is gone, or there is no alias to qualify with | the expression the name had before |
+    ///
+    /// The third row is the one that is easy to miss: `prefix "x_" & order [asc
+    /// .x_id] & select { a = .x_id }` emitted `ORDER BY x_id` against a FROM with no
+    /// such column, because `x_id` was an output alias of the stage the order was
+    /// written on and not of the one that printed it.
+    fn retarget_order(&mut self, st: &mut Stage, before: &[(String, Expr)]) {
+        let alias = match &st.from {
+            sqlglot_rust::ast::TableSource::Subquery { alias, .. } => alias.clone(),
+            _ => None,
+        };
+        for k in &mut st.order_by {
+            let Expr::Column {
+                name, table: None, ..
+            } = &k.expr
+            else {
+                continue;
+            };
+            let same = matches!(
+                st.items.iter().find(|(n, _)| n == name),
+                Some((_, Expr::Column { name: c, table: None, .. })) if c == name
+            );
+            if same {
+                continue;
+            }
+            if st.items.iter().any(|(n, _)| n == name) {
+                if let Some(alias) = &alias {
+                    k.expr = col(Some(alias), name);
+                    continue;
+                }
+            }
+            if let Some((_, old)) = before.iter().find(|(n, _)| n == name) {
+                k.expr = old.clone();
+            }
+        }
     }
 
     /// Would folding `fs` into `st` change what one of `st`'s sort keys means?
@@ -620,7 +672,9 @@ impl Lowerer {
             };
             items.push((name, e));
         }
+        let before = st.items.clone();
         st.set_items(items, new_win);
+        self.retarget_order(&mut st, &before);
         Ok(st)
     }
 

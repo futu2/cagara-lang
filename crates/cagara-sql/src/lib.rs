@@ -3,6 +3,7 @@
 pub mod dialect;
 pub mod intrinsics;
 pub mod lower;
+pub mod rewrite;
 pub mod stage;
 
 pub use sqlglot_rust::Dialect;
@@ -59,6 +60,11 @@ pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
             return Err(msg);
         }
     }
+    // The `Rel -> Rel` pass, after validation (so diagnostics name the query as
+    // written) and before lowering (so the lowerer only ever sees stages it can
+    // decide one at a time). `rewrite` has no dialect in it; see its module doc.
+    let rewritten = rewrite::rewrite(rel);
+    let rel = &rewritten;
     let mut lowerer = lower::Lowerer::for_rel(rel);
     let st = lowerer.rel(rel)?;
     let mut select = st.into_statement();

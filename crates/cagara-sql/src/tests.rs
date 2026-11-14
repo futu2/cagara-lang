@@ -1016,9 +1016,11 @@ fn dialects_rewrite_every_block() {
             ),
         "{my}"
     );
-    // `limit` and `offset` are one clause, so a pipeline that applies both
-    // stays a single statement: one LIMIT, carrying the OFFSET.
-    assert!(my.contains("LIMIT 10 OFFSET 5"), "{my}");
+    // `limit 10 & offset 5` keeps rows 6..=10 — five of them — so the statement
+    // carries `LIMIT 5 OFFSET 5`, not `LIMIT 10 OFFSET 5`: the two are one clause
+    // only in the order `offset` then `limit`, and `rewrite` turns this pipeline
+    // into that one. It stays a single statement either way.
+    assert!(my.contains("LIMIT 5 OFFSET 5"), "{my}");
     assert_eq!(my.matches("LIMIT").count(), 1, "{my}");
     assert!(!my.contains("AS t1"), "pagination must not wrap: {my}");
     let ts = dialect(
@@ -1043,9 +1045,10 @@ fn dialects_rewrite_every_block() {
     );
     // T-SQL spells pagination as `OFFSET … ROWS FETCH NEXT … ROWS ONLY`, and
     // the flat statement carries the ORDER BY it needs — no TOP, no wrap.
+    // `limit 10 & offset 5` keeps five rows, so the FETCH count is 5.
     let ts = dialect(q, "q", "tsql").unwrap();
     assert!(
-        ts.contains("OFFSET 5 ROWS FETCH NEXT 10 ROWS ONLY") && !ts.contains("TOP"),
+        ts.contains("OFFSET 5 ROWS FETCH NEXT 5 ROWS ONLY") && !ts.contains("TOP"),
         "{ts}"
     );
     assert!(dialect("q = users & offset 5\n", "q", "tsql")
@@ -3022,18 +3025,26 @@ fn the_six_wrong_number_bugs_stay_fixed() {
 
     // 5. `limit` and `offset` in one pipeline used to lower to a nested pair
     //    whose `OFFSET` applied after the `LIMIT`, which returns no rows.
+    //    `limit 10 & offset 5` keeps rows 6..=10, so the one statement that says
+    //    that is `LIMIT 5 OFFSET 5`; `rewrite` folds the pair into it.
     let s = sql(
         &format!("{schema}q = users & order [asc .id] & limit 10 & offset 5\n"),
         "q",
     );
     assert!(
-        s.contains("LIMIT 10") && s.contains("OFFSET 5"),
+        s.contains("LIMIT 5") && s.contains("OFFSET 5"),
         "both survive: {s}"
     );
     assert!(
-        s.find("LIMIT 10").expect("limit") < s.find("OFFSET 5").expect("offset"),
+        s.find("LIMIT 5").expect("limit") < s.find("OFFSET 5").expect("offset"),
         "`LIMIT` then `OFFSET`, in one statement: {s}"
     );
+    // The other order is already one clause and stays as written.
+    let s = sql(
+        &format!("{schema}q = users & order [asc .id] & offset 5 & limit 3\n"),
+        "q",
+    );
+    assert!(s.contains("LIMIT 3 OFFSET 5"), "{s}");
 
     // 6. A template placeholder has to be an expression on its own: `"$1 +"`
     //    silently truncated the SQL, and `CAST(id AS $1)` produced broken SQL.

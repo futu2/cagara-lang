@@ -240,13 +240,16 @@ impl Stage {
             Fuse::Aggregate => paged || self.distinct || self.has_agg || self.has_win,
             Fuse::Sort => paged || self.distinct,
             Fuse::Limit => self.limit.is_some(),
-            // A limit and an offset are one clause in SQL (`LIMIT n OFFSET
-            // m`), so they must fold together whatever order the pipeline
-            // applies them in. Refusing that fold put the LIMIT inside a
-            // derived table and the OFFSET outside it — which returns no rows
-            // at all, since the offset then skips past everything the limit
-            // kept.
-            Fuse::Offset => self.offset.is_some(),
+            // An offset folds into a stage that already skips rows: skipping
+            // more is the same clause.
+            //
+            // It must *not* fold into a stage that already has a limit, though:
+            // `limit 5 & offset 2` keeps rows 3..=5, while `LIMIT 5 OFFSET 2`
+            // keeps five rows starting at the third. The two are one clause only
+            // in the order `offset` then `limit`, and `rewrite` turns the other
+            // order into that one before lowering; this rule is what keeps the
+            // answer right if a `Rel` ever reaches the lowerer unrewritten.
+            Fuse::Offset => self.offset.is_some() || self.limit.is_some(),
             Fuse::Distinct => paged,
         }
     }

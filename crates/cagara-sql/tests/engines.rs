@@ -356,6 +356,50 @@ const CASES: &[(&str, &[&str])] = &[
         "bar_agg_limit_where = nums & agg { b = group .b, n = count } & order [asc .b] & limit 2 & where (.n > 1)",
         &["2|2"],
     ),
+    // The `Rel -> Rel` rules, measured on rows. Each of these used to keep a
+    // derived table (or, for pagination, return the wrong rows), so a wrong rule
+    // here is a wrong answer rather than a slower query.
+    //
+    // `limit 3 & limit 2` is the first two rows of the first three.
+    (
+        "rw_limit_limit = nums & order [asc .id] & limit 3 & limit 2 & select {.id}",
+        &["1", "2"],
+    ),
+    // Two offsets add: skipping 1 twice is skipping 2.
+    (
+        "rw_offset_offset = nums & order [asc .id] & offset 1 & offset 1 & select {.id}",
+        &["3", "4"],
+    ),
+    // `limit 3 & offset 1` keeps rows 2..=3 — three rows, starting at the
+    // second — which is `LIMIT 2 OFFSET 1`, not `LIMIT 3 OFFSET 1`.
+    (
+        "rw_limit_offset = nums & order [asc .id] & limit 3 & offset 1 & select {.id}",
+        &["2", "3"],
+    ),
+    // An offset at or past the limit keeps nothing.
+    (
+        "rw_limit_offset_empty = nums & order [asc .id] & limit 2 & offset 2 & select {.id}",
+        &[],
+    ),
+    (
+        "rw_limit_offset_past = nums & order [asc .id] & limit 2 & offset 9 & select {.id}",
+        &[],
+    ),
+    // The other order is already one clause, and must keep its meaning.
+    (
+        "rw_offset_limit = nums & order [asc .id] & offset 1 & limit 2 & select {.id}",
+        &["2", "3"],
+    ),
+    // Deduping twice is deduping once.
+    (
+        "rw_distinct_distinct = dupes & select {.k} & distinct & distinct & order [asc .k]",
+        &["x", "y"],
+    ),
+    // A chain of all three, which the pass has to reach a fixed point on.
+    (
+        "rw_chain = nums & order [asc .id] & limit 4 & offset 1 & offset 1 & limit 1 & select {.id}",
+        &["3"],
+    ),
     // The barrier table, one case per row of it. Each of these folds the wrong
     // way unless the stage is wrapped first, and folding changes *which rows*
     // come back rather than producing invalid SQL — so the differential harness

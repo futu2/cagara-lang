@@ -28,6 +28,14 @@
   drop. A `distinct` still needs the barrier, because dropping a column there changes how many
   rows are deduped. A projection that reuses a sort key's name for another column keeps it too.
 
+- `rollup` and `cube` add subtotal rows (`GROUP BY ROLLUP(…)` / `CUBE(…)`). The rolled-up key is
+  `maybe`, because the subtotal rows leave it out. SQLite and the MySQL family refuse them: MySQL's
+  `WITH ROLLUP` rolls up the whole key list and cannot be combined with `ORDER BY`, which is not the
+  same operation.
+
+- Two existence checks in a row no longer produce a dangling alias. `q & semiJoin a p & semiJoin b q`
+  emitted `SELECT t1.id FROM users AS t3`, which every engine rejects.
+
 - BigQuery set operations carry an explicit `DISTINCT` (`UNION DISTINCT`, `INTERSECT DISTINCT`,
   `EXCEPT DISTINCT`). A bare `UNION` is a syntax error there, not a default.
 

@@ -246,8 +246,14 @@ names the observation that puts it there, because a plan without one is a wish.
    computed result), and it would also unblock exact decimal division. Worth doing
    only if someone needs SQL's `(p+1, s)`; the current same-type rule is what makes
    the type honest.
-4. **Grouping sets / `rollup` / `cube`.** A new `agg` form. The dialect pass already
-   knows which targets have them; the checker and arena do not know the form.
+4. ~~**Grouping sets / `rollup` / `cube`.**~~ **Done.** `rollup e` and `cube e` are
+   primitives beside `group`, and the key they mark is `maybe` in the output row — the
+   type is the whole point, since there is no cast that makes a subtotal row's key
+   exist. The shape belongs to the stage: `ROLLUP(a, b)` is one clause over every marked
+   key, so a plain `group` beside them goes first in the clause, which is what makes it
+   mean "grouped within the subtotals". SQLite and the MySQL family refuse it, for
+   different reasons — SQLite has no grouping sets, and MySQL's `WITH ROLLUP` rolls up
+   the whole key list and cannot combine with `ORDER BY`.
 5. ~~**Correlated subqueries.**~~ **Investigated: no capability is missing.** Every
    correlated pattern this plan named is reachable today with the join spellings, and
    `the_join_spellings_match_a_correlated_subquery` proves it by running each one beside

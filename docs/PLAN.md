@@ -182,7 +182,7 @@ known shape, and none is a boundary of what exists today:
 | item | what it would take |
 |---|---|
 | catalog declarations | a module that declares tables without a `query … = table` binding, so a project can share one schema |
-| typed bind parameters | `--param NAME:TYPE` is read today; the type is checked at the call site only, and a declared parameter type would need a binding in the prelude |
+| typed bind parameters | `--param name:type=value` works today (`limit_n : int = 5` is prepended to the file, so the type is checked like any signature), and a wrong type is a compile error. What is missing is a *file* declaring its own parameters, so the same query can be run without the flag |
 | name-aligned set operations | `union` requires both sides to have the same row *in the same order*; aligning by name needs a projection per branch |
 | `qualify` | a stage that filters on a window without the derived table SQL requires; sqlglot's AST has the field (`SelectStatement::qualify`) and no Cagara syntax reaches it |
 | grouping sets, `rollup`, `cube` | a new `agg` form and a backend rule; the dialect pass already knows which targets have them |

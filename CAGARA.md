@@ -367,14 +367,19 @@ combine only when they are the **same** type, and nothing converts.
 | `decimal 10 2 + decimal 10 2` | `decimal 10 2` |
 | `decimal 10 2 - decimal 10 2` | `decimal 10 2` |
 | `decimal 10 2 + decimal 12 2` | **compile error**: bring both to one type with `toDecimal` |
-| `decimal 10 2 * decimal 10 2` | **refused**: a product's scale is the sum of the operands', which the type cannot state |
-| `decimal 10 2 / decimal 10 2` | **refused**: a quotient's scale is engine-defined |
+| `decimal 10 2 * decimal 10 2` | `decimal 10 2` — the product is exact, and its scale is the engine's (`toDecimal 10 2` brings it back) |
+| `decimal 10 2 / decimal 10 2` | **refused**: DuckDB promotes a decimal quotient to `DOUBLE`, so no same-type rule stays exact on every target |
 | `decimal 10 2 == decimal 10 2` | `bool` |
 | `decimal 10 2 == decimal 12 2` | **compile error**: one type everywhere, so convert both |
 
 The width a declaration states is the promise about how large the value can be, so
-adding money keeps the type rather than widening it. Comparisons follow the same
-rule as arithmetic: one type on both sides. A numeric literal takes the
+money arithmetic keeps the type rather than widening it. A product is exact — the
+engine computes it exactly, at a scale that is the sum of the operands' — so the
+value can carry more digits than the type states: `toString` shows what the engine
+kept, and `toDecimal p s` is how it comes back to the declared scale. Division is
+the one operation left out, because the engines disagree about it: PostgreSQL keeps
+a quotient exact, DuckDB promotes it to `DOUBLE` (measured), and no same-type rule
+can hold on both. A numeric literal takes the
 shape its context demands, so `total * 1.2` is a *product with a literal* and is
 refused like any other product; write `roundTo 2 (total * 1.2)`'s inputs as
 decimals with `toDecimal` when the scale matters. To change a scale, say so:

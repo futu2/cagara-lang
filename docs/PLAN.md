@@ -145,10 +145,19 @@ non-null reading produces. Lowering the candidate's score, or only the
 parameterized constructors' score, left exactly those two tests failing. Recorded
 because it is the shape any future "let these two types meet" feature will hit.
 
+Multiplication is in as well, under the same rule: the product is exact, and its
+scale — the sum of the operands' — is the engine's, so `toDecimal p s` is how the
+value comes back to the declared one. Division is the one operation left out, and
+not for a type-system reason: PostgreSQL keeps a decimal quotient exact, DuckDB
+promotes it to `DOUBLE` (measured: `typeof(20.00::DECIMAL(10,2) / 4.00::DECIMAL(10,2))`
+is `DOUBLE`), so a same-type rule would be a promise one target breaks.
+
 What is left of the decimal work is therefore: a result type that *widens* the way
 SQL's does (which needs type-level arithmetic in the language, or an arbitration
-that can rank a computed result), and `--ddl` if the schema side ever emits column
-types. Mixed comparisons are not on the list: they are refused by decision.
+that can rank a computed result), a division that stays exact on every target (which
+needs a cast whose parameters come from the type, i.e. the same type-level
+machinery), and `--ddl` if the schema side ever emits column types. Mixed
+comparisons are not on the list: they are refused by decision.
 
 See [`CORE.md`](CORE.md) for semantics and [`ROW-TYPES.md`](ROW-TYPES.md) for
 row algebra.

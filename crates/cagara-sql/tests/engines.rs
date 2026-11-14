@@ -523,7 +523,8 @@ fn money_is_exact_on_the_engines() {
                  INSERT INTO main.money VALUES (1, 19.99, 0.1), (2, 19.99, 0.2), (3, 19.99, 0.3);\n";
     let src = "money : query { id = int, total = decimal 10 2, part = decimal 10 1 } = \
                table \"main\" \"money\"\n\
-               q = money & agg { revenue = sum .total, parts = sum .part }\n";
+               q = money & agg { revenue = sum .total, parts = sum .part }\n\
+               prod = money & select { id = .id, gross = .total * .total }\n";
     let ws = Workspace::from_source(src);
     assert!(ws.diags.is_empty(), "{:?}", ws.diags);
     let rels = root_queries(&ws);
@@ -535,6 +536,18 @@ fn money_is_exact_on_the_engines() {
         .as_ref()
         .unwrap_or_else(|d| panic!("`q`: {}", d.message));
     let want = ["59.97|0.6"];
+    let (_, prod) = rels
+        .iter()
+        .find(|(n, _)| n == "prod")
+        .unwrap_or_else(|| panic!("no `prod`"));
+    let prod = prod
+        .as_ref()
+        .unwrap_or_else(|d| panic!("`prod`: {}", d.message));
+    // 19.99 * 19.99 is 399.6001 exactly, and both engines render it the same way
+    // even though their decimal *types* differ (DuckDB `DECIMAL(18,4)`,
+    // PostgreSQL `numeric`): the product keeps the operand type in Cagara and the
+    // exact value in the engine.
+    let prod_want = ["1|399.6001", "2|399.6001", "3|399.6001"];
 
     let duck = Engine {
         shell: "duckdb",
@@ -557,6 +570,20 @@ fn money_is_exact_on_the_engines() {
             panic!("`duckdb` is not installed (CAGARA_REQUIRE_ENGINES is set)")
         }
         None => eprintln!("skipping duckdb: not installed"),
+    }
+    let prod_sql = compile(
+        prod,
+        Options {
+            dialect: Dialect::DuckDb,
+            ..Options::default()
+        },
+    )
+    .expect("duckdb product");
+    if let Some(rows) = run_setup(&duck, setup, &prod_sql) {
+        match rows {
+            Ok(rows) => assert_eq!(rows, prod_want, "{prod_sql}"),
+            Err(m) => panic!("duckdb: {m}\n  {prod_sql}"),
+        }
     }
 
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
@@ -583,6 +610,16 @@ fn money_is_exact_on_the_engines() {
     let pg_setup = format!("CREATE SCHEMA main;\n{setup}");
     let blocks = pg_batch(harness, &pg_setup, std::slice::from_ref(&pg));
     assert_eq!(blocks[0], want, "{pg}");
+    let prod_pg = compile(
+        prod,
+        Options {
+            dialect: Dialect::Postgres,
+            ..Options::default()
+        },
+    )
+    .expect("postgres product");
+    let blocks = pg_batch(harness, &pg_setup, std::slice::from_ref(&prod_pg));
+    assert_eq!(blocks[0], prod_want, "{prod_pg}");
 }
 
 /// `lift` on the engines: one row has a value and one does not, so the NULL

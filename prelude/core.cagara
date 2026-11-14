@@ -581,7 +581,16 @@ _-_ : expr r (decimal p s) -> expr r (decimal p s) -> expr r (decimal p s) = sql
 _-_ : expr r int -> expr r int -> expr r int = sql "$1 - $2"
 _-_ : expr r float -> expr r float -> expr r float = sql "$1 - $2"
 
-## Multiplication, overloaded on `int` and `float`.
+## Multiplication, overloaded on `int`, `float` and `decimal p s`.
+##
+## Two decimals multiply only as the same `(p,s)`, like addition. The product is
+## exact — the engine computes it exactly — but its *scale* is the sum of the
+## operands', so the value can carry more digits than the type states: `toString`
+## shows what the engine kept, and `toDecimal p s` is how it is brought back to the
+## declared scale. Division is absent: DuckDB promotes a decimal quotient to
+## `DOUBLE` (measured), so there is no same-type rule that stays exact on every
+## target.
+_*_ : expr r (decimal p s) -> expr r (decimal p s) -> expr r (decimal p s) = sql "$1 * $2"
 _*_ : expr r int -> expr r int -> expr r int = sql "$1 * $2"
 _*_ : expr r float -> expr r float -> expr r float = sql "$1 * $2"
 

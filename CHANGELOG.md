@@ -9,8 +9,10 @@
   door out.
 - One type everywhere for decimals. `+`/`-` take two operands of the same `(p,s)` and return it —
   no implicit conversion, and a mismatch names both parameters and `toDecimal` as the way to bring
-  them together. Comparisons follow the same rule. `*` and `/` are refused: a product's scale is the
-  sum of the operands' and a quotient's is engine-defined, so neither can be stated by a signature.
+  them together. Comparisons and multiplication follow the same rule — a product is exact, at a
+  scale that is the sum of the operands', so `toDecimal p s` brings it back. Division is refused
+  because the engines disagree: PostgreSQL keeps a decimal quotient exact, DuckDB promotes it to
+  `DOUBLE`.
   `sum`/`avg` of a `decimal p s` are `maybe (decimal 38 s)` and `min`/`max` keep the operand's type.
   A decimal cast on SQLite is a compile error (its `NUMERIC` affinity stores REAL or INTEGER, so the
   precision would be lost silently). `money_is_exact_on_the_engines` runs the sum of three 19.99s and

@@ -431,9 +431,13 @@ bad = money & select { mixed = .total + .other }    # decimal 10 2 + decimal 12 
 ```
 
 — and the declared width is the promise about how large a value can be.
-Multiplication and division are refused: a product's scale is the sum of the
-operands' and a quotient's is engine-defined, so neither can be stated by the
-signature. `toDecimal 12 2 .total` is how a value changes scale.
+Multiplication follows it too, and its product is exact: the engine computes it at
+a scale that is the sum of the operands', so the value may carry more digits than
+the type — `toDecimal 10 2 (.a * .b)` brings it back, and `toString` shows what the
+engine kept. Division is refused, and the reason is the engines rather than the
+type system: PostgreSQL keeps a decimal quotient exact, DuckDB promotes it to
+`DOUBLE`, so the same rule cannot hold on both. `toDecimal 12 2 .total` is how a
+value changes scale.
 
 Aggregates do the widening instead: `sum .total` is `maybe (decimal 38 2)` and
 `avg .total` the same, because 38 digits with the operand's scale is what the

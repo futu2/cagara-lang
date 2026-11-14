@@ -269,9 +269,20 @@ fn decimal_arithmetic_keeps_the_type_and_refuses_mixes() {
     // Two different parameters do not mix.
     let e = err(&format!("{prelude}q = m & select {{ x = .a + .c }}\n"), "q");
     assert!(e.contains("expected 10, found 12"), "{e}");
-    // Multiplication is refused: its scale is the sum of the operands'.
-    let e = err(&format!("{prelude}q = m & select {{ x = .a * .b }}\n"), "q");
-    assert!(e.contains("no overload of `*` matches"), "{e}");
+    // Multiplication follows the same rule: same type in, same type out. The
+    // product is exact, and `toDecimal` is how its (wider) scale is brought back.
+    let src =
+        format!("{prelude}q = m & select {{ t = .a * .b, back = toDecimal 10 2 (.a * .b) }}\n");
+    assert_eq!(
+        ty(&src, "q"),
+        "query { t = decimal 10 2, back = decimal 10 2 }"
+    );
+    let e = err(&format!("{prelude}q = m & select {{ x = .a * .c }}\n"), "q");
+    assert!(e.contains("`decimal` parameters differ"), "{e}");
+    // Division is refused: DuckDB promotes a decimal quotient to `DOUBLE`, so no
+    // same-type rule stays exact on every target.
+    let e = err(&format!("{prelude}q = m & select {{ x = .a / .b }}\n"), "q");
+    assert!(e.contains("no overload of `/` matches"), "{e}");
 }
 
 /// `decimal p s` is a type, its parameters are numbers, and both are checked.

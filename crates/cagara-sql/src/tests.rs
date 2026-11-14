@@ -1572,14 +1572,28 @@ fn a_permutation_projection_crosses_a_barrier() {
         ),
         "SELECT DISTINCT name AS y, id AS x, age AS z, active AS w FROM public.users"
     );
-    // Dropping a column is not a permutation: after a `DISTINCT` it changes the
-    // number of rows, and after a `LIMIT` it is only safe when the sort keys
-    // survive — which this rule does not try to prove.
-    let dropped = sql(
-        "q = users & order [asc .id] & limit 3 & select { x = .id }\n",
+    // Dropping a column is not a permutation, but across *paging* it folds
+    // anyway: `LIMIT` picks rows by an `ORDER BY` over the input columns, which
+    // SQL allows even when the projection no longer outputs them.
+    assert_eq!(
+        sql(
+            "q = users & order [asc .id] & limit 3 & select { x = .id }\n",
+            "q"
+        ),
+        "SELECT id AS x FROM public.users ORDER BY id NULLS LAST LIMIT 3"
+    );
+    // A `DISTINCT` is the one that still needs the barrier: dropping a column
+    // there changes how many rows are deduped. `(1,'a'), (1,'b')` is two rows
+    // after `distinct`, and one after the fold.
+    let dropped = sql("q = users & distinct & select { x = .id }\n", "q");
+    assert!(dropped.contains("AS t1"), "{dropped}");
+    // And a projection that puts a different column under a name a sort key uses
+    // changes what `ORDER BY` means once they share a `SELECT`.
+    let shadowed = sql(
+        "q = users & order [asc .name] & limit 3 & select { name = .id, x = .name }\n",
         "q",
     );
-    assert!(dropped.contains("AS t1"), "{dropped}");
+    assert!(shadowed.contains("AS t1"), "{shadowed}");
     // Nor is computing one.
     let computed = sql(
         "q = users & distinct & select { x = .id, y = .name, z = .age, w = .id + 1 }\n",

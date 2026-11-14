@@ -367,6 +367,30 @@ const CASES: &[(&str, &[&str])] = &[
         "rw_perm_distinct = dupes & distinct & select { k = .k, id = .id } & order [asc .id, asc .k]",
         &["x|1", "x|2", "y|3"],
     ),
+    // Dropping a column across *paging* folds, so it must not move the rows
+    // either: the sort key is a base column, which SQL lets an `ORDER BY` name
+    // even when the projection no longer outputs it.
+    (
+        "rw_page_drop = nums & order [asc .id] & limit 2 & select { a = .a }",
+        &["7", "-7"],
+    ),
+    (
+        "rw_page_drop_desc = nums & order [desc .id] & limit 2 & select { a = .a }",
+        &["-8", "7"],
+    ),
+    // Sorting by a column the projection drops: the order is still the input's.
+    (
+        "rw_page_sort_dropped = nums & order [asc .a] & limit 2 & select { id = .id }",
+        &["4", "2"],
+    ),
+    // A projection that reuses a sort key's name for a different column changes
+    // what `ORDER BY` means, so it keeps its derived table.
+    // The rows the barrier produces: ids 4 and 2 (the two smallest `a`), then
+    // swapped names, then ordered by the output `a` — which is `id`.
+    (
+        "rw_page_shadow = nums & order [asc .a] & limit 2 & select { a = .id, id = .a }",
+        &["2|-7", "4|-8"],
+    ),
     // Dropping a column is not a permutation and keeps its derived table, so it
     // still has to return the rows the drop implies.
     (

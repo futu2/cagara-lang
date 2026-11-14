@@ -542,10 +542,30 @@ impl Lowerer {
         let new_win = fs
             .iter()
             .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
-        // A projection that renames and reorders without dropping anything does
-        // not need the barrier a general one does: it cannot change which rows a
-        // `LIMIT` or a `DISTINCT` below it selects. See `keeps_every_column`.
-        if st.needs_barrier(Fuse::Project, new_win) && !st.keeps_every_column(fs) {
+        // What a projection can and cannot fold over, in two parts.
+        //
+        // A `DISTINCT` below it is the one that always needs the barrier: dropping
+        // a column there changes how many rows are deduped. `(1,'a'), (1,'b')` is
+        // two rows after `distinct`, and two rows after projecting `id`; folded it
+        // would be one.
+        //
+        // A `LIMIT` or an `OFFSET` below it does not: those pick *which* rows the
+        // stage returns, by an `ORDER BY` whose keys were already resolved to
+        // expressions over the input columns — SQL lets an `ORDER BY` name a
+        // column the projection does not output, as long as the query is not
+        // `DISTINCT`. So the projection may fold whatever it drops.
+        //
+        // Everything else `needs_barrier` refuses (a window a later stage would
+        // have to see, an aggregate) is untouched: `keeps_every_column` only
+        // widens the paging case.
+        let paged = st.limit.is_some() || st.offset.is_some();
+        let shadows = self.shadows_a_sort_key(&st, fs);
+        let barrier = if paged && !st.distinct {
+            (new_win && (st.has_agg || st.has_win)) || shadows
+        } else {
+            st.needs_barrier(Fuse::Project, new_win) && (!st.keeps_every_column(fs) || shadows)
+        };
+        if barrier {
             st = self.wrap(st);
         }
         let items = fs
@@ -554,6 +574,29 @@ impl Lowerer {
             .collect::<Result<_, String>>()?;
         st.set_items(items, new_win);
         Ok(st)
+    }
+
+    /// Would folding `fs` into `st` change what one of `st`'s sort keys means?
+    ///
+    /// A sort key was resolved to an expression over the stage's *input* columns,
+    /// and a bare column key is written as that column's name. Once the projection
+    /// shares the same `SELECT`, an `ORDER BY name` binds to the *output* `name`
+    /// when there is one — so a projection that puts a different column under a
+    /// name a sort key uses changes the ordering. `select { name = .id }` under
+    /// `order [asc .name]` is exactly that, and it is why the paging fold has to
+    /// ask.
+    fn shadows_a_sort_key(&self, st: &Stage, fs: &[(String, IrExpr)]) -> bool {
+        st.order_by.iter().any(|k| {
+            let Expr::Column {
+                name, table: None, ..
+            } = &k.expr
+            else {
+                return false;
+            };
+            fs.iter()
+                .find(|(n, _)| n == name)
+                .is_some_and(|(_, e)| !matches!(e, IrExpr::Col(Side::Single, c) if c == name))
+        })
     }
 
     fn lower_update(&mut self, r: &Rel, fs: &[(String, IrExpr)]) -> Result<Stage, String> {

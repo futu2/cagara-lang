@@ -779,8 +779,8 @@ Rules:
 - `sum`, `avg`, `min`, `max` return `maybe`. `count`, `countOf`, `countDistinct` return `int`. A
 nullable column needs no separate name: `sum` accepts `int`, `float`, `maybe int` and `maybe float`,
 and every overload emits the same `SUM(x)`.
-- A nullable column goes to the same aggregate — `sum .m` is `maybe int` — or to
-  `countOfMaybe`/`countDistinctMaybe`. Coalescing first changes `avg`/`min`/`max`.
+- A nullable column goes to the same aggregate — `sum .m` is `maybe int`, and `countOf .m`
+  counts the non-null values. Coalescing first changes `avg`/`min`/`max`.
 - An aggregate is a **value**, so three combinators modify one instead of a name per
   combination. `filtered p a` keeps only the rows `p` keeps, `distinctAgg a` makes the
   argument distinct, and `over spec a` is the same aggregate as a window:
@@ -949,8 +949,8 @@ after the join refer to `.x`, which follows the left-wins rule.
 
 Filtering the nullable side is a semantic choice. `where (isNotNull .amount)` drops the unmatched
 rows; omit it to keep them. A comparison such as `where (.amount > 0.0)` is a type error until the
-value is handled (`coalesce`, `isNull`). `countOf` rejects a nullable argument, but `countOfMaybe`
-is SQL `COUNT(x)` over the null-extended side: it counts matched rows and is never NULL:
+value is handled (`coalesce`, `isNull`). `countOf` accepts the nullable column directly: it is SQL
+`COUNT(x)` over the null-extended side, so it counts matched rows and is never NULL:
 
 ```cagara
 users : query { id = int } = table "public" "users"
@@ -961,7 +961,7 @@ main =
   & leftJoin orders (.<id == .>user_id)
   & agg {
       id = group .id,
-      matched = countOfMaybe .user_id
+      matched = countOf .user_id
     }
 ```
 
@@ -1121,7 +1121,7 @@ Where `maybe` comes from:
 | `sum`, `avg`, `min`, `max` — filtered or not | `maybe` (empty/all-null input) |
 | `lag`, `lead`, `over` | `maybe` |
 | `count`, `countOf`, `countDistinct`, `over spec count`, `filtered p count` | non-null `int` |
-| `countOfMaybe`, `countDistinctMaybe` | non-null `int` |
+
 | `isNull`, `isNotNull`, `isTrue` | non-null `bool` |
 | `try*` casts | `maybe` |
 
@@ -1150,14 +1150,14 @@ main =
   & agg {
       id = group .id,
       total = coalesce 0.0 (sum .amount),
-      n = countOfMaybe .user_id
+      n = countOf .user_id
     }
 ```
 
-`countOf .maybe_column` is rejected because its argument must be non-null. Use `countOfMaybe` for
-SQL `COUNT(x)` (NULLs skipped), or sum an indicator over the nullable side. `sum`/`avg` over a
-nullable column pass it straight through, so `avg` does not count a missing value as zero the
-way `avg (coalesce 0 .x)` would.
+`countOf` takes the nullable column directly — it is SQL `COUNT(x)`, which skips NULLs — so it is
+how matched rows are counted across an outer join. `sum`/`avg` over a nullable column pass it
+straight through too, so `avg` does not count a missing value as zero the way `avg (coalesce 0 .x)`
+would. Summing an indicator is the third spelling, when the predicate is more than "not NULL".
 
 A nullable value **is** a usable sort key and group key: SQL already says what they mean (NULLs sort
 last, which the language fixes, and NULL forms its own group). Wrapping one in `coalesce` changes the
@@ -1190,7 +1190,7 @@ main =
       name = group .name,
       deposits = coalesce 0.0 (sum (ifThenElse (coalesce "" .kind == "deposit") (coalesce 0.0 .amount) 0.0)),
       withdrawals = coalesce 0.0 (sum (ifThenElse (coalesce "" .kind == "withdrawal") (coalesce 0.0 .amount) 0.0)),
-      n = countOfMaybe .account_id
+      n = countOf .account_id
     }
 ```
 
@@ -1397,9 +1397,9 @@ another use constrains it.
 ```text
 count              : agg (expr r int)                              COUNT(*)
 countOf            : expr r a -> agg (expr r int)                  COUNT(x)
+countOf            : expr r (maybe a) -> agg (expr r int)          COUNT(x)
 countDistinct      : expr r a -> agg (expr r int)                  COUNT(DISTINCT x)
-countOfMaybe       : expr r (maybe a) -> agg (expr r int)          COUNT(x)
-countDistinctMaybe : expr r (maybe a) -> agg (expr r int)          COUNT(DISTINCT x)
+countDistinct      : expr r (maybe a) -> agg (expr r int)          COUNT(DISTINCT x)
 
 sum : expr r int -> agg (expr r (maybe int))        sum : expr r (maybe int) -> agg (expr r (maybe int))
 sum : expr r float -> agg (expr r (maybe float))    sum : expr r (maybe float) -> agg (expr r (maybe float))
@@ -1641,7 +1641,7 @@ Use this to map a request, not to write SQL.
 | `COUNT(*) FILTER (WHERE p)` | `filtered p` count |
 | `COUNT(x) FILTER (WHERE p)` | `filtered p (countOf .x`) |
 | `COUNT(DISTINCT x) FILTER (WHERE p)` | `filtered p (distinctAgg (countOf .x`)) |
-| `COUNT(x)` where `x` is `maybe` | `countOfMaybe .x` |
+| `COUNT(x)` where `x` is `maybe` | `countOf .x` |
 | `SUM/AVG/MIN/MAX(x)` where `x` is `maybe` | `sum`/`avg`/`min`/`max .x` |
 | `COALESCE(x, 0)` | `coalesce 0 .x` or `.x ?? 0` |
 | `CASE WHEN c THEN a ELSE b END` | `ifThenElse c a b` |
@@ -1742,7 +1742,7 @@ report =
       id = group .id,
       name = group .name,
       total = coalesce 0.0 (sum .amount),
-      matched = countOfMaybe .user_id
+      matched = countOf .user_id
     }
   & order [desc .total]
 

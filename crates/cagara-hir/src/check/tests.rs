@@ -247,6 +247,30 @@ fn a_decimal_cast_names_its_parameters() {
     assert!(e.contains("expected 12, found 10"), "{e}");
 }
 
+/// Every aggregate that skips NULLs takes a nullable column.
+///
+/// `sum`/`avg`/`min`/`max` had a `maybe` overload and `countOf`/`countDistinct` did
+/// not, which is backwards: `COUNT(x)` is the aggregate whose *whole point* is that
+/// it skips NULLs, and a nullable column is exactly where you count non-null values.
+/// The signature said `expr r a`, and a bare type variable in a signature is non-null.
+#[test]
+fn every_null_skipping_aggregate_takes_a_maybe() {
+    let prelude = "m : query { v = maybe int } = table \"s\" \"m\"\n";
+    let src = format!(
+        "{prelude}q = m & agg {{ s = sum .v, a = avg .v, lo = min .v, hi = max .v, \
+         n = countOf .v, nd = countDistinct .v }}\n"
+    );
+    assert_eq!(
+        ty(&src, "q"),
+        "query { s = maybe int, a = maybe float, lo = maybe int, hi = maybe int, \
+         n = int, nd = int }"
+    );
+    // A non-null column still works, and the count is the same `int`.
+    let src = "m : query { v = int } = table \"s\" \"m\"\n\
+               q = m & agg { n = countOf .v, nd = countDistinct .v }\n";
+    assert_eq!(ty(src, "q"), "query { n = int, nd = int }");
+}
+
 /// The parameters of a cast are read wherever the literals are: a partly applied
 /// cast under `lift`, and a named constant.
 ///
@@ -1318,11 +1342,14 @@ fn aggregate_nullability_is_explicit() {
         "q",
     );
     assert!(e.contains("non-null") && e.contains("??"), "{e}");
-    let e = err(
+    // `countOf` is the exception, and deliberately: `COUNT(x)` skips NULLs by
+    // definition, so counting the non-null values of a nullable column is what
+    // it is *for* — no `??` needed, and the count is never nullable.
+    let t = ty(
         &format!("{NULLABLE}q = people & agg {{ c = countOf .email }}\n"),
         "q",
     );
-    assert!(e.contains("non-null") && e.contains("maybe"), "{e}");
+    assert!(t.contains("c = int"), "{t}");
     // Explicit nullable aggregates are the escape hatch: the signature says
     // `maybe`, so the template is the place that decides what NULL means.
     let t = ty(

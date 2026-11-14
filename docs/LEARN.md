@@ -806,19 +806,22 @@ the next section.
 
 ### Nullable aggregate inputs
 
-A column declared `maybe` is not accepted by `sum`, `avg`, `min`, `max`,
-`countOf`, or `countDistinct`: those signatures say non-null. The value
-aggregates take both: `sum`, `avg`, `min` and `max` accept a `maybe` column
-under the same name and pass it straight to the SQL aggregate, because SQL
-already skips `NULL`:
+Every aggregate accepts a column declared `maybe` under its own name, because SQL
+already skips `NULL` in all of them — `SUM`, `AVG`, `MIN`, `MAX`, `COUNT(x)` and
+`COUNT(DISTINCT x)`:
 
 ```haskell
 q = t & agg {
   total = coalesce 0 (sum .amount),
   average = avg .amount,
-  n = countOfMaybe .code
+  n = countOf .code
 }
 ```
+
+`countOf` and `countDistinct` are worth a word, because their `COUNT` skips NULLs by
+definition: counting the non-null values of a nullable column is what they are *for*,
+and the result is never nullable. (`countOfMaybe` and `countDistinctMaybe` still
+exist as aliases, for queries written against them.)
 
 This is not the same as coalescing first. Over `[NULL, 5]`, `avg .amount` is
 `5`, while `avg (coalesce 0 .amount)` is `2.5`; `min .amount` over `[NULL, 5]`
@@ -902,8 +905,7 @@ Where nullability comes from:
 | The possibly-absent side of a left, right, or full join | its columns become `maybe` |
 | `sum`, `avg`, `min`, `max` — filtered or not | `maybe` |
 | `lag`, `lead`, `over` | `maybe` |
-| `count`, `countOf`, `countDistinct`; `over spec count`, `filtered p count` | non-null `int` |
-| `countOfMaybe`, `countDistinctMaybe` | non-null `int` |
+| `count`, `countOf`, `countDistinct` (nullable input or not); `over spec count`, `filtered p count` | non-null `int` |
 | `isNull`, `isNotNull`, `isTrue` | non-null `bool` |
 
 Handling nulls explicitly:
@@ -945,15 +947,14 @@ The fix is to say what a missing amount means:
 t = u & leftJoin o (.<id == .>user_id) & select {.id, amt = coalesce 0.0 .amount + 1.0}
 ```
 
-`countOf` follows the same non-null rule even though SQL's `COUNT(x)` skips
-nulls. Use `countOfMaybe` for that meaning: it counts matched rows across a
-left join, because the synthetic null-extended row has a `NULL` key:
+`countOf` is how matched rows are counted across a left join, because the synthetic
+null-extended row has a `NULL` key and `COUNT(x)` skips it:
 
 ```haskell
 matches =
   users
   & leftJoin orders (.<id == .>user_id)
-  & agg { id = group .id, n = countOfMaybe .user_id }
+  & agg { id = group .id, n = countOf .user_id }
 ```
 
 The same count without a nullable helper sums an indicator:
@@ -1401,8 +1402,8 @@ byId : expr { id = int | r } int -> query { id = int | r } -> query { id = int |
 `power exponent base` `sign` `greatest a b` `least a b`
 
 **Aggregates:** `count` `countOf` `countDistinct` `sum` `avg` `min` `max`;
-`filtered` `distinctAgg` `over`; `sum`/`avg`/`min`/`max` also accept a `maybe`
-column, and the nullable counts are `countOfMaybe` `countDistinctMaybe`
+`filtered` `distinctAgg` `over`; every one of them also accepts a `maybe` column
+(`countOfMaybe` and `countDistinctMaybe` remain as aliases)
 
 **Nulls:** `nothing` `coalesce` `??` `just` `nullIf` `isNull` `isNotNull` `isTrue`
 `eqMaybe`

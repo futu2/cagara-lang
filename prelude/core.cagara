@@ -414,11 +414,15 @@ except : query r -> query r -> query r = primitive "__except"
 count : agg (expr r int) = sql "COUNT(*)"
 
 ## `countOf .x` counts the rows where `x` is not NULL (`COUNT(x)`) — the
-## difference from `count` is exactly the NULLs.
+## difference from `count` is exactly the NULLs, which is why a nullable column
+## needs no special spelling: `COUNT` already skips them.
 countOf : expr r a -> agg (expr r int) = sql "COUNT($1)"
+countOf : expr r (maybe a) -> agg (expr r int) = sql "COUNT($1)"
 
-## `countDistinct .x` counts the distinct non-NULL values of `x`.
+## `countDistinct .x` counts the distinct non-NULL values of `x`, nullable column
+## or not: `COUNT(DISTINCT x)` skips NULLs by definition.
 countDistinct : expr r a -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
+countDistinct : expr r (maybe a) -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
 
 ## Sum of a column, overloading `int` and `float`. NULL for an all-NULL or
 ## empty group, so the result is `maybe`: `coalesce 0 (sum .amount)`.

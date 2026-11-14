@@ -10,8 +10,7 @@ function signature means a non-null type, so `expr r a` does not accept
 | The possibly absent side of a left, right, or full join | Its output columns become `maybe` |
 | `sum`, `avg`, `min`, `max` — filtered or not | Return `maybe`, including for empty/all-null input |
 | `lag`, `lead`, `over` | Return `maybe` |
-| `count`, `countOf`, `countDistinct`; `over spec count`, `filtered p count` | Return non-null `int` |
-| `countOfMaybe`, `countDistinctMaybe` | Return non-null `int` |
+| `count`, `countOf`, `countDistinct` (nullable input or not); `over spec count`, `filtered p count` | Return non-null `int` |
 
 `filtered p agg` takes a non-null `bool` predicate over the aggregate's input
 rows and keeps the aggregate's type, so `filtered p (sum .x)` is `maybe` and

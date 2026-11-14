@@ -20,12 +20,14 @@ ifThenElse : expr r bool -> expr r a -> expr r a -> expr r a =
 ## conditionals are written with the `case { p => a; ... }` form instead.
 caseWhen : expr r bool -> expr r a -> expr r a -> expr r a = ifThenElse
 
-## `countOf` for a nullable column: `COUNT(x)` already skips NULLs, so this is
-## the same aggregate with a signature that accepts `maybe a`.
-countOfMaybe : expr r (maybe a) -> agg (expr r int) = sql "COUNT($1)"
+## `countOf` for a nullable column. `countOf` accepts one directly — `COUNT(x)`
+## skips NULLs by definition, which is what counting the non-null values of a
+## nullable column *is* — so this spelling is an alias, kept because queries
+## written against it should keep working.
+countOfMaybe : expr r (maybe a) -> agg (expr r int) = countOf
 
-## `countDistinct` for a nullable column; NULLs are skipped by SQL.
-countDistinctMaybe : expr r (maybe a) -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
+## `countDistinct` for a nullable column; an alias, like `countOfMaybe`.
+countDistinctMaybe : expr r (maybe a) -> agg (expr r int) = countDistinct
 
 # Filtered aggregates apply a predicate to the aggregate's *input* rows, the
 # portable spelling of SQL's `agg(x) FILTER (WHERE p)`. The predicate is a

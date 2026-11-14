@@ -198,7 +198,7 @@ so `expr r a` does not accept `expr r (maybe a)`. Where nullability arises:
 - `sum`, `avg`, `min`, `max`, `lag`, `lead` and the `*Over` windows return
   `maybe`, because SQL returns
   `NULL` for an empty or all-null input; `count`/`countOf`/`countDistinct` and
-  their `countOfMaybe`/`countDistinctMaybe` forms return non-null `int`.
+  every aggregate accepts a nullable column, and the counts return non-null `int`.
   `filtered` keeps the result type of the aggregate it modifies.
 
 Filtered aggregates are not an IR construct: `filtered p (sum x)`, for example,

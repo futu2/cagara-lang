@@ -373,6 +373,12 @@ const CASES: &[(&str, &[&str])] = &[
         "rw_null_ext_fn = users & leftJoin (orders & select { user_id = .user_id, s = toString .amount }) (.<id == .>user_id) & select { id = .id, s = .s } & order [asc .id, asc .s]",
         &["1|4.5", "1|5.5", "2|NULL", "3|1.0"],
     ),
+    // Every NULL-skipping aggregate takes a nullable column, and counts the
+    // non-null values: `nums.v` is 10, NULL, 30, 20.
+    (
+        "null_aggs = nums & agg { s = sum .v, a = avg .v, lo = min .v, hi = max .v, n = countOf .v, nd = countDistinct .v }",
+        &["60|20.0|10|30|3|3"],
+    ),
     // A filter after a bare `distinct` folds into it, which is only right
     // because deduping whole rows and filtering on them commute.
     (

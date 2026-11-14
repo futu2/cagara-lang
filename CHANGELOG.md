@@ -28,6 +28,10 @@
   drop. A `distinct` still needs the barrier, because dropping a column there changes how many
   rows are deduped. A projection that reuses a sort key's name for another column keeps it too.
 
+- `countOf` and `countDistinct` take a nullable column. They were the two NULL-skipping
+  aggregates without a `maybe` overload, which is backwards: `COUNT(x)` skips NULLs by
+  definition, and counting the non-null values of a nullable column is what it is for.
+
 - A sort key keeps pointing at a column that exists. `order [asc .age] & limit 2 & select { age = .id }`
   emitted `ORDER BY age`, which SQL binds to the *output* `age` — so it reordered the rows the limit
   had just chosen — and `prefix "x_" & order [asc .x_id] & select { a = .x_id }` emitted

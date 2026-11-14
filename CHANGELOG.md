@@ -18,6 +18,10 @@
   precision would be lost silently). `money_is_exact_on_the_engines` runs the sum of three 19.99s and
   `0.1 + 0.2` on DuckDB and PostgreSQL.
 
+- An overload that fails because an argument is a `maybe` now says how to take it out
+  (``x ?? default`` / `just x`), the same advice the type-mismatch path gives — `.n + .n` on a
+  `maybe int` used to stop at "no overload of `+` matches".
+
 - A `maybe` used where a present value is wanted now comes with its fix on the diagnostic itself, so
   any client can offer it: `(.s ?? "")` with a per-type default when the value is missing, `just (…)`
   when the position takes a `maybe`. It wraps the column, not the field around it, so `upper .s`

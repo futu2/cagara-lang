@@ -42,6 +42,14 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
 
 ## Recently closed
 
+- The `??` advice reaches overload failures too: `.n + .n` on a `maybe int` names
+  the nullable argument and the two ways out, where it used to list candidates.
+- A `decimal` cast finds its parameters through a partly applied cast
+  (`lift (toDecimal 10 2) .d`) and through a named constant (`p = 10`), both of which
+  used to leave `decimal a b` open in `--types`.
+- The documented decimal range is `0 ≤ s ≤ p ≤ 38` — a scale of zero is a whole
+  number of units and was always allowed; only the prose said otherwise.
+
 - `unnest .x` of a non-list says `unnest needs a list, and this is not one`. The
   conflict still surfaces in the row unification, but the application records its
   argument's span (`unnest_args`) and the definition's error is rewritten when it

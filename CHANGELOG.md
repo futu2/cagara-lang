@@ -18,8 +18,10 @@
   precision would be lost silently). `money_is_exact_on_the_engines` runs the sum of three 19.99s and
   `0.1 + 0.2` on DuckDB and PostgreSQL.
 
-- A projection that only renames or reorders columns no longer forces a derived table when a
-  `limit` or a `distinct` sits below it — it cannot change which rows those keep.
+- A projection no longer forces a derived table when a `limit` or an `offset` sits below it: a
+  `LIMIT` picks rows by an `ORDER BY` over the input columns, which SQL allows a projection to
+  drop. A `distinct` still needs the barrier, because dropping a column there changes how many
+  rows are deduped. A projection that reuses a sort key's name for another column keeps it too.
 
 - A `semiJoin` / `antiJoin` no longer wraps a plain table in a derived table on either side.
   It is an existence test and neither side is null-extended, so the subquery only appears where

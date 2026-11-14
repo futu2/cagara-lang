@@ -110,10 +110,16 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
    (`keeps_every_column`) and consulted from `lower_select`, because the question is
    one node against a stage — the same boundary as the semi-join inlining.
 
+   A *dropping* projection now folds over paging too (a `LIMIT` picks rows by an
+   `ORDER BY` over the input columns, which SQL allows), but never over a
+   `DISTINCT` — that is the one where dropping changes how many rows are deduped. A
+   projection that reuses a sort key's name for another column is refused as well.
+
    Next candidates, in the order they look worth it: filter-into-join for an inner
-   join, folding a projection into a join operand, and dropping a *dropping*
-   projection across a barrier when the sort keys survive it. None of them is needed
-   for correctness today.
+   join, folding a projection into a join operand, and `count(*)` over an aggregate
+   (`agg { c = count } & agg { d = count }` is `COUNT(*)` over one row per group,
+   which SQL can write as a nested aggregate only with a window or a derived
+   table — so it stays). None of them is needed for correctness today.
 
 2. ~~Extend the execution-backed coverage beyond SQLite, DuckDB and PostgreSQL.~~
    **Done to the extent this repository can reach, and the limit is documented.**

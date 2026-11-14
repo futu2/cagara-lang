@@ -178,6 +178,54 @@ need their own intrinsic per dialect.
    division differs), then Trino (strict typing), then the warehouses. Each needs a
    service to start, which is why they are not here.
 
+## Maintenance
+
+What the next reader needs to know before changing something, in the order the
+questions come up.
+
+**Where to put a change.** [`ARCHITECTURE.md`](ARCHITECTURE.md) has the crate table
+and the two rules that keep it true: a dialect rule goes in `cagara-sql/src/dialect.rs`,
+and a rule that needs to look at two stages at once goes in `rewrite.rs`. Everything
+else in the backend is one node against the stage built so far.
+
+**The three big files are big for a reason, and it is the same reason.**
+`check/infer.rs` (3765 lines) is one `impl Checker` with five marked sections —
+definitions, inference, coercions, primitives, deferred constraints — and they share
+the trail, the variable store and the pending-constraint list, so splitting them
+would mean handing a dozen fields across a module boundary on every call. The
+sections are the seams; a new one is a new marker, not a new file.
+`check/tests.rs` and `cagara-sql/src/tests.rs` are test bodies, which have no reason
+to be anywhere else.
+
+**Adding a language construct** is four steps, and the architecture doc lists them:
+a checker fact, a normalizer reduction, an arena constructor (or a payload rule), and
+a regression that covers the erased `Rel` *and* its source origins. A construct that
+skips one of those compiles and then misbehaves in a way no test is looking for.
+
+**Adding a backend rule** is two steps: a `Rel -> Rel` rule in `rewrite.rs` (if it
+needs a pair), or a `Fuse`/`needs_barrier` answer in `stage.rs` (if it is one node
+against a stage) — and then a case in `engines.rs`, because a lowering bug is a wrong
+row and only an engine can see it. The differential suite is the only thing standing
+between a "harmless" reordering and silently different results.
+
+**What the tests are for**, so a failure points somewhere:
+
+| suite | catches |
+|---|---|
+| `cagara-hir` unit tests | a checker rule, a message, a suggestion |
+| `cagara-sql/src/tests.rs` | the SQL a query lowers to, per dialect |
+| `cagara-hir/tests/corpus` | the SQL of the shipped examples, as a snapshot (`CAGARA_BLESS=1` to update) |
+| `cagara-sql/tests/engines.rs` | wrong *rows* on real SQLite, DuckDB and PostgreSQL, in both lowerings |
+| `cagara-sql/tests/fuzz.rs` | a crash, a panic, or non-determinism over generated programs |
+| `cagara-cli/tests/doc*.rs` | the prelude's documentation, and that the manual's code blocks compile |
+| `cagara-sql/tests/perf.rs` | a lowering or checking regression in time |
+
+**A recorded expectation is not a derivation.** The differential suite asserted a
+wrong row order for a whole round because the expectation had been recorded from the
+engine's output instead of reasoned from the query — and so it could not catch the bug
+it was recorded from. When adding a case, work out the answer from the data and write
+the reasoning in the comment beside it.
+
 ## Deferred language work
 
 These are **features**, not open questions — each is a language or IR addition with a

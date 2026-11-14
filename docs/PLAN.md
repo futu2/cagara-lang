@@ -65,30 +65,39 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
 
 ## Next steps
 
-1. ~~Separate relational rewrites from SQL emission.~~ **The layering is already
-   there; the `Rel -> Rel` pass is not needed yet.** Reading the crate for it shows
-   three modules with no overlap, and the split is by concern rather than by file
-   size:
+1. ~~Separate relational rewrites from SQL emission.~~ **Done: the pass exists and
+   earns its keep.** `crates/cagara-sql/src/rewrite.rs` is a `Rel -> Rel` pass with
+   no dialect and no SQL in it, applied in `compile` after validation and before
+   lowering. It holds the rules the lowerer cannot express, because they look at two
+   stages at once:
+
+   | rule | why it cannot be a stage decision |
+   |---|---|
+   | `limit a & limit b` → `limit (min a b)` | a pair of nodes, not one node against a stage |
+   | `offset a & offset b` → `offset (a+b)` | same |
+   | `limit a & offset b` → `limit (a-b) & offset b` | the fold is legal in one order only, and which order a pipeline is in is a property of the pair |
+   | `distinct & distinct` → `distinct` | same |
+
+   The pagination rule fixed a real bug: `limit 5 & offset 2` keeps rows 3..=5, and
+   the pair folded into `LIMIT 5 OFFSET 2` keeps five rows starting at the third. The
+   pass turns it into one statement with the right rows, and `Fuse::Offset` now
+   refuses to fold into a stage that already has a limit, so the shape cannot come
+   back through the lowerer.
+
+   The layering is otherwise as it was, and stays by concern:
 
    | module | does | knows about dialects? |
    |---|---|---|
-   | `lower.rs` | `Rel` → `Stage`: fuse into the current `SELECT` or wrap in a derived table (`Fuse`, `needs_barrier`, `grouped`, the depth bound) | no |
+   | `rewrite.rs` | `Rel` → `Rel` | no |
+   | `lower.rs` | `Rel` → `Stage`: fuse or wrap (`Fuse`, `needs_barrier`, `grouped`, the depth bound) | no |
    | `stage.rs` | `Stage` → a `sqlglot` `SelectStatement` | no |
    | `dialect.rs` | `rewrite` / `validate_dialect_support` on the finished statement | yes — all of it |
 
-   `compile` runs exactly that order (`lower` → `into_statement` → optional
-   sqlglot `optimize` → `dialect::rewrite` → validate → generate), and `grep
-   'Dialect::' lower.rs stage.rs` finds nothing. So the item's stated goal — "keeping
-   dialect rules in the backend" — is met.
-
-   What is *not* met is its stated mechanism: there is no `Rel -> Rel` pass, because
-   the fuse-or-wrap decision is taken while lowering rather than as a rewrite on the
-   IR. That is only worth changing when a rewrite needs it, and the differential
-   suite already covers the decisions (`engines_agree`, 74 cases, both lowerings on
-   two engines). The concrete trigger to build one: a rewrite that is *not*
-   expressible as "fold into the current stage or wrap it" — filter-into-join and
-   identity-projection elimination are the two candidates, and neither is wanted
-   today.
+   Next rules that would fit there, in the order they look worth it: identity
+   projection elimination (`select { a = .a, b = .b }` already fuses, but a
+   projection whose names and order match its input could skip the stage entirely),
+   filter-into-join for an inner join, and folding a projection into a join operand.
+   None of them is needed for correctness; the pagination rule was.
 
 2. Extend the execution-backed coverage in `crates/cagara-sql/tests/engines.rs`
    beyond SQLite, DuckDB and PostgreSQL (PGlite). Every shared case already runs

@@ -1831,6 +1831,127 @@ fn trino_agrees_when_a_server_is_running() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// MySQL, through a server this machine starts by hand (`tests/mysql.sh`).
+///
+/// The MySQL family is the one whose *semantics* differ most, not just its
+/// spelling: `||` is boolean OR, integer division and `%` round differently,
+/// `FULL JOIN` does not exist, `CAST` to `CHAR` rather than `TEXT`, and a boolean
+/// column is `1`/`0` rather than `true`/`false`. MariaDB is used because it ships
+/// as a self-contained binary tarball — no root, no container — and is a
+/// drop-in for the dialect.
+///
+/// Skips unless `MYSQL_SOCKET` and `MYSQL` name a running server.
+#[test]
+fn mysql_agrees_when_a_server_is_running() {
+    let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/mysql.sh");
+    let ready = Command::new("bash")
+        .args([harness, "--check"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ready {
+        assert!(
+            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            "no MySQL server (set MYSQL_SOCKET and MYSQL; CAGARA_REQUIRE_ENGINES is set)"
+        );
+        eprintln!("skipping mysql: no server answers");
+        return;
+    }
+    // The shared [`SETUP`], in MySQL's spelling: `TEXT` is fine here (the *cast*
+    // spells `CHAR`), and `DELETE` rather than a drop-and-create keeps the
+    // connection cheap.
+    let setup = "DROP TABLE IF EXISTS nums\n\
+                 CREATE TABLE nums (id INT, a INT, b INT, v INT)\n\
+                 INSERT INTO nums VALUES (1, 7, 2, 10), (2, -7, 2, NULL), \
+                 (3, 7, -2, 30), (4, -8, 3, 20)\n\
+                 DROP TABLE IF EXISTS users\n\
+                 CREATE TABLE users (id INT, name TEXT)\n\
+                 INSERT INTO users VALUES (1, 'ann'), (2, 'bob'), \
+                 (3, 'it''s a\\\\b ')\n\
+                 DROP TABLE IF EXISTS orders\n\
+                 CREATE TABLE orders (id INT, user_id INT, amount DOUBLE)\n\
+                 INSERT INTO orders VALUES (10, 1, 5.5), (11, 1, 4.5), (12, 3, 1.0)\n\
+                 DROP TABLE IF EXISTS days\n\
+                 CREATE TABLE days (id INT, d DATE)\n\
+                 INSERT INTO days VALUES (1, '2024-01-31'), (2, '2024-01-07'), \
+                 (3, '2023-12-25')\n\
+                 DROP TABLE IF EXISTS `select`\n\
+                 CREATE TABLE `select` (id INT, `order` INT, userId INT)\n\
+                 INSERT INTO `select` VALUES (1, 5, 9)\n\
+                 DROP TABLE IF EXISTS empty\n\
+                 CREATE TABLE empty (id INT)\n\
+                 DROP TABLE IF EXISTS dupes\n\
+                 CREATE TABLE dupes (id INT, k TEXT)\n\
+                 INSERT INTO dupes VALUES (1, 'x'), (1, 'x'), (2, 'x'), (3, 'y')\n";
+    let mysql = Options {
+        dialect: Dialect::Mysql,
+        ..Options::default()
+    };
+    let src = format!(
+        "{TABLES}{}\n",
+        CASES.iter().map(|(d, _)| *d).collect::<Vec<_>>().join("\n")
+    );
+    let ws = Workspace::from_source(&src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+
+    let mut wanted: Vec<(&str, &[&str])> = Vec::new();
+    let mut queries = Vec::new();
+    for (def, want) in CASES {
+        let name = def.split_whitespace().next().expect("name");
+        let (_, rel) = rels
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no query `{name}`"));
+        let rel = rel
+            .as_ref()
+            .unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
+        // A refusal is a decision about the target (`fullJoin` on this family),
+        // not a failure to compile.
+        let Ok(sql) = compile(rel, mysql) else {
+            continue;
+        };
+        wanted.push((name, *want));
+        queries.push(sql);
+    }
+    assert!(!queries.is_empty(), "nothing compiled for MySQL");
+    let blocks = mysql_batch(harness, setup, &queries);
+    let mut failures = Vec::new();
+    for ((name, want), got) in wanted.iter().zip(&blocks) {
+        let mut got = got.clone();
+        let mut want: Vec<&str> = want.to_vec();
+        got.sort();
+        want.sort();
+        if got.len() != want.len() || !got.iter().zip(&want).all(|(a, b)| same_row(a, b)) {
+            failures.push(format!("`{name}` on mysql: got {got:?}, want {want:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A batch through a shell harness that speaks `pglite.mjs`'s protocol.
+fn mysql_batch(harness: &str, setup: &str, queries: &[String]) -> Vec<Vec<String>> {
+    let mut script = setup.to_string();
+    for q in queries {
+        script.push('\u{1e}');
+        script.push_str(q);
+    }
+    let args = [std::ffi::OsStr::new(harness)];
+    let lines = run_script("bash", &args, "", &script)
+        .expect("bash ran")
+        .unwrap_or_else(|m| panic!("mysql: {m}"));
+    let mut out: Vec<Vec<String>> = vec![Vec::new()];
+    for line in lines {
+        if line == "\u{1e}" {
+            out.push(Vec::new());
+        } else {
+            out.last_mut().expect("a block").push(line);
+        }
+    }
+    assert_eq!(out.len(), queries.len(), "one block per query: {out:?}");
+    out
+}
+
 /// Postgres, through PGlite — Postgres compiled to WebAssembly and driven by
 /// `node`, so no server is needed (`crates/cagara-sql/tests/pglite.mjs`).
 ///

@@ -753,6 +753,7 @@ impl<'w> Checker<'w> {
             join_args: HashMap::new(),
             field_spans: HashMap::new(),
             field_uses: Vec::new(),
+            unnest_args: Vec::new(),
             suggested: None,
             span: Span::default(),
             trail: Vec::new(),
@@ -834,6 +835,9 @@ pub(crate) struct Checker<'w> {
     /// projection's refusal names the field (`field \`s\``) but the value to
     /// rewrite is the column inside it, and the field's own span covers both.
     pub(crate) field_uses: Vec<(String, Span)>,
+    /// Where each `unnest`'s list argument is written. A failure inside one of
+    /// these is the operation's own, not a mismatch between two `expr`s.
+    pub(crate) unnest_args: Vec<Span>,
     /// The suggestion the failing constraint decided on, when it had a span to
     /// point at. `solve` moves it onto the diagnostic it was about.
     pub(crate) suggested: Option<crate::workspace::Suggestion>,

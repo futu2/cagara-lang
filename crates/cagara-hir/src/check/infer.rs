@@ -278,11 +278,32 @@ impl<'w> Checker<'w> {
                 scheme
             }
             Err(e) => {
+                // `unnest .id` reads as a mismatch between two `expr`s whose
+                // halves look swapped ("expected `int`, found `list a`"): the
+                // column's value variable is bound to the parameter's element
+                // before the table's row arrives, so the conflict surfaces in
+                // the row rather than at the argument. The operation is what is
+                // wrong, so it says so — the recorded argument span is what
+                // tells this error apart from any other mismatch.
+                let message = if e.msg.contains("type mismatch")
+                    && self
+                        .unnest_args
+                        .iter()
+                        // The error is re-spanned at the application, so the
+                        // argument's span overlaps rather than contains it.
+                        .any(|sp| e.span.start <= sp.end && sp.start <= e.span.end)
+                {
+                    "`unnest` needs a list, and this is not one; the element under `value` \
+                     comes from a list"
+                        .to_string()
+                } else {
+                    e.msg
+                };
                 self.errors.push(RawTypeError {
                     module: m,
                     def: i,
                     span: e.span,
-                    message: e.msg,
+                    message,
                     kind: RawErrorKind::Def,
                     severity: crate::workspace::Severity::Error,
                     suggestions: e.suggestions,
@@ -1709,7 +1730,15 @@ impl<'w> Checker<'w> {
         let mut ft = self.infer(env, f)?;
         let combine_kind = self.callee_combine_kind(f);
         let mut combine_inputs = Vec::new();
+        // `unnest .x` is recorded before the parameter type is pushed down: the
+        // failure that needs the name is the one where the value slot is bound
+        // too early, and that can happen before this block decides it is a
+        // stage application.
+        let callee_stage = self.callee_row_stage(f);
         for (index, arg) in args.iter().enumerate() {
+            if callee_stage == Some(RowStage::Unnest) {
+                self.unnest_args.push(arg.span);
+            }
             // Where a join's parts are written, for the warning that offers a
             // rename. The signature's order is `query right -> pred -> query
             // left`, so the index names the part.
@@ -1829,23 +1858,7 @@ impl<'w> Checker<'w> {
                     // `check` re-records a literal argument at the type it was
                     // lifted to (`18` in `.age >= 18` has the value type it was
                     // lifted to), so no special case is needed here.
-                    let checked = match self.check(env, arg, &p) {
-                        Ok(t) => t,
-                        Err(mut e) => {
-                            // `unnest .id` otherwise reads as a mismatch between
-                            // two `expr`s whose halves look swapped ("expected
-                            // `int`, found `list a`"), naming the wrong side and
-                            // the wrong thing. The operation is what is wrong,
-                            // so it says so.
-                            if self.callee_row_stage(f) == Some(RowStage::Unnest)
-                                && e.msg.contains("type mismatch")
-                            {
-                                e.msg = "`unnest` needs a list, and this is not one; the                                          element under `value` comes from a list"
-                                    .to_string();
-                            }
-                            return Err(e);
-                        }
-                    };
+                    let checked = self.check(env, arg, &p)?;
                     // A `sortkey` result is what says this argument is a *key*:
                     // `asc` and `desc` are the only producers, and they take an
                     // `expr`, which an aggregate and a window also are. Their

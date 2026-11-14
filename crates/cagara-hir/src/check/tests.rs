@@ -180,6 +180,31 @@ fn a_nullable_mismatch_carries_its_fix() {
     assert_eq!(err.diag.suggestions[0].title, "Wrap in `just`");
 }
 
+/// `unnest` of a non-list names the operation, not a type mismatch whose halves
+/// read swapped.
+///
+/// The column's value variable is bound to the parameter's element type before
+/// the table's row arrives, so the conflict surfaces in the row unification
+/// ("expected `int`, found `list a`") rather than at the argument. The
+/// application's argument span is recorded while it is checked, and the message
+/// is written where the definition's error is reported.
+#[test]
+fn unnest_says_it_needs_a_list() {
+    let e = err(
+        "t : query { id = int } = table \"s\" \"t\"\n\
+         u = t & unnest .id\n",
+        "u",
+    );
+    assert!(e.contains("`unnest` needs a list"), "{e}");
+    assert!(!e.contains("type mismatch"), "{e}");
+    // A list column still works, and names the element as `value`.
+    let src = "t : query { k = int, xs = list int } = table \"s\" \"t\"\n\
+               ok = t & unnest .xs\n";
+    let row = row_of(src, "ok");
+    assert_eq!(row.len(), 3, "{row:?}");
+    assert!(row.iter().any(|f| f.starts_with("value")), "{row:?}");
+}
+
 /// `lift` turns a `maybe` argument into a `maybe` result, and the function it
 /// takes never sees the missing value.
 ///

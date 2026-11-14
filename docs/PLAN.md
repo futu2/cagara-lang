@@ -42,13 +42,12 @@ lists) and the JSON-facing functions; both would need their own intrinsic per di
 
 ## Next steps
 
-0. `unnest .x` where `x` is not a list still reports a `type mismatch` whose
-   halves read swapped ("expected `int`, found `list a`"): the column's value
-   variable is bound to the parameter's list element before the table's row
-   arrives, so the conflict surfaces in the row unification rather than at the
-   argument. A message that names the operation needs the argument's value slot
-   checked before it is bound, which is the same deferral problem as item 0
-   below.
+0. `unnest .x` where `x` is not a list now says so: the application records its
+   argument's span (`unnest_args`), and the definition's error is rewritten when
+   it falls inside one — the conflict still surfaces in the row unification
+   ("expected `int`, found `list a`"), because the column's value variable is
+   bound to the parameter's element before the table's row arrives, but the
+   message no longer repeats that.
 
 1. A `maybe` used where a value is needed carries its `??`/`just` fix on the
    diagnostic itself, so any client can offer it. The projection's refusal comes

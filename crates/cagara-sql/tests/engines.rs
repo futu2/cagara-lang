@@ -2312,6 +2312,131 @@ fn every_construct_we_emit_is_one_the_engine_reads() {
     assert!(ran >= 10, "only {ran} constructs ran");
 }
 
+/// Every correlated pattern is reachable with the join spellings, and the rows
+/// prove it against a hand-written correlated subquery.
+///
+/// `docs/PLAN.md` listed "general correlated subqueries" as the largest remaining
+/// change and the one with the least evidence that it is wanted. This is the
+/// evidence, and it says the language is already expressive: each case is a Cagara
+/// query, and beside it the SQL a user *would* have written with a correlated
+/// subquery. The two must agree on the engine, so the claim is checked rather than
+/// asserted.
+///
+/// The gap that is real is ergonomic, not semantic: `semiJoin` and `antiJoin` are
+/// *stages*, so an `EXISTS` cannot be a column or sit inside `&&`, and every case
+/// below needs an explicit aggregate on the joined side. Forgetting that aggregate
+/// multiplies rows, which is the footgun — not a missing capability.
+#[test]
+fn the_join_spellings_match_a_correlated_subquery() {
+    // `(name, cagara query, the same question as a correlated subquery)`.
+    const PAIRS: &[(&str, &str, &str)] = &[
+        // "does this user have an order" — the boolean column.
+        (
+            "exists_as_a_column",
+            "q = users & leftJoin (orders & agg { user_id = group .user_id, n = count }) \
+             (.<id == .>user_id) & select { id = .id, has = (.n ?? 0) > 0 } \
+             & order [asc .id]",
+            "SELECT id, (SELECT COUNT(*) FROM main.orders AS o WHERE o.user_id = u.id) > 0 AS has \
+             FROM main.users AS u ORDER BY id",
+        ),
+        // "how many orders" — the correlated aggregate.
+        (
+            "count_per_row",
+            "q = users & leftJoin (orders & agg { user_id = group .user_id, n = count }) \
+             (.<id == .>user_id) & select { id = .id, n = .n ?? 0 } & order [asc .id]",
+            "SELECT id, (SELECT COUNT(*) FROM main.orders AS o WHERE o.user_id = u.id) AS n \
+             FROM main.users AS u ORDER BY id",
+        ),
+        // "each row against its group's maximum" — the self-correlated scalar.
+        (
+            "against_the_group_max",
+            "q = orders & leftJoin (orders & agg { user_id = group .user_id, m = max .amount }) \
+             (.<user_id == .>user_id) & select { id = .id, amount = .amount, m = .m } \
+             & order [asc .id]",
+            "SELECT id, amount, (SELECT MAX(amount) FROM main.orders AS o2 \
+             WHERE o2.user_id = o.user_id) AS m FROM main.orders AS o ORDER BY id",
+        ),
+    ];
+    let engine = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    let mut failures = Vec::new();
+    for (name, def, correlated) in PAIRS {
+        let ws = Workspace::from_source(&format!("{TABLES}{def}\n"));
+        assert!(ws.diags.is_empty(), "`{name}`: {:?}", ws.diags);
+        let (_, rel) = root_queries(&ws)
+            .into_iter()
+            .find(|(n, _)| n == "q")
+            .unwrap_or_else(|| panic!("`{name}`: no query `q`"));
+        let rel = rel.unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
+        let ours = compile(&rel, Options::default()).unwrap_or_else(|e| panic!("`{name}`: {e}"));
+        let Some(Ok(ours_rows)) = run_setup(&engine, SETUP, &ours) else {
+            panic!("`{name}`: `duckdb` refused our SQL or is not installed\n  {ours}");
+        };
+        let Some(Ok(their_rows)) = run_setup(&engine, SETUP, correlated) else {
+            panic!("`{name}`: `duckdb` refused the correlated subquery\n  {correlated}");
+        };
+        // Two empty results would agree for the wrong reason.
+        assert!(!ours_rows.is_empty(), "`{name}` returned no rows: {ours}");
+        if ours_rows != their_rows {
+            failures.push(format!(
+                "`{name}`: the join spelling and the correlated subquery disagree\n  \
+                 ours: {ours_rows:?}\n  theirs: {their_rows:?}\n  {ours}\n  {correlated}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Chaining two existence checks must not leave a dangling alias.
+///
+/// `exists p && exists q` is two `semiJoin`s in a row, which is how the plan's
+/// "correlated subqueries" item is answered without a correlated subquery. The
+/// second one's input is the first one's output, and that output is a stage whose
+/// `FROM` already carries an alias — so re-aliasing it produced
+/// `SELECT t1.id FROM main.users AS t3`, which DuckDB refuses with
+/// `Referenced table "t1" not found`. `qualify` only rewrites *unqualified*
+/// columns, so the alias has to be kept, not replaced.
+#[test]
+fn chained_existence_checks_keep_their_alias() {
+    const DEFS: &str = "\
+q_and = users & semiJoin orders (.<id == .>user_id) \
+        & semiJoin orders (.<id == .>user_id && .>amount > 4.5) & select {.id} & order [asc .id]
+q_or = users & semiJoin orders (.<id == .>user_id) \
+       & union (users & semiJoin orders (.<id == .>user_id && .>amount > 4.5)) \
+       & select {.id} & order [asc .id]
+q_not = users & antiJoin orders (.<id == .>user_id) & select {.id} & order [asc .id]
+";
+    let engine = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    // `users` is ann(1), bob(2), "it's a\b "(3); `orders` has 1→5.5, 1→4.5, 3→1.0.
+    // So: an order over 4.5 is user 1 only, and the three answers are distinct.
+    for (name, want) in [
+        ("q_and", vec!["1".to_string()]),
+        ("q_or", vec!["1".to_string(), "3".to_string()]),
+        ("q_not", vec!["2".to_string()]),
+    ] {
+        let ws = Workspace::from_source(&format!("{TABLES}{DEFS}"));
+        assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+        let (_, rel) = root_queries(&ws)
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no query `{name}`"));
+        let rel = rel.unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
+        let sql = compile(&rel, Options::default()).unwrap_or_else(|e| panic!("`{name}`: {e}"));
+        match run_setup(&engine, SETUP, &sql) {
+            Some(Ok(rows)) => assert_eq!(rows, want, "`{name}`: {sql}"),
+            Some(Err(m)) => panic!("`{name}`: {m}\n  {sql}"),
+            None => panic!("duckdb is not installed"),
+        }
+    }
+}
+
 /// Postgres, through PGlite — Postgres compiled to WebAssembly and driven by
 /// `node`, so no server is needed (`crates/cagara-sql/tests/pglite.mjs`).
 ///

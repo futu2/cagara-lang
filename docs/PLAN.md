@@ -248,9 +248,26 @@ names the observation that puts it there, because a plan without one is a wish.
    the type honest.
 4. **Grouping sets / `rollup` / `cube`.** A new `agg` form. The dialect pass already
    knows which targets have them; the checker and arena do not know the form.
-5. **Correlated subqueries.** `unnest` is the only correlated construct today. A
-   general one needs a scope in the IR, which is the largest of these changes and
-   the one with the least evidence that it is wanted.
+5. ~~**Correlated subqueries.**~~ **Investigated: no capability is missing.** Every
+   correlated pattern this plan named is reachable today with the join spellings, and
+   `the_join_spellings_match_a_correlated_subquery` proves it by running each one beside
+   the correlated subquery a user would have written and requiring the same rows:
+
+   | question | how it is written today |
+   |---|---|
+   | "does this row have a child" | `leftJoin (child & agg { k = group .k, n = count }) … & select { has = (.n ?? 0) > 0 }` |
+   | "how many children" | the same `leftJoin` + `agg` |
+   | "this row against its group's max" | `leftJoin (self & agg { k = group .k, m = max .x }) …` |
+   | "top N per group" | `rowNumber { partition = … }` + `where` |
+   | "a value from the whole table beside each row" | a cross join: `leftJoin (q & agg {…}) (1 == 1)` |
+
+   So the item was mis-stated. What is actually missing is **ergonomics**, and it is
+   narrower than "a scope in the IR": `semiJoin`/`antiJoin` are *stages*, so an `EXISTS`
+   cannot be a column or sit inside `&&`, and every case above needs an explicit
+   aggregate on the joined side. Forgetting that aggregate multiplies rows — a footgun,
+   not a missing capability. Making `EXISTS` a boolean *expression* is the small,
+   well-evidenced version of this item; a general correlated subquery is not needed and
+   would be a large change with no evidence behind it.
 
 What is *not* on the list, and why: replacing sqlglot (it is a parser/transpiler and
 the crate does not parse; the two weaknesses found — a dialect-agnostic parser and no
@@ -318,7 +335,7 @@ known shape, and none is a boundary of what exists today:
 | name-aligned set operations | `union` requires both sides to have the same row *in the same order*; aligning by name needs a projection per branch |
 | `qualify` | a stage that filters on a window without the derived table SQL requires; sqlglot's AST has the field (`SelectStatement::qualify`) and no Cagara syntax reaches it |
 | grouping sets, `rollup`, `cube` | a new `agg` form and a backend rule; the dialect pass already knows which targets have them |
-| lateral or correlated subqueries | `unnest` is the only correlated construct today; a general one needs a scope in the IR |
+| correlated subqueries | every pattern is reachable with the join spellings (proved by a test); what is missing is an `EXISTS` that is a boolean *expression* rather than a stage |
 | richer window frames | `rows …` covers row-counted frames; `range`/`groups` would be two more constructors |
 
 `decimal` was the one with a correctness argument behind it, and it is in — see

@@ -185,7 +185,17 @@ impl Lowerer {
             && !st.has_win;
         match st.from {
             TableSource::Table(mut t) if fusable && st.joins.is_empty() => {
-                let alias = self.alias();
+                // A table that already carries an alias is one a previous stage
+                // has already qualified against, so the alias is kept: renaming it
+                // here would leave every item pointing at the old name, because
+                // `qualify` only rewrites *unqualified* columns. That produced
+                // `SELECT t1.id FROM users AS t3` for a semi join whose input was
+                // another semi join — a dangling alias DuckDB refuses with
+                // `Referenced table "t1" not found`.
+                let alias = match &t.alias {
+                    Some(existing) => existing.clone(),
+                    None => self.alias(),
+                };
                 t.alias = Some(alias.clone());
                 JoinInput {
                     from: TableSource::Table(t),

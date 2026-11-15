@@ -28,6 +28,11 @@
   drop. A `distinct` still needs the barrier, because dropping a column there changes how many
   rows are deduped. A projection that reuses a sort key's name for another column keeps it too.
 
+- A second `markExists` in one pipeline now replaces the first's `exists` column, as the row type
+  always said it did. It was appended instead, so `& markExists u p & markExists u q & select
+  { a = .exists }` answered `p`'s question and dropped `q`'s — silently, with correct types and
+  wrong rows.
+
 - `markExists q on` appends an `exists` boolean column: `EXISTS` as a value, so an existence test
   can be a projection field or sit inside `||`. `semiJoin`/`antiJoin` remain the form to use when
   the answer is which rows survive.

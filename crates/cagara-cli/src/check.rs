@@ -8,6 +8,7 @@
 
 use crate::{display, done, out, usage, USAGE};
 use cagara_hir::{check, Workspace};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -196,6 +197,17 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitC
             }
         }
     }
+    // One diagnostic, once — however many workspaces reach it.
+    //
+    // `check .` opens a workspace per file, and a file that imports another sees
+    // that file's diagnostics too: an error in `lib.cagara` arrives once from
+    // `main.cagara`'s workspace and again from `lib.cagara`'s own. Both carry the
+    // same path, position and message, so the report listed it twice and a build
+    // system counting errors counted two. The key is the whole rendered
+    // diagnostic, because two *different* problems can share a position (a
+    // `select` field with two bad columns reports one error per column, and the
+    // record spans both).
+    let mut seen: HashSet<String> = HashSet::new();
     let mut failed = false;
     for file in &files {
         let ws = Workspace::open(file);
@@ -234,6 +246,12 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitC
             }
         }
         for f in found {
+            // A suggestion list is part of the diagnostic: the same message at the
+            // same position with a different fix offered is a different report.
+            let key = if json { f.json() } else { f.text() };
+            if !seen.insert(key) {
+                continue;
+            }
             if json {
                 out(&f.json())?;
             } else {

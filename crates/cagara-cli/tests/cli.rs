@@ -773,6 +773,44 @@ fn check_reports_the_fix_a_diagnostic_knows() {
     assert!(json.contains(r#".s → (.s ?? \"\")"#), "{json}");
 }
 
+/// A diagnostic reached through two workspaces is reported once.
+///
+/// `check .` opens a workspace per file, and a file that imports another sees that
+/// file's diagnostics too. So an error in `lib.cagara` arrives once from
+/// `main.cagara`'s workspace and again from `lib.cagara`'s own, with the same path,
+/// position and message — and the report listed it twice, which makes a build
+/// system counting errors count two. The key is the whole rendered diagnostic,
+/// because two different problems can share a position: a `select` field with two
+/// bad columns reports one error per column.
+#[test]
+fn check_reports_an_imported_error_once() {
+    let dir = TempDir::new("check-import-dedupe");
+    dir.write(
+        "lib.cagara",
+        "t : query { id = int } = table \"s\" \"t\"\nq = t & select { .nope }\n",
+    );
+    dir.write(
+        "main.cagara",
+        "import \"lib.cagara\"\nm : query { id = int } = table \"s\" \"t\"\nr = m & select { .id }\n",
+    );
+    let out = cagara([std::ffi::OsString::from("check"), dir.0.path().into()]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    let err = stderr(&out);
+    assert_eq!(
+        err.matches("no column `nope`").count(),
+        1,
+        "reported once, not once per workspace: {err}"
+    );
+    // The same in JSON, which is what a consumer parses.
+    let out = cagara([
+        std::ffi::OsString::from("check"),
+        std::ffi::OsString::from("--json"),
+        dir.0.path().into(),
+    ]);
+    let text = stdout(&out);
+    assert_eq!(text.lines().count(), 1, "one JSON object, not two: {text}");
+}
+
 /// It checks each file as a *library*, so a directory of table declarations is
 /// reportable without one of them being `main`. Exit codes distinguish "found a
 /// diagnostic" (1) from "you called me wrong" (2), which is what a hook needs.

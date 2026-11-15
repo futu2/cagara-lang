@@ -773,6 +773,59 @@ fn check_reports_the_fix_a_diagnostic_knows() {
     assert!(json.contains(r#".s → (.s ?? \"\")"#), "{json}");
 }
 
+/// `check` reports what the *compiler* rejects, not only what the checker does.
+///
+/// The two are different questions. A set operation whose sides have the same columns
+/// in different orders type-checks — row unification matches by name — and cannot be
+/// lowered, because a set operation is positional in SQL. `check` reported nothing and
+/// `cagara --only` refused to compile the same file: a pre-commit hook passing on
+/// something the compiler rejects, which is the one thing a checker must not do.
+#[test]
+fn check_reports_a_lowering_error() {
+    let dir = TempDir::new("check-lowering");
+    let f = dir.write(
+        "t.cagara",
+        "t : query { id = int, name = string } = table \"m\" \"t\"\n\
+         u : query { id = int, name = string } = table \"m\" \"u\"\n\
+         bad = (t & select { id = .id, name = .name }) & union (u & select { name = .name, id = .id })\n",
+    );
+    // `check`, not the compile mode: `run` runs `cagara <path>`, which is the SQL
+    // path and would refuse the file anyway. The assertion that matters is that the
+    // *checker* mode does too.
+    let out = cagara([
+        std::ffi::OsString::from("check"),
+        f.clone().into_os_string(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(stderr(&out).contains("same columns"), "{}", stderr(&out));
+    // And the compile path agrees, which is the point.
+    let sql = Command::new(env!("CARGO_BIN_EXE_cagara"))
+        .arg(&f)
+        .args(["--only", "bad"])
+        .output()
+        .expect("run cagara");
+    assert!(!sql.status.success(), "{}", stdout(&sql));
+}
+
+/// A file with no query — a table declaration or a bare helper — still checks.
+///
+/// `check` is documented as checking a file as a *library*, so a directory of table
+/// declarations is reportable without one of them being `main`. Reporting the
+/// compiler's diagnostics must not turn "this file has no entry point" into an error,
+/// or the mode becomes unusable for the thing it exists for.
+#[test]
+fn check_accepts_a_library_with_no_entry_point() {
+    let dir = TempDir::new("check-library");
+    dir.write(
+        "table.cagara",
+        "t : query { id = int } = table \"m\" \"t\"\n",
+    );
+    dir.write("helper.cagara", "helper = .x > 1\n");
+    let out = cagara([std::ffi::OsString::from("check"), dir.0.path().into()]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stderr(&out).is_empty(), "{}", stderr(&out));
+}
+
 /// A diagnostic reached through two workspaces is reported once.
 ///
 /// `check .` opens a workspace per file, and a file that imports another sees that

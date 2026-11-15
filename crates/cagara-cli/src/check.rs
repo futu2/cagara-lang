@@ -7,7 +7,7 @@
 //! directory of table declarations is reportable without one of them being `main`.
 
 use crate::{display, done, out, usage, USAGE};
-use cagara_hir::{check, Workspace};
+use cagara_hir::{check, compile_diagnostics, Workspace};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -233,6 +233,7 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitC
     let mut failed = false;
     for file in &files {
         let ws = Workspace::open(file);
+        let root_path = ws.modules[ws.root].path.display().to_string();
         let mut found: Vec<Found> = Vec::new();
         for d in &ws.diags {
             found.push(Found {
@@ -264,6 +265,33 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitC
                     col: w.diag.col,
                     message: w.diag.message.clone(),
                     suggestions: fixes(&ws, &w.diag),
+                });
+            }
+            // And the *compiler's* verdict, not only the checker's.
+            //
+            // The two are not the same thing: a set operation whose sides have the
+            // same columns in different orders type-checks (row unification matches
+            // by name) and cannot be lowered (a set operation is positional in SQL).
+            // `check` reported nothing and `cagara --only` refused to compile the same
+            // file — a pre-commit hook passing on something the compiler rejects, which
+            // is the one thing a checker must not do.
+            //
+            // This does not make `check` compile a program to SQL for its own sake:
+            // it asks the compiler for its diagnostics, which it already produces
+            // when it builds a file, and a file without a `main` is compiled as a
+            // library, so the "a directory of table declarations is reportable"
+            // property holds.
+            for d in compile_diagnostics(&ws)
+                .iter()
+                .filter(|d| d.path == root_path)
+            {
+                found.push(Found {
+                    severity: d.severity.as_str(),
+                    path: d.path.clone(),
+                    line: d.line,
+                    col: d.col,
+                    message: d.message.clone(),
+                    suggestions: fixes(&ws, d),
                 });
             }
         }

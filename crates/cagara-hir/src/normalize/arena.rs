@@ -526,14 +526,46 @@ impl Builder {
         right: NodeId,
     ) -> Result<NodeId, Error> {
         let left_row = self.node(left).row.clone();
-        let right_row = self.node(right).row.clone();
+        let mut right_row = self.node(right).row.clone();
+        let mut right = right;
         if left_row.names() != right_row.names() {
-            return Err(Error::new(format!(
-                "set-operation inputs must have the same columns; left has [{}], right has [{}]",
-                left_row.names().join(", "),
-                right_row.names().join(", ")
-            ))
-            .at(origin));
+            // Same names in another order: reorder the right input, and say so in the
+            // row it presents below.
+            //
+            // A set operation is positional in SQL, so the *emitted* statement has to
+            // have both sides in one order. Which order is the left operand's, because
+            // that is what the checker binds the answer's row to (`step_set`) and what
+            // `normalize::value` passes as `left` — the operand written first in the
+            // source. So the right side is what moves.
+            let (mut l, mut r): (Vec<String>, Vec<String>) = (left_row.names(), right_row.names());
+            l.sort_unstable();
+            r.sort_unstable();
+            if l != r {
+                return Err(Error::new(format!(
+                    "set-operation inputs must have the same columns; left has [{}], right \
+                     has [{}]",
+                    left_row.names().join(", "),
+                    right_row.names().join(", ")
+                ))
+                .at(origin));
+            }
+            let fields: Vec<(String, CheckedExpr)> = left_row
+                .columns()
+                .iter()
+                .map(|(name, ty)| {
+                    (
+                        name.clone(),
+                        CheckedExpr::column(
+                            cagara_syntax::ast::Side::Single,
+                            name.clone(),
+                            ty.clone(),
+                            origin,
+                        ),
+                    )
+                })
+                .collect();
+            right = self.project(site, origin, right, Projection::Select, fields)?;
+            right_row = self.node(right).row.clone();
         }
         if left_row.columns() != right_row.columns() {
             let differing = left_row

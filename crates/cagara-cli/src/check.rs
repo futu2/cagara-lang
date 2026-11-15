@@ -7,7 +7,7 @@
 //! directory of table declarations is reportable without one of them being `main`.
 
 use crate::{display, done, out, usage, USAGE};
-use cagara_hir::{check, compile_diagnostics, Workspace};
+use cagara_hir::{check, compile_checked, Workspace};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -281,10 +281,14 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitC
             // when it builds a file, and a file without a `main` is compiled as a
             // library, so the "a directory of table declarations is reportable"
             // property holds.
-            for d in compile_diagnostics(&ws)
-                .iter()
-                .filter(|d| d.path == root_path)
-            {
+            // Every root definition the compiler could not build, including the
+            // ones that are not the entry point. `Compilation::diagnostics` is not
+            // enough: it carries the checker's and the workspace's, while a
+            // *definition's* failure is on its `result` — that is where the SQL mode
+            // reads it from, and reading a different list here is how a file that
+            // `cagara --only q` refuses came to pass `cagara check`.
+            let compiled = compile_checked(&ws, &tc);
+            for d in compiled.diagnostics.iter().filter(|d| d.path == root_path) {
                 found.push(Found {
                     severity: d.severity.as_str(),
                     path: d.path.clone(),
@@ -292,6 +296,63 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitC
                     col: d.col,
                     message: d.message.clone(),
                     suggestions: fixes(&ws, d),
+                });
+            }
+            for query in &compiled.queries {
+                let Err(d) = &query.result else {
+                    continue;
+                };
+                if d.path != root_path {
+                    continue;
+                }
+                found.push(Found {
+                    severity: d.severity.as_str(),
+                    path: d.path.clone(),
+                    line: d.line,
+                    col: d.col,
+                    message: d.message.clone(),
+                    suggestions: fixes(&ws, d),
+                });
+            }
+            // And the *SQL* lowering, which is where the remaining errors are.
+            //
+            // `compile_checked` builds a `Rel` and validates its schema; turning that
+            // `Rel` into a statement is `cagara-sql`'s job and can still refuse — a
+            // `distinct` after an `order` on an expression the projection dropped is
+            // one, and it is a *program* error with a message telling the author what
+            // to write. `cagara --only q` reports it; `cagara check` did not, so a
+            // pre-commit hook passed on a file the compiler rejects.
+            //
+            // ANSI is the dialect to ask: these refusals are about the relation, not
+            // about a target's spelling, and the ones that *are* target-specific
+            // (`fullJoin` on MySQL) are a different question that `check` is not
+            // asked. A target refusal here would be a false positive on a file whose
+            // real target is another dialect.
+            for query in &compiled.queries {
+                let Ok(rel) = &query.result else {
+                    continue;
+                };
+                let Err(message) = cagara_sql::compile(
+                    rel,
+                    cagara_sql::Options {
+                        dialect: cagara_sql::Dialect::Ansi,
+                        pretty: false,
+                        optimize: false,
+                    },
+                ) else {
+                    continue;
+                };
+                found.push(Found {
+                    severity: "error",
+                    path: root_path.clone(),
+                    // No position: the refusal is about the relation, and the `Rel`
+                    // does not carry the span of the stage that caused it. Saying
+                    // `0:0` is honest about that; guessing a line would point at the
+                    // wrong place with confidence.
+                    line: 0,
+                    col: 0,
+                    message: format!("error in `{}`: {message}", query.name),
+                    suggestions: Vec::new(),
                 });
             }
         }

@@ -289,7 +289,14 @@ pub(crate) enum Cons {
         left_only: bool,
     },
     /// Set operations require both inputs to expose the same row.
-    Set { left: Ty, right: Ty, out: Ty },
+    /// The two operands of a set operation, in **source** order.
+    ///
+    /// There is no `out` field: a set operation answers with its left operand's row,
+    /// so the output *is* that variable rather than one unified with it. Unifying two
+    /// fresh variables is ambiguous in direction — and it was the ambiguity, not the
+    /// naming, that made `a & union b` report `b`'s column order while its SQL
+    /// emitted `a`'s.
+    Set { left: Ty, right: Ty },
     /// A literal of scalar type `lit` used where `target` is expected, once
     /// `target` is known (int widens to float, string to date / timestamp).
     Lit { lit: &'static str, target: Ty },
@@ -626,10 +633,9 @@ impl Cons {
                 nullable: *nullable,
                 left_only: *left_only,
             },
-            Cons::Set { left, right, out } => Cons::Set {
+            Cons::Set { left, right } => Cons::Set {
                 left: f(left),
                 right: f(right),
-                out: f(out),
             },
             Cons::Lit { lit, target } => Cons::Lit {
                 lit,

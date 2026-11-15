@@ -979,6 +979,75 @@ fn every_statement_is_well_formed_sql() {
     );
 }
 
+/// A set operation aligns by name, and the answer is the left operand's order.
+///
+/// `{ id, name }` and `{ name, id }` are the same row written differently — a set
+/// operation is about which rows appear, and a row's columns are named — so requiring
+/// the same order made the user write a `select` on one branch purely to reorder.
+/// They are aligned now, with a projection on the right input.
+///
+/// The *left* operand is the one written first in the source (`a & union b`), which is
+/// what the type says and what the SQL emits. Before this, the type said the right's
+/// order and the SQL had the left's: two plausible answers to the same question.
+///
+/// The rows are checked on an engine because the alignment is a projection, and a
+/// projection that reads the wrong column would still produce a well-formed statement
+/// with the right shape.
+#[test]
+fn a_set_operation_aligns_by_name_and_keeps_the_left_order() {
+    const DEFS: &str = "\
+t : query { id = int, name = string } = table \"main\" \"users\"\n\
+a = t & select { id = .id, name = .name }\n\
+b = t & select { name = .name, id = .id }\n\
+ab = a & union b & order [asc .id]\n\
+ba = b & union a & order [asc .id]\n";
+    let ws = Workspace::from_source(DEFS);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let sql = |n: &str| {
+        let (_, r) = rels
+            .iter()
+            .find(|(name, _)| name == n)
+            .unwrap_or_else(|| panic!("{n}"));
+        let rel = r.as_ref().unwrap_or_else(|d| panic!("{n}: {}", d.message));
+        compile(rel, Options::default()).expect(n)
+    };
+    // Both sides of the statement are in the *left* operand's order, and the right
+    // one gets a projection to get there.
+    let ab = sql("ab");
+    assert!(ab.contains("SELECT id, name FROM main.users"), "{ab}");
+    let ba = sql("ba");
+    assert!(ba.contains("SELECT name, id FROM main.users"), "{ba}");
+
+    // The rows: `users` is (1,'ann'), (2,'bob'), (3,'it''s a\\b '). `b` is the same
+    // rows with the columns swapped, so a union of the two is just those rows — and if
+    // the alignment read the wrong column, `name` would come back as a number.
+    let engine = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    // The columns come back in the order the *left* operand declared them, which is
+    // the whole point: `ab` is `id|name` and `ba` is `name|id`, from the same rows.
+    for (name, want) in [
+        ("ab", ["1|ann", "2|bob", "3|it's a\\b "]),
+        ("ba", ["ann|1", "bob|2", "it's a\\b |3"]),
+    ] {
+        let q = sql(name);
+        match run_setup(&engine, SETUP, &q) {
+            Some(Ok(rows)) => {
+                assert_eq!(rows.len(), want.len(), "{name}: {rows:?}\n  {q}");
+                assert!(
+                    rows.iter().zip(&want).all(|(a, b)| same_row(a, b)),
+                    "{name}: {rows:?} vs {want:?}\n  {q}"
+                );
+            }
+            Some(Err(m)) => panic!("{name}: duckdb: {m}\n  {q}"),
+            None => panic!("duckdb is not installed"),
+        }
+    }
+}
+
 /// Paging is a pipeline, and the two orders are different pages.
 ///
 /// `docs/LEARN.md` and `CAGARA.md` both used to say the opposite — that `limit` and

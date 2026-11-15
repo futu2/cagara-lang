@@ -527,6 +527,64 @@ fn query_output_rows() {
     );
 }
 
+/// A set operation answers with its **left** operand's row.
+///
+/// The left operand is the one written first in the source, which `&` makes the
+/// *second* parameter: `a & union b` is `union b a`. Getting that backwards is how
+/// the type came to say `b`'s column order while the emitted SQL had `a`'s — both
+/// plausible, and only one of them what the author wrote.
+///
+/// The order matters because a set operation is positional in SQL: the statement has
+/// to pick an order for both sides, and the answer is the left's. Pinned here so the
+/// type and the SQL cannot drift apart again without a test failing.
+#[test]
+fn a_set_operation_answers_with_its_left_operands_row() {
+    let src = "t : query { id = int, name = string } = table \"s\" \"t\"\n\
+               a = t & select { id = .id, name = .name }\n\
+               b = t & select { name = .name, id = .id }\n\
+               ab = a & union b\n\
+               ba = b & union a\n";
+    assert_eq!(
+        ty(src, "ab"),
+        "query { id = int, name = string }",
+        "`a`'s order"
+    );
+    assert_eq!(
+        ty(src, "ba"),
+        "query { name = string, id = int }",
+        "`b`'s order"
+    );
+    // Same for the other three operations: the rule is about set operations, not
+    // about `union`.
+    for op in ["unionAll", "intersect", "except"] {
+        let src = format!(
+            "t : query {{ id = int, name = string }} = table \"s\" \"t\"\n\
+             a = t & select {{ id = .id, name = .name }}\n\
+             b = t & select {{ name = .name, id = .id }}\n\
+             q = a & {op} b\n"
+        );
+        assert_eq!(
+            ty(&src, "q"),
+            "query { id = int, name = string }",
+            "{op}: `a`'s order"
+        );
+    }
+    // Different *names* are still refused, and the message names both sides.
+    let e = err(
+        "q = (users & select { id = .id }) & union (users & select { name = .name })\n",
+        "q",
+    );
+    assert!(e.contains("must have the same columns"), "{e}");
+    assert!(e.contains("[id]") && e.contains("[name]"), "{e}");
+    // And a different *type* for the same name is refused by name, so a reader
+    // knows which column to look at.
+    let e = err(
+        "q = (users & select { id = .id }) & union (users & select { id = .name })\n",
+        "q",
+    );
+    assert!(e.contains("set-operation column `id`"), "{e}");
+}
+
 /// An empty list is the *program's* problem, not a compiler gap.
 ///
 /// The refusal came out of the normalizer, which classified it as

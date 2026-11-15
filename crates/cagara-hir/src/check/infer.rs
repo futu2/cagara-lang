@@ -464,6 +464,13 @@ impl<'w> Checker<'w> {
                         _ => None,
                     };
                     if let Some(internal) = internal {
+                        // These primitives' *internal* type is their real signature,
+                        // and it says something the surface annotation cannot: a join
+                        // merges two rows, and a set operation answers with its left
+                        // operand's row. `query r -> query r -> query r` is true of a
+                        // set operation and loses which `r` the answer is — so the
+                        // internal rule wins here rather than being reconciled with the
+                        // declaration.
                         if matches!(
                             &def.body.kind,
                             ExprKind::Primitive(name)
@@ -475,6 +482,10 @@ impl<'w> Checker<'w> {
                                         | "__fullJoin"
                                         | "__semiJoin"
                                         | "__antiJoin"
+                                        | "__union"
+                                        | "__unionAll"
+                                        | "__intersect"
+                                        | "__except"
                                 )
                         ) {
                             return Ok(internal);
@@ -3017,16 +3028,31 @@ impl<'w> Checker<'w> {
                 }
             }
             Set(_) => {
-                let (l, r, out) = (self.fresh(), self.fresh(), self.fresh());
+                // `left` and `right` are the operands in **source** order, which is
+                // what the arena and the emitted SQL also mean by left and right.
+                // `&` is reverse application, so the piped operand — the one written
+                // first — is the *last* parameter: `a & union b` is `union b a`.
+                //
+                // Naming these by parameter order is how a set operation's output row
+                // came to be bound to the wrong operand, so that `a & union b` had
+                // `b`'s column order in its type and `a`'s in its SQL. The lowering
+                // was right the whole time (`normalize::value` takes `args.get(1)` as
+                // the left operand, for the same reason); only the type rule
+                // disagreed, and a disagreement between the two is the shape that
+                // produces a plausible answer to the wrong question.
+                // The answer *is* the piped operand's row — the same variable, not one
+                // unified with it. Two fresh variables unified with each other bind in
+                // whichever direction `unify` happens to take, which is how the output
+                // row ended up following the argument instead.
+                let (piped, argument) = (self.fresh(), self.fresh());
                 self.pending.push((
                     Cons::Set {
-                        left: l.clone(),
-                        right: r.clone(),
-                        out: out.clone(),
+                        left: piped.clone(),
+                        right: argument.clone(),
                     },
                     sp,
                 ));
-                fun(query(l), fun(query(r), query(out)))
+                fun(query(argument), fun(query(piped.clone()), query(piped)))
             }
             Group => {
                 let (r, a) = (self.fresh(), self.fresh());
@@ -3460,14 +3486,52 @@ impl<'w> Checker<'w> {
         Ok(true)
     }
 
+    /// A set operation's two operands must have the same columns — by **name**, not
+    /// by position — and the answer keeps the **left** operand's order.
+    ///
+    /// Aligning by name is what makes `{ id, name }` and `{ name, id }` the same row
+    /// written differently, which they are: a set operation is about which rows
+    /// appear, and a row's columns are named. Requiring the same order made the user
+    /// write a `select` on one branch purely to reorder, which says nothing about the
+    /// query.
+    ///
+    /// The *left* operand is the one written first in the source — `a & union b` — so
+    /// the answer is `a`'s order. That is what the lowering already emits (it takes
+    /// the piped argument as the left input) and what the arena already answers with;
+    /// this makes the type agree with both.
+    ///
+    /// Each column still has to have the same type on both sides, which is the part
+    /// that is about meaning rather than arrangement.
     fn step_set(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
-        let Cons::Set { left, right, out } = c else {
+        let Cons::Set { left, right } = c else {
             unreachable!("dispatched on Cons::Set")
         };
-        self.unify(left, right)
-            .map_err(|m| format!("set-operation inputs: {m}"))?;
-        self.unify(out, left)
-            .map_err(|m| format!("set-operation output: {m}"))?;
+        if self.row_open(left) || self.row_open(right) {
+            // The shapes are not known yet; `solve` re-runs this once they are.
+            return Ok(false);
+        }
+        let (lf, _) = self.flatten(left);
+        let (rf, _) = self.flatten(right);
+        let mut left_names: Vec<&str> = lf.iter().map(|(n, _)| n.as_str()).collect();
+        let mut right_names: Vec<&str> = rf.iter().map(|(n, _)| n.as_str()).collect();
+        left_names.sort_unstable();
+        right_names.sort_unstable();
+        if left_names != right_names {
+            return Err(format!(
+                "set-operation inputs must have the same columns: left has [{}], right has                  [{}]",
+                lf.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "),
+                rf.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        // Each name's type must agree. Matched by name, so the two orders do not have
+        // to line up.
+        for (name, lty) in &lf {
+            let Some((_, rty)) = rf.iter().find(|(n, _)| n == name) else {
+                unreachable!("the name sets are equal")
+            };
+            self.unify(lty, rty)
+                .map_err(|m| format!("set-operation column `{name}`: {m}"))?;
+        }
         Ok(true)
     }
 

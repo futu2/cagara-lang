@@ -145,7 +145,7 @@ impl Prim {
     /// the other.
     pub fn is_projection(self) -> bool {
         use Prim::*;
-        matches!(self, Where | Select | Update | AggStage | Join(_))
+        matches!(self, Where | Select | Update | AggStage | Join(_) | Set(_))
     }
 
     /// Does the compiler own this primitive's row rule?

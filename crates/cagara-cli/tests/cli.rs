@@ -783,11 +783,14 @@ fn check_reports_the_fix_a_diagnostic_knows() {
 #[test]
 fn check_reports_a_lowering_error() {
     let dir = TempDir::new("check-lowering");
+    // A `distinct` after an `order` on an expression the projection dropped. The
+    // checker accepts it — every stage is well typed — and the *SQL* lowering refuses
+    // it, with a message telling the author what to write instead. `cagara --only`
+    // reported it and `cagara check` did not.
     let f = dir.write(
         "t.cagara",
         "t : query { id = int, name = string } = table \"m\" \"t\"\n\
-         u : query { id = int, name = string } = table \"m\" \"u\"\n\
-         bad = (t & select { id = .id, name = .name }) & union (u & select { name = .name, id = .id })\n",
+         bad = t & order [asc (.id + 1)] & select {.id} & distinct\n",
     );
     // `check`, not the compile mode: `run` runs `cagara <path>`, which is the SQL
     // path and would refuse the file anyway. The assertion that matters is that the
@@ -797,7 +800,11 @@ fn check_reports_a_lowering_error() {
         f.clone().into_os_string(),
     ]);
     assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
-    assert!(stderr(&out).contains("same columns"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("cannot follow an `order`"),
+        "{}",
+        stderr(&out)
+    );
     // And the compile path agrees, which is the point.
     let sql = Command::new(env!("CARGO_BIN_EXE_cagara"))
         .arg(&f)

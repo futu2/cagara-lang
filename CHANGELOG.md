@@ -38,6 +38,15 @@
 - An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
   `select { x = upper .id }` does. It named only the operator before.
 
+- `union`, `unionAll`, `intersect` and `except` align their two sides **by name**, so `{ id, name }`
+  and `{ name, id }` are the same row written differently. The answer keeps the order of the operand
+  written first (`a & union b` answers in `a`'s order). Before, the same order was required and the
+  *type* reported the other operand's order while the SQL used this one.
+
+- `cagara check` reports what the SQL lowering refuses, not only what the checker does. A `distinct`
+  after an `order` on an expression the projection dropped type-checked and could not be lowered, so
+  `check` passed a file that `cagara --only` rejected.
+
 - `catalog "schema" { name = { … } }` declares a schema's tables once. It lowers to one ordinary
   table definition per entry, so nothing downstream needed a case for it.
 

@@ -404,12 +404,8 @@ the reasoning in the comment beside it.
 
 ## Deferred language work
 
-These are **features**, not open questions — each is a language or IR addition with a
-known shape, and none is a boundary of what exists today:
-
-| item | what it would take |
-|---|---|
-| name-aligned set operations | `union` requires both sides to have the same row *in the same order*. Attempted and reverted — see below — because aligning by name makes the checker's row order and the SQL's column order disagree |
+Nothing is deferred. The last item, name-aligned set operations, was settled by
+deciding that a set operation answers with its left operand's row; see below.
 
 Done since this table was written, and struck from it: `qualify` (a lowering rule —
 `where` over a window folds into the clause on four targets), grouping sets (`rollup`
@@ -419,17 +415,26 @@ ordinary table definition per entry), file-declared parameters (a file writes
 `rows_n : int = 5` and `--param rows_n=2` overrides the value, keeping the type), and
 `range`/`groups` window frames.
 
-The set-operation item is not deferred for want of a shape. It was implemented, and the
-implementation was correct as far as it went — `{ id, name }` aligned with
-`{ name, id }`, with a projection on the right input. What it exposed is that the
-*checker* binds a set operation's output row to the left input's order while the
-*lowering* keeps the order of the operand written first, and `&` is reverse
-application, so those are different sides. `a & union b` therefore type-checked as
-`b`'s order and emitted `a`'s. Fixing that is deciding what a set operation's output
-row *is* — a language question, not a projection in the arena — and it should be
-decided before the alignment lands, not after. The attempt did find a real bug, which
-is fixed: `cagara check` accepted a mismatched-order file that `cagara --only` refused
-to compile.
+The set-operation item was settled after all: a set operation answers with its
+**left** operand's row, where "left" is the operand written first in the source
+(`a & union b`). That decision is what the rest needed.
+
+What it fixed: the checker bound the answer's row to `left`, and `left` was the
+primitive's first *parameter* — but `&` is reverse application, so that is the operand
+written second. `a & union b` therefore had `b`'s column order in its type and `a`'s in
+its SQL. The fix is to name the parameters by what they are (`argument`, `piped`) and
+have the result *be* the piped variable rather than a third one unified with it:
+unifying two unbound row variables binds in whichever direction `unify` takes, and that
+is not a decision a type rule should leave to its implementation.
+
+With the order settled, alignment by name landed too: `{ id, name }` and `{ name, id }`
+are the same row written differently, so the two sides are matched by name and the right
+input gets a projection into the left's order. Requiring the same order made the user
+write a `select` on one branch purely to reorder, which says nothing about the query.
+
+The attempt had already found one real bug, fixed separately: `cagara check` accepted a
+file that `cagara --only` refused to compile. Making alignment work found a second — the
+refusal came from `cagara-sql`'s lowering, which `check` never ran at all.
 
 `decimal` was the one with a correctness argument behind it, and it is in — see
 above for what ships and what was decided against. The decisions as they stand:

@@ -100,6 +100,27 @@ need their own intrinsic per dialect.
 
 ## Recently closed
 
+- A lowering refusal names the stage it is about. `cagara-sql` returned
+  `Result<String, String>`, so every refusal reached the user as `file:0:0` — a
+  pre-commit hook's output was unusable and an editor would underline the first line.
+  `compile_located` carries the location of the innermost stage; `compile` is a wrapper
+  that drops it. Two places had to record it, and both were dropping one:
+  `rel_peeled` strips a run of `At`/`Where` iteratively (that is what makes a long
+  pipeline cost one stack frame instead of one per stage), so `lower_at` is never
+  reached for those nodes; and a check *inside* a `lower_*` runs after `rel` restored
+  the outer location.
+- The language server answers `rename`/`prepareRename`, `foldingRange` and
+  `semanticTokens/full`. Rename's materials were already there (`occurrences` is
+  cross-file, `references` returns paths); what was missing was the wiring, so the
+  server advertised eight capabilities and refused the ninth. Its refusals carry a
+  reason, because an empty edit set and "cannot rename this" are different things.
+- Every dialect's evidence is a table, not a paragraph: `VERIFIED` in `engines.rs`
+  marks each of the 22 accepted dialects `Engine(name)`, `Emulated` or `Text`, and two
+  tests keep it honest — the table covers every accepted dialect, claims no engine
+  without a harness, and its `Emulated` set is what the emulation test iterates. The
+  `range`/`groups` work is why: MariaDB rejects `GROUPS` and refuses a two-key `range`
+  frame, and no emulation could have shown either.
+
 - A sort key is re-aimed whenever the stage's columns change (`retarget_order`): the
   name still selects the same column, the name selects something else and the FROM has
   an alias, or the name is gone. Both failures it fixes were found by probing on a

@@ -406,15 +406,27 @@ known shape, and none is a boundary of what exists today:
 
 | item | what it would take |
 |---|---|
-| catalog declarations | a module that declares tables without a `query … = table` binding, so a project can share one schema |
-| typed bind parameters | `--param name:type=value` works today (`limit_n : int = 5` is prepended to the file, so the type is checked like any signature), and a wrong type is a compile error. What is missing is a *file* declaring its own parameters, so the same query can be run without the flag |
-| name-aligned set operations | `union` requires both sides to have the same row *in the same order*; aligning by name needs a projection per branch |
-| richer window frames | `rows …` covers row-counted frames; `range`/`groups` would be two more constructors |
+| name-aligned set operations | `union` requires both sides to have the same row *in the same order*. Attempted and reverted — see below — because aligning by name makes the checker's row order and the SQL's column order disagree |
 
 Done since this table was written, and struck from it: `qualify` (a lowering rule —
 `where` over a window folds into the clause on four targets), grouping sets (`rollup`
-and `cube`), and correlated subqueries (no capability was missing; `markExists` closed
-the ergonomic gap).
+and `cube`), correlated subqueries (no capability was missing; `markExists` closed the
+ergonomic gap), catalog declarations (`catalog "schema" { … }`, which lowers to one
+ordinary table definition per entry), file-declared parameters (a file writes
+`rows_n : int = 5` and `--param rows_n=2` overrides the value, keeping the type), and
+`range`/`groups` window frames.
+
+The set-operation item is not deferred for want of a shape. It was implemented, and the
+implementation was correct as far as it went — `{ id, name }` aligned with
+`{ name, id }`, with a projection on the right input. What it exposed is that the
+*checker* binds a set operation's output row to the left input's order while the
+*lowering* keeps the order of the operand written first, and `&` is reverse
+application, so those are different sides. `a & union b` therefore type-checked as
+`b`'s order and emitted `a`'s. Fixing that is deciding what a set operation's output
+row *is* — a language question, not a projection in the arena — and it should be
+decided before the alignment lands, not after. The attempt did find a real bug, which
+is fixed: `cagara check` accepted a mismatched-order file that `cagara --only` refused
+to compile.
 
 `decimal` was the one with a correctness argument behind it, and it is in — see
 above for what ships and what was decided against. The decisions as they stand:

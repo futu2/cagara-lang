@@ -18,6 +18,179 @@ use cagara_sql::{compile, Dialect, Options};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+/// What is the strongest evidence that this target's output is right?
+///
+/// The suite runs some dialects on a real server and others through a translation to
+/// DuckDB, and the difference matters: an emulation proves the SQL *means* the same
+/// thing, not that the target *accepts* it. This round found that out the expensive
+/// way — MariaDB rejects `GROUPS` outright and refuses a `range` frame with two sort
+/// keys, and no amount of translation could have shown either.
+///
+/// So the strength of each claim is written down here, in the same place the tests
+/// read it from, rather than in prose that can drift. `every_dialect_says_what_
+/// verifies_it` keeps the table honest: a dialect the crate accepts but the table
+/// omits fails the test, and so does an `Engine` claim for an engine with no harness.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verified {
+    /// A real server ran the query and the rows matched.
+    Engine(&'static str),
+    /// sqlglot translated our output to DuckDB and DuckDB ran it. Weaker than a
+    /// server: it cannot reject a spelling the target rejects, because DuckDB is the
+    /// one doing the parsing.
+    Emulated,
+    /// Text assertions only — the spelling is what this compiler intends and nothing
+    /// more is known. No row comparison at all.
+    Text,
+}
+
+/// Every dialect this crate accepts, and what verifies it.
+///
+/// The order is the `Dialect` enum's, and every entry has to be justified: see
+/// `docs/ENGINE-TESTS.md` for why T-SQL, BigQuery and Snowflake have no server here
+/// (a cloud account or a proprietary archive), and why the aliases are `Text`.
+const VERIFIED: &[(&str, Verified)] = &[
+    ("ansi", Verified::Emulated),
+    ("postgres", Verified::Engine("PGlite")),
+    ("duckdb", Verified::Engine("duckdb")),
+    ("sqlite", Verified::Engine("sqlite3")),
+    ("mysql", Verified::Engine("MariaDB")),
+    ("trino", Verified::Engine("Trino")),
+    ("spark", Verified::Text),
+    ("bigquery", Verified::Emulated),
+    ("snowflake", Verified::Emulated),
+    ("tsql", Verified::Emulated),
+    ("athena", Verified::Text),
+    ("presto", Verified::Text),
+    ("clickhouse", Verified::Text),
+    ("databricks", Verified::Text),
+    ("doris", Verified::Text),
+    ("fabric", Verified::Text),
+    ("hive", Verified::Text),
+    ("singlestore", Verified::Text),
+    ("starrocks", Verified::Text),
+    ("teradata", Verified::Text),
+    ("redshift", Verified::Text),
+    ("oracle", Verified::Text),
+];
+
+/// The table above covers every dialect the crate accepts, and no dialect claims
+/// more verification than exists.
+///
+/// This is the executable half of "what the emulation is worth" in
+/// `docs/ENGINE-TESTS.md`. The prose said which dialects are emulated; nothing checked
+/// it, so a new dialect could be added and quietly inherit whatever the author assumed,
+/// and a dialect could be *downgraded* from a server to an emulation without a word.
+#[test]
+fn every_dialect_says_what_verifies_it() {
+    // The crate's own list, so a dialect added to it and not here fails.
+    let accepted: Vec<&str> = [
+        "ansi",
+        "postgres",
+        "duckdb",
+        "sqlite",
+        "mysql",
+        "trino",
+        "spark",
+        "bigquery",
+        "snowflake",
+        "tsql",
+        "athena",
+        "presto",
+        "clickhouse",
+        "databricks",
+        "doris",
+        "fabric",
+        "hive",
+        "singlestore",
+        "starrocks",
+        "teradata",
+        "redshift",
+        "oracle",
+    ]
+    .into_iter()
+    .filter(|d| Dialect::from_str(d).is_some())
+    .collect();
+    let claimed: Vec<&str> = VERIFIED.iter().map(|(d, _)| *d).collect();
+    for d in &accepted {
+        assert!(
+            claimed.contains(d),
+            "`{d}` is a dialect this crate accepts and the table does not say what \
+             verifies it; add it to VERIFIED"
+        );
+    }
+    for d in &claimed {
+        assert!(
+            accepted.contains(d),
+            "VERIFIED names `{d}`, which is not a dialect this crate accepts"
+        );
+    }
+    assert_eq!(claimed.len(), accepted.len(), "no duplicates either");
+
+    // An `Engine` claim names an engine the suite can start. `PGlite` runs through
+    // `node`; the others are shells on `PATH`. Naming one that has no harness would
+    // claim a server the tests cannot reach.
+    const HARNESSED: &[&str] = &["PGlite", "duckdb", "sqlite3", "MariaDB", "Trino"];
+    for (d, how) in VERIFIED {
+        if let Verified::Engine(e) = how {
+            assert!(
+                HARNESSED.contains(e),
+                "`{d}` claims a real `{e}`, which no test harness here starts"
+            );
+        }
+    }
+
+    // The emulated set is exactly what the emulation test iterates, so the two cannot
+    // disagree about which dialects it covers.
+    let emulated: Vec<&str> = VERIFIED
+        .iter()
+        .filter(|(_, v)| *v == Verified::Emulated)
+        .map(|(d, _)| *d)
+        .collect();
+    assert_eq!(
+        emulated,
+        vec!["ansi", "bigquery", "snowflake", "tsql"],
+        "the emulated set is what `the_emulated_dialects_mean_the_same_thing` runs"
+    );
+}
+
+/// A target that is only text-checked is marked as such, and the mark is not a
+/// downgrade nobody noticed.
+///
+/// `Text` is the weakest claim, so it has to be a deliberate one. The aliases are the
+/// reason it exists: `presto` and `athena` are Trino's spelling in another era, `hive`
+/// and `databricks` are Spark's, and `doris`/`starrocks`/`singlestore` are the MySQL
+/// family's — each is covered by its family's engine, and no separate server here
+/// speaks it.
+#[test]
+fn a_text_only_target_is_a_deliberate_choice() {
+    for (d, how) in VERIFIED {
+        if *how != Verified::Text {
+            continue;
+        }
+        // Every text-only target still has to compile, and its family has to have
+        // some stronger check — otherwise the entry means "we do not know", which the
+        // table would be hiding.
+        let dialect = Dialect::from_str(d).expect("dialect");
+        let ws = Workspace::from_source(
+            "t : query { id = int, name = string } = table \"m\" \"t\"\n\
+             q = t & select { id = .id, name = .name } & order [asc .name]\n",
+        );
+        let (_, rel) = root_queries(&ws)
+            .into_iter()
+            .find(|(n, _)| n == "q")
+            .expect("q");
+        let rel = rel.expect("q type-checks");
+        compile(
+            &rel,
+            Options {
+                dialect,
+                ..Options::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("`{d}` compiles: {e}"));
+    }
+}
+
 /// One statement per line (the DuckDB shell stand-in splits on `;\n`).
 const SETUP: &str = "\
 CREATE TABLE main.nums (id INTEGER, a INTEGER, b INTEGER, v INTEGER);
@@ -2266,7 +2439,16 @@ fn the_emulated_dialects_mean_the_same_thing() {
     let mut failures: Vec<String> = Vec::new();
     let mut ran = 0;
     let mut unreadable: Vec<(String, String)> = Vec::new();
-    for dialect_name in ["tsql", "bigquery", "snowflake", "ansi"] {
+    // The set comes from `VERIFIED`, not from a second list: `every_dialect_says_
+    // what_verifies_it` already asserts that these four are the emulated ones, so a
+    // dialect moved from `Emulated` to `Text` here would otherwise keep being run
+    // while the table said it was not.
+    let emulated: Vec<&str> = VERIFIED
+        .iter()
+        .filter(|(_, v)| *v == Verified::Emulated)
+        .map(|(d, _)| *d)
+        .collect();
+    for &dialect_name in &emulated {
         let dialect = Dialect::from_str(dialect_name).expect("dialect");
         let mut names: Vec<(&str, &[&str])> = Vec::new();
         let mut statements: Vec<String> = Vec::new();

@@ -151,3 +151,26 @@ SQL Server has no self-contained archive, and BigQuery and Snowflake need a clou
 account — so those three are covered by the emulation above plus the two text checks in
 `engines.rs` (`each_dialect_avoids_what_it_cannot_read`,
 `each_dialect_uses_the_spelling_it_has`).
+
+## How strong each claim is, as code
+
+The table above is prose, and prose drifts. `engines.rs` carries the same information as
+a `VERIFIED` table — one entry per dialect the crate accepts, each `Engine(name)`,
+`Emulated` or `Text` — and two tests keep it honest:
+
+- `every_dialect_says_what_verifies_it` — the table covers every accepted dialect (a new
+  one that is not described fails), names no dialect the crate does not accept, claims no
+  engine that has no harness, and its `Emulated` set is what
+  `the_emulated_dialects_mean_the_same_thing` actually iterates.
+- `a_text_only_target_is_a_deliberate_choice` — every `Text` target still compiles, so
+  the entry cannot come to mean "this one is broken and nobody noticed".
+
+`Text` is for the aliases: `presto` and `athena` are Trino's spelling in another era,
+`hive` and `databricks` are Spark's, `doris`/`starrocks`/`singlestore` are the MySQL
+family's. Each is covered by its family's engine; no separate server here speaks it.
+
+**Why this exists.** The `range`/`groups` work found two limits that no emulation could
+have shown — MariaDB rejects `GROUPS` outright, and refuses a `range` frame with two sort
+keys because its `NULLS LAST` emulation adds a second. Both were found by running a
+server, and both would have shipped if the only evidence had been "sqlglot translated it
+and DuckDB agreed". The table makes that distinction a test instead of a paragraph.

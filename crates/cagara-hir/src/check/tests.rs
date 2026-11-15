@@ -527,6 +527,35 @@ fn query_output_rows() {
     );
 }
 
+/// An empty list is the *program's* problem, not a compiler gap.
+///
+/// The refusal came out of the normalizer, which classified it as
+/// `Fault::Compiler` — so `cagara` printed `internal error in `q`: an empty list has
+/// no element type`, which tells the reader the compiler is broken. It is not, and
+/// there is nothing to fix in it: `[]` says nothing about what it holds and no
+/// annotation position takes one. The distinction is not cosmetic — the project has
+/// a gate (`shipped_examples_have_no_compiler_gaps`) that treats a compiler fault as
+/// a bug to fix and a program fault as the user's to fix, and this was on the wrong
+/// side of it.
+#[test]
+fn an_empty_list_is_a_program_error() {
+    let ws = Workspace::from_source(
+        "t : query { a = int } = table \"s\" \"t\"\nq = t & select { xs = [] }\n",
+    );
+    let tc = check(&ws);
+    let verdicts = crate::root_verdicts(&ws, &tc);
+    let (_, result, fault) = verdicts.iter().find(|(n, _, _)| n == "q").expect("q");
+    assert!(result.is_err(), "an empty list has no type");
+    assert_eq!(*fault, crate::Fault::Program, "not a compiler gap");
+    let e = result.as_ref().expect_err("an error");
+    assert!(!e.message.contains("internal error"), "{}", e.message);
+    assert!(
+        e.message.contains("arrayAgg"),
+        "says what to do instead: {}",
+        e.message
+    );
+}
+
 /// A field's error says which field, whether or not it names a column too.
 ///
 /// Two paths reach a field's expression: `unify` on the field's row type, and the

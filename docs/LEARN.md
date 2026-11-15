@@ -686,14 +686,24 @@ the two directions stable with respect to each other, and the compiler emits
 whatever each dialect needs to achieve it (`NULLS LAST`, or a leading
 `CASE WHEN x IS NULL` key where the dialect lacks it).
 
-`limit` and `offset` cap and skip rows:
+`limit` and `offset` cap and skip rows, and **the order matters** — they are pipeline
+stages, so each one acts on what the one before it returned:
 
 ```haskell
-page2 = orders & order [asc .id] & limit 20 & offset 20
+# Page 2, twenty per page: skip twenty, then take twenty.
+page2 = orders & order [asc .id] & offset 20 & limit 20
+
+# The other order means something else: take the first twenty, then skip twenty of
+# those — which is no rows at all.
+nothing = orders & order [asc .id] & limit 20 & offset 20
 ```
 
-The two are **one clause** in the SQL they produce (`LIMIT 20 OFFSET 20`), so their
-order in the pipeline does not matter: `& offset 20 & limit 20` is the same page.
+`limit 5 & offset 2` keeps rows 3 to 5: five rows are taken, then two are skipped.
+`offset 2 & limit 5` keeps rows 3 to 7: two are skipped, then five are taken. The
+compiler folds the first into `LIMIT 3 OFFSET 2` and the second into
+`LIMIT 5 OFFSET 2`, so neither is surprising in the SQL — it is the pipeline reading,
+kept all the way down.
+
 A `distinct` cannot follow an `order` whose key the projection dropped — that
 pair is an error, because the sort key is neither sortable under `DISTINCT` nor
 safe to carry into it.
@@ -1100,7 +1110,9 @@ bad3 = users & select {.id, rn = rowNumber [asc .age]}
 > Note the last one: a spec is a **record**, not a list. `rowNumber [asc .age]`
 > is rejected; write `rowNumber {order = [asc .age]}`. Elements are homogeneous,
 > so `[1, 2.0]` is a type error rather than a promoted list. An empty `[]` is
-> accepted wherever keys are expected.
+> accepted wherever *keys* are expected (`order = []` is a window with no sort), but
+> not as a value: `select { xs = [] }` is refused, because `[]` says nothing about
+> what it holds and there is no position to annotate it.
 
 | Function | Returns |
 |---|---|

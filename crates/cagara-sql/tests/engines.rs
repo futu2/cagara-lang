@@ -979,6 +979,83 @@ fn every_statement_is_well_formed_sql() {
     );
 }
 
+/// Paging is a pipeline, and the two orders are different pages.
+///
+/// `docs/LEARN.md` and `CAGARA.md` both used to say the opposite — that `limit` and
+/// `offset` are one SQL clause and their order in the pipeline does not matter. They
+/// are one clause, and the order does matter, because each is a *stage*: it acts on
+/// what the one before returned. Measured on sixty rows:
+///
+/// * `offset 20 & limit 20` is `LIMIT 20 OFFSET 20` — rows 21 to 40.
+/// * `limit 20 & offset 20` is `LIMIT 0` — take twenty, then skip twenty of those.
+///
+/// The second is not a bug in the fold: the fold is what makes it honest. Left as
+/// `LIMIT 20 OFFSET 20` the SQL would return rows 21 to 40 for a pipeline that means
+/// "none", which is the silent-wrong-answer shape this project treats as the worst
+/// kind. So the test pins the *rows*, not the SQL: a future fold that changes the
+/// clause is fine as long as the answer is this one.
+#[test]
+fn paging_is_a_pipeline_and_the_order_matters() {
+    const DEFS: &str = "\
+n : query { id = int } = table \"main\" \"nums\"\n\
+skip_then_take = n & order [asc .id] & offset 2 & limit 2\n\
+take_then_skip = n & order [asc .id] & limit 2 & offset 1\n\
+take_all_then_skip = n & order [asc .id] & limit 2 & offset 2\n";
+    let ws = Workspace::from_source(DEFS);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let sql = |n: &str| {
+        let (_, r) = rels
+            .iter()
+            .find(|(name, _)| name == n)
+            .unwrap_or_else(|| panic!("{n}"));
+        let rel = r.as_ref().unwrap_or_else(|d| panic!("{n}: {}", d.message));
+        compile(rel, Options::default()).expect(n)
+    };
+    // The SQL, so a change in the fold is visible.
+    assert!(
+        sql("skip_then_take").contains("LIMIT 2 OFFSET 2"),
+        "{}",
+        sql("skip_then_take")
+    );
+    assert!(
+        sql("take_then_skip").contains("LIMIT 1 OFFSET 1"),
+        "{}",
+        sql("take_then_skip")
+    );
+    assert!(
+        sql("take_all_then_skip").contains("LIMIT 0"),
+        "{}",
+        sql("take_all_then_skip")
+    );
+
+    // And the rows, which is what the documents are about. `nums` is ids 1..4.
+    let engine = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    for (name, want) in [
+        // Skip two, take two: rows 3 and 4.
+        ("skip_then_take", vec!["3", "4"]),
+        // Take two, skip one of those: row 2.
+        ("take_then_skip", vec!["2"]),
+        // Take two, skip both: nothing.
+        ("take_all_then_skip", vec![]),
+    ] {
+        let q = sql(name);
+        match run_setup(&engine, SETUP, &q) {
+            Some(Ok(rows)) => assert_eq!(
+                rows.iter().map(String::as_str).collect::<Vec<_>>(),
+                want,
+                "{name}: {rows:?} vs {want:?}\n  {q}"
+            ),
+            Some(Err(m)) => panic!("{name}: duckdb: {m}\n  {q}"),
+            None => panic!("duckdb is not installed"),
+        }
+    }
+}
+
 /// Each dialect avoids the spellings it cannot read.
 ///
 /// Parsing cannot decide this — the parser accepts every dialect's syntax under

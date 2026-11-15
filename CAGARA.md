@@ -844,9 +844,8 @@ orders : query { id = int, amount = float, created_at = date } = table "public" 
 main =
   orders
   & order [desc .amount, asc .id]
-  & limit 20
   & offset 40
-  & distinct
+  & limit 20
 ```
 
 - `order` takes a list of `asc`/`desc` keys; keys are expressions over the current row. Every key
@@ -856,9 +855,10 @@ main =
   tiebreakers: `order [asc .a] & order [desc .id]` is `ORDER BY id DESC, a`.
 - NULLs sort **last** in both directions; this is fixed by the language.
 - `limit` and `offset` take an integer literal or a definition that is an integer constant. They do
-  not order by themselves. The two are **one clause** (`LIMIT n OFFSET m`), so their order in the
-  pipeline does not matter: `& limit 20 & offset 40` and `& offset 40 & limit 20` are the same
-  twenty rows starting at the forty-first.
+  not order by themselves. **Their order in the pipeline matters**, because each acts on what the
+  one before it returned: `& offset 40 & limit 20` skips forty rows and then takes twenty (rows 41
+  to 60), while `& limit 20 & offset 40` takes twenty rows and then skips forty of those — nothing.
+  The compiler folds the second into `LIMIT 0`, so the SQL says what the pipeline meant.
 - `distinct` deduplicates the whole row; it is the only deduplicating stage besides `union`,
   `intersect`, and `except`. A `distinct` cannot follow an `order` whose key the projection dropped
   — `order [asc .ts] & select { .name } & distinct` is an error, because SQL refuses to sort a
@@ -1702,8 +1702,8 @@ adults =
   & where (.age >= 18 && .active)
   & select { id = .id, label = upper .name, next_age = .age + 1 }
   & order [asc .label]
-  & limit 10
   & offset 20
+  & limit 10
 
 main = adults
 ```

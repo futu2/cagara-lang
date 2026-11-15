@@ -18,7 +18,7 @@ use super::{
 use crate::check::NodeRef;
 use crate::check::Resolved;
 use crate::checked::{CheckedExpr, CheckedExprNode};
-use crate::core::{Origin, ScalarType};
+use crate::core::{Error, Origin, ScalarType};
 
 impl<'a> Normalizer<'a, 'a> {
     /// The value of one expression, under one environment.
@@ -834,9 +834,19 @@ impl<'a> Normalizer<'a, 'a> {
     /// checker and this node only orders the parts.
     fn list_expr(&self, items: &[Value<'a>], origin: Origin) -> Result<CheckedExpr, Control> {
         if items.is_empty() {
-            return Err(Control::unsupported(
-                origin,
-                "an empty list has no element type",
+            // A *program* error, not a capability gap. `unsupported` here made the
+            // report read `internal error in `q``, which tells the reader the
+            // compiler is broken — it is not, and there is nothing to fix in it.
+            // The language simply has no way to write an empty list with a type:
+            // `[]` says nothing about what it holds, and no annotation position
+            // takes one. Naming the alternative is what makes the refusal usable.
+            return Err(Control::Program(
+                Error::new(
+                    "an empty list has no element type, and there is no way to \
+                     annotate one — build it with `arrayAgg` over no rows, or write \
+                     the list with an element",
+                )
+                .at(origin),
             ));
         }
         let mut args = Vec::with_capacity(items.len());

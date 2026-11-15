@@ -2472,7 +2472,7 @@ fn closest_token(text: &str, target: &str) -> Option<(usize, usize)> {
                 let token = &text[s..i];
                 if token != target {
                     let d = cagara_hir::suggest::edit_distance(token, target);
-                    let limit = (target.chars().count() / 3).max(1);
+                    let limit = cagara_hir::suggest::typo_limit(target);
                     if d <= limit && best.is_none_or(|(_, _, b)| d < b) {
                         best = Some((s, i, d));
                     }
@@ -2486,7 +2486,7 @@ fn closest_token(text: &str, target: &str) -> Option<(usize, usize)> {
         let token = &text[s..];
         if token != target {
             let d = cagara_hir::suggest::edit_distance(token, target);
-            let limit = (target.chars().count() / 3).max(1);
+            let limit = cagara_hir::suggest::typo_limit(target);
             if d <= limit && best.is_none_or(|(_, _, b)| d < b) {
                 best = Some((s, text.len(), d));
             }

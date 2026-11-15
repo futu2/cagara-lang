@@ -102,7 +102,13 @@ cagara --version
 - [`CAGARA.md`](CAGARA.md): a single self-contained reference written for code-generating agents;
   paste it into an agent's context before asking for Cagara code
 - [`examples/`](examples): filtering, aggregation, windows, joins, modules, error messages
-- [`docs/PLAN.md`](docs/PLAN.md): architecture and current gaps
+- The compiler: [architecture](docs/ARCHITECTURE.md) ·
+  [compile-time semantics](docs/CORE.md) · [dialect support](docs/SQL-DIALECTS.md) ·
+  [running the engines the tests need](docs/ENGINE-TESTS.md) ·
+  [catalog scale and incremental compilation](docs/PERFORMANCE.md)
+- [`docs/PLAN.md`](docs/PLAN.md): what is done and what is left
+- [Research records](docs/research/): the dated surveys the redesign rested on — reasoning,
+  not rules
 - Editor support: [VS Code](editors/vscode) · [Neovim](editors/nvim)
 
 ## License

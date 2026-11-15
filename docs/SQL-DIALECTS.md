@@ -7,13 +7,23 @@ have been checked against that database engine.
 
 | Coverage | Dialects |
 |---|---|
-| Executed against real engines in CI, under both lowerings | SQLite 3.46+, DuckDB, PostgreSQL (through [PGlite](https://pglite.dev/), Postgres compiled to WASM and driven by `node`) |
+| A real server runs the query and the rows match | SQLite 3.46+, DuckDB, PostgreSQL (through [PGlite](https://pglite.dev/), Postgres compiled to WASM and driven by `node`), Trino, MariaDB |
+| Translated to DuckDB by Python sqlglot, then run | ANSI, BigQuery, Snowflake, T-SQL |
+| Text assertions only — the spelling is intended, nothing more is known | Spark, and the aliases: Presto/Athena, Hive/Databricks, Doris/SingleStore/StarRocks, Fabric, ClickHouse, Teradata, Redshift, Oracle |
 | Cagara-specific date, string, and integer arithmetic rewrites | ANSI/Postgres fallback; MySQL family (MySQL, Doris, SingleStore, StarRocks); SQLite; DuckDB; T-SQL/Fabric; BigQuery; Snowflake; Trino/Presto/Athena; Spark/Databricks |
 | SQLGlot Rust can recognize and validate | Other dialects exposed by the pinned `sqlglot-rust` version; their Cagara-specific intrinsic spelling uses the ANSI/Postgres fallback unless listed above |
 
+The first three rows are the `VERIFIED` table in
+[`crates/cagara-sql/tests/engines.rs`](../crates/cagara-sql/tests/engines.rs), which a
+test keeps in step with the dialects the crate accepts: a new target has to say which of
+the three it is. The distinction matters — an emulation proves the SQL *means* the same
+thing, not that the target *accepts* it. MariaDB rejects a `GROUPS` frame outright and
+refuses a `range` frame with two sort keys, and no amount of translation could have shown
+either; see [`ENGINE-TESTS.md`](ENGINE-TESTS.md).
+
 Rust unit tests check generated SQL for selected constructs across these
-dialects. Those tests catch regressions in the emitted text, while the
-SQLite/DuckDB differential test checks query results for the cases in
+dialects. Those tests catch regressions in the emitted text, while the differential
+tests check query results for the cases in
 [`crates/cagara-sql/tests/engines.rs`](../crates/cagara-sql/tests/engines.rs).
 The live-engine suite is required in CI and can be skipped locally when the
 shells are unavailable.

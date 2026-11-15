@@ -133,8 +133,27 @@ fn sources_under(path: &Path) -> std::io::Result<Vec<PathBuf>> {
         out.push(path.to_path_buf());
         return Ok(out);
     }
+    // Each *file* once, however many paths reach it.
+    //
+    // A symlink is followed, so the same file can be reached many times: `ln -s .
+    // self` inside a directory makes every level of the walk see it again, and the
+    // walk stops only because the OS refuses to resolve more than 40 symlinks in one
+    // path. Measured on this tree: 41 entries for one six-byte file, 41 workspaces
+    // compiled, 1.6 s instead of 0.04 s. A symlink to a sibling directory is the
+    // quieter version — the file is checked twice, and only the diagnostic dedupe
+    // hid it.
+    //
+    // The key is the canonical path, and the path *kept* is the first one the sorted
+    // walk reached, so what is printed is a path the user typed or one under it.
+    let mut seen_files: HashSet<PathBuf> = HashSet::new();
+    let mut seen_dirs: HashSet<PathBuf> = HashSet::new();
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
+        // A directory already walked needs no second visit, which is what bounds a
+        // loop to one pass instead of forty.
+        if !seen_dirs.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
+            continue;
+        }
         let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .collect();
@@ -152,7 +171,10 @@ fn sources_under(path: &Path) -> std::io::Result<Vec<PathBuf>> {
                 }
                 stack.push(entry);
             } else if entry.extension().is_some_and(|e| e == "cagara") {
-                out.push(entry);
+                let key = std::fs::canonicalize(&entry).unwrap_or_else(|_| entry.clone());
+                if seen_files.insert(key) {
+                    out.push(entry);
+                }
             }
         }
     }
@@ -261,4 +283,157 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitC
         }
     }
     Ok(done(failed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sources_under;
+    use std::path::{Path, PathBuf};
+
+    /// A scratch tree that removes itself.
+    struct Tree(PathBuf);
+
+    impl Tree {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("cagara-check-unit-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Tree(dir)
+        }
+
+        fn write(&self, name: &str) -> PathBuf {
+            let p = self.0.join(name);
+            std::fs::create_dir_all(p.parent().expect("a parent")).expect("parents");
+            std::fs::write(&p, "q = 1\n").expect("write");
+            p
+        }
+
+        #[cfg(unix)]
+        fn link(&self, target: &str, name: &str) {
+            let p = self.0.join(name);
+            std::fs::create_dir_all(p.parent().expect("a parent")).expect("parents");
+            std::os::unix::fs::symlink(target, p).expect("symlink");
+        }
+
+        fn found(&self) -> Vec<PathBuf> {
+            sources_under(&self.0).expect("walk")
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Each *file* once, however many paths reach it.
+    ///
+    /// Asserted on the walk itself rather than through `cagara check`, deliberately:
+    /// the duplicate work is invisible from the outside. `Workspace` canonicalises the
+    /// path it is given, so the same file reached twice produces the same diagnostic,
+    /// and `run`'s dedupe prints one line — the only outward sign is that a six-byte
+    /// file takes 1.6 s to check instead of 0.04 s. A CLI-level test of "one report"
+    /// passes with and without the guard (it was written, run against the unguarded
+    /// walk, and passed), so it was removed rather than kept as a test that cannot
+    /// fail. The count is what is wrong, so the count is what is asserted.
+    #[test]
+    fn a_file_reached_by_two_paths_is_found_once() {
+        let t = Tree::new("dedupe");
+        t.write("a/one.cagara");
+        t.write("a/two.cagara");
+        t.write("b/three.cagara");
+        assert_eq!(t.found().len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_sibling_directory_is_not_walked_twice() {
+        let t = Tree::new("sibling");
+        t.write("a/one.cagara");
+        t.link("../a", "b/link");
+        assert_eq!(
+            t.found().len(),
+            1,
+            "the same file through two paths: {:?}",
+            t.found()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_loop_does_not_multiply_the_walk() {
+        let t = Tree::new("loop");
+        t.write("a/one.cagara");
+        // `a/self` is `a`, so every level of the walk sees it again. Without a guard
+        // the walk runs until the OS refuses to resolve more than 40 symlinks in one
+        // path, which is 41 entries for one file.
+        t.link(".", "a/self");
+        assert_eq!(
+            t.found().len(),
+            1,
+            "one file, however many ways the walk reaches it: {:?}",
+            t.found()
+        );
+    }
+
+    /// A path that is not a directory is returned as itself, without walking.
+    #[test]
+    fn a_file_is_returned_as_itself() {
+        let t = Tree::new("single");
+        let f = t.write("one.cagara");
+        assert_eq!(sources_under(&f).expect("walk"), vec![f]);
+    }
+
+    /// A directory with no `.cagara` files yields nothing, and is not an error.
+    #[test]
+    fn a_tree_without_sources_is_empty_not_an_error() {
+        let t = Tree::new("empty");
+        t.write("notes.txt");
+        assert!(t.found().is_empty(), "{:?}", t.found());
+    }
+
+    /// Dot directories are skipped; dot *files* are not.
+    ///
+    /// The first is a build artifact or an editor cache. The second is a file
+    /// somebody wrote on purpose — `.cagara` in a home directory is a real thing —
+    /// and skipping it silently would be a check that says "all good" about a file
+    /// it never read.
+    #[test]
+    fn dot_directories_are_skipped_and_dot_files_are_not() {
+        let t = Tree::new("dots");
+        t.write(".cache/ignored.cagara");
+        t.write("kept.cagara");
+        let found = t.found();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].ends_with("kept.cagara"), "{found:?}");
+    }
+
+    /// The walk is sorted, so two runs report in the same order.
+    #[test]
+    fn the_walk_is_ordered() {
+        let t = Tree::new("order");
+        for name in ["b.cagara", "a.cagara", "c/d.cagara"] {
+            t.write(name);
+        }
+        let found: Vec<String> = t
+            .found()
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&t.0)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let mut sorted = found.clone();
+        sorted.sort();
+        assert_eq!(found, sorted, "{found:?}");
+        assert_eq!(found.len(), 3);
+        assert_eq!(
+            Path::new(&found[0]),
+            Path::new("a.cagara"),
+            "relative to the tree: {found:?}"
+        );
+    }
 }

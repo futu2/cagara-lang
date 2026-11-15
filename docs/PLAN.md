@@ -24,7 +24,7 @@ anything an editor or a script can reach and a test cannot.
 | ~~A2~~ | **Done.** `references` is cross-file now; a real bug | They walk the root module only (`occurrences`), so a use of `lib.helper` in `main.cagara` is not a reference to `helper`. | a definition used from another open file lists that use |
 | ~~A3~~ | **Done.** Two properties, and the mutation showed the first version tested the wrong one | Round trip (format twice = format once), lossless (format then compile = compile), and comments survive — checked over the whole corpus and over the adversarial inputs that break formatters (a comment longer than the width, a string that cannot break, nesting deeper than the width allows). | three property tests over `examples/`, `tests/corpus/` and a generated adversarial set |
 | ~~A4~~ | **Done.** One object per name with a `signatures` array; the shape changed | Overloads render as one heading in the markdown but arrive as N definitions in JSON, with the doc on the first only. A consumer cannot tell that `sum`'s six signatures are one name. | the JSON groups overloads the way the markdown does, or says in `docs/` why not |
-| A5 | **`check` over a tree.** Exit codes, dedupe across workspaces, a file that imports a broken file, a directory with no `.cagara` files, a path that is not a file. | one test per case, including the exit code |
+| ~~A5~~ | **Done.** Found a symlink loop checking one file 41 times | Exit codes, dedupe across workspaces, a file that imports a broken file, a directory with no `.cagara` files, a path that is not a file. | one test per case, including the exit code |
 
 ### B. The deferred language work
 

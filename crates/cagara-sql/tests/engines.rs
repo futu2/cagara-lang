@@ -2547,6 +2547,51 @@ fn a_decimal_sum_outgrows_its_operand_type() {
     }
 }
 
+/// Two `markExists` in a row: the second one's answer is the one kept.
+///
+/// The column *replaces* one of that name, which is what the row type promises
+/// (`RowType::with`) and what the prelude documents. The lowering appended
+/// instead, so the stage had two items called `exists` and every later reader took
+/// the first — `& markExists u p & markExists u q & select { a = .exists }`
+/// answered `p`'s question and threw `q`'s away, silently. Nothing failed: the SQL
+/// ran, the types were right, and the rows were wrong.
+#[test]
+fn a_second_mark_exists_replaces_the_first() {
+    const DEFS: &str = "\
+q_twice = nums & markExists dupes (.<id == .>id) \
+          & markExists dupes (.<id == .>id && .>k == \"x\") & select { id = .id, a = .exists } \
+          & order [asc .id]
+";
+    // `nums` is ids 1..4; `dupes` has (1,'x'), (1,'x'), (2,'x'), (3,'y').
+    // First predicate: has any dupe → 1, 2, 3. Second: has an 'x' dupe → 1, 2.
+    // The *second* is what `a` must show.
+    let engine = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    let ws = Workspace::from_source(&format!("{TABLES}{DEFS}"));
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let (_, rel) = root_queries(&ws)
+        .into_iter()
+        .find(|(n, _)| n == "q_twice")
+        .expect("q_twice");
+    let rel = rel.unwrap_or_else(|d| panic!("q_twice: {}", d.message));
+    let sql = compile(&rel, Options::default()).expect("duckdb");
+    match run_setup(&engine, SETUP, &sql) {
+        Some(Ok(rows)) => {
+            let want = ["1|true", "2|true", "3|false", "4|false"];
+            assert_eq!(rows.len(), want.len(), "{rows:?} vs {want:?}\n  {sql}");
+            assert!(
+                rows.iter().zip(&want).all(|(a, b)| same_row(a, b)),
+                "{rows:?} vs {want:?}\n  {sql}"
+            );
+        }
+        Some(Err(m)) => panic!("duckdb: {m}\n  {sql}"),
+        None => panic!("duckdb is not installed"),
+    }
+}
+
 /// Postgres, through PGlite — Postgres compiled to WebAssembly and driven by
 /// `node`, so no server is needed (`crates/cagara-sql/tests/pglite.mjs`).
 ///

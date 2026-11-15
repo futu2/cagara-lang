@@ -399,10 +399,20 @@ impl<'w> Checker<'w> {
                 (_, Ty::Var(v)) => {
                     self.vars[*v as usize].kind = kind_a;
                 }
-                // A plain row where a `join` row is expected is a column in a
-                // join predicate written without its side. That has a message of
-                // its own, and a much better one than naming two kinds: the row
-                // knows the column, and the fix is a one-character edit.
+                // A row of one kind where a row of the other is expected has a
+                // message of its own, and a much better one than naming two kinds:
+                // the two rows say which spelling the reader needs, and the fix is
+                // a one-character edit. Both directions are reachable and both
+                // were, until now, reported as `kind mismatch`:
+                //
+                //   * a plain row where a `join` row is expected — a column in a
+                //     join predicate written without its side (`.x` for `.<x`);
+                //   * a `join` row where a plain row is expected — the reverse,
+                //     which is what `.>y` beside a plain `.x` produces, and what
+                //     `where (.>x)` would be.
+                //
+                // The first names the column because the row knows it; the second
+                // cannot, because the side is the thing that is wrong.
                 (_, Ty::Con("join", _)) if kind_a == Kind::Row => {
                     let n = match &a {
                         Ty::Row(fs, _) => fs.first().map_or("x", |(k, _)| k.as_str()),
@@ -412,6 +422,12 @@ impl<'w> Checker<'w> {
                         _ => "x",
                     };
                     return Err(crate::rules::needs_side(n));
+                }
+                (Ty::Con("join", _), _) if kind_e == Kind::Row => {
+                    return Err(
+                        "cannot mix join-side columns (`.<x`, `.>x`) with plain columns (`.x`)"
+                            .into(),
+                    );
                 }
                 _ => {
                     return Err(format!(
@@ -665,6 +681,11 @@ impl<'w> Checker<'w> {
         let join = |t: &Ty| matches!(t, Ty::Con("join", _));
         let plain = |t: &Ty| matches!(t, Ty::Row(..) | Ty::Empty);
         if (join(a) && plain(e)) || (plain(a) && join(e)) {
+            // A join predicate reads two rows, so every column in it has to say
+            // which one: `.<x` for the left input, `.>x` for the right. A plain
+            // `.x` names neither, and mixing the two spellings in one predicate is
+            // always a slip — the message names both so the fix is visible. (The
+            // side-less case has its own message; see `rules::needs_side`.)
             return "cannot mix join-side columns (`.<x`, `.>x`) with plain columns (`.x`)".into();
         }
         let maybe = |t: &Ty| matches!(t, Ty::Con("maybe", _));

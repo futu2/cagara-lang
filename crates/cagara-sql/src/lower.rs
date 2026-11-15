@@ -851,7 +851,15 @@ impl Lowerer {
         let mut st = Stage::new(outer.from, outer.items);
         st.joins = outer.joins;
         st.wheres = outer.wheres;
-        st.items.push(("exists".into(), exists));
+        // The column *replaces* one of that name, which is what the row type says
+        // (`RowType::with`) and what the prelude promises. Appending instead left
+        // two items called `exists` and every later reader took the first — so
+        // `& markExists u p & markExists u q & select { a = .exists }` answered
+        // `p`'s question and threw `q`'s away, silently.
+        match st.items.iter_mut().find(|(n, _)| n == "exists") {
+            Some(slot) => slot.1 = exists,
+            None => st.items.push(("exists".into(), exists)),
+        }
         Ok(st)
     }
 

@@ -527,6 +527,31 @@ fn query_output_rows() {
     );
 }
 
+/// Mixing a join-side column with a plain one says so, in both directions.
+///
+/// A join predicate reads two rows, so every column in it has to name a side. The
+/// message for that was written long before it could be reached: the kind check in
+/// `unify_inner` short-circuits first, and reported `kind mismatch: cannot unify
+/// Type with Row`, which names two kinds and no column. Both directions are pinned
+/// here because both were broken and they are different code paths — a plain column
+/// where a join row is expected (`.x` for `.<x`) and the reverse (`.>y` beside a
+/// plain `.x`).
+#[test]
+fn mixing_join_side_and_plain_columns_is_explained() {
+    // The reverse direction: a join-side column next to a plain one.
+    let e = err("q = users & innerJoin orders (.x == .>user_id)\n", "q");
+    assert!(
+        e.contains("cannot mix join-side columns") && e.contains("`.<x`"),
+        "{e}"
+    );
+    // And in a `where`, where there is no join row at all.
+    let e = err("q = users & where (.>id)\n", "q");
+    assert!(e.contains("cannot mix join-side columns"), "{e}");
+    // The forward direction still names the column, because the row knows it.
+    let e = err("q = users & innerJoin orders (.id == .user_id)\n", "q");
+    assert!(e.contains("`.<id`") && e.contains("`.>id`"), "{e}");
+}
+
 /// `markExists` appends one `bool` column, and its predicate is a join predicate.
 #[test]
 fn mark_exists_appends_one_boolean_column() {
@@ -546,6 +571,12 @@ fn mark_exists_appends_one_boolean_column() {
         .1
         .expect_err("a side-less column must be refused");
     assert!(e.contains("`.<id`") && e.contains("`.>id`"), "{e}");
+    // A column already called `exists` is replaced, not duplicated: the row type
+    // says so (`RowType::with`), and a duplicate would make every later reader
+    // take the wrong one.
+    let shadow = "e : query { id = int, exists = int } = table \"s\" \"e\"\n\
+                  q = e & markExists orders (.<id == .>user_id)\n";
+    assert_eq!(ty(shadow, "q"), "query { id = int, exists = bool }");
     // A non-bool predicate is refused too.
     let not_bool = types("q = users & markExists orders (.<id)\n");
     let e = not_bool
@@ -903,13 +934,10 @@ fn window_types() {
 #[test]
 fn join_errors() {
     assert!(err("q = orders & innerJoin users (.user_id == .id)\n", "q").contains("which input"));
-    // `.<x` outside a join predicate. The wording depends on how far the
-    // comparison's overload resolves first; either way it is refused.
+    // `.<x` outside a join predicate: there is no join row to read, so the message
+    // names the spelling rather than a kind mismatch.
     let e = err("q = users & where (.<id == 1)\n", "q");
-    assert!(
-        e.contains("join predicate") || e.contains("cannot unify"),
-        "{e}"
-    );
+    assert!(e.contains("cannot mix join-side columns"), "{e}");
     assert!(
         err("q = orders & innerJoin users (.<user_id == .>name)\n", "q").contains("type mismatch")
     );

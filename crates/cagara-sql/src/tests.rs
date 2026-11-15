@@ -1685,6 +1685,46 @@ fn rollup_and_cube_emit_the_grouping_clause() {
     );
 }
 
+/// A plain key beside a rolled-up one goes *first* in the clause, whatever order
+/// the source wrote them in.
+///
+/// `GROUP BY b, ROLLUP(a)` groups within each `b` and adds a subtotal per `b`;
+/// `GROUP BY ROLLUP(a), b` is not valid SQL at all. So the clause order is not the
+/// source order, and that is deliberate — the alternative is a rule that only
+/// sometimes compiles. Pinned because the reordering is invisible in the source:
+/// `agg { a = rollup .a, b = group .b }` emits `GROUP BY b, ROLLUP(a)`.
+#[test]
+fn a_plain_key_precedes_a_rolled_up_one() {
+    let src = "g : query { a = int, b = int, n = int } = table \"main\" \"g\"\n";
+    // Written with the rollup first, emitted with the plain key first.
+    assert_eq!(
+        sql(
+            &format!("{src}q = g & agg {{ a = rollup .a, b = group .b, s = sum .n }}\n"),
+            "q"
+        ),
+        "SELECT a, b, SUM(n) AS s FROM main.g GROUP BY b, ROLLUP(a)"
+    );
+    // And the other way round, which reads in the order it emits.
+    assert_eq!(
+        sql(
+            &format!("{src}q = g & agg {{ a = group .a, b = rollup .b, s = sum .n }}\n"),
+            "q"
+        ),
+        "SELECT a, b, SUM(n) AS s FROM main.g GROUP BY a, ROLLUP(b)"
+    );
+    // Two shapes in one stage keep their own groups: `ROLLUP(a, b)` and `CUBE(c)`
+    // are two terms, not one merged list.
+    let three = "g3 : query { a = int, b = int, c = int, n = int } = table \"main\" \"g\"\n";
+    let out = sql(
+        &format!(
+            "{three}q = g3 & agg {{ a = rollup .a, b = rollup .b, c = cube .c, s = sum .n }}\n"
+        ),
+        "q",
+    );
+    assert!(out.contains("ROLLUP(a, b)"), "{out}");
+    assert!(out.contains("CUBE(c)"), "{out}");
+}
+
 /// The targets without grouping sets refuse them, and the two refusals say why.
 #[test]
 fn grouping_sets_are_refused_where_they_do_not_exist() {

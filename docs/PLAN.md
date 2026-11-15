@@ -368,10 +368,12 @@ known shape, and none is a boundary of what exists today:
 | catalog declarations | a module that declares tables without a `query … = table` binding, so a project can share one schema |
 | typed bind parameters | `--param name:type=value` works today (`limit_n : int = 5` is prepended to the file, so the type is checked like any signature), and a wrong type is a compile error. What is missing is a *file* declaring its own parameters, so the same query can be run without the flag |
 | name-aligned set operations | `union` requires both sides to have the same row *in the same order*; aligning by name needs a projection per branch |
-| `qualify` | a stage that filters on a window without the derived table SQL requires; sqlglot's AST has the field (`SelectStatement::qualify`) and no Cagara syntax reaches it |
-| grouping sets, `rollup`, `cube` | a new `agg` form and a backend rule; the dialect pass already knows which targets have them |
-| correlated subqueries | every pattern is reachable with the join spellings (proved by a test), and `markExists` makes `EXISTS` a value |
 | richer window frames | `rows …` covers row-counted frames; `range`/`groups` would be two more constructors |
+
+Done since this table was written, and struck from it: `qualify` (a lowering rule —
+`where` over a window folds into the clause on four targets), grouping sets (`rollup`
+and `cube`), and correlated subqueries (no capability was missing; `markExists` closed
+the ergonomic gap).
 
 `decimal` was the one with a correctness argument behind it, and it is in — see
 above for what ships and what was decided against. The decisions as they stand:

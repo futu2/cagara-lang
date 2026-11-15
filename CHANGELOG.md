@@ -38,6 +38,11 @@
 - An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
   `select { x = upper .id }` does. It named only the operator before.
 
+- The language server publishes the refusals `cagara-sql` produces, so the editor shows what the
+  compiler will reject. A `distinct` after an `order` on an expression the projection dropped used to
+  look clean in the editor and fail in the build. The check runs on ANSI, which refuses nothing about
+  a target, so a target-specific refusal (`fullJoin` on MySQL) stays out of the editor.
+
 - The language server answers `textDocument/rename` and `textDocument/prepareRename`: a definition's
   name is rewritten with every use of it, in every file that imports it, and a lambda parameter's
   name within its scope. It refuses the prelude's names, a name already in use, a parameter whose new

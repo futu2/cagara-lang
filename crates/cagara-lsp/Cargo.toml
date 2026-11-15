@@ -8,6 +8,9 @@ publish = false
 
 [dependencies]
 cagara-hir = { path = "../cagara-hir" }
+# The editor shows what the compiler will refuse, and `cagara-sql` is where the last
+# refusals happen. See `analysis::lowering_diagnostics` for why it asks ANSI.
+cagara-sql = { path = "../cagara-sql" }
 cagara-syntax.workspace = true
 cagara-fmt.workspace = true
 crossbeam-channel = "=0.5.17"

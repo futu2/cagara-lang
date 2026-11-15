@@ -72,6 +72,7 @@ version = "0.4.2"
 dependencies = [
  "cagara-fmt",
  "cagara-hir",
+ "cagara-sql",
  "cagara-syntax",
  "crossbeam-channel",
  "line-index",

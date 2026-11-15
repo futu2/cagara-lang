@@ -96,7 +96,9 @@ type-checking; those facts are complete before SQL lowering begins.
 ## Where code lives
 
 Six crates, one direction of dependency: `cagara-syntax` ← `cagara-hir` ←
-`cagara-sql`/`cagara-lsp`/`cagara-fmt` ← `cagara-cli`. Nothing lower knows about
+`cagara-sql`/`cagara-fmt` ← `cagara-cli`, with `cagara-lsp` above `cagara-hir` and
+beside `cagara-sql` (it reads `cagara-sql` to report what the lowering refuses, which
+is the one thing an editor cannot learn from the checker). Nothing lower knows about
 anything above it.
 
 | crate | what it owns | depends on |
@@ -105,7 +107,7 @@ anything above it.
 | `cagara-hir` | resolution, the checker, the typed core, the normalizer, the relational arena, erasure to `Rel`, schema validation | syntax |
 | `cagara-sql` | `Rel` → SQL: `rewrite` (`Rel` → `Rel`), `lower` (`Rel` → `Stage`), `stage` (`Stage` → statement), `dialect` (statement → target), `intrinsics` (the `CAGARA_*` templates) | hir |
 | `cagara-fmt` | source formatting, on the lossless rowan tree | syntax |
-| `cagara-lsp` | diagnostics, hover, completion, code actions, inlay hints, rename, folding ranges, semantic tokens — all read the same `Workspace` the CLI does | hir, syntax, fmt |
+| `cagara-lsp` | diagnostics, hover, completion, code actions, inlay hints, rename, folding ranges, semantic tokens — all read the same `Workspace` the CLI does, and diagnostics also ask `cagara-sql` so the editor shows what the compiler will refuse | hir, sql, syntax, fmt |
 | `cagara-cli` | one module per subcommand (`main` for the file compiler, `fmt`, `check`, `doc`) | everything |
 
 Two rules keep that table true, and both are cheap to check:

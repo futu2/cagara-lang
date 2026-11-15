@@ -22,6 +22,13 @@ use std::path::PathBuf;
 pub fn diagnostics(ws: &Workspace) -> Vec<(Range, String, Severity)> {
     let compilation_diagnostics = compile_diagnostics(ws);
     let root = ws.modules[ws.root].path.display().to_string();
+    // The checker is not the last thing that can refuse. `cagara-sql` builds the
+    // statement, and it refuses some programs the checker accepted — a `distinct`
+    // after an `order` on an expression the projection dropped is one, and it is a
+    // real error with a message telling the author what to write. Without this the
+    // editor showed nothing for a file `cagara --only` rejects, so "it compiles in my
+    // editor" was false in exactly the case the author needed to know about.
+    let lowering = lowering_diagnostics(ws);
     // Deduped through a set, not `Vec::contains`: a file being typed has as
     // many diagnostics as it has errors, and comparing each against every one
     // already collected made publishing quadratic in them. The compiler's own
@@ -33,6 +40,80 @@ pub fn diagnostics(ws: &Workspace) -> Vec<(Range, String, Severity)> {
         if seen.insert(item.clone()) {
             out.push(item);
         }
+    }
+    for item in lowering {
+        if seen.insert(item.clone()) {
+            out.push(item);
+        }
+    }
+    out
+}
+
+/// What the SQL lowering refuses about the root file, positioned at the stage.
+///
+/// The dialect is **ANSI**, and that is the whole reason this is safe to show in an
+/// editor. ANSI is the permissive target: it has `FULL JOIN`, grouping sets, all three
+/// frame units, and no `NULLS LAST` emulation, so `dialect.rs` refuses nothing about it.
+/// What is left are the refusals that are about the *relation* rather than about a
+/// target's spelling — and those are errors wherever the file is headed. Asking for the
+/// file's real target instead would paint `fullJoin` red in a file targeting MySQL and
+/// `groups` red in a file targeting MySQL, which is a true statement about a target the
+/// editor does not know the user chose.
+///
+/// It costs about a tenth of a check: measured on 80 queries, `check` took 68 ms and
+/// lowering all of them to SQL took 6.5 ms in a debug build.
+///
+/// Only the root module is reported, for the same reason `diagnostics` filters on the
+/// root path: an imported file is its own document, and reporting its errors against
+/// this one would put them in a file the user is not looking at.
+fn lowering_diagnostics(ws: &Workspace) -> Vec<(Range, String, Severity)> {
+    let tc = check_reachable(ws);
+    let md = &ws.modules[ws.root];
+    let p = Positions::new(&md.text);
+    let mut out = Vec::new();
+    for (name, result) in cagara_hir::root_queries_checked(ws, &tc) {
+        let Ok(rel) = result else {
+            // The checker's own diagnostic is already reported above, in its own
+            // words and at its own position.
+            continue;
+        };
+        let Err((loc, message)) = cagara_sql::compile_located(
+            &rel,
+            cagara_sql::Options {
+                dialect: cagara_sql::Dialect::Ansi,
+                pretty: false,
+                optimize: false,
+            },
+        ) else {
+            continue;
+        };
+        let range = match loc {
+            // A `Loc` in another module is not this document; the definition's own
+            // file reports it when it is open.
+            Some(l) if l.module == ws.root => {
+                root_range(&p, l.span.start as usize, l.span.end as usize)
+            }
+            Some(_) => continue,
+            // Nothing in the relation carried a span. The refusal is still true, so it
+            // is reported at the top of the file rather than dropped — a diagnostic in
+            // the wrong place is worse than none, but a missing error is worse than a
+            // coarse one.
+            None => Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+        };
+        out.push((
+            range,
+            format!("error in `{name}`: {message}"),
+            Severity::Error,
+        ));
     }
     out
 }
@@ -1860,6 +1941,66 @@ mod tests {
         assert_eq!(
             diagnostic_code("the left join input has no column `nope`; available: id"),
             diagnostic_code("field `x`: no column `x`; available: id")
+        );
+    }
+
+    /// A file the *lowering* refuses is reported in the editor, at the stage.
+    ///
+    /// The checker accepts this program — every stage is well typed — and `cagara-sql`
+    /// refuses it, because a `distinct` after an `order` on an expression the
+    /// projection dropped cannot be written. `cagara --only` reported that and the
+    /// editor reported nothing, so a file that would not compile looked clean in the
+    /// one place the author was looking.
+    #[test]
+    fn a_lowering_refusal_reaches_the_editor() {
+        let src = "t : query { id = int, name = string } = table \"m\" \"t\"\n\
+                   q = t & order [asc (.id + 1)] & select {.id} & distinct\n";
+        let ws = Workspace::from_source(src);
+        let ds = diagnostics(&ws);
+        assert_eq!(ds.len(), 1, "{ds:?}");
+        let (r, msg, severity) = &ds[0];
+        assert_eq!(*severity, Severity::Error);
+        assert!(msg.contains("cannot follow an `order`"), "{msg}");
+        // The refusal is on line 1 and points at the stage, not at the file's start.
+        assert_eq!(r.start.line, 1, "{r:?}");
+        assert!(r.start.character > 0, "not column zero: {r:?}");
+    }
+
+    /// A refusal that is about a *target* is not reported, because the editor does not
+    /// know the target.
+    ///
+    /// This is the negative control for asking ANSI. `fullJoin` is refused on MySQL and
+    /// fine on ANSI; painting it red in a file that targets MySQL would be a true
+    /// statement about a choice the editor was never told, and painting it red in a
+    /// file that targets Postgres would be simply wrong. So the editor reports what is
+    /// true of every target, and a target-specific refusal stays where the target is
+    /// known — `cagara --dialect`.
+    #[test]
+    fn a_target_specific_refusal_is_not_reported() {
+        let src = "a : query { id = int } = table \"m\" \"a\"\n\
+                   b : query { id = int } = table \"m\" \"b\"\n\
+                   q = a & fullJoin b (.<id == .>id)\n";
+        let ws = Workspace::from_source(src);
+        let ds = diagnostics(&ws);
+        assert!(
+            !ds.iter().any(|(_, m, _)| m.contains("fullJoin")),
+            "`fullJoin` is fine on ANSI, which is what the editor asks: {ds:?}"
+        );
+        // And it *is* refused when a target is named, so the silence above is about
+        // the dialect and not about the check being missing.
+        let rels = cagara_hir::root_queries(&ws);
+        let (_, r) = rels.iter().find(|(n, _)| n == "q").expect("q");
+        let rel = r.as_ref().expect("q type-checks");
+        assert!(
+            cagara_sql::compile(
+                rel,
+                cagara_sql::Options {
+                    dialect: cagara_sql::Dialect::Mysql,
+                    ..Default::default()
+                }
+            )
+            .is_err(),
+            "MySQL refuses it"
         );
     }
 

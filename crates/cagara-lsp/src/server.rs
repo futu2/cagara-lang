@@ -1097,6 +1097,39 @@ mod tests {
             }
         }
 
+        /// Every notification the server sends within `quiet` of the last one.
+        ///
+        /// `ask` drops notifications while it waits for its response, which is right
+        /// for a capability test and useless for the one thing the server sends without
+        /// being asked: diagnostics. This collects them.
+        fn notifications(&mut self, quiet: Duration) -> Vec<Message> {
+            let mut out = Vec::new();
+            while let Ok(m) = self.client.receiver.recv_timeout(quiet) {
+                out.push(m);
+            }
+            out
+        }
+
+        /// The diagnostics published for `uri`, as the editor receives them.
+        fn published(&mut self, uri: &str, quiet: Duration) -> Vec<Value> {
+            let want = uri.to_string();
+            let mut found = Vec::new();
+            for m in self.notifications(quiet) {
+                if let Message::Notification(n) = m {
+                    if n.method != "textDocument/publishDiagnostics" {
+                        continue;
+                    }
+                    if n.params["uri"] == json!(want) {
+                        found = n.params["diagnostics"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                    }
+                }
+            }
+            found
+        }
+
         fn open(&mut self, uri: &str, text: &str) {
             self.client
                 .sender
@@ -1270,6 +1303,58 @@ mod tests {
         );
         assert!(edits.as_array().is_some(), "formatting: {edits}");
 
+        ed.close();
+    }
+
+    /// A file the lowering refuses is published as a diagnostic, at the stage.
+    ///
+    /// The checker accepts this program; `cagara-sql` does not. Before this the editor
+    /// published nothing for it, so a file `cagara --only` rejects looked clean — and
+    /// the author found out at build time, in a different window.
+    #[test]
+    fn a_lowering_refusal_is_published() {
+        let mut ed = Editor::start();
+        ed.open(
+            URI,
+            "t : query { id = int, name = string } = table \"m\" \"t\"\n\
+             q = t & order [asc (.id + 1)] & select {.id} & distinct\n",
+        );
+        let ds = ed.published(URI, Duration::from_millis(600));
+        assert_eq!(ds.len(), 1, "one diagnostic: {ds:?}");
+        assert_eq!(ds[0]["severity"], json!(1), "an error: {ds:?}");
+        assert!(
+            ds[0]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("cannot follow an `order`")),
+            "{ds:?}"
+        );
+        // Line 1, not line 0: the range is the stage.
+        assert_eq!(ds[0]["range"]["start"]["line"], json!(1), "{ds:?}");
+        assert_eq!(ds[0]["source"], json!("cagara"), "{ds:?}");
+        ed.close();
+    }
+
+    /// A target-specific refusal is *not* published, because the editor has no target.
+    ///
+    /// `fullJoin` is refused on MySQL and fine on ANSI. Publishing it would put a
+    /// squiggle under a construct that is correct for the target the user chose and
+    /// never told the server about.
+    #[test]
+    fn a_target_specific_refusal_is_not_published() {
+        let mut ed = Editor::start();
+        ed.open(
+            URI,
+            "a : query { id = int } = table \"m\" \"a\"\n\
+             b : query { id = int } = table \"m\" \"b\"\n\
+             q = a & fullJoin b (.<id == .>id)\n",
+        );
+        let ds = ed.published(URI, Duration::from_millis(600));
+        assert!(
+            !ds.iter().any(|d| d["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("fullJoin"))),
+            "`fullJoin` is fine on the dialect the editor asks about: {ds:?}"
+        );
         ed.close();
     }
 

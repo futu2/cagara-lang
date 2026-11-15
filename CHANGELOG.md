@@ -28,6 +28,11 @@
   drop. A `distinct` still needs the barrier, because dropping a column there changes how many
   rows are deduped. A projection that reuses a sort key's name for another column keeps it too.
 
+- A non-ASCII name says which rule it broke. `名字 = .id` was `expected an expression` (the character
+  is there) or, inside a record, `expected `}``; both now say identifiers are ASCII.
+
+- `cagara check .` reports an error in an imported file once, not once per workspace that reaches it.
+
 - A second `markExists` in one pipeline now replaces the first's `exists` column, as the row type
   always said it did. It was appended instead, so `& markExists u p & markExists u q & select
   { a = .exists }` answered `p`'s question and dropped `q`'s — silently, with correct types and

@@ -2012,6 +2012,25 @@ impl<'w> Checker<'w> {
                     // change the verdict, and typing it first would add
                     // unrelated diagnostics for a call that was never
                     // well-formed.
+                    //
+                    // Unless the argument is the mistake. `true and false` is a
+                    // reader writing the word for `&&`, and "cannot apply a value
+                    // of type bool" is about the `true` they got right — it never
+                    // mentions the name that is not a name. When the argument is a
+                    // bare identifier this language does not have, that is the
+                    // message.
+                    if let ast::ExprKind::Name(unknown) = &arg.kind {
+                        let known = self.env.scope.contains_key(unknown);
+                        if !known {
+                            if let Some(what) = crate::suggest::from_another_language(unknown) {
+                                return Err(TyErr {
+                                    suggestions: Vec::new(),
+                                    span: arg.span,
+                                    msg: format!("`{unknown}` is not this language's name: {what}"),
+                                });
+                            }
+                        }
+                    }
                     let msg = format!(
                         "cannot apply a value of type {} to an argument",
                         self.show(&o)
@@ -2356,6 +2375,13 @@ impl<'w> Checker<'w> {
                 "`{n}` is a module; refer to a definition as `{n}.name`"
             )),
             None => {
+                // A name from another language first: it is the common case for a
+                // reader arriving from SQL, and the edit-distance hint actively
+                // misleads there — `null` is six edits from `nothing`, and three
+                // from `fullJoin`, so the near-miss would name something unrelated.
+                if let Some(what) = crate::suggest::from_another_language(n) {
+                    return Err(format!("`{n}` is not this language's name: {what}"));
+                }
                 let hint =
                     crate::suggest::did_you_mean(n, self.env.scope.keys().map(String::as_str));
                 Err(format!("unknown name `{n}`{hint}"))

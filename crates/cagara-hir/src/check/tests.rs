@@ -527,6 +527,40 @@ fn query_output_rows() {
     );
 }
 
+/// A name from another language says what this one calls the idea.
+///
+/// The edit-distance hint answers "you mistyped something in scope", and for a
+/// word borrowed from SQL or TypeScript it actively misleads: `null` is six edits
+/// from `nothing` and three from `fullJoin`, so the near-miss named something
+/// unrelated — or nothing at all. These are not typos; they are the names for the
+/// idea in the language the reader came from.
+#[test]
+fn a_name_from_another_language_says_what_this_one_calls_it() {
+    for (src, want) in [
+        ("q = null\n", "nothing"),
+        ("q = if\n", "ifThenElse"),
+        ("q = COUNT\n", "lowercase"),
+        ("q = UNION\n", "union"),
+        // In argument position, where the callee's own error used to win and the
+        // unknown name was never mentioned at all.
+        ("q = true and false\n", "&&"),
+        ("q = true or false\n", "||"),
+    ] {
+        let e = err(src, "q");
+        assert!(
+            e.contains("not this language's name"),
+            "{src:?} should name the rule: {e}"
+        );
+        assert!(e.contains(want), "{src:?} should mention {want:?}: {e}");
+    }
+    // A name that is merely unknown keeps the near-miss hint, and a plain
+    // non-function callee keeps its own error: the table must not swallow either.
+    let e = err("q = uppper\n", "q");
+    assert!(e.contains("did you mean `upper`"), "{e}");
+    let e = err("q = 1 2\n", "q");
+    assert!(e.contains("cannot apply a value of type int"), "{e}");
+}
+
 /// Mixing a join-side column with a plain one says so, in both directions.
 ///
 /// A join predicate reads two rows, so every column in it has to name a side. The

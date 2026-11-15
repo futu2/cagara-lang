@@ -37,6 +37,49 @@ pub(crate) fn did_you_mean<'a>(
     }
 }
 
+/// A name from another language, and what this one calls the same thing.
+///
+/// The edit-distance suggestion above answers "you mistyped something in scope".
+/// It cannot answer the other case, and reports it worse than saying nothing:
+/// `null` is *not* a typo for anything, and `did you mean `nothing`` is only
+/// reachable by accident — the distance is 6. A reader arriving from SQL or
+/// TypeScript writes these names because they are the names for the idea, so the
+/// message says what the idea is called here.
+///
+/// The list is deliberately short and only contains names whose *meaning* carries
+/// over. `if` is here because `ifThenElse` is the spelling; `let` is not, because
+/// this language has `let … in` and the word is already a keyword.
+pub(crate) fn from_another_language(name: &str) -> Option<&'static str> {
+    Some(match name {
+        // Absence.
+        "null" | "nil" | "None" | "undefined" => {
+            "`nothing` is the absent value, and `maybe a` \
+             is its type; `??` supplies a default and `lift` maps inside one"
+        }
+        // Conditionals.
+        "if" | "when" => {
+            "a conditional is `ifThenElse p a b`, or a `case` expression for more \
+             than two arms"
+        }
+        "else" => "a conditional is `ifThenElse p a b`; `case` has the arms",
+        "then" => "a conditional is `ifThenElse p a b`, with the condition first",
+        // Boolean spelling. `not` and `isNull` are *defined* here, so they never
+        // reach this table; only the spellings this language does not have do.
+        "and" => "`&&` is conjunction",
+        "or" => "`||` is disjunction",
+        // Aggregates.
+        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" => {
+            "aggregates are lowercase here: `count`, `sum`, `avg`, `min`, `max`"
+        }
+        // Set operators written as words.
+        "UNION" | "JOIN" => {
+            "a set operation is a stage: `& union`, `& unionAll`, `& intersect`, `& except`; a \
+             join is `& innerJoin q on` and its relatives"
+        }
+        _ => return None,
+    })
+}
+
 /// Levenshtein distance, over characters.
 ///
 /// Three callers, one measurement: the near-miss for an unknown *name* (below), the

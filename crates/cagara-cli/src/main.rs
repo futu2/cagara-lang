@@ -401,11 +401,95 @@ fn open_with_wrapper(path: &Path, body: &str, params: &str) -> std::io::Result<W
     } else {
         text = std::fs::read_to_string(path)?;
     }
+    // A `--param` naming a definition the *file* declares overrides that
+    // definition's value, keeping its type.
+    //
+    // A parameter is a definition the file leaves to its caller, and the natural
+    // way to write one is in the file with a default — `limit_n : int = 5` — so
+    // `cagara q.cagara` works and `--param limit_n=2` changes it. Prepending the
+    // flag's definition instead collided with the file's own: `limit_n` would be
+    // defined twice, which is an overloading error, so a file could either declare
+    // its parameters or be overridden, never both.
+    //
+    // The replacement is textual and uses the definition's own body span, so the
+    // signature — and the doc comment above it — stay exactly as written. A wrong
+    // type is still the file's error, because the type is still the file's.
+    //
+    // Replacements are collected first and applied *from the end*, because a value
+    // of a different length moves every offset after it: applying them front to back
+    // made `--param limit_n=2 --param off_n=1` emit `LIMIT 1 OFFSET 1`, the first
+    // value written into the second's span.
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    let mut appended = String::new();
+    for def in param_definitions(params) {
+        match declared_span(&text, &def.name) {
+            Some((start, end)) => edits.push((start, end, def.value)),
+            None => {
+                // Not declared: the flag supplies the whole definition, type and all.
+                appended.push_str(&match def.ty {
+                    Some(ty) => format!("{} : {ty} = {}\n", def.name, def.value),
+                    None => format!("{} = {}\n", def.name, def.value),
+                });
+            }
+        }
+    }
+    edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+    for (start, end, value) in edits {
+        text.replace_range(start..end, &value);
+    }
     // Parameters first: the wrapper calls a definition, and that definition may
     // read one. Cagara resolves forward references, so the order is for reading.
-    text.push_str(params);
+    text.push_str(&appended);
     text.push_str(&format!("\n{ARG_ENTRY} = {body}\n"));
     Ok(Workspace::open_with(path, text))
+}
+
+/// One `--param` flag, as the pieces the wrapper needs.
+struct ParamDef {
+    name: String,
+    value: String,
+    /// The type the flag spelled, if it spelled one. The file's own declaration is
+    /// what supplies it otherwise, which is the case an override is about.
+    ty: Option<String>,
+}
+
+/// The value a `--param` flag supplies, and the name it supplies it for.
+fn param_definitions(params: &str) -> Vec<ParamDef> {
+    params
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end();
+            if line.is_empty() {
+                return None;
+            }
+            let (lhs, value) = line.split_once(" = ")?;
+            let (name, ty) = match lhs.split_once(" : ") {
+                Some((n, t)) => (n.to_string(), Some(t.to_string())),
+                None => (lhs.to_string(), None),
+            };
+            Some(ParamDef {
+                name,
+                value: value.to_string(),
+                ty,
+            })
+        })
+        .collect()
+}
+
+/// The byte range of a definition's *body* in `text`, when the file declares it.
+///
+/// Read from the parsed file rather than by searching the text: the body's span is
+/// the one the parser recorded, so a name mentioned inside a string or a comment
+/// cannot be mistaken for the definition.
+fn declared_span(text: &str, name: &str) -> Option<(usize, usize)> {
+    // The span of the definition whose name is `name`, in the root file only: a
+    // parameter declared in an imported module is that module's business.
+    let (file, _errors) = cagara_syntax::ast::lower_source(text);
+    file.defs
+        .iter()
+        .find(|d| d.name == name)
+        .map(|d| (d.body.span.start as usize, d.body.span.end as usize))
+        .filter(|(start, end)| *start < text.len() && *end <= text.len() && start < end)
 }
 
 /// What a `--param` flag writes: `name = value`, or `name : type = value`.

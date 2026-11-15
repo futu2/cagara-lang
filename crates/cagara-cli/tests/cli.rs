@@ -922,6 +922,83 @@ fn check_reports_a_whole_tree() {
     assert!(stdout(&out).is_empty() && stderr(&out).is_empty());
 }
 
+/// A `--param` overrides a value the *file* declares, keeping the file's type.
+///
+/// The natural way to write a parameter is in the file with a default, so that
+/// running the file works and a flag changes it. That used to be impossible: the
+/// flag's definition was prepended to the file, so a name the file already declared
+/// was defined twice — an overloading error — and a file could either declare its
+/// parameters or be overridden, never both.
+///
+/// The value replaces the definition's *body* and nothing else, so the signature and
+/// the doc comment above it stay exactly as written, and a wrong type is still the
+/// file's own error.
+#[test]
+fn param_overrides_a_value_the_file_declares() {
+    let dir = TempDir::new("param-override");
+    let path = dir.write(
+        "q.cagara",
+        "## How many rows to keep.\n\
+         rows_n : int = 5\n\
+         t : query { id = int } = table \"s\" \"t\"\n\
+         q = t & limit rows_n\n",
+    );
+    // The default, with no flag.
+    let out = run_with(&path, &["--only", "q"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("LIMIT 5"), "{}", stdout(&out));
+    // Overridden.
+    let out = run_with(&path, &["--only", "q", "--param", "rows_n=2"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("LIMIT 2"), "{}", stdout(&out));
+    // The type is still the file's: a string where it declared `int` is an error at
+    // the flag, and it says which signature refused it.
+    let out = run_with(&path, &["--only", "q", "--param", "rows_n=\"x\""]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr(&out);
+    assert!(err.contains("does not match its signature"), "{err}");
+    assert!(err.contains("expected int, found string"), "{err}");
+    // Two overrides land in their own definitions: a value of a different length
+    // moves the offsets after it, so applying them front to back wrote the first
+    // value into the second's span.
+    let two = dir.write(
+        "two.cagara",
+        "rows_n : int = 5\n\
+         skip_n : int = 0\n\
+         t : query { id = int } = table \"s\" \"t\"\n\
+         q = t & limit rows_n & offset skip_n\n",
+    );
+    // `rows_n` gets a *longer* value than the `5` it replaces, which is what makes
+    // the ordering observable: applied front to back, the two bytes it grows by push
+    // `skip_n`'s body out from under its span.
+    let out = run_with(
+        &two,
+        &[
+            "--only",
+            "q",
+            "--param",
+            "rows_n=300",
+            "--param",
+            "skip_n=1",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    // `limit 300 & offset 1` keeps rows 2..=300, which is `LIMIT 299 OFFSET 1`.
+    assert!(
+        stdout(&out).contains("LIMIT 299 OFFSET 1"),
+        "{}",
+        stdout(&out)
+    );
+    // A name the file does *not* declare is still supplied whole, type and all.
+    let open = dir.write(
+        "open.cagara",
+        "t : query { id = int } = table \"s\" \"t\"\nq = t & limit n\n",
+    );
+    let out = run_with(&open, &["--only", "q", "--param", "n=7"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("LIMIT 7"), "{}", stdout(&out));
+}
+
 /// `--param name=value` supplies a definition the file leaves to its caller.
 ///
 /// A parameter is an ordinary definition written at the end of the file, so the

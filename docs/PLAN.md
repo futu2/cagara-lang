@@ -34,7 +34,7 @@ are done in this order because each one is smaller than the next:
 | # | item | done when |
 |---|---|---|
 | ~~B1~~ | **Attempted, reverted — and it found a real bug on the way.** Aligning by name makes the checker's row order and the SQL's column order disagree: `&` is reverse application, so the primitive's first parameter is the operand written on the *right*, while `step_set` binds the output to `left`. The SQL keeps the left's order; the type says the right's. Fixing that means deciding what a set operation's output row *is*, which is a language decision rather than a projection in the arena. The bug it found: `cagara check` accepted the mismatched-order file that `cagara --only` refused — fixed separately. |
-| B2 | file-declared typed parameters | a file declares its own parameters, so a query runs without `--param` |
+| ~~B2~~ | **Done.** A file declares a parameter with a default and `--param` overrides the value, keeping the file's type |
 | B3 | richer window frames | `range`/`groups` as two more constructors, with the engine coverage the other frames have |
 | B4 | catalog declarations | a module declares tables without a `query … = table` binding |
 

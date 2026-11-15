@@ -363,6 +363,7 @@ impl<'a> Parser<'a> {
                 // between items is harmless.
                 Some(Token::Semicolon) => self.bump(),
                 Some(Token::ImportKw) => self.import(),
+                Some(Token::Ident) if self.at_catalog() => self.catalog(),
                 Some(Token::Ident) if self.looks_like_definition() => self.def(),
                 Some(Token::Ident) => {
                     self.recover("expected a definition (`name = ...`) or `import` at column 0")
@@ -385,6 +386,64 @@ impl<'a> Parser<'a> {
             } else {
                 self.error("expected module alias");
             }
+        }
+        if self.at(Token::Semicolon) {
+            self.bump();
+        }
+        self.finish();
+    }
+
+    /// The contextual `catalog` that starts a table declaration.
+    ///
+    /// Contextual rather than a keyword, so a definition may still be named
+    /// `catalog`. It is a declaration and not a definition because a definition
+    /// has one name, and the point of this one is to name a *schema* once and give
+    /// it several tables.
+    fn at_catalog(&self) -> bool {
+        self.peek_lex(0)
+            .is_some_and(|l| l.kind == Token::Ident && l.text == "catalog")
+            && matches!(
+                self.peek_lex(1).map(|l| l.kind),
+                Some(Token::String | Token::LBrace)
+            )
+    }
+
+    /// `catalog "schema" { name = { columns } … }`
+    ///
+    /// The columns are a record *type*, the same shape a `query { … }` signature
+    /// uses, so the declaration says what the table's row is and nothing else. The
+    /// lowering turns each entry into an ordinary
+    /// `name : query { … } = table "schema" "name"`, which is what every consumer
+    /// downstream already understands.
+    fn catalog(&mut self) {
+        self.start(K::CatalogDecl);
+        self.bump(); // `catalog`
+        self.expect(Token::String, "catalog schema string");
+        if self.at(Token::LBrace) {
+            self.bump();
+            while self.at_inner(Token::Ident) {
+                self.start(K::CatalogEntry);
+                self.bump(); // the table's name
+                self.expect(Token::Eq, "`=` before a table's columns");
+                if self.at(Token::LBrace) {
+                    self.ty_atom();
+                } else {
+                    // `bail`: the entry is unparseable and the declaration's brace
+                    // will never close, so the two errors that would follow (a missing
+                    // `}`, then "expected a definition") bury the one that says what
+                    // to write.
+                    self.bail("expected a table's columns, as `{ name = type, … }`");
+                }
+                self.finish();
+                if self.at(Token::Comma) {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            self.expect(Token::RBrace, "`}` closing `catalog`");
+        } else {
+            self.error("expected `{` after a catalog's schema");
         }
         if self.at(Token::Semicolon) {
             self.bump();
@@ -1677,6 +1736,69 @@ mod tests {
 
     fn messages(p: &Parse) -> Vec<&str> {
         p.errors.iter().map(|e| e.message.as_str()).collect()
+    }
+
+    /// A `catalog` declaration parses, and its columns are a record type.
+    ///
+    /// `catalog` is a *contextual* identifier, not a keyword: a program may still
+    /// have a definition called `catalog`, which is why the dispatch looks at the
+    /// token after it rather than reserving the word.
+    #[test]
+    fn a_catalog_declaration_parses() {
+        let src = "catalog \"public\" {\n  users = { id = int, name = string },\n  \
+                   orders = { id = int }\n}\nq = 1\n";
+        let p = parse(src);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        // The declaration and the definition after it: the catalog is one item, not
+        // one item per entry, because the lowering is what splits it.
+        let items: Vec<String> = p
+            .syntax()
+            .children()
+            .map(|n| format!("{:?}", n.kind()))
+            .collect();
+        assert_eq!(items, ["CatalogDecl", "Definition"], "{items:?}");
+        // Its entries, and each entry's record type.
+        let decl = p
+            .syntax()
+            .children()
+            .find(|n| n.kind() == K::CatalogDecl)
+            .expect("a CatalogDecl");
+        let entries: Vec<String> = decl
+            .children()
+            .filter(|n| n.kind() == K::CatalogEntry)
+            .filter_map(|n| n.first_token().map(|t| t.text().to_string()))
+            .collect();
+        assert_eq!(entries, ["users", "orders"], "{entries:?}");
+        assert!(decl.descendants().any(|n| n.kind() == K::TyRecord));
+        assert_eq!(p.syntax().text().to_string(), src, "not lossless");
+    }
+
+    /// A malformed `catalog` says what is missing, once.
+    ///
+    /// Three shapes, three messages — and each is a single error. Without `bail` on
+    /// the entry, an unparseable column list produced three: the entry's own error,
+    /// a missing `}`, and then "expected a definition", which buries the one that
+    /// says what to write.
+    #[test]
+    fn a_malformed_catalog_says_what_is_missing() {
+        for (src, want) in [
+            ("catalog {\n  a = { x = int }\n}\n", "schema string"),
+            ("catalog \"s\" {\n  a = int\n}\n", "a table's columns"),
+            ("catalog \"s\" {\n  a = { x = int }\n", "closing `catalog`"),
+        ] {
+            let p = parse(src);
+            let msgs = messages(&p);
+            assert_eq!(msgs.len(), 1, "{src:?} should say one thing: {msgs:?}");
+            assert!(msgs[0].contains(want), "{src:?}: {msgs:?}");
+        }
+    }
+
+    /// `catalog` is a definition name like any other.
+    #[test]
+    fn catalog_is_not_a_reserved_word() {
+        let p = parse("catalog = 1\nq = catalog + 1\n");
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(defs(&p), ["catalog", "q"]);
     }
 
     /// A non-ASCII name says which rule it broke, not "expected an expression".

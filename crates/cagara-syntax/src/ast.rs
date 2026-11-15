@@ -261,10 +261,62 @@ impl Lower<'_> {
                         m.defs.push(d);
                     }
                 }
+                K::CatalogDecl => self.catalog(&n, &mut m.defs),
                 _ => {}
             }
         }
         m
+    }
+
+    /// Lower a `catalog "schema" { name = { columns } … }` into ordinary
+    /// definitions.
+    ///
+    /// One definition per entry, of exactly the form a person would have written by
+    /// hand — `name : query { … } = table "schema" "name"` — so nothing after this
+    /// point needs to know the declaration existed. That is the whole design: the
+    /// shorthand is a *lowering*, not a new kind of thing the checker has to reason
+    /// about, and `cagara doc`, the language server's outline and the formatter's
+    /// type printing all keep working without a case for it.
+    ///
+    /// Each generated definition's span starts at its own name, so the `##` block
+    /// written above an entry documents that table and the editor can jump to it.
+    fn catalog(&mut self, n: &SyntaxNode, out: &mut Vec<Def>) {
+        let Some(schema) = token(n, K::String) else {
+            return;
+        };
+        let schema = unescape(schema.text());
+        for entry in n.children().filter(|c| c.kind() == K::CatalogEntry) {
+            let Some(name) = token(&entry, K::Ident) else {
+                continue;
+            };
+            let name_text = name.text().to_string();
+            let span = span(&entry);
+            let columns = entry
+                .children()
+                .find(|c| c.kind() == K::TyRecord)
+                .map(|r| self.ty(&r))
+                .unwrap_or(TypeExpr::Error(span));
+            // `query { … }` — the row a table definition is declared as.
+            let ty = TypeExpr::App {
+                head: "query".to_string(),
+                args: vec![columns],
+                span,
+            };
+            // `table "schema" "name"`, applied one argument at a time: the
+            // primitive is curried, and building it the way the surface syntax
+            // would keeps the checker's use-site bookkeeping honest.
+            let table = self.mk(span, ExprKind::Name("table".to_string()));
+            let schema_lit = self.mk(span, ExprKind::Lit(Lit::Str(schema.clone())));
+            let applied = self.mk(span, ExprKind::App(Box::new(table), Box::new([schema_lit])));
+            let name_lit = self.mk(span, ExprKind::Lit(Lit::Str(name_text.clone())));
+            let body = self.mk(span, ExprKind::App(Box::new(applied), Box::new([name_lit])));
+            out.push(Def {
+                name: name_text,
+                ty: Some(ty),
+                body,
+                span,
+            });
+        }
     }
 
     /// Lower one `name = body` or `name : ty = body` definition.
@@ -801,5 +853,72 @@ mod tests {
             m.defs[0].body.kind,
             ExprKind::Sql(r"REPLACE($1, '\')".into())
         );
+    }
+}
+
+/// `catalog "schema" { … }` — a module's tables, declared once.
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    /// Each entry becomes an ordinary table definition.
+    ///
+    /// That is the whole design: the shorthand lowers to what a person would have
+    /// written, so the checker, `cagara doc`, the language server and the formatter
+    /// need no case for it. The test asserts the lowered *shape* rather than the
+    /// feature, because the shape is what everything downstream depends on.
+    #[test]
+    fn a_catalog_entry_becomes_a_table_definition() {
+        let src = "catalog \"public\" {\n  users = { id = int, name = string },\n  \
+                   orders = { id = int }\n}\n";
+        let (m, errors) = lower_source(src);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(m.defs.len(), 2, "{:?}", m.defs);
+        assert_eq!(m.defs[0].name, "users");
+        assert_eq!(m.defs[1].name, "orders");
+        // The declared type is `query { … }`, the row a table is declared as.
+        let TypeExpr::App { head, args, .. } = m.defs[0].ty.as_ref().expect("a type") else {
+            panic!("expected a type application: {:?}", m.defs[0].ty);
+        };
+        assert_eq!(head, "query");
+        let TypeExpr::Record { fields, .. } = &args[0] else {
+            panic!("expected a record: {:?}", args[0]);
+        };
+        let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["id", "name"]);
+        // The body is `table "public" "users"`, applied one argument at a time.
+        let ExprKind::App(f, args) = &m.defs[0].body.kind else {
+            panic!("expected an application: {:?}", m.defs[0].body.kind);
+        };
+        assert_eq!(args.len(), 1);
+        assert!(matches!(&args[0].kind, ExprKind::Lit(Lit::Str(s)) if s == "users"));
+        let ExprKind::App(inner, first) = &f.kind else {
+            panic!("expected a curried application: {:?}", f.kind);
+        };
+        assert!(matches!(&first[0].kind, ExprKind::Lit(Lit::Str(s)) if s == "public"));
+        assert!(matches!(&inner.kind, ExprKind::Name(n) if n == "table"));
+    }
+
+    /// A `##` block above an entry documents that entry.
+    ///
+    /// The generated definition's span starts at the entry's name, which is what
+    /// connects the two — the same rule every other definition uses.
+    #[test]
+    fn an_entrys_doc_block_reaches_its_definition() {
+        let src = "catalog \"s\" {\n  ## The users.\n  users = { id = int }\n}\n";
+        let (m, errors) = lower_source(src);
+        assert!(errors.is_empty(), "{errors:?}");
+        let doc = crate::docs::item_doc(src, m.defs[0].span.start as usize);
+        assert_eq!(doc.as_deref(), Some("The users."));
+    }
+
+    /// The entries are definitions in source order, so a query may use them.
+    #[test]
+    fn entries_keep_their_order() {
+        let src = "catalog \"s\" {\n  a = { x = int },\n  b = { x = int },\n  \
+                   c = { x = int }\n}\n";
+        let (m, _) = lower_source(src);
+        let names: Vec<&str> = m.defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c"]);
     }
 }

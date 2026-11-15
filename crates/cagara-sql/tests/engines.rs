@@ -2681,6 +2681,65 @@ g = f & select { s = over { order = [asc .k], frame = groups (preceding 1) curre
     }
 }
 
+/// A `catalog` declaration is a table definition, on a real engine.
+///
+/// The shorthand lowers to `name : query { … } = table "schema" "name"` before
+/// anything else sees it, so the claim to check is that the *lowered* form is what
+/// the whole pipeline already handles — not that the parser accepted some new
+/// syntax. Running it is the only way to know the schema and table name reached the
+/// SQL.
+#[test]
+fn a_catalog_declaration_is_a_table() {
+    const DEFS: &str = "\
+catalog \"main\" {\
+  nums = { id = int, a = int, b = int, v = maybe int }\
+}\
+q = nums & select { id = .id, m = .a % .b } & order [asc .id]\
+";
+    let ws = Workspace::from_source(DEFS);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    // The table is a definition, so it has a type like any other.
+    let tc = cagara_hir::check(&ws);
+    let i = ws.modules[ws.root]
+        .module
+        .defs
+        .iter()
+        .position(|d| d.name == "nums")
+        .expect("the catalog entry is a definition");
+    assert_eq!(
+        tc.type_of(ws.root, i).map(|t| t.to_string()).as_deref(),
+        Some("query { id = int, a = int, b = int, v = maybe int }")
+    );
+    let (_, rel) = root_queries(&ws)
+        .into_iter()
+        .find(|(n, _)| n == "q")
+        .expect("q");
+    let rel = rel.unwrap_or_else(|d| panic!("q: {}", d.message));
+    let sql = compile(&rel, Options::default()).expect("duckdb");
+    assert!(sql.contains("FROM main.nums"), "{sql}");
+
+    // And the rows are the rows: `nums` is the shared table.
+    let engine = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    // `%` keeps the dividend's sign, so the rows are the ones the shared `div` case
+    // already pins — the point here is that the *table* came from the catalog.
+    let want = ["1|1", "2|-1", "3|1", "4|-2"];
+    match run_setup(&engine, SETUP, &sql) {
+        Some(Ok(rows)) => {
+            assert_eq!(rows.len(), want.len(), "{rows:?} vs {want:?}");
+            assert!(
+                rows.iter().zip(&want).all(|(a, b)| same_row(a, b)),
+                "{rows:?} vs {want:?}\n  {sql}"
+            );
+        }
+        Some(Err(m)) => panic!("duckdb: {m}\n  {sql}"),
+        None => panic!("duckdb is not installed"),
+    }
+}
+
 /// The dialects that emulate `NULLS LAST` read `ROWS` and refuse the other two units.
 ///
 /// Two different reasons, both measured on a real engine:

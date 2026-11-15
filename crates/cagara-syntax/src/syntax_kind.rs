@@ -346,6 +346,16 @@ kind_table! {
         ErrorNode,
         /// `let name = value in body`
         LetExpr,
+        /// `catalog "schema" { name = { columns } … }` — one schema's tables.
+        ///
+        /// A declaration rather than an expression: it lowers to one ordinary
+        /// definition per entry, so nothing downstream (the checker, `cagara doc`,
+        /// the language server) needs to know it exists. `catalog` is a
+        /// *contextual* identifier rather than a keyword, so a definition may still
+        /// be called `catalog`.
+        CatalogDecl,
+        /// One `name = { columns }` inside a [`SyntaxKind::CatalogDecl`].
+        CatalogEntry,
     }
 }
 
@@ -383,7 +393,7 @@ mod tests {
             Ident Int Float String UnterminatedString Error LetKw SourceFile ImportDecl \
             Definition TypeAnn TyApp TyRecord TyField TyFun TyParen TyStr TyNat Lambda BinExpr App \
             NegExpr ParenExpr RecordExpr RecordField ListExpr NameRef Literal FieldExpr ProjExpr \
-            SqlExpr PrimitiveExpr CaseExpr CaseArm ErrorNode LetExpr";
+            SqlExpr PrimitiveExpr CaseExpr CaseArm ErrorNode LetExpr CatalogDecl CatalogEntry";
         let got: Vec<String> = ALL.iter().map(|k| format!("{k:?}")).collect();
         assert_eq!(got.join(" "), expected);
     }

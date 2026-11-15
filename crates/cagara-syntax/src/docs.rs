@@ -58,6 +58,20 @@ pub fn item_doc(src: &str, offset: usize) -> Option<String> {
     join(&block)
 }
 
+/// Is `offset` the first thing on its line, whitespace aside?
+///
+/// A `##` block belongs to an item that *starts a line*: that is what makes it a
+/// block above the item rather than a trailing comment on the line before.
+fn starts_its_line(src: &str, offset: usize) -> bool {
+    let Some(before) = src.get(..offset.min(src.len())) else {
+        return false;
+    };
+    let line = before.rfind(['\n', '\r']).map_or(0, |at| at + 1);
+    before
+        .get(line..)
+        .is_some_and(|lead| lead.chars().all(char::is_whitespace))
+}
+
 /// The documentation of a whole file: the last `#!` run above its first item.
 ///
 /// Read from the module rather than from the text alone, because "above the
@@ -170,7 +184,16 @@ impl<'a> Docs<'a> {
                                 name: f.name.clone(),
                                 span: f.span,
                                 line: self.line(at),
-                                doc: item_doc(self.src, at),
+                                // A field documents nothing unless it starts its own
+                                // line. `item_doc` reads the block above the *line*,
+                                // and a field sharing a line with others has no line
+                                // of its own — so it would take whatever documents
+                                // the thing that line belongs to. A table declared
+                                // inside a `catalog` is exactly that case: the entry
+                                // owns the block, its inline columns must not claim it.
+                                doc: starts_its_line(self.src, at)
+                                    .then(|| item_doc(self.src, at))
+                                    .flatten(),
                             }
                         })
                         .collect(),
@@ -458,6 +481,40 @@ mod tests {
         let records = docs.record_fields(ty);
         assert_eq!(records.len(), 1);
         assert!(records[0].iter().all(|f| f.doc.is_none()), "{records:?}");
+    }
+
+    /// A field that shares its line does not take the block above that line.
+    ///
+    /// The rule used to be "read the block above the field's line", which is right
+    /// for a field on its own line and wrong for one that is not: a table declared
+    /// inside a `catalog` puts its columns on the entry's line, and every column
+    /// claimed the entry's own `##` block. `cagara doc` then printed the entry's
+    /// prose under every column — visible, and wrong.
+    ///
+    /// The condition is that the field *starts its line*: a `##` block belongs to an
+    /// item that begins one, which is what makes it a block above the item rather
+    /// than a trailing comment on the line before.
+    #[test]
+    fn an_inline_field_does_not_take_the_entrys_block() {
+        let (src, module) = lower(
+            "catalog \"s\" {\n\
+             \x20 ## The users.\n\
+             \x20 users = { id = int, name = string }\n\
+             }\n",
+        );
+        let docs = Docs::new(&src);
+        let ty = module.defs[0].ty.as_ref().expect("a declared type");
+        let records = docs.record_fields(ty);
+        assert_eq!(records.len(), 1);
+        assert!(
+            records[0].iter().all(|f| f.doc.is_none()),
+            "the entry's block is not the columns': {records:?}"
+        );
+        // And the entry still gets it, which is the half that has to keep working.
+        assert_eq!(
+            item_doc(&src, module.defs[0].span.start as usize).as_deref(),
+            Some("The users.")
+        );
     }
 
     /// Every record in a signature is walked, including one nested in a field's

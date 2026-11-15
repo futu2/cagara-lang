@@ -55,6 +55,25 @@ adults =
 main = adults
 ```
 
+### Declaring several tables at once
+
+A module that mirrors one schema can say so once. `catalog` is a *declaration*, not a
+value: it lowers to one ordinary definition per entry, exactly as if each had been
+written out.
+
+```haskell
+## The public schema.
+catalog "public" {
+  ## The user table.
+  users = { id = int, name = string, age = int, active = bool },
+  orders = { id = int, user_id = int, amount = float }
+}
+```
+
+The columns are a record type, and a `##` block above an entry documents that table —
+`cagara doc` shows it, and the language server's outline lists each entry. `catalog` is
+not a keyword, so a definition may still be called `catalog`.
+
 Three ideas carry most of the language:
 
 1. **A query is a value.** `users` is not a connection or a handle; it is a

@@ -45,7 +45,30 @@ main =
 /// A definition the formatter cannot lay out is printed verbatim, so a
 /// construct it does not understand used to pass every test above: the output
 /// was stable, kept its comments, and simply never changed. This pins that
-/// each construct is actually reformatted, by feeding it a deliberately
+/// A `catalog` declaration is laid out like a record, and is stable.
+///
+/// The formatter works on the syntax tree, so a new node kind that nothing prints
+/// falls back to "print the text as written" — which compiles and looks fine in the
+/// one case a person tries. These cases are the shapes that would expose it: an entry
+/// whose columns need spacing, a multi-line declaration, and the round trip.
+#[test]
+fn a_catalog_is_laid_out_and_is_stable() {
+    // The columns are spaced like any record type.
+    check(
+        "catalog \"s\" { a = { x = int }, b = { y = string } }\n",
+        "catalog \"s\" { a = { x = int }, b = { y = string } }\n",
+    );
+    // Written one entry per line, it stays one per line.
+    let src = "catalog \"public\" {\n  users = { id = int, name = string },\n  \
+               orders = { id = int }\n}\nq = users & select { .id }\n";
+    let out = fmt(src);
+    assert_eq!(out, src, "already canonical");
+    // And a squeezed one expands, with the entries on their own lines.
+    let squeezed = "catalog \"s\" { a = { x = int }, b = { y = string } }\n";
+    assert_eq!(fmt(&fmt(squeezed)), fmt(squeezed), "not idempotent");
+}
+
+/// Each construct is actually reformatted, by feeding it a deliberately
 /// unformatted spelling and requiring a change.
 #[test]
 fn every_construct_is_actually_reformatted() {

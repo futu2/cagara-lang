@@ -108,7 +108,27 @@ id : a -> a = x => x
 
 ## A table: `table "schema" "name"` (the schema may be `""`). The row type is
 ## inferred from use — the projection stages decide the columns — so a
-## definition of a table usually carries a signature naming them.
+## definition of a table usually carries a signature naming them:
+##
+## ```
+## users : query { id = int, name = string } = table "public" "users"
+## ```
+##
+## A module that declares several tables in one schema can say so once, with a
+## `catalog` declaration, which is syntax rather than a value — it lowers to one
+## ordinary definition per entry, so everything below still sees `table`:
+##
+## ```
+## catalog "public" {
+##   ## The user table.
+##   users = { id = int, name = string },
+##   orders = { id = int, user_id = int, amount = float }
+## }
+## ```
+##
+## The columns are a record type, and a `##` block above an entry documents that
+## table. `catalog` is not a keyword, so a definition may still be called
+## `catalog`.
 table : string -> string -> query r = primitive "__table"
 
 ## Filter rows: `where (.age >= 18)`. The predicate is non-null `bool`; a

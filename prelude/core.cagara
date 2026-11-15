@@ -379,6 +379,16 @@ antiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__
 ## not a value. Reach for it when the answer is the point; reach for `markExists`
 ## when the answer is one column among others, or when it has to be `||`-ed with a
 ## condition that is not itself an existence test.
+##
+## The column is a *value* like any other, so a later `select` that does not name it
+## drops it — and with it the `EXISTS`, since the clause is what computes it:
+##
+## ```
+## q = users & markExists orders (.<id == .>user_id) & select {.id}
+## ```
+##
+## asks a question and then throws the answer away, which reads as "filter by
+## existence" and is not. Use `semiJoin` for that, or keep the column.
 markExists : query s -> expr (join r s) bool -> query r -> query (merge r { exists = bool }) =
   primitive "__markExists"
 

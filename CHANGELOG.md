@@ -38,6 +38,27 @@
 - An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
   `select { x = upper .id }` does. It named only the operator before.
 
+- `range` and `groups` window frames, beside `rows`. The three differ in what an offset counts —
+  rows, distances in the order key, or peer groups — and `Frame` now carries the unit, so a lowerer
+  cannot quietly write `ROWS` for all three. MySQL refuses `groups` (it is a syntax error there) and
+  every dialect whose `NULLS LAST` is emulated refuses `range` (it needs one sort key; the emulation
+  adds a second).
+
+- `--param name=value` overrides a parameter the file declares, keeping the file's type. Before, a
+  file could either declare its parameters with defaults or be overridden by a flag, never both:
+  the flag's definition collided with the file's.
+
+- `cagara check` reports the compiler's diagnostics, not only the checker's. A set operation whose
+  sides had the same columns in different orders type-checked and could not be lowered, so `check`
+  passed a file that `cagara --only` refused to compile.
+
+- `cagara doc --json` groups an overload set into one object with a `signatures` array, as the
+  markdown always has. It emitted one object per definition, so `sum` arrived as six entries — five
+  with `"doc": null` — and a consumer could not tell they were one name.
+
+- `cagara check` walks each file once when a symlink reaches it by several paths. `ln -s . self`
+  inside a directory made one six-byte file be checked 41 times (1.6 s instead of 0.04 s).
+
 - A non-ASCII name says which rule it broke. `名字 = .id` was `expected an expression` (the character
   is there) or, inside a record, `expected `}``; both now say identifiers are ASCII.
 

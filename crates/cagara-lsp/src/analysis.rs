@@ -908,6 +908,205 @@ pub fn references(
     out
 }
 
+/// What `textDocument/rename` would change, or why it will not.
+///
+/// The refusals are part of the answer rather than an empty list, because an empty
+/// edit set and "this name cannot be renamed" are different things to an editor: the
+/// first says the file is already right, the second says nothing was attempted. A
+/// rename that silently did nothing would leave the user believing it worked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rename {
+    /// Edits per file. Every entry has at least one edit.
+    Edits(Vec<(PathBuf, Vec<TextEdit>)>),
+    /// A sentence to show the user. Always says *why*, because the cursor landing
+    /// on a column and on a definition look identical from the outside.
+    Refused(String),
+}
+
+/// The name under the cursor, if it is one this server will rename.
+///
+/// `textDocument/prepareRename` uses this to decide whether to put the editor into
+/// rename mode at all: a column name, a literal or the space between two tokens is
+/// not a rename target, and the honest answer is a range or a refusal.
+pub fn prepare_rename(ws: &Workspace, pos: Position) -> Result<Range, String> {
+    let text = &ws.modules[ws.root].text;
+    let p = Positions::new(text);
+    let occs = occurrences(ws, ws.root);
+    let o = p
+        .offset(pos)
+        .and_then(|off| occ_at(&occs, off))
+        .ok_or_else(|| {
+            "there is no name here to rename: this is a column, a literal or a \
+             punctuation mark, and none of them is bound to anything"
+                .to_string()
+        })?;
+    check_renamable(&o.target)?;
+    Ok(root_range(&p, o.start, o.end))
+}
+
+/// Why `target` cannot be renamed, or `Ok` when it can.
+///
+/// The prelude is the one interesting refusal. `sum` is a name the *language*
+/// defines, and it lives in a file the user does not have: rewriting every use of it
+/// in their program would break those uses, not rename the definition. The message
+/// says so, because "no" without a reason reads like a bug.
+fn check_renamable(target: &Target) -> Result<(), String> {
+    match target {
+        // The prelude is module 0 (`Workspace::empty` adds it first), which is the
+        // same test `definition` uses to keep prelude definitions out of its answer.
+        Target::Global(Binding::Def(0, _) | Binding::Overloads(0, _)) => Err(
+            "this name is defined by the prelude, in a file you do not have; \
+                 give it a name of your own instead of renaming the language's"
+                .to_string(),
+        ),
+        Target::Global(Binding::Def(..) | Binding::Overloads(..) | Binding::Module(_)) => Ok(()),
+        Target::Local(_) => Ok(()),
+    }
+}
+
+/// Rename the name under the cursor to `new_name`, everywhere it means that name.
+///
+/// The edit set is `references` with declarations included: a definition's own name
+/// is one of its occurrences, so renaming a definition rewrites the declaration and
+/// every use together. Doing it any other way — a rename that left the definition
+/// alone — would produce two names that do not resolve to each other.
+///
+/// A local is looked for in its own file only, for the reason `references` gives:
+/// the identity of a lambda parameter is a byte offset, and an offset is only
+/// meaningful in one text.
+pub fn rename(ws: &Workspace, pos: Position, new_name: &str) -> Rename {
+    if let Err(why) = valid_new_name(new_name) {
+        return Rename::Refused(why);
+    }
+    let text = &ws.modules[ws.root].text;
+    let p = Positions::new(text);
+    let occs = occurrences(ws, ws.root);
+    let Some(o) = p.offset(pos).and_then(|off| occ_at(&occs, off)) else {
+        return Rename::Refused(
+            "there is no name here to rename: this is a column, a literal or a \
+             punctuation mark, and none of them is bound to anything"
+                .to_string(),
+        );
+    };
+    if let Err(why) = check_renamable(&o.target) {
+        return Rename::Refused(why);
+    }
+    let target = o.target.clone();
+    // The name being replaced, for the collision check below.
+    let old_name = &text[o.start..o.end];
+    if old_name == new_name {
+        // Not a refusal, but not an edit either: the file already says what was
+        // asked for.
+        return Rename::Edits(Vec::new());
+    }
+    if let Err(why) = not_captured(ws, &target, new_name) {
+        return Rename::Refused(why);
+    }
+    let cross_file = matches!(target, Target::Global(_));
+    let mut out: Vec<(PathBuf, Vec<TextEdit>)> = Vec::new();
+    for (m, reachable) in ws.modules_reachable_from(ws.root).into_iter().enumerate() {
+        if !reachable || (!cross_file && m != ws.root) {
+            continue;
+        }
+        let md = &ws.modules[m];
+        let mp = Positions::new(&md.text);
+        let edits: Vec<TextEdit> = occurrences(ws, m)
+            .into_iter()
+            .filter(|x| x.target == target)
+            .map(|x| TextEdit {
+                range: root_range(&mp, x.start, x.end),
+                new_text: new_name.to_string(),
+            })
+            .collect();
+        if !edits.is_empty() {
+            out.push((md.path.clone(), edits));
+        }
+    }
+    Rename::Edits(out)
+}
+
+/// `new_name` has to be one name, spelled the way this language spells names.
+///
+/// The check is the *lexer's*, not a re-implemented character class: a name is valid
+/// exactly when lexing it produces one `Ident` whose text is the whole input. That
+/// keeps the rule in one place, and it rejects `a b`, `1x`, `a.b` and `""` without
+/// this function having an opinion about any of them.
+fn valid_new_name(new_name: &str) -> Result<(), String> {
+    if new_name.is_empty() {
+        return Err("a name cannot be empty".to_string());
+    }
+    let lexed: Vec<_> = cagara_syntax::lexer::lex(new_name)
+        .into_iter()
+        .filter(|l| !l.kind.is_trivia())
+        .collect();
+    match lexed.as_slice() {
+        [one] if one.kind == cagara_syntax::lexer::Token::Ident && one.text == new_name => Ok(()),
+        _ => Err(format!(
+            "`{new_name}` is not a name: a name starts with a letter or `_` and \
+             continues with letters, digits and `_`"
+        )),
+    }
+}
+
+/// Would `new_name` mean something else where the edit lands?
+///
+/// A rename that introduces a second meaning for a name does not fail — it changes
+/// what the program does, quietly. The two ways that happens here are a definition
+/// whose new name is already taken in the same module, and a lambda parameter whose
+/// new name is already a definition or another parameter in scope. Both are refused
+/// rather than resolved, because the right answer depends on which the user meant.
+fn not_captured(ws: &Workspace, target: &Target, new_name: &str) -> Result<(), String> {
+    match target {
+        Target::Global(Binding::Def(m, _) | Binding::Overloads(m, _)) => {
+            let md = &ws.modules[*m];
+            match md.scope.get(new_name) {
+                None => Ok(()),
+                // A prelude name is in scope here without being in this file, and
+                // shadowing one is a different decision from colliding with a
+                // definition of the user's own. Saying which is which is the
+                // difference between an instruction and a guess.
+                Some(Binding::Def(0, _) | Binding::Overloads(0, _)) => Err(format!(
+                    "`{new_name}` is the prelude's name for something else; picking it \
+                     would shadow the language's definition here"
+                )),
+                Some(_) => Err(format!(
+                    "`{new_name}` already names something in this file; pick a name that \
+                     is not in use, or rename that one first"
+                )),
+            }
+        }
+        // A parameter may take any name that is not already bound where it is used.
+        // The lambda's scope is `[binding offset, scope_end)`, so a *different* target
+        // spelled `new_name` inside it would be captured by the new binding and the
+        // program would silently mean something else.
+        Target::Local(at) => {
+            let text = &ws.modules[ws.root].text;
+            let occs = occurrences(ws, ws.root);
+            let Some(bind) = occs
+                .iter()
+                .find(|o| o.decl && o.target == Target::Local(*at))
+            else {
+                return Ok(());
+            };
+            let captured = occs.iter().any(|o| {
+                o.target != Target::Local(*at)
+                    && o.start >= bind.start
+                    && o.end <= bind.scope_end
+                    && &text[o.start..o.end] == new_name
+            });
+            if captured {
+                Err(format!(
+                    "`{new_name}` already means something inside this lambda; the \
+                     parameter would take over its uses"
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Target::Global(Binding::Module(_)) => Ok(()),
+    }
+}
+
 /// Occurrences in the root file of the name under the cursor; binding
 /// sites are `WRITE`, uses `READ`.
 pub fn highlights(ws: &Workspace, pos: Position) -> Vec<(Range, DocumentHighlightKind)> {
@@ -1894,6 +2093,42 @@ mod tests {
 
     /// A lambda parameter is not matched across files.
     ///
+    /// A rename of an imported definition reaches into the file that defines it.
+    ///
+    /// This is the case a single-file rename gets wrong without anyone noticing: the
+    /// edit set looks complete — it renames the use — and the definition in the other
+    /// file still has the old name, so the program stops resolving. The edit set has
+    /// to carry both files.
+    #[test]
+    fn rename_reaches_across_an_import() {
+        let dir = std::env::temp_dir().join(format!("cagara-lsp-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lib.cagara"), "helper = 1\n").unwrap();
+        let main = dir.join("main.cagara");
+        let src = "import \"lib.cagara\" as lib\nq = lib.helper\n";
+        let ws = Workspace::open_with(&main, src.to_string());
+        let Rename::Edits(files) = rename(&ws, at_in(src, "lib.helper", 4), "aid") else {
+            panic!("renaming an imported definition is allowed");
+        };
+        let mut names: Vec<String> = files
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["lib.cagara".to_string(), "main.cagara".to_string()],
+            "both files are edited: {files:?}"
+        );
+        // One edit in each: the definition in `lib`, the use in `main`.
+        for (path, edits) in &files {
+            assert_eq!(edits.len(), 1, "{}: {edits:?}", path.display());
+            assert_eq!(edits[0].new_text, "aid");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// `Target::Local` is the byte offset where the parameter is bound, and an
     /// offset is only meaningful inside one text. Two files can bind a parameter at
     /// the same byte — this test builds them so they do — and without a guard the
@@ -1932,6 +2167,93 @@ mod tests {
         );
         assert_eq!(rs.len(), 2, "the parameter and its use: {rs:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A rename rewrites the definition and every use, and nothing else.
+    ///
+    /// The trap is the same one `references` has: `users` is both a definition and a
+    /// lambda parameter in `shadow`, and renaming the definition must leave the
+    /// parameter alone — they are different names that happen to be spelled the same.
+    #[test]
+    fn rename_rewrites_the_definition_and_its_uses() {
+        let ws = ws();
+        let Rename::Edits(files) = rename(&ws, at("q = users", 4), "people") else {
+            panic!("renaming a definition is allowed");
+        };
+        assert_eq!(files.len(), 1, "one file, one entry: {files:?}");
+        let (_, edits) = &files[0];
+        // `users` on lines 0, 2 and 5 is the definition and its two uses; the
+        // parameter in `shadow` (line 5, column 9) is a different name.
+        assert_eq!(
+            edits.iter().map(|e| e.range).collect::<Vec<_>>(),
+            vec![range(0, 0, 5), range(2, 4, 9), range(3, 6, 11)],
+            "{edits:?}"
+        );
+        assert!(edits.iter().all(|e| e.new_text == "people"), "{edits:?}");
+    }
+
+    /// A lambda parameter is renamed within its scope, not across the file.
+    #[test]
+    fn rename_handles_a_lambda_parameter() {
+        let ws = ws();
+        let Rename::Edits(files) = rename(&ws, at("=> x", 3), "n") else {
+            panic!("renaming a parameter is allowed");
+        };
+        let (_, edits) = &files[0];
+        assert_eq!(
+            edits.iter().map(|e| e.range).collect::<Vec<_>>(),
+            vec![range(4, 8, 9), range(4, 13, 14), range(4, 17, 18)],
+            "the parameter and both uses: {edits:?}"
+        );
+    }
+
+    /// The refusals say *why*, and each reason is a different one.
+    ///
+    /// A rename that silently did nothing is the failure mode this is guarding: an
+    /// editor shows "no changes" and the user believes the rename happened. So the
+    /// three ways the gesture can be wrong — the prelude's name, a column, and a name
+    /// already in use — are three messages, not three empty edit sets.
+    #[test]
+    fn a_rename_that_would_be_wrong_is_refused_with_a_reason() {
+        let ws = ws();
+        // The prelude defines `sum`; the user cannot rename the language's names.
+        match rename(&ws, at("sum .age", 1), "total") {
+            Rename::Refused(why) => assert!(why.contains("prelude"), "{why}"),
+            other => panic!("a prelude name is refused: {other:?}"),
+        }
+        // `.age` is a column, not a name with a binding.
+        match rename(&ws, at(".age >= 18", 1), "years") {
+            Rename::Refused(why) => assert!(why.contains("no name here"), "{why}"),
+            other => panic!("a column is refused: {other:?}"),
+        }
+        // `adult` cannot become `users`: that name is taken in this file.
+        match rename(&ws, at("where adult", 7), "users") {
+            Rename::Refused(why) => assert!(why.contains("already names"), "{why}"),
+            other => panic!("a collision is refused: {other:?}"),
+        }
+        // And the new name has to be a name.
+        match rename(&ws, at("where adult", 7), "two words") {
+            Rename::Refused(why) => assert!(why.contains("is not a name"), "{why}"),
+            other => panic!("a non-name is refused: {other:?}"),
+        }
+        // Renaming to what it already says is not an error, and not an edit either.
+        assert_eq!(
+            rename(&ws, at("where adult", 7), "adult"),
+            Rename::Edits(Vec::new())
+        );
+    }
+
+    /// `prepareRename` answers with the range the editor should select.
+    #[test]
+    fn prepare_rename_gives_the_range_or_refuses() {
+        let ws = ws();
+        assert_eq!(
+            prepare_rename(&ws, at("where adult", 7)),
+            Ok(range(2, 18, 23)),
+            "the `adult` token"
+        );
+        assert!(prepare_rename(&ws, at(".age >= 18", 1)).is_err());
+        assert!(prepare_rename(&ws, at("sum .age", 1)).is_err());
     }
 
     #[test]

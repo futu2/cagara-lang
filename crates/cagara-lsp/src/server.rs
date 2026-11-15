@@ -12,7 +12,8 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting,
-    GotoDefinition, HoverRequest, InlayHintRequest, References, Request as _,
+    GotoDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
+    Request as _,
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
@@ -21,7 +22,8 @@ use lsp_types::{
     DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability, InlayHint,
     InlayHintKind, InlayHintLabel, InlayHintParams, Location, LogMessageParams, MarkupContent,
-    MarkupKind, MessageType, OneOf, PublishDiagnosticsParams, ReferenceParams, ServerCapabilities,
+    MarkupKind, MessageType, OneOf, PrepareRenameResponse, PublishDiagnosticsParams,
+    ReferenceParams, RenameOptions, RenameParams, ServerCapabilities, TextDocumentPositionParams,
     TextDocumentSyncCapability, TextDocumentSyncKind, Uri, WorkspaceEdit,
 };
 use std::collections::HashMap;
@@ -173,6 +175,15 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
+        // `analysis::rename` rewrites a definition's name and every use of it, in
+        // every file that imports it, and a lambda parameter's name within its scope.
+        // `prepare_rename_provider` is advertised with it: an editor that offers the
+        // rename gesture needs to know, before the user types, whether the cursor is
+        // on something renameable — a column name is not.
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
         document_highlight_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
@@ -528,6 +539,56 @@ fn request(
                     .collect()
             });
             json(serde_json::to_value(locs))
+        }
+        PrepareRenameRequest::METHOD => {
+            let p: TextDocumentPositionParams =
+                serde_json::from_value(params).map_err(bad_params)?;
+            let key = doc_key(&p.text_document.uri);
+            let r: Option<PrepareRenameResponse> = state
+                .select(&key)
+                .then(|| {
+                    analysis::prepare_rename(&state.ws, p.position)
+                        .ok()
+                        .map(PrepareRenameResponse::Range)
+                })
+                .flatten();
+            json(serde_json::to_value(r))
+        }
+        Rename::METHOD => {
+            let p: RenameParams = serde_json::from_value(params).map_err(bad_params)?;
+            let key = doc_key(&p.text_document_position.text_document.uri);
+            let outcome = if state.select(&key) {
+                analysis::rename(&state.ws, p.text_document_position.position, &p.new_name)
+            } else {
+                // A document the server was never told about: nothing to rename, and
+                // an empty edit set says that without pretending to have looked.
+                analysis::Rename::Edits(Vec::new())
+            };
+            match outcome {
+                analysis::Rename::Edits(files) => {
+                    // An empty edit set is a valid answer: the file already says what
+                    // was asked for. `null` would be read as "no such name", which is
+                    // a different thing.
+                    // `lsp_types::Uri` has interior mutability, which `clippy` reads as
+                    // a mutable key. It is what the protocol's `changes` map is keyed
+                    // by, so the allow sits on the map rather than on the method.
+                    #[allow(clippy::mutable_key_type)]
+                    let mut changes: HashMap<Uri, Vec<lsp_types::TextEdit>> = HashMap::new();
+                    for (path, edits) in files {
+                        if let Some(u) = uri::from_path(&path) {
+                            changes.insert(u, edits);
+                        }
+                    }
+                    json(serde_json::to_value(Some(WorkspaceEdit {
+                        changes: Some(changes),
+                        ..Default::default()
+                    })))
+                }
+                // A refusal is a request error, not an empty edit: an editor that got
+                // `null` would say "nothing to change" and the user would believe the
+                // rename happened.
+                analysis::Rename::Refused(why) => Err((ErrorCode::InvalidRequest, why)),
+            }
         }
         DocumentHighlightRequest::METHOD => {
             let p: DocumentHighlightParams = serde_json::from_value(params).map_err(bad_params)?;
@@ -1053,6 +1114,29 @@ mod tests {
             "a definition and its use: {refs}"
         );
 
+        // `prepareRename` puts the editor into rename mode; the answer is the range
+        // of the name, so the editor selects exactly what will change.
+        let prep = ed.ask("textDocument/prepareRename", Editor::at(URI, 1, 2));
+        assert_eq!(prep["start"]["line"], 1, "prepareRename on `adult`: {prep}");
+
+        let ren = ed.ask(
+            "textDocument/rename",
+            json!({ "textDocument": { "uri": URI },
+                    "position": { "line": 1, "character": 2 },
+                    "newName": "grown_up" }),
+        );
+        let edits = ren["changes"][URI]
+            .as_array()
+            .unwrap_or_else(|| panic!("rename produced no edits: {ren}"));
+        assert!(
+            edits.iter().all(|e| e["newText"] == "grown_up"),
+            "every edit writes the new name: {ren}"
+        );
+        assert!(
+            edits.len() >= 2,
+            "the definition and its use are both renamed: {ren}"
+        );
+
         let hl = ed.ask("textDocument/documentHighlight", Editor::at(URI, 1, 2));
         assert!(
             hl.as_array().is_some_and(|a| !a.is_empty()),
@@ -1119,8 +1203,11 @@ mod tests {
     fn a_capability_that_is_not_advertised_is_refused() {
         let mut ed = Editor::start();
         ed.open(URI, DOC);
+        // `textDocument/rename` used to be in this list. It is implemented now, so
+        // the list holds only what is still missing — the test is about the server
+        // refusing what it does not advertise, and a method it *does* answer belongs
+        // in `every_advertised_capability_answers` instead.
         for method in [
-            "textDocument/rename",
             "textDocument/signatureHelp",
             "workspace/symbol",
             "textDocument/documentColor",

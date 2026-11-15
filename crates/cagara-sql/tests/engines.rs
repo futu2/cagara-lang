@@ -2497,6 +2497,56 @@ q_and = users & markExists orders (.<id == .>user_id && .>amount > 4.5) \
     }
 }
 
+/// A decimal sum really does need a wider precision — which is why `+` does not
+/// widen today, and what a widening would have to be right about.
+///
+/// `DECIMAL(10,2)` holds `99999999.99`; its sum with itself is `199999999.98`, which
+/// does not fit. Both engines answer with a one-digit-wider type, and casting that sum
+/// back is an *error*, not a rounding:
+///
+/// ```text
+/// Conversion Error: Casting value "199999999.98" to type DECIMAL(10,2) failed:
+/// value is out of range!
+/// ```
+///
+/// So the same-type rule is a real limitation and not a formality. This test pins the
+/// engine behaviour that makes it one, so a future widening has the measurement to
+/// check itself against — see `docs/PLAN.md` for what blocked it.
+#[test]
+fn a_decimal_sum_outgrows_its_operand_type() {
+    let duck = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    let setup = "CREATE TABLE t (v DECIMAL(10, 2));\n\
+                 INSERT INTO t VALUES (99999999.99);\n";
+    // The sum, as the engine types it.
+    match run_setup(&duck, setup, "SELECT typeof(v + v) AS t FROM t") {
+        Some(Ok(rows)) => assert_eq!(rows, vec!["DECIMAL(11,2)".to_string()]),
+        Some(Err(m)) => panic!("duckdb: {m}"),
+        None => panic!("duckdb is not installed"),
+    }
+    // And the value, which the declared type cannot hold.
+    match run_setup(&duck, setup, "SELECT v + v AS s FROM t") {
+        Some(Ok(rows)) => assert_eq!(rows, vec!["199999999.98".to_string()]),
+        Some(Err(m)) => panic!("duckdb: {m}"),
+        None => panic!("duckdb is not installed"),
+    }
+    // Casting it back to the operand type is the error, and it is an error rather
+    // than a silent wrap: that is what makes the wider type necessary.
+    let narrowed = run_setup(
+        &duck,
+        setup,
+        "SELECT CAST(v + v AS DECIMAL(10, 2)) AS s FROM t",
+    );
+    match narrowed {
+        Some(Ok(rows)) => panic!("duckdb accepted an out-of-range cast: {rows:?}"),
+        Some(Err(_)) => {}
+        None => panic!("duckdb is not installed"),
+    }
+}
+
 /// Postgres, through PGlite — Postgres compiled to WebAssembly and driven by
 /// `node`, so no server is needed (`crates/cagara-sql/tests/pglite.mjs`).
 ///

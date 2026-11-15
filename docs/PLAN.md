@@ -240,12 +240,37 @@ names the observation that puts it there, because a plan without one is a wish.
    `limit`/`offset` cannot fold (SQL runs `QUALIFY` before `LIMIT`), and the
    predicate names the window *function*, not the output alias, because a later
    projection can drop the alias.
-3. **The decimal widening result type.** Refused by decision, and it should stay
-   refused until type-level arithmetic exists — but the *shape* of that work is
-   known (a `Ty` that can compute `Nat + Nat`, and an arbitration that ranks a
-   computed result), and it would also unblock exact decimal division. Worth doing
-   only if someone needs SQL's `(p+1, s)`; the current same-type rule is what makes
-   the type honest.
+3. **The decimal widening result type.** **Attempted and reverted, with the blocker
+   now known.** The type-level arithmetic is straightforward — three `Ty` variants
+   (`NatAdd`, `NatMin`, `NatMax`) and a `reduce_nat` that folds them once the operands
+   are numbers; `decimal (atMost 38 (plus (larger p q) 1)) s` reduces to `decimal 11 2`
+   at the use site, and that part worked. Two things blocked it:
+
+   * **The engines do not agree on multiplication**, so only `+`/`-` can widen.
+     Measured: `(10,2) * (12,2)` is `DECIMAL(18,4)` on DuckDB and `decimal(22,4)` on
+     Trino — DuckDB caps the product at 18 digits for a literal fold. Addition *is*
+     portable: `(max(p,q)+1, s)`, capped at 38, on both. So the widening would have
+     been half a rule, with multiplication still same-type.
+   * **A computed precision survives into the row type unreduced**, so a stage that
+     reads the column cannot match it. `select { t = .a + .b }` was fine and printed
+     `decimal 11 2`, but `& order [asc .t]` then failed with
+     `no overload of `asc` matches … decimal (atMost 38 (plus (larger a b) 1)) 2` — the
+     term with the *signature's* variables still in it, in a row the printer could
+     reduce and the matcher could not. Making `reduce_nat_terms` walk `Ty::Row` and
+     reducing in `lift` and in the recorded `uses` were each tried and neither closed
+     it, so the remaining work is an ordering fix in the checker: a computed parameter
+     must reduce before the row is recorded, which means knowing the operand bindings
+     at that point.
+
+   The same-type rule is what makes the type honest, and it is what ships. Doing this
+   properly is worth it only if someone needs SQL's `(p+1, s)` — and then the ordering
+   problem above is the work, not the arithmetic.
+
+   One thing the attempt did establish, worth keeping: the widening is *necessary*, not
+   cosmetic. `DECIMAL(10,2)` holds `99999999.99`, its sum with itself is
+   `199999999.98`, and casting that back to `DECIMAL(10,2)` is an out-of-range error on
+   DuckDB. Both engines answer `DECIMAL(11,2)`; a type that says `10 2` would be
+   describing a value it cannot hold.
 4. ~~**Grouping sets / `rollup` / `cube`.**~~ **Done.** `rollup e` and `cube e` are
    primitives beside `group`, and the key they mark is `maybe` in the output row — the
    type is the whole point, since there is no cast that makes a subtotal row's key

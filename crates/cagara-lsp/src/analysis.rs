@@ -60,13 +60,22 @@ struct Occ {
     site: Option<Span>,
 }
 
-/// Every resolved name occurrence in the root file, in source order.
-/// Desugared names that are not spelled in the source (`negate` for `-x`)
-/// are skipped; operators count where their symbol is written.
-fn occurrences(ws: &Workspace) -> Vec<Occ> {
-    let md = &ws.modules[ws.root];
+/// Every resolved name occurrence in `module`, in source order.
+///
+/// Desugared names that are not spelled in the source (`negate` for `-x`) are
+/// skipped; operators count where their symbol is written.
+///
+/// The module is a parameter rather than always the root because a *reference* to
+/// a definition can be written in a file that imports it, and the cursor's file is
+/// the only one whose positions are being asked about. Everything that answers about
+/// the cursor (`hover`, `definition`, `highlights`, `completion`) passes the root;
+/// `references` walks the reachable modules one at a time and converts each with its
+/// own `Positions`, since byte offsets mean nothing across two texts.
+fn occurrences(ws: &Workspace, module: usize) -> Vec<Occ> {
+    let md = &ws.modules[module];
     let mut w = Walk {
         ws,
+        module,
         out: Vec::new(),
         env: Vec::new(),
     };
@@ -92,6 +101,8 @@ fn occurrences(ws: &Workspace) -> Vec<Occ> {
 
 struct Walk<'a> {
     ws: &'a Workspace,
+    /// The module whose text the spans are offsets into.
+    module: usize,
     out: Vec<Occ>,
     /// Lambda parameters in scope, innermost last: (name, binding offset).
     ///
@@ -105,7 +116,7 @@ struct Walk<'a> {
 impl Walk<'_> {
     fn expr(&mut self, e: &Expr) {
         let ws = self.ws;
-        let md = &ws.modules[ws.root];
+        let md = &ws.modules[self.module];
         match &e.kind {
             ExprKind::Name(n) => {
                 let Some((start, end)) = spelled(&md.text, e.span, n) else {
@@ -642,7 +653,7 @@ pub fn hover(ws: &Workspace, pos: Position) -> Option<String> {
     let text = &ws.modules[ws.root].text;
     let p = Positions::new(text);
     let offset = p.offset(pos)?;
-    let occs = occurrences(ws);
+    let occs = occurrences(ws, ws.root);
     let Some(o) = occ_at(&occs, offset) else {
         return declared_field_hover(ws, offset).or_else(|| atom_hover(ws, &occs, offset));
     };
@@ -813,7 +824,7 @@ fn atom_at(text: &str, e: &Expr, offset: usize, found: &mut Option<(Span, (usize
 pub fn definition(ws: &Workspace, pos: Position) -> Vec<(PathBuf, Range)> {
     let text = &ws.modules[ws.root].text;
     let p = Positions::new(text);
-    let occs = occurrences(ws);
+    let occs = occurrences(ws, ws.root);
     let Some(o) = p.offset(pos).and_then(|off| occ_at(&occs, off)) else {
         return vec![];
     };
@@ -847,14 +858,54 @@ pub fn definition(ws: &Workspace, pos: Position) -> Vec<(PathBuf, Range)> {
         .collect()
 }
 
-/// Ranges in the root file that refer to the same thing as the name under
-/// the cursor, with or without its binding site.
-pub fn references(ws: &Workspace, pos: Position, include_declaration: bool) -> Vec<Range> {
-    highlights(ws, pos)
-        .into_iter()
-        .filter(|(_, k)| include_declaration || *k != DocumentHighlightKind::WRITE)
-        .map(|(r, _)| r)
-        .collect()
+/// Every place that refers to the name under the cursor, in any open file.
+///
+/// `highlights` answers the same question for one document, because
+/// `textDocument/documentHighlight` is defined that way. A *reference* is not: a
+/// definition used from three files has three uses, and an editor's "find all
+/// references" that listed only the one it was asked from would be quietly wrong —
+/// it does not error, it shows a short list.
+///
+/// The target is resolved once, from the cursor's own file, and then looked for in
+/// every module reachable from the root. Each module's offsets are its own, so each
+/// is converted with its own `Positions`; a shared offset across two texts would
+/// point at unrelated text and still return a plausible range.
+pub fn references(
+    ws: &Workspace,
+    pos: Position,
+    include_declaration: bool,
+) -> Vec<(PathBuf, Range)> {
+    let text = &ws.modules[ws.root].text;
+    let p = Positions::new(text);
+    let root_occs = occurrences(ws, ws.root);
+    let Some(target) = p
+        .offset(pos)
+        .and_then(|off| occ_at(&root_occs, off))
+        .map(|o| o.target.clone())
+    else {
+        return Vec::new();
+    };
+    // A lambda parameter is identified by the byte offset where it is bound, and an
+    // offset means nothing outside its own text: two files can bind a parameter at
+    // the same byte and a cross-file match would report one as a reference to the
+    // other. So a local is looked for in the cursor's file only, which is also the
+    // only place it can appear.
+    let cross_file = matches!(target, Target::Global(_));
+    let mut out = Vec::new();
+    for (m, reachable) in ws.modules_reachable_from(ws.root).into_iter().enumerate() {
+        if !reachable || (!cross_file && m != ws.root) {
+            continue;
+        }
+        let md = &ws.modules[m];
+        let mp = Positions::new(&md.text);
+        for o in occurrences(ws, m) {
+            if o.target != target || (!include_declaration && o.decl) {
+                continue;
+            }
+            out.push((md.path.clone(), root_range(&mp, o.start, o.end)));
+        }
+    }
+    out
 }
 
 /// Occurrences in the root file of the name under the cursor; binding
@@ -862,7 +913,7 @@ pub fn references(ws: &Workspace, pos: Position, include_declaration: bool) -> V
 pub fn highlights(ws: &Workspace, pos: Position) -> Vec<(Range, DocumentHighlightKind)> {
     let text = &ws.modules[ws.root].text;
     let p = Positions::new(text);
-    let occs = occurrences(ws);
+    let occs = occurrences(ws, ws.root);
     let Some(o) = p.offset(pos).and_then(|off| occ_at(&occs, off)) else {
         return vec![];
     };
@@ -1044,7 +1095,7 @@ fn name_completion(ws: &Workspace, offset: usize) -> Vec<CompletionItem> {
     let tc = check_reachable(ws);
     let md = &ws.modules[ws.root];
     let text = &md.text;
-    let mut locals: Vec<CompletionItem> = occurrences(ws)
+    let mut locals: Vec<CompletionItem> = occurrences(ws, ws.root)
         .into_iter()
         .filter(|o| {
             o.decl
@@ -1841,15 +1892,61 @@ mod tests {
         assert!(labels.iter().any(|l| l == "x"), "{labels:?}");
     }
 
+    /// A lambda parameter is not matched across files.
+    ///
+    /// `Target::Local` is the byte offset where the parameter is bound, and an
+    /// offset is only meaningful inside one text. Two files can bind a parameter at
+    /// the same byte — this test builds them so they do — and without a guard the
+    /// one would be reported as a reference to the other. The guard is that a local
+    /// is looked for in the cursor's file only, which is also the only place it can
+    /// appear.
+    #[test]
+    fn a_lambda_parameter_is_not_matched_across_files() {
+        let dir = std::env::temp_dir().join(format!("cagara-lsp-locals-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = "import \"lib.cagara\" as lib\nq = lib.f\nr = x => x\n";
+        // The lambda's `x` binds at byte 41 in the root. `lib.cagara` is padded so
+        // its own lambda binds at byte 41 too — the collision is the point.
+        let at = src.find("r = x").expect("the lambda") + 4;
+        // `f = x => x` puts its `x` four bytes into the line, so the padding before
+        // it is `at - 4` bytes of harmless definitions.
+        let pad = "p = 0\n".repeat((at - 4) / 6);
+        let lib = format!("{pad}{}f = x => x\n", "\n".repeat((at - 4) % 6));
+        assert_eq!(
+            lib.find('x'),
+            Some(at),
+            "the two offsets must collide: {lib:?}"
+        );
+        std::fs::write(dir.join("lib.cagara"), &lib).unwrap();
+        let main = dir.join("main.cagara");
+        let ws = Workspace::open_with(&main, src.to_string());
+        let rs = references(&ws, at_in(src, "r = x", 4), true);
+        let files: Vec<String> = rs
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            files.iter().all(|f| f == "main.cagara"),
+            "a local belongs to one file: {files:?}"
+        );
+        assert_eq!(rs.len(), 2, "the parameter and its use: {rs:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn references_respect_shadowing() {
         let ws = ws();
         // `users` from its use in `q`: the definition and two uses, not the
         // lambda parameter in `shadow`.
+        let ranges = |rs: Vec<(PathBuf, Range)>| rs.into_iter().map(|(_, r)| r).collect::<Vec<_>>();
         let rs = references(&ws, at("q = users", 4), true);
-        assert_eq!(rs, vec![range(0, 0, 5), range(2, 4, 9), range(3, 6, 11)]);
+        assert_eq!(
+            ranges(rs),
+            vec![range(0, 0, 5), range(2, 4, 9), range(3, 6, 11)]
+        );
         let rs = references(&ws, at("q = users", 4), false);
-        assert_eq!(rs, vec![range(2, 4, 9), range(3, 6, 11)]);
+        assert_eq!(ranges(rs), vec![range(2, 4, 9), range(3, 6, 11)]);
         // `x` in `twice`: the parameter and both uses.
         let hs = highlights(&ws, at("=> x", 3));
         let kinds: Vec<_> = hs.iter().map(|(_, k)| *k).collect();

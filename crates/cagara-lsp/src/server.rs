@@ -513,13 +513,17 @@ fn request(
             let p: ReferenceParams = serde_json::from_value(params).map_err(bad_params)?;
             let tp = p.text_document_position;
             let key = doc_key(&tp.text_document.uri);
-            let uri = tp.text_document.uri;
+            // Each reference carries its own path: a use can be in a file that
+            // imports the definition, and a `Location` naming the requesting document
+            // would open the wrong file at a plausible position.
             let locs: Option<Vec<Location>> = state.select(&key).then(|| {
                 analysis::references(&state.ws, tp.position, p.context.include_declaration)
                     .into_iter()
-                    .map(|range| Location {
-                        uri: uri.clone(),
-                        range,
+                    .filter_map(|(path, range)| {
+                        Some(Location {
+                            uri: uri::from_path(&path)?,
+                            range,
+                        })
                     })
                     .collect()
             });
@@ -853,7 +857,7 @@ mod tests {
     // `Notification` of its own, hence the anonymous import.
     use lsp_types::notification::Notification as _;
     use lsp_types::PublishDiagnosticsParams;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::time::Duration;
 
     fn request(id: i32, method: &str, params: serde_json::Value) -> Message {
@@ -924,6 +928,386 @@ mod tests {
             .send(notify("exit", serde_json::Value::Null))
             .unwrap();
         t.join().unwrap().unwrap();
+    }
+
+    /// A running server, driven the way an editor drives it.
+    ///
+    /// The tests around this one each drive one capability or one bug. The
+    /// question here is different: can a *client* reach each capability at all —
+    /// advertised, dispatched, parameter-typed, and answered in the shape the
+    /// protocol says? `analysis::*` has 56 tests that answer "does the analysis
+    /// work"; this answers "does the editor get it", which is the only thing a
+    /// user sees.
+    struct Editor {
+        client: Connection,
+        thread: Option<std::thread::JoinHandle<Result<(), String>>>,
+        next: i32,
+    }
+
+    impl Editor {
+        fn start() -> Self {
+            let (server, client) = Connection::memory();
+            let thread = std::thread::spawn(move || {
+                serve(&server, "0.0.0 (test)").map_err(|e| e.to_string())
+            });
+            let mut ed = Self {
+                client,
+                thread: Some(thread),
+                next: 1,
+            };
+            ed.ask("initialize", json!({ "capabilities": {} }));
+            ed.client
+                .sender
+                .send(notify("initialized", json!({})))
+                .unwrap();
+            ed
+        }
+
+        /// Ask and wait for the answer. A `MethodNotFound` comes back as an
+        /// error object rather than a panic, so the caller can assert on it.
+        fn ask(&mut self, method: &str, params: Value) -> Value {
+            let id = self.next;
+            self.next += 1;
+            self.client
+                .sender
+                .send(request(id, method, params))
+                .expect("send");
+            let r = response(&self.client, id);
+            match r.response_result {
+                Ok(v) => v,
+                Err(e) => json!({ "error": { "code": e.code, "message": e.message } }),
+            }
+        }
+
+        fn open(&mut self, uri: &str, text: &str) {
+            self.client
+                .sender
+                .send(notify(
+                    "textDocument/didOpen",
+                    json!({ "textDocument": {
+                        "uri": uri, "languageId": "cagara", "version": 1, "text": text
+                    } }),
+                ))
+                .expect("didOpen");
+        }
+
+        fn at(uri: &str, line: u32, character: u32) -> Value {
+            json!({ "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character } })
+        }
+
+        fn close(mut self) {
+            self.ask("shutdown", Value::Null);
+            self.client
+                .sender
+                .send(notify("exit", Value::Null))
+                .unwrap();
+            if let Some(t) = self.thread.take() {
+                t.join()
+                    .expect("the server thread ended")
+                    .expect("clean exit");
+            }
+        }
+    }
+
+    const DOC: &str = "users : query { id = int, name = string } = table \"p\" \"users\"\n\
+                       adult = .id >= 18\n\
+                       q = users & where adult & select { id = .id, who = .name }\n";
+    const URI: &str = "file:///nonexistent/cagara-caps/main.cagara";
+
+    /// Every capability the server advertises answers through the protocol.
+    ///
+    /// A capability is advertised in `initialize` and dispatched in `request`;
+    /// nothing checked that the two lists agree, so a method could be advertised
+    /// and answer `MethodNotFound` (the editor greys out a feature that is
+    /// "supported") or be dispatched and never advertised (the editor never asks).
+    /// The list below is the advertised set, and each entry is asked for real.
+    #[test]
+    fn every_advertised_capability_answers() {
+        let mut ed = Editor::start();
+        ed.open(URI, DOC);
+
+        let hover = ed.ask("textDocument/hover", Editor::at(URI, 1, 8));
+        assert!(
+            hover["contents"]["value"]
+                .as_str()
+                .is_some_and(|v| !v.is_empty()),
+            "hover: {hover}"
+        );
+
+        // `adult` on line 1 is defined there and used on line 2.
+        let def = ed.ask("textDocument/definition", Editor::at(URI, 2, 19));
+        assert_eq!(
+            def[0]["range"]["start"]["line"], 1,
+            "definition of `adult`: {def}"
+        );
+
+        let refs = ed.ask(
+            "textDocument/references",
+            json!({ "textDocument": { "uri": URI },
+                    "position": { "line": 1, "character": 2 },
+                    "context": { "includeDeclaration": true } }),
+        );
+        assert!(
+            refs.as_array().is_some_and(|a| a.len() >= 2),
+            "a definition and its use: {refs}"
+        );
+
+        let hl = ed.ask("textDocument/documentHighlight", Editor::at(URI, 1, 2));
+        assert!(
+            hl.as_array().is_some_and(|a| !a.is_empty()),
+            "highlights: {hl}"
+        );
+
+        let syms = ed.ask(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": URI } }),
+        );
+        let names: Vec<&str> = syms
+            .as_array()
+            .expect("symbols")
+            .iter()
+            .filter_map(|s| s["name"].as_str())
+            .collect();
+        assert!(names.contains(&"q"), "{names:?}");
+
+        let items = ed.ask("textDocument/completion", Editor::at(URI, 2, 11));
+        assert!(
+            items.as_array().is_some_and(|a| !a.is_empty()),
+            "completion: {items}"
+        );
+
+        let hints = ed.ask(
+            "textDocument/inlayHint",
+            json!({ "textDocument": { "uri": URI },
+                    "range": { "start": { "line": 0, "character": 0 },
+                               "end": { "line": 3, "character": 0 } } }),
+        );
+        assert!(
+            hints.as_array().is_some_and(|a| !a.is_empty()),
+            "inlay hints: {hints}"
+        );
+
+        let actions = ed.ask(
+            "textDocument/codeAction",
+            json!({ "textDocument": { "uri": URI },
+                    "range": { "start": { "line": 2, "character": 0 },
+                               "end": { "line": 2, "character": 60 } },
+                    "context": { "diagnostics": [] } }),
+        );
+        // This document has no fixable diagnostic, so the right answer is an
+        // empty list — not an error, and not null.
+        assert_eq!(actions, json!([]), "code actions: {actions}");
+
+        // Formatting is asked last: it is the only capability that changes the
+        // document, and every request above is about the text it was opened with.
+        let edits = ed.ask(
+            "textDocument/formatting",
+            json!({ "textDocument": { "uri": URI }, "options": { "tabSize": 2, "insertSpaces": true } }),
+        );
+        assert!(edits.as_array().is_some(), "formatting: {edits}");
+
+        ed.close();
+    }
+
+    /// A capability the server does not advertise is refused, not answered.
+    ///
+    /// Answering an unimplemented request with an empty result is worse than
+    /// refusing it: an editor that asked for a rename would show "no changes"
+    /// and the user would believe it.
+    #[test]
+    fn a_capability_that_is_not_advertised_is_refused() {
+        let mut ed = Editor::start();
+        ed.open(URI, DOC);
+        for method in [
+            "textDocument/rename",
+            "textDocument/signatureHelp",
+            "workspace/symbol",
+            "textDocument/documentColor",
+        ] {
+            let r = ed.ask(method, Editor::at(URI, 1, 8));
+            assert_eq!(
+                r["error"]["code"],
+                ErrorCode::MethodNotFound as i32,
+                "{method} must be refused: {r}"
+            );
+        }
+        ed.close();
+    }
+
+    /// A request for a document the server was never told about gets nothing.
+    ///
+    /// An editor can ask about a file it has not opened yet — a peeked
+    /// definition, a workspace symbol — and the server must answer "nothing"
+    /// rather than analyse whatever document it last selected.
+    #[test]
+    fn a_request_for_an_unopened_document_gets_nothing() {
+        let mut ed = Editor::start();
+        ed.open(URI, DOC);
+        let other = "file:///nonexistent/cagara-caps/other.cagara";
+        for (method, params) in [
+            ("textDocument/hover", Editor::at(other, 0, 0)),
+            (
+                "textDocument/documentSymbol",
+                json!({ "textDocument": { "uri": other } }),
+            ),
+            ("textDocument/completion", Editor::at(other, 0, 0)),
+        ] {
+            let r = ed.ask(method, params);
+            assert!(
+                r.is_null(),
+                "{method} for an unopened document must be null, got {r}"
+            );
+        }
+        ed.close();
+    }
+
+    /// A definition in an imported buffer is found from the file that imports it.
+    ///
+    /// Both buffers are open and unsaved, so the import resolves through the
+    /// workspace the server keeps rather than through the filesystem. That is the
+    /// case an editor is in while a project is being edited, and the one the
+    /// `select`/`rebuild` dance exists for.
+    #[test]
+    fn an_imported_definition_is_found_across_buffers() {
+        let mut ed = Editor::start();
+        let lib = "file:///nonexistent/cagara-caps/lib.cagara";
+        ed.open(lib, "helper = 1\n");
+        ed.open(URI, "import \"lib.cagara\" as lib\nq = lib.helper\n");
+        // `helper` in `lib.helper` is at units 8..14 on line 1.
+        let def = ed.ask("textDocument/definition", Editor::at(URI, 1, 10));
+        let locs = def
+            .as_array()
+            .unwrap_or_else(|| panic!("definition: {def}"));
+        assert_eq!(locs.len(), 1, "{def}");
+        assert!(
+            locs[0]["uri"]
+                .as_str()
+                .is_some_and(|u| u.ends_with("lib.cagara")),
+            "the definition is in the imported file: {def}"
+        );
+        assert_eq!(locs[0]["range"]["start"]["line"], 0, "{def}");
+        ed.close();
+    }
+
+    /// A definition used from another file lists that use.
+    ///
+    /// `textDocument/documentHighlight` is defined per document, so `highlights`
+    /// stays root-only on purpose. A *reference* is not: an editor's "find all
+    /// references" that listed only the file it was asked from would not error, it
+    /// would show a short list — and the user would conclude the definition is
+    /// unused. The locations have to carry their own URIs for the same reason: a
+    /// link naming the requesting document opens the wrong file at a plausible
+    /// position.
+    #[test]
+    fn references_cross_an_import() {
+        let mut ed = Editor::start();
+        let lib = "file:///nonexistent/cagara-caps/lib.cagara";
+        ed.open(lib, "helper = 1\n");
+        ed.open(URI, "import \"lib.cagara\" as lib\nq = lib.helper\n");
+        let refs = ed.ask(
+            "textDocument/references",
+            json!({ "textDocument": { "uri": URI },
+                    "position": { "line": 1, "character": 9 },
+                    "context": { "includeDeclaration": true } }),
+        );
+        let locs = refs
+            .as_array()
+            .unwrap_or_else(|| panic!("references: {refs}"));
+        assert_eq!(locs.len(), 2, "the definition and the use: {refs}");
+        let files: Vec<&str> = locs
+            .iter()
+            .filter_map(|l| l["uri"].as_str())
+            .map(|u| {
+                if u.ends_with("lib.cagara") {
+                    "lib"
+                } else {
+                    "main"
+                }
+            })
+            .collect();
+        assert_eq!(files, ["lib", "main"], "one in each file: {refs}");
+        ed.close();
+    }
+
+    /// A position counts UTF-16 units, all the way through the protocol.
+    ///
+    /// The protocol measures `character` in UTF-16 code units, not bytes and not
+    /// characters. An emoji is one character and two units, so a name after one sits
+    /// one unit further right than a character count would put it — and every request
+    /// that takes a position has to agree. A request that lands one unit off does not
+    /// error: it answers about a *different* name, or about none, which reads as a
+    /// bug in the analysis rather than in the mapping.
+    ///
+    /// The document below puts `q` after an emoji on the same line on purpose. With
+    /// characters instead of units it would be found at 20 rather than 21.
+    #[test]
+    fn a_position_is_measured_in_utf16_units() {
+        let mut ed = Editor::start();
+        let text = "q = 1\nr = \"🎉\" ++ toString q\n";
+        ed.open(URI, text);
+        // `r = "🎉" ++ toString q` — in UTF-16 units the name starts at 21.
+        let def = ed.ask("textDocument/definition", Editor::at(URI, 1, 21));
+        assert_eq!(
+            def[0]["range"]["start"]["line"], 0,
+            "definition of `q` at the UTF-16 column: {def}"
+        );
+        // A character count would put it at 20, which is the space before it.
+        // A character count would put the name at 20, which is the space before it.
+        let off = ed.ask("textDocument/definition", Editor::at(URI, 1, 20));
+        assert!(off.is_null(), "unit 20 is the space, not the name: {off}");
+        ed.close();
+    }
+
+    /// Formatting a half-broken document formats what it can and leaves the rest.
+    ///
+    /// This is the one place the server and `cagara fmt` deliberately disagree, and
+    /// the reason is what happens to the result. The CLI writes to disk, so a file
+    /// it cannot fully understand is reported and left alone — rewriting someone's
+    /// source from a guessed parse is not recoverable. The server hands edits to a
+    /// buffer the user is *mid-keystroke* in, and refusing everything until the file
+    /// parses means format-on-save silently does nothing all day. So it formats the
+    /// definitions that parse and leaves the broken one as written, which is what
+    /// `analysis::format`'s contract says.
+    ///
+    /// Pinned because it looks like a bug from either side: a reader who knows the
+    /// CLI expects a refusal, and a reader who knows the server expects no partial
+    /// edits.
+    #[test]
+    fn formatting_a_half_broken_document_formats_only_what_parses() {
+        let mut ed = Editor::start();
+        ed.open(URI, "q=1\nr = (\n");
+        let r = ed.ask(
+            "textDocument/formatting",
+            json!({ "textDocument": { "uri": URI }, "options": { "tabSize": 2, "insertSpaces": true } }),
+        );
+        let edits = r.as_array().unwrap_or_else(|| panic!("formatting: {r}"));
+        assert_eq!(edits.len(), 1, "one edit for the one formattable line: {r}");
+        assert_eq!(edits[0]["newText"], "q = 1\n", "{r}");
+        // The broken line is outside every edit.
+        assert_eq!(edits[0]["range"]["end"]["line"], 1, "{r}");
+        ed.close();
+    }
+
+    /// A document that is entirely unparseable gets no edits, not an error.
+    ///
+    /// `cagara_fmt::format` succeeds for such a file and returns the text it
+    /// produced with the parse errors beside it, so the server has edits to send
+    /// and must not turn a mid-keystroke buffer into an `InternalError` — clients
+    /// surface that as "the language server crashed".
+    #[test]
+    fn formatting_an_unparseable_document_is_not_an_internal_error() {
+        let mut ed = Editor::start();
+        ed.open(URI, "q = (\n");
+        let r = ed.ask(
+            "textDocument/formatting",
+            json!({ "textDocument": { "uri": URI }, "options": { "tabSize": 2, "insertSpaces": true } }),
+        );
+        assert!(
+            r.is_null() || r.as_array().is_some_and(|a| a.is_empty()),
+            "nothing to format yet: {r}"
+        );
+        ed.close();
     }
 
     #[test]

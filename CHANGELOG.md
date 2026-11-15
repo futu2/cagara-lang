@@ -28,6 +28,16 @@
   drop. A `distinct` still needs the barrier, because dropping a column there changes how many
   rows are deduped. A projection that reuses a sort key's name for another column keeps it too.
 
+- A name borrowed from another language says what this one calls the idea: `null` points at `nothing`,
+  `and` at `&&`, `COUNT` at `count`. `true and false` used to report `cannot apply a value of type bool`
+  — about the `true` the reader got right — and never mention the name that is not a name.
+
+- A swapped pair counts as one edit, so `cuont` suggests `count`. It suggested nothing before: plain
+  edit distance counts a transposition as two, and the bound for a five-letter name is one.
+
+- An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
+  `select { x = upper .id }` does. It named only the operator before.
+
 - A non-ASCII name says which rule it broke. `名字 = .id` was `expected an expression` (the character
   is there) or, inside a record, `expected `}``; both now say identifiers are ASCII.
 

@@ -15,8 +15,8 @@ use crate::checked::CheckedExprNode;
 /// The fold an accumulator performs once its last argument arrives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FoldSpec {
-    /// `rows start end`.
-    Rows,
+    /// `rows start end`, `range start end`, `groups start end`.
+    Frame(crate::ir::FrameUnit),
     /// `preceding n` / `following n`.
     Offset { following: bool },
 }
@@ -35,7 +35,17 @@ pub(crate) fn primitive_value<'a>(
         Prim::Rows => Value::Fold {
             partial: Vec::new(),
             origin,
-            spec: FoldSpec::Rows,
+            spec: FoldSpec::Frame(crate::ir::FrameUnit::Rows),
+        },
+        Prim::Range => Value::Fold {
+            partial: Vec::new(),
+            origin,
+            spec: FoldSpec::Frame(crate::ir::FrameUnit::Range),
+        },
+        Prim::Groups => Value::Fold {
+            partial: Vec::new(),
+            origin,
+            spec: FoldSpec::Frame(crate::ir::FrameUnit::Groups),
         },
         Prim::Preceding => Value::Fold {
             partial: Vec::new(),
@@ -63,7 +73,7 @@ pub(crate) fn fold<'a>(
     let mut args = partial.to_vec();
     args.push(super::value::own(&arg));
     let arity = match spec {
-        FoldSpec::Rows => 2,
+        FoldSpec::Frame(_) => 2,
         FoldSpec::Offset { .. } => 1,
     };
     if args.len() < arity {
@@ -74,16 +84,16 @@ pub(crate) fn fold<'a>(
         });
     }
     match spec {
-        FoldSpec::Rows => {
+        FoldSpec::Frame(unit) => {
             let (Some(Value::Bound(start)), Some(Value::Bound(end))) = (args.first(), args.get(1))
             else {
                 return Err(Control::unsupported(
                     origin,
-                    "`rows` takes two frame bounds",
+                    "a frame takes two frame bounds",
                 ));
             };
             let (start, end) = (*start, *end);
-            crate::checked::frame(start, end)
+            crate::checked::frame(unit, start, end)
                 .map(Value::Frame)
                 .map_err(Control::Program)
         }

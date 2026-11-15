@@ -46,8 +46,29 @@ impl Bound {
 /// A `ROWS BETWEEN start AND end` frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Frame {
+    /// What the bounds count: rows, the order key's values, or peer groups.
+    ///
+    /// The three differ only in what `1 PRECEDING` means, which is why one struct
+    /// carries the unit rather than three structs carrying bounds. `Rows` is the
+    /// default the lowerer writes for an ordered aggregate window; `Range` is what
+    /// SQL itself defaults to, and the reason a running total needs an explicit
+    /// frame (`RANGE … CURRENT ROW` includes the peers of the current row, so a
+    /// repeated order key makes it wrong).
+    pub unit: FrameUnit,
     pub start: Bound,
     pub end: Bound,
+}
+
+/// The unit a frame's bounds are counted in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FrameUnit {
+    /// `ROWS`: offsets are row counts.
+    #[default]
+    Rows,
+    /// `RANGE`: offsets are distances in the order key's value.
+    Range,
+    /// `GROUPS`: offsets are counts of peer groups.
+    Groups,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

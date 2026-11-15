@@ -534,7 +534,7 @@ pub fn window_spec(
 
 /// A `ROWS BETWEEN` frame from two bounds, rejecting impossible ones (the
 /// check for `__rows`).
-pub fn frame(start: Bound, end: Bound) -> Result<Frame, Error> {
+pub fn frame(unit: crate::ir::FrameUnit, start: Bound, end: Bound) -> Result<Frame, Error> {
     if start == Bound::UnboundedFollowing
         || end == Bound::UnboundedPreceding
         || start.key() > end.key()
@@ -543,7 +543,7 @@ pub fn frame(start: Bound, end: Bound) -> Result<Frame, Error> {
             "impossible window frame: {start:?} to {end:?}"
         )));
     }
-    Ok(Frame { start, end })
+    Ok(Frame { unit, start, end })
 }
 
 // ── the shared rules ───────────────────────────────────────────────────────

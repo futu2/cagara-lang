@@ -90,6 +90,40 @@ pub(crate) fn supports_full_join(d: Dialect) -> bool {
     fam(d) != Fam::Mysql
 }
 
+/// Does the target accept a `RANGE` window frame *with the ORDER BY we write*?
+///
+/// Every target accepts one with a single sort key. The question is whether it
+/// accepts the two this compiler writes on the dialects whose `NULLS LAST` is
+/// emulated with a leading `CASE WHEN x IS NULL` key — and three of them do not:
+///
+/// * MariaDB: `RANGE-type frame requires ORDER BY clause with single sort key` (4019).
+/// * T-SQL: the emulation's own output, run through DuckDB, says `RANGE frames must
+///   have only one ORDER BY expression` — so the translated statement would be
+///   refused there too.
+///
+/// So the answer here is "with the ORDER BY we write", not "in principle", and it is
+/// derived from `null_order` rather than from a second list: a dialect needs the
+/// emulation exactly when its entry says there is no `NULLS LAST` syntax. A second
+/// list would be a place for the two to disagree.
+pub(crate) fn supports_range_frame(d: Dialect) -> bool {
+    !matches!(null_order(d), Some((_, _, false)))
+}
+
+/// Does the target have a `GROUPS` window frame?
+///
+/// The MySQL family does not: MariaDB 11.4 rejects `GROUPS BETWEEN 1 PRECEDING AND
+/// CURRENT ROW` with `ERROR 1064 … near 'GROUPS BETWEEN …'`, while `ROWS` and
+/// `RANGE` both run there. Measured, not assumed — the three units are one word apart
+/// in the clause and two of them work, which is exactly the shape that gets assumed
+/// wrong.
+///
+/// So a `groups` frame is refused for MySQL rather than rewritten. Rewriting it as
+/// `RANGE` would be right only when the order key has no peers within the offset,
+/// which is the case the author wrote `groups` to handle.
+pub(crate) fn supports_groups_frame(d: Dialect) -> bool {
+    fam(d) != Fam::Mysql
+}
+
 /// Does the target have `GROUP BY ROLLUP(…)` / `CUBE(…)`?
 ///
 /// Two do not, and for different reasons, so they get different messages:

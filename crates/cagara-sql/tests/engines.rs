@@ -35,6 +35,10 @@ CREATE TABLE main.dupes (id INTEGER, k TEXT);
 INSERT INTO main.dupes VALUES (1, 'x'), (1, 'x'), (2, 'x'), (3, 'y');
 CREATE TABLE main.g (a INTEGER, b INTEGER, n INTEGER);
 INSERT INTO main.g VALUES (1, 1, 1), (1, 2, 2), (2, 1, 3);
+-- Three frame units, told apart by one table: `k` has a peer group at 1 and then a
+-- gap to 5, so a one-unit offset means a different thing in each unit.
+CREATE TABLE main.frames (k INTEGER, n INTEGER);
+INSERT INTO main.frames VALUES (1, 1), (1, 2), (5, 3);
 ";
 
 const TABLES: &str = "\
@@ -46,6 +50,7 @@ kw : query { id = int, order = int, userId = int } = table \"main\" \"select\"
 empty : query { id = int } = table \"main\" \"empty\"
 dupes : query { id = int, k = string } = table \"main\" \"dupes\"
 g : query { a = int, b = int, n = int } = table \"main\" \"g\"
+frames : query { k = int, n = int } = table \"main\" \"frames\"
 ";
 
 /// `(definition, expected rows)`; a row is its columns joined by `|`, NULL
@@ -406,6 +411,32 @@ const CASES: &[(&str, &[&str])] = &[
     (
         "null_aggs = nums & agg { s = sum .v, a = avg .v, lo = min .v, hi = max .v, n = countOf .v, nd = countDistinct .v }",
         &["60|20.0|10|30|3|3"],
+    ),
+    // The three frame units, on one table whose order key has a peer group and then
+    // a gap. `k` is 1, 1, 5 with `n` 1, 2, 3, so "one before" means:
+    //   rows   — the previous row:        1, 3, 5
+    //   range  — keys within 1 of this:   3, 3, 3
+    //   groups — the previous peer group: 3, 3, 6
+    // Three different answers from three spellings of the same clause, which is the
+    // only way to know the unit reached the SQL instead of being dropped.
+    (
+        "frame_rows = frames & select { k = .k, s = over { order = [asc .k], frame = rows (preceding 1) currentRow } (sum .n) } & order [asc .k]",
+        &["1|1", "1|3", "5|5"],
+    ),
+    (
+        "frame_range = frames & select { k = .k, s = over { order = [asc .k], frame = range (preceding 1) currentRow } (sum .n) } & order [asc .k]",
+        &["1|3", "1|3", "5|3"],
+    ),
+    (
+        "frame_groups = frames & select { k = .k, s = over { order = [asc .k], frame = groups (preceding 1) currentRow } (sum .n) } & order [asc .k]",
+        &["1|3", "1|3", "5|6"],
+    ),
+    // An unbounded range frame is the running total *including peers*, so both rows
+    // of the first group share one — where the default `ROWS` frame the lowerer
+    // writes would give them 1 and 3.
+    (
+        "frame_range_running = frames & select { k = .k, s = over { order = [asc .k], frame = range unboundedPreceding currentRow } (sum .n) } & order [asc .k]",
+        &["1|3", "1|3", "5|6"],
     ),
     // A filter over a window folds into `QUALIFY` on DuckDB and into a derived
     // table on PostgreSQL. Same query, same rows — which is the whole claim.
@@ -896,6 +927,7 @@ fn every_statement_is_well_formed_sql() {
     ];
     let mut failures = Vec::new();
     let mut checked = 0;
+    let mut groups_unreadable = 0;
     for d in DIALECTS {
         let dialect = Dialect::from_str(d).expect("dialect");
         for name in &names {
@@ -918,6 +950,21 @@ fn every_statement_is_well_formed_sql() {
                 // `try*` on a dialect without one), not a failure to read back.
                 Err(_) => continue,
             };
+            // A `GROUPS` frame cannot be read back: `sqlglot-rust` 0.10.30's parser
+            // has no `GROUPS` in its frame-unit table, though its AST has
+            // `WindowFrameKind::Groups` and its generator emits the word — which is
+            // why the statement is built as a node and the kind set on it rather than
+            // spelled into the template. So the re-parse check cannot cover this one
+            // construct, and says so instead of being quietly weaker.
+            //
+            // The construct is not unchecked: `each_frame_unit_reaches_the_sql` pins
+            // the spelling, and the engine cases pin the answers on DuckDB and Trino,
+            // which both accept `GROUPS` and both agree. MySQL refuses it by a rule
+            // measured on MariaDB 11.4.
+            if sql.contains("GROUPS BETWEEN") {
+                groups_unreadable += 1;
+                continue;
+            }
             match sqlglot_rust::parse(&sql, dialect) {
                 Ok(_) => checked += 1,
                 Err(e) => failures.push(format!("{d} / `{name}`: {e}\n  {sql}")),
@@ -926,6 +973,10 @@ fn every_statement_is_well_formed_sql() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert!(checked > 500, "only {checked} statements were read back");
+    assert!(
+        groups_unreadable > 0,
+        "no `GROUPS` statement was seen, so the exclusion above is dead and should go"
+    );
 }
 
 /// Each dialect avoids the spellings it cannot read.
@@ -1819,7 +1870,10 @@ fn trino_agrees_when_a_server_is_running() {
                  INSERT INTO main.dupes VALUES (1, 'x'), (1, 'x'), (2, 'x'), (3, 'y')\n\
                  DROP TABLE IF EXISTS main.g\n\
                  CREATE TABLE main.g (a INTEGER, b INTEGER, n INTEGER)\n\
-                 INSERT INTO main.g VALUES (1, 1, 1), (1, 2, 2), (2, 1, 3)\n";
+                 INSERT INTO main.g VALUES (1, 1, 1), (1, 2, 2), (2, 1, 3)\n\
+                 DROP TABLE IF EXISTS main.frames\n\
+                 CREATE TABLE main.frames (k INTEGER, n INTEGER)\n\
+                 INSERT INTO main.frames VALUES (1, 1), (1, 2), (5, 3)\n";
     let trino = Options {
         dialect: Dialect::Trino,
         ..Options::default()
@@ -1921,7 +1975,10 @@ fn mysql_agrees_when_a_server_is_running() {
                  INSERT INTO dupes VALUES (1, 'x'), (1, 'x'), (2, 'x'), (3, 'y')\n\
                  DROP TABLE IF EXISTS g\n\
                  CREATE TABLE g (a INT, b INT, n INT)\n\
-                 INSERT INTO g VALUES (1, 1, 1), (1, 2, 2), (2, 1, 3)\n";
+                 INSERT INTO g VALUES (1, 1, 1), (1, 2, 2), (2, 1, 3)\n\
+                 DROP TABLE IF EXISTS frames\n\
+                 CREATE TABLE frames (k INT, n INT)\n\
+                 INSERT INTO frames VALUES (1, 1), (1, 2), (5, 3)\n";
     let mysql = Options {
         dialect: Dialect::Mysql,
         ..Options::default()
@@ -2590,6 +2647,146 @@ q_twice = nums & markExists dupes (.<id == .>id) \
         Some(Err(m)) => panic!("duckdb: {m}\n  {sql}"),
         None => panic!("duckdb is not installed"),
     }
+}
+
+/// The three frame units are three different clauses, not three spellings of one.
+///
+/// `ROWS`, `RANGE` and `GROUPS` differ only in what an offset counts, so a lowerer
+/// that dropped the unit — writing `ROWS` for all three — would produce SQL that
+/// runs, type-checks and answers a different question. The engine cases above pin
+/// the answers; this pins the spelling, because a dialect that does not have
+/// `GROUPS` needs to say so rather than silently emit `ROWS`.
+#[test]
+fn each_frame_unit_reaches_the_sql() {
+    const DEFS: &str = "\
+f : query { k = int, n = int } = table \"main\" \"frames\"\n\
+r = f & select { s = over { order = [asc .k], frame = rows (preceding 1) currentRow } (sum .n) }\n\
+a = f & select { s = over { order = [asc .k], frame = range (preceding 1) currentRow } (sum .n) }\n\
+g = f & select { s = over { order = [asc .k], frame = groups (preceding 1) currentRow } (sum .n) }\n";
+    let ws = Workspace::from_source(DEFS);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    for (name, unit) in [("r", "ROWS"), ("a", "RANGE"), ("g", "GROUPS")] {
+        let (_, rel) = root_queries(&ws)
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("{name}"));
+        let rel = rel.unwrap_or_else(|d| panic!("{name}: {}", d.message));
+        let sql = compile(&rel, Options::default()).expect(name);
+        assert!(
+            sql.contains(&format!("{unit} BETWEEN")),
+            "{name} should emit {unit}: {sql}"
+        );
+        // And only that unit: `ROWS` is a substring of nothing here, but `RANGE` is
+        // not a substring of `GROUPS`, so the check above is already specific.
+    }
+}
+
+/// The dialects that emulate `NULLS LAST` read `ROWS` and refuse the other two units.
+///
+/// Two different reasons, both measured on a real engine:
+///
+/// * `GROUPS` is a syntax error — `near 'GROUPS BETWEEN …'`. The three units differ
+///   by one word in the clause, which is the shape that gets assumed wrong.
+/// * `RANGE` is *supported*, but only with a single sort key: MariaDB says
+///   `RANGE-type frame requires ORDER BY clause with single sort key` (4019), and the
+///   T-SQL emulation refuses the same thing (`RANGE frames must have only one ORDER BY
+///   expression`). This compiler always writes two there, because `NULLS LAST` is
+///   emulated with a leading `CASE WHEN x IS NULL` key — so a `range` frame and the
+///   emulation cannot both happen, whatever the target supports in principle.
+///
+/// A refusal is better than a rewrite in both cases: `RANGE` would answer the same as
+/// `GROUPS` only when the order key has no peers within the offset, which is the case
+/// `groups` exists to handle.
+#[test]
+fn the_mysql_family_refuses_a_groups_frame() {
+    const DEFS: &str = "\
+f : query { k = int, n = int } = table \"main\" \"frames\"\n\
+g = f & select { s = over { order = [asc .k], frame = groups (preceding 1) currentRow } (sum .n) }\n\
+r = f & select { s = over { order = [asc .k], frame = rows (preceding 1) currentRow } (sum .n) }\n\
+a = f & select { s = over { order = [asc .k], frame = range (preceding 1) currentRow } (sum .n) }\n";
+    let ws = Workspace::from_source(DEFS);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let rel = |n: &str| {
+        let (_, r) = rels
+            .iter()
+            .find(|(name, _)| name == n)
+            .unwrap_or_else(|| panic!("{n}"));
+        r.as_ref()
+            .unwrap_or_else(|d| panic!("{n}: {}", d.message))
+            .clone()
+    };
+    // `GROUPS` is refused by the MySQL family only: T-SQL has it (SQL Server 2022),
+    // and the emulation's own output shows sqlglot carrying the clause through.
+    for d in [Dialect::Mysql, Dialect::SingleStore, Dialect::Doris] {
+        let err = compile(
+            &rel("g"),
+            Options {
+                dialect: d,
+                ..Options::default()
+            },
+        )
+        .expect_err("a `groups` frame must be refused");
+        assert!(err.contains("`groups` window frame"), "{d:?}: {err}");
+        assert!(err.contains("rejects `GROUPS`"), "{d:?}: {err}");
+    }
+    // `range` is refused by every target whose `NULLS LAST` needs the second key —
+    // the MySQL family *and* T-SQL, which is a different list.
+    for d in [
+        Dialect::Mysql,
+        Dialect::SingleStore,
+        Dialect::Doris,
+        Dialect::Tsql,
+    ] {
+        let err = compile(
+            &rel("a"),
+            Options {
+                dialect: d,
+                ..Options::default()
+            },
+        )
+        .expect_err("a `range` frame must be refused");
+        assert!(err.contains("`range` window frame"), "{d:?}: {err}");
+        assert!(err.contains("single sort key"), "{d:?}: {err}");
+    }
+    // `rows` is the one that works everywhere.
+    for d in [
+        Dialect::Mysql,
+        Dialect::SingleStore,
+        Dialect::Doris,
+        Dialect::Tsql,
+    ] {
+        compile(
+            &rel("r"),
+            Options {
+                dialect: d,
+                ..Options::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{d:?} / rows: {e}"));
+    }
+    // A target that has `NULLS LAST` syntax has no second key, so `range` is fine
+    // there — the rule is about the ORDER BY, not about `range` itself.
+    for d in [Dialect::DuckDb, Dialect::Postgres, Dialect::Trino] {
+        compile(
+            &rel("a"),
+            Options {
+                dialect: d,
+                ..Options::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{d:?} / range: {e}"));
+    }
+    // And a target that reads `GROUPS` emits it.
+    let sql = compile(
+        &rel("g"),
+        Options {
+            dialect: Dialect::DuckDb,
+            ..Options::default()
+        },
+    )
+    .expect("duckdb reads GROUPS");
+    assert!(sql.contains("GROUPS BETWEEN"), "{sql}");
 }
 
 /// Postgres, through PGlite — Postgres compiled to WebAssembly and driven by

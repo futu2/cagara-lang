@@ -38,6 +38,43 @@ impl Default for Options {
 /// Validate and compile one query to SQL. The IR and `sql` templates are
 /// ANSI; sqlglot then rewrites them for the target dialect (e.g. `||` →
 /// `CONCAT` for MySQL / T-SQL, `LIMIT` → `TOP` / `FETCH`).
+/// Does any window in this relation use a `RANGE` frame?
+fn has_range_frame(rel: &Rel) -> bool {
+    fn expr(e: &cagara_hir::ir::Expr) -> bool {
+        e.any(&|e| match e {
+            cagara_hir::ir::Expr::Win(_, _, spec) => spec
+                .frame
+                .is_some_and(|f| f.unit == cagara_hir::ir::FrameUnit::Range),
+            _ => false,
+        })
+    }
+    match rel {
+        Rel::Select(_, fields) => fields.iter().any(|(_, e)| expr(e)),
+        _ => rel.children().into_iter().any(has_range_frame),
+    }
+}
+
+/// Does any window in this relation use a `GROUPS` frame?
+///
+/// The frame lives on an expression, not on the relation, so this walks the tree —
+/// the same shape as `has_full_join` and `has_grouping_sets`, and for the same
+/// reason: the rule is about what the statement contains, and only the completed
+/// relation knows that.
+fn has_groups_frame(rel: &Rel) -> bool {
+    fn expr(e: &cagara_hir::ir::Expr) -> bool {
+        e.any(&|e| match e {
+            cagara_hir::ir::Expr::Win(_, _, spec) => spec
+                .frame
+                .is_some_and(|f| f.unit == cagara_hir::ir::FrameUnit::Groups),
+            _ => false,
+        })
+    }
+    match rel {
+        Rel::Select(_, fields) => fields.iter().any(|(_, e)| expr(e)),
+        _ => rel.children().into_iter().any(has_groups_frame),
+    }
+}
+
 /// Does this relation unnest anywhere?
 fn has_unnest(rel: &Rel) -> bool {
     matches!(rel, Rel::Unnest(..)) || rel.children().into_iter().any(has_unnest)
@@ -64,6 +101,34 @@ pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
              no grouping sets"
                 .into()
         });
+    }
+    // A `RANGE` frame needs exactly one sort key, and the MySQL family's `NULLS
+    // LAST` emulation adds a second. So `range` and the emulation cannot both
+    // happen: MariaDB answers `RANGE-type frame requires ORDER BY clause with single
+    // sort key` (4019), measured. Refusing says which of the two to give up; writing
+    // both would be SQL that runs nowhere.
+    //
+    // This is a narrower rule than "MySQL has no `RANGE`": it does, and it works with
+    // a single key. What it cannot have is a *null-ordered* `range` frame, which is
+    // every `range` frame this compiler writes, because a window's sort key is always
+    // spelled `NULLS LAST`.
+    if !dialect::supports_range_frame(opts.dialect) && has_range_frame(rel) {
+        return Err(
+            "a `range` window frame needs a single sort key, and this target's \
+             `NULLS LAST` is emulated with a second one — MariaDB answers `RANGE-type \
+             frame requires ORDER BY clause with single sort key`, and T-SQL's \
+             equivalent refuses it too. Use `rows` for a row count, or `groups` on a \
+             target that has it"
+                .into(),
+        );
+    }
+    if !dialect::supports_groups_frame(opts.dialect) && has_groups_frame(rel) {
+        return Err(
+            "a `groups` window frame is not supported by the MySQL dialect family: it \
+             reads `ROWS` and `RANGE` and rejects `GROUPS`. Use `rows` for a row \
+             count, or `range` when a distance in the order key is what is meant"
+                .into(),
+        );
     }
     // `unnest` is a relational node, so its refusal is here rather than in the
     // intrinsic pass: the lowerer has no dialect, and the wording belongs with

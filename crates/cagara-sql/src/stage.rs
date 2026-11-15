@@ -851,6 +851,27 @@ fn frame_sensitive(sql: &str) -> bool {
         .any(|f| head.starts_with(f))
 }
 
+/// Set the frame kind on the window function in `e`.
+///
+/// The parser does not accept `GROUPS`, so the clause is written as `ROWS` and the
+/// kind is corrected here. There are *two* window-bearing variants — a plain
+/// `Function` and a `TypedFunction`, which is what an aggregate like `SUM` becomes —
+/// and missing the second is why the first version of this did nothing.
+fn set_frame_kind(
+    mut e: sqlglot_rust::ast::Expr,
+    kind: sqlglot_rust::ast::WindowFrameKind,
+) -> sqlglot_rust::ast::Expr {
+    let spec = match &mut e {
+        sqlglot_rust::ast::Expr::Function { over, .. }
+        | sqlglot_rust::ast::Expr::TypedFunction { over, .. } => over,
+        _ => return e,
+    };
+    if let Some(frame) = spec.as_mut().and_then(|s| s.frame.as_mut()) {
+        frame.kind = kind;
+    }
+    e
+}
+
 fn bound(b: Bound) -> String {
     match b {
         Bound::UnboundedPreceding => "UNBOUNDED PRECEDING".into(),
@@ -946,16 +967,37 @@ pub fn lower_expr(e: &ir::Expr, r: &Resolver) -> Result<Expr, String> {
             // order key repeats.
             let frame = spec.frame.or_else(|| {
                 (!spec.order.is_empty() && frame_sensitive(sql)).then_some(ir::Frame {
+                    unit: ir::FrameUnit::Rows,
                     start: Bound::UnboundedPreceding,
                     end: Bound::CurrentRow,
                 })
             });
             if let Some(f) = frame {
+                // The unit is part of the clause: `ROWS` counts rows, `RANGE` counts
+                // the order key's values, `GROUPS` counts peer groups. Writing `ROWS`
+                // for all three would silently change what `1 PRECEDING` means.
+                //
+                // `GROUPS` is spelled `ROWS` in the text handed to the parser, which
+                // does not accept the keyword, and then set on the parsed node —
+                // `WindowFrameKind::Groups` exists and the generator emits it, so the
+                // gap is in one table in the parser and not in the model. Text is a
+                // lossy way to build an expression, and this is where that shows.
+                let groups = f.unit == ir::FrameUnit::Groups;
+                let unit = match f.unit {
+                    ir::FrameUnit::Rows | ir::FrameUnit::Groups => "ROWS",
+                    ir::FrameUnit::Range => "RANGE",
+                };
                 over.push(format!(
-                    "ROWS BETWEEN {} AND {}",
+                    "{unit} BETWEEN {} AND {}",
                     bound(f.start),
                     bound(f.end)
                 ));
+                let e = template(&format!("{sql} OVER ({})", over.join(" ")), args)?;
+                return Ok(if groups {
+                    set_frame_kind(e, sqlglot_rust::ast::WindowFrameKind::Groups)
+                } else {
+                    e
+                });
             }
             template(&format!("{sql} OVER ({})", over.join(" ")), args)
         }

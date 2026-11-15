@@ -3055,7 +3055,7 @@ impl<'w> Checker<'w> {
                 let (r, a) = (self.fresh(), self.fresh());
                 fun(expr(con("row"), r.clone(), a), sortkey(r))
             }
-            Rows => fun(con("bound"), fun(con("bound"), con("frame"))),
+            Rows | Range | Groups => fun(con("bound"), fun(con("bound"), con("frame"))),
             UnboundedPreceding | UnboundedFollowing | CurrentRow => con("bound"),
             Preceding | Following => fun(i, con("bound")),
             // `prefix "s"` / `suffix "s"` rename every column. The rule is

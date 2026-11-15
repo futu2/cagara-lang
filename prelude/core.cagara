@@ -555,10 +555,31 @@ cumeDist : winspec r -> win (expr r float) = sql "CUME_DIST()"
 
 # ── window frames ─────────────────────────────────────────────────────────
 
-## `rows start end`: a frame counted in rows rather than in peer groups —
+## `rows start end`: a frame counted in rows —
 ## `rows unboundedPreceding currentRow` is the running total. The spec's
 ## `frame` field is where the two bounds go.
+##
+## The three units differ in what an offset *counts*, which is why there are three
+## constructors rather than one: `rows (preceding 1)` is the row before, `range
+## (preceding 1)` is every row whose order key is within 1 of this one, and `groups
+## (preceding 1)` is the previous peer group. `range` needs exactly one order key,
+## and that key has to be something a distance makes sense for — a number or a date,
+## not a string.
 rows : bound -> bound -> frame = primitive "__rows"
+
+## `range start end`: a frame counted in the order key's *values*. With no order
+## key, `range` covers the whole partition (every row is a peer of every other).
+##
+## This is what SQL itself defaults to, which is why a running total over a repeated
+## order key needs `rows` instead: `range unboundedPreceding currentRow` includes
+## every peer of the current row, so a tie gives several rows the same running total.
+range : bound -> bound -> frame = primitive "__range"
+
+## `groups start end`: a frame counted in peer groups. `groups (preceding 1)
+## currentRow` is this group and the one before it, whatever their sizes.
+##
+## Needs an order key, because "the previous group" is defined by the sort.
+groups : bound -> bound -> frame = primitive "__groups"
 
 ## Frame bound: the start of the partition, with no limit.
 unboundedPreceding : bound = primitive "__unboundedPreceding"

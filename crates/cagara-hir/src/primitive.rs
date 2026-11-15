@@ -54,6 +54,10 @@ pub enum Prim {
     Asc,
     Desc,
     Rows,
+    /// `range start end`: a frame counted in the order key's *values*.
+    Range,
+    /// `groups start end`: a frame counted in peer groups.
+    Groups,
     UnboundedPreceding,
     UnboundedFollowing,
     CurrentRow,
@@ -109,6 +113,8 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__asc", Prim::Asc),
     ("__desc", Prim::Desc),
     ("__rows", Prim::Rows),
+    ("__range", Prim::Range),
+    ("__groups", Prim::Groups),
     ("__unboundedPreceding", Prim::UnboundedPreceding),
     ("__unboundedFollowing", Prim::UnboundedFollowing),
     ("__currentRow", Prim::CurrentRow),
@@ -163,7 +169,7 @@ impl Prim {
             UnboundedPreceding | UnboundedFollowing | CurrentRow => 0,
             Group | Rollup | Cube | Asc | Desc | Preceding | Following => 1,
             Where | Unnest | Select | Update | Omit | AggStage | Order | Limit | Offset | Table
-            | Rows | Prefix | Suffix | Merge | MapValue | Lift => 2,
+            | Rows | Range | Groups | Prefix | Suffix | Merge | MapValue | Lift => 2,
             Distinct => 1,
             In => 2,
             Join(_) | MarkExists => 3,

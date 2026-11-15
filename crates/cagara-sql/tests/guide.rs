@@ -199,3 +199,61 @@ fn the_guide_teaches_every_operator_the_language_has() {
         );
     }
 }
+
+/// A shorthand and the stage it names are the same query.
+///
+/// The table above says `&-` *means* `limit`; this says the two spellings produce
+/// the same SQL. They are different claims, and the difference is the `&^` bug: the
+/// table was right about the symbol existing and the prelude was wrong about what it
+/// did, so a reader who copied the guide's own example got a type error on a symbol
+/// the guide had just taught them.
+///
+/// The invariant is the language's own: every stage takes the query last, so
+/// `q & stage p` and `stage p q` are the same expression. If the prelude's body were
+/// `q => n => offset n q`, the two spellings would differ — and nothing else would
+/// notice, because both compile.
+///
+/// The cases are the shorthands whose stage takes one *expression* argument, because
+/// those are the ones two spellings can share verbatim. `&|` takes a list of sort
+/// keys and reads them from the other side (`&|` is `q => ks => order ks q`), so the
+/// two spellings are not `X arg t`; the set operations take a query. All of them are
+/// covered by `CASES` in `engines.rs`, and by the table test above for their names.
+#[test]
+fn a_shorthand_and_its_stage_are_the_same_query() {
+    const TABLE: &str =
+        "t : query { id = int, a = int, v = maybe int } = table \"main\" \"nums\"\n";
+    // The three that take one witness argument: the query is the *last* parameter,
+    // so `t &X p` is `X p t`.
+    for (symbol, stage, arg) in [("&?", "where", "(.a > 1)"), ("&-", "limit", "2")] {
+        let src = format!(
+            "{TABLE}short = t {symbol} {arg}\n\
+             long = {stage} {arg} t\n"
+        );
+        let ws = cagara_hir::Workspace::from_source(&src);
+        assert!(ws.diags.is_empty(), "{symbol}: {:?}", ws.diags);
+        let rels = cagara_hir::root_queries(&ws);
+        let sql = |n: &str| {
+            let (_, r) = rels
+                .iter()
+                .find(|(name, _)| name == n)
+                .unwrap_or_else(|| panic!("{n}"));
+            let rel = r
+                .as_ref()
+                .unwrap_or_else(|d| panic!("{symbol} / {n}: {}", d.message));
+            cagara_sql::compile(
+                rel,
+                cagara_sql::Options {
+                    dialect: cagara_sql::Dialect::DuckDb,
+                    ..cagara_sql::Options::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{symbol} / {n}: {e}"))
+        };
+        assert_eq!(
+            sql("short"),
+            sql("long"),
+            "`{symbol}` and `{stage}` disagree: the prelude's body does not match \
+             the stage the guide names"
+        );
+    }
+}

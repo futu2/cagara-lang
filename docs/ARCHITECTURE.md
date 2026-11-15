@@ -105,7 +105,7 @@ anything above it.
 | `cagara-hir` | resolution, the checker, the typed core, the normalizer, the relational arena, erasure to `Rel`, schema validation | syntax |
 | `cagara-sql` | `Rel` → SQL: `rewrite` (`Rel` → `Rel`), `lower` (`Rel` → `Stage`), `stage` (`Stage` → statement), `dialect` (statement → target), `intrinsics` (the `CAGARA_*` templates) | hir |
 | `cagara-fmt` | source formatting, on the lossless rowan tree | syntax |
-| `cagara-lsp` | diagnostics, hover, completion, code actions, inlay hints, rename — all read the same `Workspace` the CLI does | hir, syntax, fmt |
+| `cagara-lsp` | diagnostics, hover, completion, code actions, inlay hints, rename, folding ranges, semantic tokens — all read the same `Workspace` the CLI does | hir, syntax, fmt |
 | `cagara-cli` | one module per subcommand (`main` for the file compiler, `fmt`, `check`, `doc`) | everything |
 
 Two rules keep that table true, and both are cheap to check:

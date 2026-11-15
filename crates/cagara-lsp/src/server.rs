@@ -11,20 +11,24 @@ use lsp_types::notification::{
     DidSaveTextDocument, LogMessage, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest, Formatting,
-    GotoDefinition, HoverRequest, InlayHintRequest, PrepareRenameRequest, References, Rename,
-    Request as _,
+    CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest,
+    FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest, InlayHintRequest,
+    PrepareRenameRequest, References, Rename, Request as _, SemanticTokensFullRequest,
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticSeverity, DocumentFormattingParams, DocumentHighlight,
-    DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
+    DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
+    FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability, InlayHint,
     InlayHintKind, InlayHintLabel, InlayHintParams, Location, LogMessageParams, MarkupContent,
     MarkupKind, MessageType, OneOf, PrepareRenameResponse, PublishDiagnosticsParams,
-    ReferenceParams, RenameOptions, RenameParams, ServerCapabilities, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri, WorkspaceEdit,
+    ReferenceParams, RenameOptions, RenameParams, SemanticToken, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    WorkspaceEdit,
 };
 use std::collections::HashMap;
 use std::error::Error;
@@ -187,6 +191,26 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
         document_highlight_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
+        // Definitions whose body spans lines, `##` doc blocks, and `catalog` blocks.
+        // A file of table declarations is otherwise a wall of text an editor cannot
+        // collapse.
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        // Only what a grammar cannot know: whether a name is a table, a column, a
+        // parameter or a function is resolution, not spelling.
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                legend: SemanticTokensLegend {
+                    token_types: analysis::TOKEN_TYPES
+                        .iter()
+                        .map(|t| SemanticTokenType::new(t))
+                        .collect(),
+                    token_modifiers: Vec::new(),
+                },
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+                range: Some(false),
+                ..Default::default()
+            },
+        )),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         // The inferred type of a definition that does not write one, at the end
         // of its name (`analysis::type_hints`).
@@ -589,6 +613,39 @@ fn request(
                 // rename happened.
                 analysis::Rename::Refused(why) => Err((ErrorCode::InvalidRequest, why)),
             }
+        }
+        SemanticTokensFullRequest::METHOD => {
+            let p: SemanticTokensParams = serde_json::from_value(params).map_err(bad_params)?;
+            let key = doc_key(&p.text_document.uri);
+            let data: Option<SemanticTokensResult> = state.select(&key).then(|| {
+                let tokens = analysis::semantic_tokens(&state.ws);
+                SemanticTokensResult::Tokens(SemanticTokens {
+                    result_id: None,
+                    data: analysis::encode_tokens(&tokens)
+                        .into_iter()
+                        .map(
+                            |[delta_line, delta_start, length, token_type, token_modifiers]| {
+                                SemanticToken {
+                                    delta_line,
+                                    delta_start,
+                                    length,
+                                    token_type,
+                                    token_modifiers_bitset: token_modifiers,
+                                }
+                            },
+                        )
+                        .collect(),
+                })
+            });
+            json(serde_json::to_value(data))
+        }
+        FoldingRangeRequest::METHOD => {
+            let p: FoldingRangeParams = serde_json::from_value(params).map_err(bad_params)?;
+            let key = doc_key(&p.text_document.uri);
+            let ranges: Option<Vec<FoldingRange>> = state
+                .select(&key)
+                .then(|| analysis::folding_ranges(&state.ws));
+            json(serde_json::to_value(ranges))
         }
         DocumentHighlightRequest::METHOD => {
             let p: DocumentHighlightParams = serde_json::from_value(params).map_err(bad_params)?;
@@ -1136,6 +1193,28 @@ mod tests {
             edits.len() >= 2,
             "the definition and its use are both renamed: {ren}"
         );
+
+        // `foldingRange` and `semanticTokens` are asked through the protocol too: an
+        // advertised capability that only its analysis test reaches is advertised and
+        // untested, which is what this test exists to prevent.
+        let folds = ed.ask(
+            "textDocument/foldingRange",
+            json!({ "textDocument": { "uri": URI } }),
+        );
+        assert!(folds.as_array().is_some(), "foldingRange: {folds}");
+
+        let toks = ed.ask(
+            "textDocument/semanticTokens/full",
+            json!({ "textDocument": { "uri": URI } }),
+        );
+        let data = toks["data"]
+            .as_array()
+            .unwrap_or_else(|| panic!("semanticTokens: {toks}"));
+        assert!(!data.is_empty(), "semanticTokens: {toks}");
+        // On the wire it is one flat array of five-number groups, not an array of
+        // arrays — that is `SemanticToken`'s own serialization, and getting it wrong
+        // here would mean testing a shape the editor never sees.
+        assert_eq!(data.len() % 5, 0, "five numbers per token: {toks}");
 
         let hl = ed.ask("textDocument/documentHighlight", Editor::at(URI, 1, 2));
         assert!(

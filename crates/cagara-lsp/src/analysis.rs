@@ -13,6 +13,7 @@ use lsp_types::{
     CompletionItem, CompletionItemKind, DocumentHighlightKind, DocumentSymbol, Position, Range,
     SymbolKind, TextEdit,
 };
+use lsp_types::{FoldingRange, FoldingRangeKind};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -856,6 +857,213 @@ pub fn definition(ws: &Workspace, pos: Position) -> Vec<(PathBuf, Range)> {
             (md.path.clone(), range)
         })
         .collect()
+}
+
+/// The token types this server reports, in the order its indices refer to.
+///
+/// Only what a grammar cannot know is here. A TextMate grammar already highlights
+/// strings, numbers and comments — they are lexical, and the editor does that well.
+/// What it cannot know is whether `users` in `.name` is a table, a column or a
+/// parameter: that is *resolution*, and it is the only thing worth sending.
+pub const TOKEN_TYPES: &[&str] = &["function", "variable", "parameter", "namespace", "type"];
+
+const TY_FUNCTION: u32 = 0;
+const TY_VARIABLE: u32 = 1;
+const TY_PARAMETER: u32 = 2;
+const TY_NAMESPACE: u32 = 3;
+const TY_TYPE: u32 = 4;
+
+/// One semantic token, in source order, before delta encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Token {
+    pub line: u32,
+    pub start: u32,
+    /// Length in UTF-16 units, which is what the protocol counts.
+    pub len: u32,
+    pub kind: u32,
+}
+
+/// The resolved names in the root file, classified.
+///
+/// The classification is `occurrences`' own: a lambda parameter is a `parameter`, an
+/// import alias is a `namespace`, a definition's name or use is a `function` when its
+/// type is one and a `variable` when it is not, and a name that resolves to nothing —
+/// a column, a record field — is a `property`. The last one is the common case and the
+/// reason this exists at all: a column is not bound, so nothing but the checker knows
+/// it is a column rather than a name that happens to be spelled that way.
+pub fn semantic_tokens(ws: &Workspace) -> Vec<Token> {
+    let md = &ws.modules[ws.root];
+    let p = Positions::new(&md.text);
+    let tc = check_reachable(ws);
+    let mut out: Vec<Token> = Vec::new();
+    for o in occurrences(ws, ws.root) {
+        let kind = match &o.target {
+            Target::Local(_) => TY_PARAMETER,
+            Target::Global(Binding::Module(_)) => TY_NAMESPACE,
+            Target::Global(b @ (Binding::Def(..) | Binding::Overloads(..))) => {
+                // An overload set is one name with several signatures; the first is
+                // enough to say whether it is applied, which is all this decides.
+                let (m, first) = match b {
+                    Binding::Def(m, i) => (*m, Some(*i)),
+                    Binding::Overloads(m, is) => (*m, is.first().copied()),
+                    Binding::Module(_) => unreachable!("matched on Def or Overloads"),
+                };
+                let rendered = first.and_then(|i| tc.type_of(m, i));
+                match rendered {
+                    Some(t) if t.contains("->") => TY_FUNCTION,
+                    Some(_) => TY_VARIABLE,
+                    // No recorded type: the definition is broken, and guessing would
+                    // colour it wrongly with confidence. `type` is the neutral choice.
+                    None => TY_TYPE,
+                }
+            } // `Binding` has exactly three variants and all three are handled above, so
+              // there is no fallback. A column is *not* an occurrence at all — it has no
+              // binding — so it never reaches this function, which is why there is no
+              // "column" token type: the grammar colours those, and a type nothing can
+              // produce would be a lie in the legend.
+        };
+        let start = p.position(o.start);
+        let end = p.position(o.end);
+        // A name does not span lines, so the length is the difference on one line.
+        out.push(Token {
+            line: start.line,
+            start: start.character,
+            len: end.character.saturating_sub(start.character),
+            kind,
+        });
+    }
+    // The protocol requires source order, and `occurrences` returns them in the order
+    // it resolved them, which is not the same thing.
+    out.sort_by_key(|t| (t.line, t.start));
+    out
+}
+
+/// Delta-encode tokens the way `SemanticTokens.data` wants them.
+///
+/// Each token is `[deltaLine, deltaStart, length, tokenType, tokenModifiers]`, where
+/// `deltaStart` is relative to the previous token *on the same line* and absolute when
+/// the line changed. Getting that wrong is the classic semantic-token bug: the editor
+/// paints the file correctly for the first line and progressively further off after
+/// that.
+pub fn encode_tokens(tokens: &[Token]) -> Vec<[u32; 5]> {
+    let mut out = Vec::with_capacity(tokens.len());
+    let (mut prev_line, mut prev_start) = (0u32, 0u32);
+    for t in tokens {
+        let delta_line = t.line - prev_line;
+        let delta_start = if delta_line == 0 {
+            t.start - prev_start
+        } else {
+            t.start
+        };
+        out.push([delta_line, delta_start, t.len, t.kind, 0]);
+        prev_line = t.line;
+        prev_start = t.start;
+    }
+    out
+}
+
+/// The regions of the root file an editor should be able to fold.
+///
+/// Three kinds, because they are the three things a reader collapses for different
+/// reasons:
+///
+/// - a **definition** whose body runs over more than one line. The range starts at the
+///   definition's name, not at its type: folding `q : query { … } = …` should keep `q`
+///   visible, which is what an outline of the file is for.
+/// - a **`##` doc block**, which is prose and usually the longest thing in the file.
+///   `FoldingRangeKind::Comment` is what lets an editor offer "fold all comments"
+///   separately from "fold all definitions".
+/// - a **`catalog` declaration**, which is a schema's worth of tables in one block.
+///
+/// A one-line definition gets no range. An editor given a range whose start and end are
+/// the same line either ignores it or folds a line into itself, and neither is a fold
+/// the reader asked for.
+pub fn folding_ranges(ws: &Workspace) -> Vec<FoldingRange> {
+    let md = &ws.modules[ws.root];
+    let text = &md.text;
+    let p = Positions::new(text);
+    let mut out: Vec<FoldingRange> = Vec::new();
+    for d in &md.module.defs {
+        let start = p.position(d.span.start as usize);
+        let end = p.position(d.span.end as usize);
+        if end.line > start.line {
+            out.push(FoldingRange {
+                start_line: start.line,
+                start_character: Some(start.character),
+                end_line: end.line,
+                // The body's last line is often `}`, and folding *through* the brace
+                // reads better than folding up to it: the closing line is what tells
+                // the reader the block ended.
+                end_character: Some(end.character),
+                kind: None,
+                collapsed_text: None,
+            });
+        }
+    }
+    // A `catalog "schema" { … }` block. It does not survive lowering as one node —
+    // each entry becomes its own table definition — so the *parse tree* is where the
+    // block still exists as a block. Re-parsing here is cheap (the file was parsed to
+    // open it) and keeps this function independent of how the AST is shaped.
+    {
+        let parse = cagara_syntax::parse(text);
+        for node in parse.syntax().descendants() {
+            if node.kind() != cagara_syntax::SyntaxKind::CatalogDecl {
+                continue;
+            }
+            let r = node.text_range();
+            let start = p.position(u32::from(r.start()) as usize);
+            let end = p.position(u32::from(r.end()) as usize);
+            if end.line > start.line {
+                out.push(FoldingRange {
+                    start_line: start.line,
+                    start_character: Some(start.character),
+                    end_line: end.line,
+                    end_character: Some(end.character),
+                    kind: None,
+                    collapsed_text: None,
+                });
+            }
+        }
+    }
+    // The `##` blocks. A block is a run of lines each starting with `##` after
+    // indentation; `starts_its_line` is the same rule `cagara_syntax::docs` uses to
+    // decide what documents what, so a block folded here is a block that is read as
+    // documentation there.
+    let mut run: Option<(usize, usize)> = None;
+    for (i, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("##") {
+            run = match run {
+                Some((first, _)) => Some((first, i)),
+                None => Some((i, i)),
+            };
+        } else if let Some((first, last)) = run.take() {
+            if last > first {
+                out.push(FoldingRange {
+                    start_line: first as u32,
+                    start_character: None,
+                    end_line: last as u32,
+                    end_character: None,
+                    kind: Some(FoldingRangeKind::Comment),
+                    collapsed_text: None,
+                });
+            }
+        }
+    }
+    if let Some((first, last)) = run {
+        if last > first {
+            out.push(FoldingRange {
+                start_line: first as u32,
+                start_character: None,
+                end_line: last as u32,
+                end_character: None,
+                kind: Some(FoldingRangeKind::Comment),
+                collapsed_text: None,
+            });
+        }
+    }
+    out.sort_by_key(|r| (r.start_line, r.end_line));
+    out
 }
 
 /// Every place that refers to the name under the cursor, in any open file.
@@ -2254,6 +2462,127 @@ mod tests {
         );
         assert!(prepare_rename(&ws, at(".age >= 18", 1)).is_err());
         assert!(prepare_rename(&ws, at("sum .age", 1)).is_err());
+    }
+
+    /// Folding: the multi-line definitions, the `##` blocks, and nothing else.
+    ///
+    /// A one-line definition gets no range, because an editor given a range whose
+    /// start and end are the same line folds a line into itself. In `SRC` that is
+    /// `adult`, `q`, `bad`, `twice` and `shadow` — every definition is one line — so
+    /// the only ranges are the doc blocks of the source below.
+    /// Semantic tokens classify names by what they *are*, not by how they look.
+    ///
+    /// `users` appears three times in `SRC` and means the same thing each time, so it
+    /// is coloured the same. `x` in `twice` is a parameter, `age` in `.age` is a column
+    /// (a `property`), and the point of the whole feature is that last one: nothing
+    /// lexical can tell a column from a definition.
+    #[test]
+    fn semantic_tokens_classify_names() {
+        let ws = ws();
+        let tokens = semantic_tokens(&ws);
+        let kind_at = |line: u32, start: u32| {
+            tokens
+                .iter()
+                .find(|t| t.line == line && t.start == start)
+                .map(|t| t.kind)
+                .unwrap_or_else(|| panic!("no token at {line}:{start}: {tokens:?}"))
+        };
+        // `users` on line 0 is a definition whose type is a query, so a variable;
+        // `adult` on line 1 is a predicate, also a variable.
+        assert_eq!(kind_at(0, 0), TY_VARIABLE, "`users`: {tokens:?}");
+        assert_eq!(kind_at(1, 0), TY_VARIABLE, "`adult`: {tokens:?}");
+        // `x` in `twice` is a lambda parameter.
+        assert_eq!(kind_at(4, 8), TY_PARAMETER, "`x`: {tokens:?}");
+        // `sum` is a prelude function, applied to an argument.
+        assert_eq!(kind_at(2, 36), TY_FUNCTION, "`sum`: {tokens:?}");
+    }
+
+    /// Delta encoding is relative to the previous token on the same line only.
+    ///
+    /// This is the classic semantic-token bug: use an absolute start everywhere and the
+    /// first line looks right while every later line is progressively further off. The
+    /// assertion is on the encoded numbers, because that is what the editor reads.
+    #[test]
+    fn semantic_token_deltas_reset_on_a_new_line() {
+        let tokens = vec![
+            Token {
+                line: 0,
+                start: 2,
+                len: 1,
+                kind: 0,
+            },
+            Token {
+                line: 0,
+                start: 9,
+                len: 3,
+                kind: 1,
+            },
+            Token {
+                line: 2,
+                start: 4,
+                len: 2,
+                kind: 2,
+            },
+        ];
+        assert_eq!(
+            encode_tokens(&tokens),
+            vec![[0, 2, 1, 0, 0], [0, 7, 3, 1, 0], [2, 4, 2, 2, 0]],
+            "the third token's start is absolute because the line changed"
+        );
+    }
+
+    #[test]
+    fn folding_covers_definitions_and_doc_blocks() {
+        let src = "## A file about users.\n\
+                   ## It spans two lines.\n\
+                   users : query { id = int, name = string } = table \"p\" \"users\"\n\
+                   q = users & select {\n\
+                   \x20 id = .id,\n\
+                   \x20 name = .name,\n\
+                   }\n\
+                   r = users\n";
+        let ws = Workspace::from_source(src);
+        assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+        let fs = folding_ranges(&ws);
+        // The doc block on lines 0..1, as a comment range.
+        assert!(
+            fs.iter().any(|f| f.start_line == 0
+                && f.end_line == 1
+                && f.kind == Some(FoldingRangeKind::Comment)),
+            "the `##` block: {fs:?}"
+        );
+        // `q` spans lines 3..6. Its range starts at the name, so `q` stays visible.
+        let q = fs
+            .iter()
+            .find(|f| f.start_line == 3)
+            .unwrap_or_else(|| panic!("no fold for `q`: {fs:?}"));
+        assert_eq!(q.end_line, 6, "{q:?}");
+        assert_eq!(q.kind, None, "a definition is not a comment: {q:?}");
+        // `users` and `r` are one line each, so they get no range.
+        assert!(
+            !fs.iter().any(|f| f.start_line == 2 || f.start_line == 7),
+            "one-line definitions are not foldable: {fs:?}"
+        );
+    }
+
+    /// A `catalog` block folds as one unit, even though it lowers to many definitions.
+    ///
+    /// This is the case the AST cannot answer: `catalog "s" { a = {…} b = {…} }` becomes
+    /// one table definition per entry, so the block no longer exists after lowering. The
+    /// parse tree still has it.
+    #[test]
+    fn folding_covers_a_catalog_block() {
+        let src = "catalog \"s\" {\n\
+                   \x20 users = { id = int },\n\
+                   \x20 orders = { id = int },\n\
+                   }\n";
+        let ws = Workspace::from_source(src);
+        assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+        let fs = folding_ranges(&ws);
+        assert!(
+            fs.iter().any(|f| f.start_line == 0 && f.end_line == 3),
+            "the whole catalog block: {fs:?}"
+        );
     }
 
     #[test]

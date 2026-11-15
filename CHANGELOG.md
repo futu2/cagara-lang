@@ -38,6 +38,19 @@
 - An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
   `select { x = upper .id }` does. It named only the operator before.
 
+- The language server answers `textDocument/rename` and `textDocument/prepareRename`: a definition's
+  name is rewritten with every use of it, in every file that imports it, and a lambda parameter's
+  name within its scope. It refuses the prelude's names, a name already in use, a parameter whose new
+  name would capture a use, and anything that is not a name — each with a sentence saying which.
+
+- The language server answers `textDocument/foldingRange` (multi-line definitions, `##` doc blocks,
+  `catalog` blocks) and `textDocument/semanticTokens/full` (whether a name is a function, a variable,
+  a parameter or an import alias — the part a grammar cannot know).
+
+- A lowering refusal names the stage it is about instead of `0:0`. `cagara check` and `cagara --only`
+  print the line and column, and a dialect refusal underlines the construct that is refused
+  (`fullJoin`, a `rollup` key, a `groups` frame).
+
 - `union`, `unionAll`, `intersect` and `except` align their two sides **by name**, so `{ id, name }`
   and `{ name, id }` are the same row written differently. The answer keeps the order of the operand
   written first (`a & union b` answers in `a`'s order). Before, the same order was required and the

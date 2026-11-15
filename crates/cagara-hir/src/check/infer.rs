@@ -563,7 +563,7 @@ impl<'w> Checker<'w> {
                 sp,
             )) = self.first_unsatisfiable()
             {
-                let msg = self.no_overload_message(module, &name, &cands, &target);
+                let msg = self.no_overload_at(module, &name, &cands, &target, sp);
                 return Err(TyErr {
                     span: sp,
                     msg,
@@ -2668,6 +2668,45 @@ impl<'w> Checker<'w> {
         None
     }
 
+    /// `no overload` for a use at `sp`, labelled with the field it is in.
+    ///
+    /// An overload failure is reported when the constraint is solved, which is long
+    /// after the projection field holding it was checked — so the message named the
+    /// operator and not the field. `select { x = .name + 1 }` and
+    /// `select { x = upper .id }` are the same mistake in the same place and read
+    /// differently: one says which field, the other does not. The field spans are
+    /// already kept (for the nullable rewrite); this asks them which field holds
+    /// this use.
+    fn no_overload_at(
+        &mut self,
+        module: usize,
+        name: &str,
+        cands: &[usize],
+        target: &Ty,
+        sp: Span,
+    ) -> String {
+        let msg = self.no_overload_message(module, name, cands, target);
+        match self.field_label(sp) {
+            Some(l) => format!("field `{l}`: {msg}"),
+            None => msg,
+        }
+    }
+
+    /// The projection field whose expression contains `sp`, if any.
+    ///
+    /// `field_spans` is keyed by the record literal's span and was added for the
+    /// nullable rewrite, which needs a field's own span to edit. This asks the same
+    /// map the other question — which field is this use in — and the answer is the
+    /// innermost containing one, because a nested record is a field of a field.
+    fn field_label(&self, sp: Span) -> Option<String> {
+        self.field_spans
+            .values()
+            .flatten()
+            .filter(|(_, f)| f.start <= sp.start && sp.end <= f.end)
+            .min_by_key(|(_, f)| f.end - f.start)
+            .map(|(n, _)| n.clone())
+    }
+
     /// The `no overload` diagnostic, with each candidate's first disagreement.
     ///
     /// Listing the signatures alone makes the reader compare three of them
@@ -3128,7 +3167,7 @@ impl<'w> Checker<'w> {
         // them by the shape they expect rather than by declaration order.
         let fits = self.prefer(*module, &fits, target, true);
         match fits.as_slice() {
-            [] => Err(self.no_overload_message(*module, name, cands, target)),
+            [] => Err(self.no_overload_at(*module, name, cands, target, sp)),
             [i] => {
                 self.choose(*module, *i, target, origin, name, sp)?;
                 Ok(true)
@@ -3361,6 +3400,13 @@ impl<'w> Checker<'w> {
                             self.suggested =
                                 crate::check::ty::nullable_fix(&m, inner).into_iter().next();
                         }
+                        // The message may already name a field, and it stays: the
+                        // language server reads the *innermost* name to decide what
+                        // to wrap (`nullable_wrap` takes the last `field `…`` in
+                        // the message), so `field `x`: field `s`: …` is a contract
+                        // between the two crates and not just a chain of labels.
+                        // It does read as two problems, which is worth fixing — but
+                        // only together with the LSP rule, not before it.
                         return Err(format!("field `{l}`: {m}"));
                     }
                     out.push((l, v));

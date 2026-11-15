@@ -527,6 +527,45 @@ fn query_output_rows() {
     );
 }
 
+/// A field's error says which field, whether or not it names a column too.
+///
+/// Two paths reach a field's expression: `unify` on the field's row type, and the
+/// overload constraint, which is solved later and only knows the use's span. The
+/// first named the field (and the column inside it); the second named only the
+/// operator, so `select { x = .name + 1 }` and `select { x = upper .id }` — the same
+/// mistake in the same place — read differently. Both label the field now.
+#[test]
+fn a_field_error_says_which_field() {
+    // The unification path: the field, then the column the value is read from. The
+    // second name is what the language server wraps in `??`/`just`, so it stays.
+    let e = err("q = users & select { y = upper .id }\n", "q");
+    assert!(e.starts_with("field `y`: field `id`:"), "{e}");
+    // The overload path: the field, and no column — the failure is the operator.
+    for src in [
+        "q = users & select { x = .name + 1 }\n",
+        "q = users & select { x = .name * 2 }\n",
+    ] {
+        let e = err(src, "q");
+        assert_eq!(
+            e.matches("field `").count(),
+            1,
+            "one label on the overload path: {e}"
+        );
+        assert!(
+            e.starts_with("field `x`:"),
+            "the field the reader wrote: {e}"
+        );
+    }
+    // An `agg` field is labelled too, and a `where` has no field, so it is not.
+    let e = err("q = users & agg { n = sum .name }\n", "q");
+    assert!(e.starts_with("field `n`:"), "{e}");
+    let e = err("q = users & where (.name + 1 > 0)\n", "q");
+    assert!(!e.contains("field `"), "no field to name in a `where`: {e}");
+    // A field that is not a column expression keeps its own wording.
+    let e = err("q = users & select { x = users }\n", "q");
+    assert!(e.contains("must be a column expression"), "{e}");
+}
+
 /// A name from another language says what this one calls the idea.
 ///
 /// The edit-distance hint answers "you mistyped something in scope", and for a

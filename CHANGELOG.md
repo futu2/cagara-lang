@@ -38,6 +38,9 @@
 - An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
   `select { x = upper .id }` does. It named only the operator before.
 
+- `catalog "schema" { name = { … } }` declares a schema's tables once. It lowers to one ordinary
+  table definition per entry, so nothing downstream needed a case for it.
+
 - `range` and `groups` window frames, beside `rows`. The three differ in what an offset counts —
   rows, distances in the order key, or peer groups — and `Frame` now carries the unit, so a lowerer
   cannot quietly write `ROWS` for all three. MySQL refuses `groups` (it is a syntax error there) and

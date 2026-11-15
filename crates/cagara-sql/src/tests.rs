@@ -1,6 +1,6 @@
 //! End-to-end tests: Cagara source -> SQL (ANSI).
 
-use crate::{compile, Dialect, Options};
+use crate::{compile, compile_located, Dialect, Options};
 use cagara_hir::{root_queries, Workspace};
 use std::collections::HashMap;
 
@@ -37,6 +37,70 @@ fn sql_with(src: &str, name: &str, opts: Options) -> String {
         .unwrap_or_else(|e| panic!("`{name}` failed: {e}"));
     eprintln!("{name}: {s}");
     s
+}
+
+/// A refusal that names the stage it is about.
+///
+/// Every user-triggerable failure in this crate used to reach the user as `0:0` —
+/// `cagara check` printed `file.cagara:0:0: error: error in `q`: …` — because `Rel`
+/// is built bottom-up and only `Rel::At` remembers where a stage was written. A
+/// diagnostic at the top of the file points at the wrong place, and an editor puts
+/// the squiggle there.
+///
+/// The location has to be the *innermost* stage: a `distinct` that cannot follow an
+/// `order` is about the `distinct`, not about the table the pipeline starts from.
+#[test]
+fn a_refusal_names_the_stage_it_is_about() {
+    let full = format!("{USERS}q = users & order [asc (.age + 1)] & select {{.age}} & distinct\n");
+    let ws = Workspace::from_source(&full);
+    let (_, r) = root_queries(&ws)
+        .into_iter()
+        .find(|(n, _)| n == "q")
+        .expect("q");
+    let rel = r.expect("q type-checks");
+    let (loc, message) = compile_located(&rel, Options::default())
+        .expect_err("a `distinct` after a dropped sort key is refused");
+    assert!(message.contains("cannot follow an `order`"), "{message}");
+    let loc = loc.expect("the refusal carries a location");
+    // The span is a *stage*, not a token: `select {.age}` is what the `distinct`
+    // cannot follow, and underlining it is more useful than underlining the word
+    // `distinct` — the reader has to change one of the two, and this is the one with
+    // the sort key in it. What matters is that it is *in the query* rather than at
+    // `0:0`.
+    let text = &full[loc.span.start as usize..loc.span.end as usize];
+    assert!(
+        text.contains("select") || text.contains("distinct"),
+        "the span names a stage of the query, not the file: {text:?}"
+    );
+    assert!(loc.span.start > 0, "not the top of the file");
+}
+
+/// A dialect refusal names the construct, not the query.
+#[test]
+fn a_dialect_refusal_names_the_construct() {
+    let full = format!("{USERS}q = users & fullJoin users (.<id == .>id)\n");
+    let ws = Workspace::from_source(&full);
+    let (_, r) = root_queries(&ws)
+        .into_iter()
+        .find(|(n, _)| n == "q")
+        .expect("q");
+    let rel = r.expect("q type-checks");
+    let (loc, message) = compile_located(
+        &rel,
+        Options {
+            dialect: Dialect::Mysql,
+            ..Options::default()
+        },
+    )
+    .expect_err("MySQL has no FULL JOIN");
+    assert!(message.contains("`fullJoin` is not supported"), "{message}");
+    let loc = loc.expect("the refusal carries a location");
+    let text = &full[loc.span.start as usize..loc.span.end as usize];
+    assert!(
+        text.contains("fullJoin"),
+        "the span covers the join that refused: {text:?}"
+    );
+    assert!(loc.span.start > 0, "not the top of the file");
 }
 
 fn dialect(src: &str, name: &str, d: &str) -> Result<String, String> {

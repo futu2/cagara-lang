@@ -722,7 +722,7 @@ fn report_sql(
         let Ok(rel) = query.result else {
             continue;
         };
-        match cagara_sql::compile(
+        match cagara_sql::compile_located(
             &rel,
             cagara_sql::Options {
                 dialect: opts.dialect,
@@ -730,8 +730,20 @@ fn report_sql(
                 optimize: opts.optimize,
             },
         )
-        .map_err(|m| format!("{shown}: error in `{name}`: {m}"))
-        {
+        .map_err(|(loc, m)| {
+            // A lowering refusal names the stage that caused it, when the IR still
+            // remembers where that was. `diag_span` is the same conversion the
+            // checker's diagnostics go through, so the line and column are measured
+            // against the same text — and a `Loc` in an imported module resolves
+            // against that module's file, not this one.
+            match loc {
+                Some(l) => format!(
+                    "{}",
+                    ws.diag_span(l.module, l.span, format!("error in `{name}`: {m}"))
+                ),
+                None => format!("{shown}: error in `{name}`: {m}"),
+            }
+        }) {
             Ok(sql) => {
                 // One statement per run: `main`, or the one `--only` named.
                 // Nothing separates it from anything, because there is nothing

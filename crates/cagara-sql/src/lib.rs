@@ -80,27 +80,64 @@ fn has_unnest(rel: &Rel) -> bool {
     matches!(rel, Rel::Unnest(..)) || rel.children().into_iter().any(has_unnest)
 }
 
+/// Compile `rel` for `opts.dialect`, with the message only.
+///
+/// A caller that has somewhere to put a position — `cagara check`, the CLI's error
+/// report, the language server — should call [`compile_located`] instead: a lowering
+/// refusal that names `0:0` points at the top of the file rather than at the stage
+/// the reader has to change.
 pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
-    cagara_hir::schema::schema(rel)?;
+    compile_located(rel, opts).map_err(|(_, message)| message)
+}
+
+/// Compile `rel`, reporting **where** in the source the refusal came from.
+///
+/// The location is the innermost `Rel::At` the lowering had descended to when it
+/// failed, or the node that a dialect check found. It is `None` when nothing in the
+/// relation carries a span — an IR built by hand in a test, for instance — and a
+/// caller has to say `0:0` then rather than inventing a line.
+pub fn compile_located(
+    rel: &Rel,
+    opts: Options,
+) -> Result<String, (Option<cagara_hir::ir::Loc>, String)> {
+    cagara_hir::schema::schema(rel).map_err(|m| (None, m))?;
     if !dialect::supports_full_join(opts.dialect) && has_full_join(rel) {
-        return Err(
+        return Err((
+            locate(rel, &|r| {
+                matches!(
+                    r.bare(),
+                    Rel::Join {
+                        kind: JoinKind::Full,
+                        ..
+                    }
+                )
+            }),
             "`fullJoin` is not supported by the MySQL dialect family; rewrite it with \
              `leftJoin`/`rightJoin` and `unionAll`"
                 .into(),
-        );
+        ));
     }
     if !dialect::supports_grouping_sets(opts.dialect) && has_grouping_sets(rel) {
-        return Err(if dialect::fam(opts.dialect) == dialect::Fam::Mysql {
-            "`rollup` and `cube` are not supported by the MySQL dialect family: its \
+        let at = locate(rel, &|r| match r.bare() {
+            Rel::Agg(_, fs) => fs
+                .iter()
+                .any(|(_, e)| e.any(&|x| matches!(x, cagara_hir::ir::Expr::Grouping(..)))),
+            _ => false,
+        });
+        return Err((
+            at,
+            if dialect::fam(opts.dialect) == dialect::Fam::Mysql {
+                "`rollup` and `cube` are not supported by the MySQL dialect family: its \
              `GROUP BY … WITH ROLLUP` rolls up the whole key list and cannot be \
              combined with `ORDER BY`, so it is not the same operation. Compute the \
              subtotals with a separate `agg` and `union` them in"
-                .into()
-        } else {
-            "`rollup` and `cube` are not supported by the SQLite dialect, which has \
+                    .into()
+            } else {
+                "`rollup` and `cube` are not supported by the SQLite dialect, which has \
              no grouping sets"
-                .into()
-        });
+                    .into()
+            },
+        ));
     }
     // A `RANGE` frame needs exactly one sort key, and the MySQL family's `NULLS
     // LAST` emulation adds a second. So `range` and the emulation cannot both
@@ -113,29 +150,35 @@ pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
     // every `range` frame this compiler writes, because a window's sort key is always
     // spelled `NULLS LAST`.
     if !dialect::supports_range_frame(opts.dialect) && has_range_frame(rel) {
-        return Err(
+        return Err((
+            locate(rel, &|r| {
+                frame_of(r) == Some(cagara_hir::ir::FrameUnit::Range)
+            }),
             "a `range` window frame needs a single sort key, and this target's \
              `NULLS LAST` is emulated with a second one — MariaDB answers `RANGE-type \
              frame requires ORDER BY clause with single sort key`, and T-SQL's \
              equivalent refuses it too. Use `rows` for a row count, or `groups` on a \
              target that has it"
                 .into(),
-        );
+        ));
     }
     if !dialect::supports_groups_frame(opts.dialect) && has_groups_frame(rel) {
-        return Err(
+        return Err((
+            locate(rel, &|r| {
+                frame_of(r) == Some(cagara_hir::ir::FrameUnit::Groups)
+            }),
             "a `groups` window frame is not supported by the MySQL dialect family: it \
              reads `ROWS` and `RANGE` and rejects `GROUPS`. Use `rows` for a row \
              count, or `range` when a distance in the order key is what is meant"
                 .into(),
-        );
+        ));
     }
     // `unnest` is a relational node, so its refusal is here rather than in the
     // intrinsic pass: the lowerer has no dialect, and the wording belongs with
     // the other `list` refusals.
     if has_unnest(rel) {
         if let Some(msg) = intrinsics::unnest_refusal(dialect::fam(opts.dialect)) {
-            return Err(msg);
+            return Err((locate(rel, &|r| matches!(r.bare(), Rel::Unnest(..))), msg));
         }
     }
     // The `Rel -> Rel` pass, after validation (so diagnostics name the query as
@@ -144,15 +187,18 @@ pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
     let rewritten = rewrite::rewrite(rel);
     let rel = &rewritten;
     let mut lowerer = lower::Lowerer::for_rel(rel, dialect::supports_qualify(opts.dialect));
-    let st = lowerer.rel(rel)?;
+    let st = lowerer.rel(rel).map_err(|m| (lowerer.failed_at(), m))?;
+    let at = lowerer.failed_at();
     let mut select = st.into_statement();
     select.ctes = lowerer.take_ctes();
     let mut stmt = sqlglot_rust::Statement::Select(select);
     if opts.optimize {
-        stmt = sqlglot_rust::optimizer::optimize(stmt).map_err(|e| format!("optimizer: {e}"))?;
+        stmt =
+            sqlglot_rust::optimizer::optimize(stmt).map_err(|e| (at, format!("optimizer: {e}")))?;
     }
-    let stmt = dialect::rewrite(stmt, opts.dialect)?;
-    sqlglot_rust::validate_dialect_support(&stmt, opts.dialect).map_err(|e| format!("{e}"))?;
+    let stmt = dialect::rewrite(stmt, opts.dialect).map_err(|e| (at, e))?;
+    sqlglot_rust::validate_dialect_support(&stmt, opts.dialect)
+        .map_err(|e| (at, format!("{e}")))?;
     let sql = if opts.pretty {
         sqlglot_rust::generate_pretty(&stmt, opts.dialect)
     } else {
@@ -160,6 +206,61 @@ pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
     };
     // The one fixup that has to happen after generation: see `dialect::finalize`.
     Ok(dialect::finalize(sql, opts.dialect))
+}
+
+/// The location of the innermost node `p` accepts, or of the innermost node at all.
+///
+/// The dialect refusals in `compile_located` are about a *construct* — a `fullJoin`,
+/// a rolled-up key, a `GROUPS` frame — and the reader needs to be sent to where that
+/// construct was written. `Rel::At` is the only carrier of a span, so this descends
+/// the tree keeping the deepest one it has seen and, when the predicate matches,
+/// reports the location in force at that node: the same "innermost enclosing stage"
+/// rule `cagara_hir::schema` uses.
+///
+/// Returns `None` for a relation with no `At` anywhere, which is what an IR built by
+/// hand in a test looks like. A caller then prints no position rather than a wrong one.
+fn locate(rel: &Rel, p: &dyn Fn(&Rel) -> bool) -> Option<cagara_hir::ir::Loc> {
+    fn walk<'a>(
+        rel: &'a Rel,
+        p: &dyn Fn(&Rel) -> bool,
+        here: Option<cagara_hir::ir::Loc>,
+        best: &mut Option<cagara_hir::ir::Loc>,
+    ) {
+        let here = match rel {
+            Rel::At(l, _) => Some(*l),
+            _ => here,
+        };
+        if p(rel) && best.is_none() {
+            *best = here;
+        }
+        for child in rel.children() {
+            walk(child, p, here, best);
+        }
+    }
+    let mut best = None;
+    walk(rel, p, None, &mut best);
+    best
+}
+
+/// The frame unit of the first window expression in `r`, if it has one.
+///
+/// Used by the dialect refusals for `range` and `groups`: the message is about a
+/// *frame unit*, so the reader has to be sent to the window that chose it.
+fn frame_of(r: &Rel) -> Option<cagara_hir::ir::FrameUnit> {
+    let Rel::Select(_, fs) = r.bare() else {
+        return None;
+    };
+    fs.iter().find_map(|(_, e)| unit_of(e))
+}
+
+/// The frame unit of the first window expression in `e` that has a frame.
+fn unit_of(e: &cagara_hir::ir::Expr) -> Option<cagara_hir::ir::FrameUnit> {
+    if let cagara_hir::ir::Expr::Win(_, _, spec) = e {
+        if let Some(f) = spec.frame {
+            return Some(f.unit);
+        }
+    }
+    e.children().into_iter().find_map(unit_of)
 }
 
 /// Whether a relation asks for subtotal rows, anywhere in the tree.

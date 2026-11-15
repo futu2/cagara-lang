@@ -814,6 +814,50 @@ fn check_reports_a_lowering_error() {
     assert!(!sql.status.success(), "{}", stdout(&sql));
 }
 
+/// A lowering refusal names a line and column, not `0:0`.
+///
+/// The refusal comes from `cagara-sql`, whose `Rel` is built bottom-up — only
+/// `Rel::At` remembers where a stage was written. Before this, `check` printed
+/// `file.cagara:0:0: error: …`, which puts the diagnostic at the top of the file: a
+/// pre-commit hook's output was unusable and an editor would underline the wrong line.
+#[test]
+fn a_lowering_error_names_a_position() {
+    let dir = TempDir::new("check-lowering-position");
+    let f = dir.write(
+        "t.cagara",
+        "t : query { id = int, name = string } = table \"m\" \"t\"\n\
+         q = t & order [asc (.id + 1)] & select {.id} & distinct\n",
+    );
+    let out = cagara([
+        std::ffi::OsString::from("check"),
+        f.clone().into_os_string(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    let err = stderr(&out);
+    // `file:line:col:` with a line that is not zero.
+    let at = err
+        .split(':')
+        .nth(1)
+        .unwrap_or_else(|| panic!("no position in {err}"))
+        .parse::<usize>()
+        .unwrap_or_else(|_| panic!("line is not a number: {err}"));
+    assert_eq!(at, 2, "the refusal is on line 2: {err}");
+    assert!(!err.contains(":0:0:"), "not the top of the file: {err}");
+
+    // The SQL mode reports the same position.
+    let sql = Command::new(env!("CARGO_BIN_EXE_cagara"))
+        .arg(&f)
+        .args(["--only", "q"])
+        .output()
+        .expect("run cagara");
+    assert!(!sql.status.success(), "{}", stdout(&sql));
+    let serr = String::from_utf8_lossy(&sql.stderr);
+    assert!(
+        serr.contains(":2:"),
+        "the SQL mode names the line too: {serr}"
+    );
+}
+
 /// A file with no query — a table declaration or a bare helper — still checks.
 ///
 /// `check` is documented as checking a file as a *library*, so a directory of table

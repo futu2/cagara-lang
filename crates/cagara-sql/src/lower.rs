@@ -49,6 +49,15 @@ pub struct Lowerer {
     /// over a window folds into the clause when it does, and into a derived table
     /// when it does not.
     has_qualify: bool,
+    /// The `At` of the stage being lowered, innermost last.
+    ///
+    /// A lowering failure used to reach the user as `0:0`, because `Rel` is built
+    /// bottom-up and only `Rel::At` remembers where a stage was written. The
+    /// lowerer descends that wrapper on its way in, so it is the one place that
+    /// knows the answer — and it keeps the *innermost* location on failure, which is
+    /// the same rule the schema validator applies (`cagara_hir::schema`): a node
+    /// without a location of its own is blamed on the nearest enclosing stage.
+    loc: Option<cagara_hir::ir::Loc>,
 }
 
 impl Lowerer {
@@ -71,11 +80,21 @@ impl Lowerer {
             tables,
             depth: 0,
             has_qualify,
+            loc: None,
         }
     }
 
     pub fn take_ctes(self) -> Vec<sqlglot_rust::ast::Cte> {
         self.ctes
+    }
+
+    /// Where the lowering was when it failed, if it knew.
+    ///
+    /// Read after `rel` returns an error. The lowerer keeps the *innermost*
+    /// location, so this names the stage the message is about rather than the whole
+    /// query.
+    pub fn failed_at(&self) -> Option<cagara_hir::ir::Loc> {
+        self.loc
     }
 
     fn alias(&mut self) -> String {
@@ -359,9 +378,18 @@ impl Lowerer {
         if matches!(rel, Rel::Where(..) | Rel::At(_, _)) {
             let mut stages: Vec<&IrExpr> = Vec::new();
             let mut base = rel;
+            // The outermost `At` seen on the way down, which is the location of the
+            // stage this run of `where`s belongs to. The peel is what makes a long
+            // pipeline cost one stack frame instead of one per stage; it also means
+            // `lower_at` is never reached for these nodes, so the location is
+            // recorded here or not at all.
+            let mut outer_loc: Option<cagara_hir::ir::Loc> = None;
             loop {
                 match base {
-                    Rel::At(_, inner) => base = inner,
+                    Rel::At(loc, inner) => {
+                        outer_loc = outer_loc.or(Some(*loc));
+                        base = inner;
+                    }
                     Rel::Where(inner, p) => {
                         stages.push(p);
                         base = inner;
@@ -369,7 +397,17 @@ impl Lowerer {
                     _ => break,
                 }
             }
-            let mut st = self.rel(base)?;
+            let saved = self.loc;
+            if let Some(loc) = outer_loc {
+                self.loc = Some(loc);
+            }
+            // Keep the location on failure — it is what `compile` reports — and
+            // restore it on success, so a later stage is not blamed on this one.
+            let lowered = self.rel(base);
+            if lowered.is_ok() {
+                self.loc = saved;
+            }
+            let mut st = lowered?;
             // A filter on a stage that has already grouped is a `HAVING`: every
             // column it can name is a grouping key or an aggregate value, and
             // `resolve` turns each into the expression it stands for
@@ -390,7 +428,7 @@ impl Lowerer {
             // `At` and `Where` are unreachable here: the peel above takes both
             // at the root of this call and returns. They are kept because the
             // match must still be exhaustive.
-            Rel::At(_, r) => self.lower_at(r),
+            Rel::At(loc, r) => self.lower_at(loc, r),
             Rel::Table {
                 schema,
                 name,
@@ -419,8 +457,21 @@ impl Lowerer {
         }
     }
 
-    fn lower_at(&mut self, r: &Rel) -> Result<Stage, String> {
-        self.rel(r)
+    /// `Rel::At` is a location wrapper, not a stage: it lowers to its input, and its
+    /// only job here is to say *where* the input was written.
+    ///
+    /// The location is restored on success and kept on failure. Restoring it on
+    /// failure would lose the deepest stage by the time `compile` asks; keeping it is
+    /// the same rule `cagara_hir::schema` uses — the innermost stage that has a
+    /// location is the one to blame.
+    fn lower_at(&mut self, loc: &cagara_hir::ir::Loc, r: &Rel) -> Result<Stage, String> {
+        let outer = self.loc;
+        self.loc = Some(*loc);
+        let out = self.rel(r);
+        if out.is_ok() {
+            self.loc = outer;
+        }
+        out
     }
 
     fn lower_table(
@@ -941,6 +992,18 @@ impl Lowerer {
         Ok(st)
     }
 
+    /// The innermost `At` of `r` itself, without descending into its inputs.
+    ///
+    /// A stage's own location is on the `At` that wraps *it*, and `rel` has already
+    /// restored the outer one by the time a check inside a `lower_*` runs. This
+    /// recovers it from the node the check is about.
+    fn loc_of(r: &Rel) -> Option<cagara_hir::ir::Loc> {
+        match r {
+            Rel::At(loc, _) => Some(*loc),
+            _ => None,
+        }
+    }
+
     fn lower_distinct(&mut self, r: &Rel) -> Result<Stage, String> {
         let mut st = self.rel(r)?;
         if st.needs_barrier(Fuse::Distinct, false) {
@@ -957,6 +1020,10 @@ impl Lowerer {
             .iter()
             .any(|k| !st.items.iter().any(|(_, e)| *e == k.expr))
         {
+            // The location is already set here: `rel` restored it on success, so
+            // this stage's own `At` was consumed below. Re-enter it from the node
+            // being lowered, which is where the reader wrote `distinct`.
+            self.loc = Self::loc_of(r).or(self.loc);
             return Err(concat!(
                 "`distinct` cannot follow an `order` on an expression the output row no ",
                 "longer has: order the deduplicated result instead, or keep that expression ",

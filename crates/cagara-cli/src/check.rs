@@ -332,7 +332,7 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitC
                 let Ok(rel) = &query.result else {
                     continue;
                 };
-                let Err(message) = cagara_sql::compile(
+                let Err((loc, message)) = cagara_sql::compile_located(
                     rel,
                     cagara_sql::Options {
                         dialect: cagara_sql::Dialect::Ansi,
@@ -342,16 +342,32 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitC
                 ) else {
                     continue;
                 };
+                // The lowering names the stage that refused, so this points at it.
+                // `diag_span` is the conversion every other diagnostic goes through,
+                // which keeps the line and column measured against the same text.
+                let d = match loc {
+                    Some(l) => ws.diag_span(
+                        l.module,
+                        l.span,
+                        format!("error in `{}`: {message}", query.name),
+                    ),
+                    None => cagara_hir::workspace::Diag {
+                        severity: cagara_hir::workspace::Severity::Error,
+                        path: root_path.clone(),
+                        line: 0,
+                        col: 0,
+                        message: format!("error in `{}`: {message}", query.name),
+                        source: String::new(),
+                        width: 0,
+                        suggestions: Vec::new(),
+                    },
+                };
                 found.push(Found {
-                    severity: "error",
-                    path: root_path.clone(),
-                    // No position: the refusal is about the relation, and the `Rel`
-                    // does not carry the span of the stage that caused it. Saying
-                    // `0:0` is honest about that; guessing a line would point at the
-                    // wrong place with confidence.
-                    line: 0,
-                    col: 0,
-                    message: format!("error in `{}`: {message}", query.name),
+                    severity: d.severity.as_str(),
+                    path: d.path.clone(),
+                    line: d.line,
+                    col: d.col,
+                    message: d.message.clone(),
                     suggestions: Vec::new(),
                 });
             }

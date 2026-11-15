@@ -152,7 +152,7 @@ The constructors are the single statement of relational validity:
 | `Builder::keep_row` (`where`, `order`, `limit`, `offset`, `distinct`) | predicates are `bool` and row-phase and read only input columns; keys are row-phase and read only input columns; counts are non-negative | the input's row |
 | `Builder::project` (`select`, `update`, `agg`) | fields placed by phase (`rules::Place`); `update` merges over the input row (right-wins); `agg` rejects `win`-phase fields | computed from the fields |
 | `Builder::join` | side-qualified columns only (`rules::needs_side`), each present on its side; the predicate is row-phase `bool` | left columns, then the right's that the left lacks; nullable sides wrapped in `maybe` |
-| `Builder::set` | both inputs expose the same columns, in the same order, with the same types | the left input's row |
+| `Builder::set` | both inputs expose the same columns, with the same types — matched by name, so the orders may differ, and the right input is projected into the left's order | the left input's row |
 
 These are every constructor there is. A primitive with no rule — `primitive "__merge"`, which no
 prelude name spells — reaches `apply` and is refused as `Control::Unsupported`, because `merge r s`

@@ -45,7 +45,8 @@ Give this file to an agent as context, then ask for **one** `.cagara` file.
    `isNull`/`isNotNull`, `isTrue`, `eqMaybe`. A `where` takes a `maybe bool` directly.
 9. **Joins require side-qualified columns in the predicate:** `.<x` (left) and `.>x` (right).
    Shared output names keep the left value; outer joins make the nullable side `maybe`.
-10. **Set operations require identical rows:** same names, same order, same types.
+10. **Set operations require the same columns:** same names and same types, matched by
+    name — the order may differ, and the answer keeps the left operand's order.
 11. **`[..]` is a fixed key list, not a general list value.** It is valid as `order` keys, a window
     spec's `partition`/`order`, and `inList` members. Nowhere else.
 12. **`main` is the entry point and must be a `query`.** A scalar `main = 1` is rejected; omit
@@ -1923,7 +1924,8 @@ Run this in order before returning a file.
 8. **Nulls:** predicates and operators see non-null values; every `maybe` is handled.
 9. **Joins:** predicate uses `.<` and `.>`; both columns exist on the correct sides; output
    name/shared-column rule understood.
-10. **Sets:** operands have identical rows (names, order, types).
+10. **Sets:** operands have the same columns (names and types, matched by name); the
+    answer is in the left operand's order.
 11. **Lists:** only sort keys (each with `asc`/`desc`), partition keys (no direction), or `inList`;
     homogeneous.
 12. **Conditionals:** `case` ends with `true => value`; arms share a type and phase; conditions are

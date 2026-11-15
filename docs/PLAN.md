@@ -6,9 +6,12 @@ this page tracks the remaining boundaries and language work.
 
 ## Work plan
 
-The order below is the order the work is done in. Each item ends the same way: a
-probe that shows the defect, a fix, a test that fails without the fix, and a commit
-that says what was measured rather than what was assumed.
+The order below is the order the work was done in. Each item ended the same way: a
+probe that shows the defect, a fix, a test that fails without the fix, and a commit that
+says what was measured rather than what was assumed.
+
+**Every item is closed.** What is left is the one item B1 exposed and could not settle
+without a language decision — see "Deferred language work" at the end of this file.
 
 ### A. The tooling surfaces
 
@@ -18,20 +21,20 @@ for, `cagara doc` and `cagara check` have one test per mode, and the language se
 has 56 tests against `analysis::*` but 8 against the *server*. A boundary here is
 anything an editor or a script can reach and a test cannot.
 
-| # | item | done when |
+| # | item | outcome |
 |---|---|---|
-| ~~A1~~ | **Done.** | 4 server tests; a real bug was found by writing them | Every capability it advertises (`hover`, `definition`, `references`, `documentHighlight`, `documentSymbol`, `formatting`, `codeAction`, `inlayHint`, `completion`) is driven through the server for a real document, including a UTF-16 position and a document with an import. | each capability has a server-level test, and a request for a capability it does *not* advertise is refused rather than answered |
-| ~~A2~~ | **Done.** `references` is cross-file now; a real bug | They walk the root module only (`occurrences`), so a use of `lib.helper` in `main.cagara` is not a reference to `helper`. | a definition used from another open file lists that use |
-| ~~A3~~ | **Done.** Two properties, and the mutation showed the first version tested the wrong one | Round trip (format twice = format once), lossless (format then compile = compile), and comments survive — checked over the whole corpus and over the adversarial inputs that break formatters (a comment longer than the width, a string that cannot break, nesting deeper than the width allows). | three property tests over `examples/`, `tests/corpus/` and a generated adversarial set |
-| ~~A4~~ | **Done.** One object per name with a `signatures` array; the shape changed | Overloads render as one heading in the markdown but arrive as N definitions in JSON, with the doc on the first only. A consumer cannot tell that `sum`'s six signatures are one name. | the JSON groups overloads the way the markdown does, or says in `docs/` why not |
-| ~~A5~~ | **Done.** Found a symlink loop checking one file 41 times | Exit codes, dedupe across workspaces, a file that imports a broken file, a directory with no `.cagara` files, a path that is not a file. | one test per case, including the exit code |
+| ~~A1~~ | Language server, end to end | **Done.** Four server-level tests driving every advertised capability; found that none of them had ever been reached through the protocol. |
+| ~~A2~~ | `references` and `highlights` across an import | **Done.** A real bug: `references` was `highlights` filtered, so it only ever saw the file the request came from — a short list rather than an error. |
+| ~~A3~~ | `fmt` as an invariant, not examples | **Done.** Two properties — every shipped program formats, and every one means the same afterwards — plus the awkward shapes. The mutation showed the first version tested the wrong half. |
+| ~~A4~~ | `doc`'s `--json` contract | **Done.** One object per name with a `signatures` array, as the markdown has always grouped them. The shape changed. |
+| ~~A5~~ | `check` over a tree | **Done.** A real bug: a symlink loop made one six-byte file be checked 41 times (1.6 s against 0.04 s). |
 
 ### B. The deferred language work
 
 These are features with a known shape (see the table at the end of this file). They
 are done in this order because each one is smaller than the next:
 
-| # | item | done when |
+| # | item | outcome |
 |---|---|---|
 | ~~B1~~ | **Attempted, reverted — and it found a real bug on the way.** Aligning by name makes the checker's row order and the SQL's column order disagree: `&` is reverse application, so the primitive's first parameter is the operand written on the *right*, while `step_set` binds the output to `left`. The SQL keeps the left's order; the type says the right's. Fixing that means deciding what a set operation's output row *is*, which is a language decision rather than a projection in the arena. The bug it found: `cagara check` accepted the mismatched-order file that `cagara --only` refused — fixed separately. |
 | ~~B2~~ | **Done.** A file declares a parameter with a default and `--param` overrides the value, keeping the file's type |
@@ -40,10 +43,10 @@ are done in this order because each one is smaller than the next:
 
 ### C. Documentation that stays true
 
-| # | item | done when |
+| # | item | outcome |
 |---|---|---|
-| C1 | every claim in `docs/` is either tested or marked as an expectation | a claim with no test says so in the sentence |
-| C2 | `PLAN.md`, `CHANGELOG.md` and `ARCHITECTURE.md` are updated in the same commit as the change | no commit leaves a doc describing the previous behaviour |
+| ~~C1~~ | **Done.** Every ```` ```cagara ```` block in `docs/` compiles or is a listed fragment; the guide's shorthand table is checked against the fixed table *and* against the prelude's bodies; the two claims a reader would act on (paging order, empty `[]`) were measured and corrected | the examples are tested and the fragments are named |
+| ~~C2~~ | **Done.** Kept per-commit through Phases A and B; the deferred-work table and `CHANGELOG.md` are current | no commit leaves a doc describing the previous behaviour |
 
 ## Current boundaries
 

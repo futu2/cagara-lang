@@ -908,6 +908,21 @@ impl<'a> Parser<'a> {
                     let msg = unknown_op(l.text, self.ops);
                     self.bail(&msg);
                 }
+                // A character no pattern claims: the common case is a
+                // non-ASCII name, because identifiers are ASCII by definition
+                // (`[a-zA-Z_][a-zA-Z0-9_]*`). "expected an expression" at that
+                // byte says nothing about why — the character *is* there — so
+                // the message names the rule and the character.
+                Some(l) if l.kind == Token::Error && !l.text.is_ascii() => {
+                    let ch = l.text.chars().next().unwrap_or('?');
+                    self.error(format!(
+                        "`{ch}` cannot start a name: identifiers are ASCII letters, digits and \
+                         `_`; a string literal (`\"{ch}\") holds any text"
+                    ));
+                    self.start(K::ErrorNode);
+                    self.bump();
+                    self.finish();
+                }
                 _ => {
                     self.error("expected an expression");
                     self.start(K::ErrorNode);
@@ -928,6 +943,20 @@ impl<'a> Parser<'a> {
                      // A field is `name = expr`, or the shorthand `.name` for
                      // `name = .name`, so `select {.id, .name}` chooses columns
                      // without naming each one twice.
+                     // A field name that is not a name: the same rule as an expression, said
+                     // where a reader will meet it — inside a record, "expected `}`" points at
+                     // the character and explains nothing.
+        if let Some(l) = self.peek_lex(0) {
+            if l.kind == Token::Error && !l.text.is_ascii() && !self.at(Token::Field) {
+                let ch = l.text.chars().next().unwrap_or('?');
+                // `bail`, not `error`: the field is unparseable and the brace
+                // will never close, so reporting that too would bury the one
+                // message that says what is wrong.
+                self.bail(&format!(
+                    "`{ch}` cannot name a field: identifiers are ASCII letters, digits and `_`"
+                ));
+            }
+        }
         while self.at_field_name() || self.at(Token::Field) {
             self.start(K::RecordField);
             // `.name` is the shorthand; `name = expr` is the long form.
@@ -1648,6 +1677,40 @@ mod tests {
 
     fn messages(p: &Parse) -> Vec<&str> {
         p.errors.iter().map(|e| e.message.as_str()).collect()
+    }
+
+    /// A non-ASCII name says which rule it broke, not "expected an expression".
+    ///
+    /// Identifiers are ASCII (`[a-zA-Z_][a-zA-Z0-9_]*`), so `名字 = .id` is a
+    /// lexer `Error` token. The generic messages were `expected an expression` at
+    /// the byte — the character *is* there, so that says nothing — or, inside a
+    /// record, `expected `}``, which points at the wrong thing entirely. Both
+    /// places now name the rule and the character, and the record case bails
+    /// rather than adding an uncloseable-brace error on top.
+    #[test]
+    fn a_non_ascii_name_says_what_the_rule_is() {
+        let p = parse("q = 名字\n");
+        let msgs = messages(&p);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("cannot start a name") && m.contains('名')),
+            "{msgs:?}"
+        );
+        assert!(msgs.iter().any(|m| m.contains("ASCII")), "{msgs:?}");
+        // In a record field name: one message, not a cascade.
+        let p = parse("q = t & select { 名字 = .id }\n");
+        let msgs = messages(&p);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("cannot name a field") && m.contains('名')),
+            "{msgs:?}"
+        );
+        assert!(
+            !msgs.iter().any(|m| m.contains("expected `}`")),
+            "bailing suppresses the cascade: {msgs:?}"
+        );
+        // A non-ASCII *string* is still fine: the rule is about names.
+        assert!(parse("q = \"名字\"\n").errors.is_empty());
     }
 
     #[test]

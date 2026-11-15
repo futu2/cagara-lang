@@ -276,6 +276,36 @@ fn documents_survive_the_formatter() {
 }
 
 /// A file that does not parse is reported and prints no reference: a list of
+/// An overload set is one object in `--json`, as it is one section in the markdown.
+///
+/// A consumer that got six entries called `sum`, five with `"doc": null`, would
+/// publish five empty sections beside the real one — and no field told it that the
+/// six were one name. The check is on a real prelude name, so it covers the shape
+/// the prelude actually produces rather than a fixture.
+#[test]
+fn json_groups_an_overload_set() {
+    let out = cagara(vec!["doc".into(), "--prelude".into(), "--json".into()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    // `sum` has six signatures in the prelude, and exactly one object.
+    let objects: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains(r#""name": "sum""#))
+        .collect();
+    assert_eq!(objects.len(), 1, "one object for `sum`: {objects:?}");
+    let line = objects[0];
+    assert_eq!(
+        line.matches(r#""type": "#).count(),
+        6,
+        "all six signatures: {line}"
+    );
+    assert!(
+        line.contains(r#""doc": "#),
+        "the doc rides the group: {line}"
+    );
+    assert!(!line.contains(r#""doc": null"#), "{line}");
+}
+
 /// definitions from a broken parse is not something to publish.
 #[test]
 fn a_broken_file_is_reported_and_prints_nothing() {

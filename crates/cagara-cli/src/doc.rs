@@ -306,6 +306,18 @@ fn groups(defs: &[DocumentedDef]) -> Vec<&[DocumentedDef]> {
 /// The reference as JSON, for a tool that would rather not parse markdown: a
 /// documentation site, an editor extension, a check that every name a release
 /// added is described.
+///
+/// **One object per *name*, not per definition.** An overload set is one thing to a
+/// reader and to a documentation site — `sum` has six signatures and one paragraph
+/// of prose — and the markdown renderer has always grouped it that way. The JSON
+/// emitted one object per definition, so a consumer got six entries called `sum`,
+/// five with `"doc": null`, and no way to tell that they were one name rather than
+/// five undocumented ones. A consumer that did not already know to group by name
+/// would publish five empty sections.
+///
+/// Each entry therefore carries `signatures`: one `{ type, line }` per definition, in
+/// source order. `type` is `null` where the checker recorded no type, which is the
+/// same distinction the markdown makes by printing the name alone.
 fn json(modules: &[Documented]) -> String {
     let mut out = String::from("{\n  \"modules\": [");
     for (i, m) in modules.iter().enumerate() {
@@ -317,20 +329,36 @@ fn json(modules: &[Documented]) -> String {
             string(&m.path),
             option(m.doc.as_deref())
         ));
-        for (j, d) in m.defs.iter().enumerate() {
+        for (j, group) in groups(&m.defs).iter().enumerate() {
             if j > 0 {
                 out.push(',');
             }
-            out.push_str(&format!(
-                "\n        {{\"name\": {}, \"type\": {}, \"line\": {}, \"doc\": {}, \"fields\": [",
-                string(&d.name),
-                option(d.ty.as_deref()),
-                d.line,
-                option(d.doc.as_deref())
-            ));
-            let fields: Vec<String> = d
-                .fields
+            let Some(first) = group.first() else {
+                continue;
+            };
+            // The doc and the fields come from the whole group, the way the
+            // markdown takes them: documenting an overload set once, above its
+            // first definition, is how the prelude is written.
+            let signatures: Vec<String> = group
                 .iter()
+                .map(|d| {
+                    format!(
+                        "{{\"type\": {}, \"line\": {}}}",
+                        option(d.ty.as_deref()),
+                        d.line
+                    )
+                })
+                .collect();
+            out.push_str(&format!(
+                "\n        {{\"name\": {}, \"line\": {}, \"doc\": {}, \"signatures\": [{}], \"fields\": [",
+                string(&first.name),
+                first.line,
+                option(group.iter().find_map(|d| d.doc.as_deref())),
+                signatures.join(", ")
+            ));
+            let fields: Vec<String> = group
+                .iter()
+                .flat_map(|d| &d.fields)
                 .flatten()
                 .map(|f| {
                     format!(
@@ -516,6 +544,48 @@ mod tests {
             text.contains(r#""doc": "Line one.\nLine \"two\".""#),
             "{text}"
         );
+        assert!(text.contains(r#""signatures": ["#), "{text}");
         assert!(text.trim_end().ends_with('}'), "{text}");
+    }
+
+    /// An overload set is one object with every signature, as it is one section in
+    /// the markdown.
+    ///
+    /// The JSON used to emit one object per definition, so a consumer got six
+    /// entries called `sum` — five of them with `"doc": null` — and no way to tell
+    /// that they were one name rather than five undocumented ones. A documentation
+    /// site reading that would publish five empty sections beside the real one.
+    #[test]
+    fn an_overload_set_is_one_object() {
+        let mut a = def("sum", Some("Adds them up."));
+        a.ty = Some("expr r int -> agg (expr r (maybe int))".into());
+        let mut b = def("sum", None);
+        b.ty = Some("expr r float -> agg (expr r (maybe float))".into());
+        b.line = 9;
+        let mut c = def("other", None);
+        c.line = 12;
+        let m = Documented {
+            path: "q.cagara".into(),
+            doc: None,
+            defs: vec![a, b, c],
+        };
+        let text = json(&[m]);
+        // Counted rather than parsed: `serde_json` is not a dependency of this
+        // crate, and the shape being checked is a shape, not a value.
+        assert_eq!(
+            text.matches(r#""name": "sum""#).count(),
+            1,
+            "one object for `sum`, not one per definition: {text}"
+        );
+        assert_eq!(text.matches(r#""name": "other""#).count(), 1, "{text}");
+        // Two for `sum` and one for `other`: a signature per definition, which is
+        // what `signatures` is for.
+        assert_eq!(
+            text.matches(r#""type": "#).count(),
+            3,
+            "every signature is there: {text}"
+        );
+        assert!(text.contains(r#""doc": "Adds them up.""#), "{text}");
+        assert!(text.contains(r#""line": 9"#), "the second signature's line");
     }
 }

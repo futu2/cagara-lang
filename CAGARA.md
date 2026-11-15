@@ -980,9 +980,9 @@ main =
 
 ### 5.8 Set operations
 
-Both operands must have the same row: same names, same order, same types. The result keeps the
-**subject's** columns and order — the subject is the last argument, i.e. the query the pipeline
-supplies.
+Both operands must have the same columns — the same names with the same types, matched **by name**,
+so the order may differ. The result keeps the **subject's** columns and order — the subject is the
+last argument, i.e. the query the pipeline supplies, and the one written first in the source.
 
 ```cagara
 a : query { id = int, name = string } = table "public" "a"

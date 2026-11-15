@@ -185,8 +185,11 @@ Set operations (`ir::SetKind`, `cagara-sql/src/lower.rs::lower_set`):
 
 `Intersect` and `Except` are the standard, duplicate-removing forms: there is no
 `INTERSECT ALL` or `EXCEPT ALL` in the language. Both operands must have the
-same row (`Builder::set`), and the result keeps the left operand's columns and
-order.
+same *columns* — the same names with the same types, matched by name, so the
+orders may differ — and the result keeps the left operand's columns and order
+(`Builder::set`; the right input is projected into the left's order). The left
+operand is the one written first in the source, which `&` makes the second
+parameter: `a & union b` answers in `a`'s order.
 
 **Nullability.** `maybe a` is a value that may be `NULL` (see
 [`NULLABILITY.md`](NULLABILITY.md)). Type variables in signatures mean non-null,
@@ -240,8 +243,13 @@ it also says what order it is in, which the checker does not enforce.
 **Windows.** A window function is a `win (expr r a)` template applied to a
 window specification record (`{ partition = [..], order = [..], frame = .. }`) and
 then to its expression arguments; the spec is the first argument and is consumed
-by the template application in `normalize/scalar.rs`. Frames are built by `rows`/`preceding`/
-`following`/the fixed bounds and validated by `checked::frame`.
+by the template application in `normalize/scalar.rs`. Frames are built by
+`rows`/`range`/`groups` — the three frame *units* — together with `preceding`/`following`
+and the fixed bounds, and validated by `checked::frame`. `Frame.unit` carries which unit
+was chosen, because the emitted clause differs: `ROWS` counts rows, `RANGE` counts
+distance in the sort key, and `GROUPS` counts peer groups. Two targets cannot take all
+three and the backend refuses rather than emitting SQL they reject — see
+[`SQL-DIALECTS.md`](SQL-DIALECTS.md).
 
 ## 5. The `sql` escape hatch
 

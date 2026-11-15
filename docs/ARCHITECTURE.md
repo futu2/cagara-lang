@@ -40,7 +40,8 @@ relational nodes, never table data.
 The relational arena is the only place that constructs a query node. Every
 constructor computes its output row and checks its own rule: predicates and
 keys must use the input row, projections compute their fields, joins qualify
-columns and add nullability, and set operations require equal rows. Erasure
+columns and add nullability, and set operations require equal columns and answer in the
+left operand's order. Erasure
 walks the finished arena and emits `Rel` without inferring or checking again.
 
 `Control::Unsupported` represents a compiler capability gap. `Control::Program`

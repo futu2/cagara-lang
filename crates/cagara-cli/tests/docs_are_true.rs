@@ -278,3 +278,123 @@ fn every_cagara_fence_is_spelled_the_same_way() {
         "these fences are not tagged `cagara`, so the example test skips them: {odd:?}"
     );
 }
+
+/// A claim that a *probe* settled stays settled.
+///
+/// The rules below were each checked against the compiler by hand — by writing the
+/// program and reading the type or the SQL it produced — and each one is the kind of
+/// sentence a document drifts away from silently, because nothing about editing the
+/// prose makes it fail. When one of them changes, this test fails and names the
+/// document that says otherwise.
+///
+/// The list is short on purpose. It holds the claims a reader would *act* on: a
+/// statement about what the language accepts, that someone would write a query around.
+/// A document that merely describes a design is not here, because a design can change
+/// without any query changing.
+const SETTLED: &[(&str, &str)] = &[
+    // `docs/CORE.md`, `CAGARA.md` §0/§5.8/§10, `docs/LEARN.md` §11 and
+    // `docs/ARCHITECTURE.md` all say a set operation matches its two sides **by
+    // name**, so the orders may differ, and answers in the left operand's order.
+    (
+        "the columns of a set operation are matched by name",
+        "docs/CORE.md, CAGARA.md, docs/LEARN.md, docs/ARCHITECTURE.md",
+    ),
+    // `docs/CORE.md` and `docs/SQL-DIALECTS.md`: the three frame units, and that two
+    // targets refuse some of them.
+    (
+        "`rows`, `range` and `groups` are three different frame units",
+        "docs/CORE.md, docs/SQL-DIALECTS.md",
+    ),
+    // `docs/NULLABILITY.md`: which aggregates return `maybe`.
+    (
+        "`sum`/`avg`/`min`/`max` return `maybe`; the counts return `int`",
+        "docs/NULLABILITY.md",
+    ),
+];
+
+/// The settled claims, probed against the compiler.
+///
+/// Each probe is a program and an expected fragment of what the compiler says about it.
+/// A claim that stops holding fails here, and the message names the documents that
+/// would then be wrong — because the failure is not in this file, it is in them.
+#[test]
+fn the_settled_claims_still_hold() {
+    let dir = tempfile::Builder::new()
+        .prefix("cagara-claims-")
+        .tempdir()
+        .expect("temp dir");
+
+    // A program, the mode that answers the question, and what it must say about `q`.
+    let probes: &[(&str, &[&str], &str, &str)] = &[
+        // A set operation matches by name and answers in the left's order: `a` lists
+        // `id, n` and `b` lists `n, id`, and the answer is `a`'s.
+        // The claim has two halves and they fail in different phases: the *type* says
+        // `a`'s order (the checker's rule) and the *SQL* has both sides in `a`'s order
+        // (the arena's). `--types` alone would pass with the arena refusing the query,
+        // which is why this probes both.
+        (
+            "a : query { id = int, n = string } = table \"m\" \"a\"\n\
+             b : query { n = string, id = int } = table \"m\" \"b\"\n\
+             q = a & union b\n",
+            &["--types"],
+            "q : query { id = int, n = string }",
+            "the columns of a set operation are matched by name",
+        ),
+        (
+            "a : query { id = int, n = string } = table \"m\" \"a\"\n\
+             b : query { n = string, id = int } = table \"m\" \"b\"\n\
+             q = a & union b\n",
+            &[],
+            "SELECT id, n FROM m.a UNION SELECT id, n FROM m.b",
+            "the columns of a set operation are matched by name",
+        ),
+        // The three frame units exist and each reaches the SQL with its own keyword.
+        (
+            "u : query { id = int } = table \"m\" \"u\"\n\
+             q = u & select { s = over { order = [asc .id], frame = rows (preceding 1) \
+             (following 1) } (sum .id) }\n",
+            // No `--types`: the claim is about the emitted clause, which is the SQL
+            // mode's output.
+            &[],
+            "ROWS BETWEEN",
+            "`rows`, `range` and `groups` are three different frame units",
+        ),
+        // The aggregate nullability table.
+        (
+            "u : query { id = int, s = maybe int } = table \"m\" \"u\"\n\
+             q = u & agg { a = sum .s, b = count, c = countOf .s }\n",
+            &["--types"],
+            "q : query { a = maybe int, b = int, c = int }",
+            "`sum`/`avg`/`min`/`max` return `maybe`; the counts return `int`",
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    for (i, (src, flags, want, claim)) in probes.iter().enumerate() {
+        let file = dir.path().join(format!("probe{i}.cagara"));
+        std::fs::write(&file, src).expect("write probe");
+        let out = Command::new(env!("CARGO_BIN_EXE_cagara"))
+            .arg(&file)
+            .args(["--only", "q"])
+            .args(*flags)
+            .output()
+            .expect("run cagara");
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if !said.contains(want) {
+            let docs = SETTLED
+                .iter()
+                .find(|(c, _)| c == claim)
+                .map(|(_, d)| *d)
+                .unwrap_or("(not listed)");
+            failures.push(format!(
+                "`{claim}` no longer holds, so {docs} are wrong: expected {want:?}, \
+                 got {said:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

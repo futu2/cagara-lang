@@ -1210,7 +1210,10 @@ unlike aggregates, a window may be *composed*: `rowNumber spec + 1` is fine.
 
 ## 11. Set operations and `distinct`
 
-Set operations combine two queries that have **the same row type**:
+Set operations combine two queries that have **the same columns** — the same names
+with the same types, matched by name, so the two may list them in either order. The
+result keeps the columns and order of the subject, which is the query written first
+(`users &| vips` answers in `users`' order):
 
 ```haskell
 everyone = users &| vips        # union

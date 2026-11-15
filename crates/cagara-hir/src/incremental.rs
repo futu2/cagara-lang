@@ -211,6 +211,164 @@ pub(crate) fn compile_current(
 }
 
 #[cfg(test)]
+mod consistency_tests {
+    use crate::compile::compile_diagnostics;
+    use crate::workspace::Workspace;
+    use std::path::Path;
+
+    /// Compiling after an edit must agree with compiling from scratch.
+    ///
+    /// The incremental path reuses a query's lowered relation when nothing it
+    /// depends on changed, and *relocates* the spans in that reused tree when the
+    /// text above it moved. Every editor session runs it, and it had one test — for
+    /// the span arithmetic, not for the agreement. This is the property that
+    /// matters: whatever an edit produces, a fresh workspace with the same text
+    /// produces too.
+    ///
+    /// The edits are the ones that move spans without changing meaning (a blank
+    /// line above, a comment), and the ones that change meaning through a
+    /// *dependency* (a table's column renamed, a helper's body changed).
+    fn messages(text: &str) -> Vec<String> {
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), text.to_string());
+        compile_diagnostics(&ws)
+            .iter()
+            .map(|d| {
+                format!(
+                    "{}:{}:{}: {}",
+                    d.line,
+                    d.col,
+                    d.severity.as_str(),
+                    d.message
+                )
+            })
+            .collect()
+    }
+
+    /// The diagnostics of the *edited* workspace — the incremental answer.
+    ///
+    /// Every edit compiles, so the cache the next step sees is the one the previous
+    /// step produced: this is the path an editor takes, not a fresh read.
+    fn messages_after_edits(edits: &[&str]) -> Vec<String> {
+        let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), String::new());
+        let mut out = Vec::new();
+        for text in edits {
+            assert!(
+                ws.set_source(ws.root, (*text).to_string()),
+                "an edit was rejected"
+            );
+            // Each step compiles, so the cache is what the next step sees.
+            out = compile_diagnostics(&ws)
+                .iter()
+                .map(|d| {
+                    format!(
+                        "{}:{}:{}: {}",
+                        d.line,
+                        d.col,
+                        d.severity.as_str(),
+                        d.message
+                    )
+                })
+                .collect();
+        }
+        out
+    }
+
+    const BASE: &str = "users : query { id = int, name = string } = table \"s\" \"u\"\n\
+                        q = users & select { id = .id }\n";
+
+    #[test]
+    fn an_edit_that_only_moves_text_agrees_with_a_fresh_compile() {
+        // A blank line above everything: every span moves, nothing changes.
+        let moved = format!("\n\n{BASE}");
+        assert_eq!(messages_after_edits(&[BASE, &moved]), messages(&moved));
+        // A comment line, which the formatter keeps and spans must skip.
+        let commented = format!("# a note\n{BASE}");
+        assert_eq!(
+            messages_after_edits(&[BASE, &commented]),
+            messages(&commented)
+        );
+    }
+
+    #[test]
+    fn an_edit_that_breaks_a_dependency_agrees_with_a_fresh_compile() {
+        // Renaming the table's column breaks `q`, and the error has to be
+        // *reported*: a reused query whose dependency changed is exactly what the
+        // dirty-propagation exists for.
+        let broken = BASE.replace("id = int, name = string", "ident = int, name = string");
+        assert_eq!(messages_after_edits(&[BASE, &broken]), messages(&broken));
+        assert!(
+            messages(&broken).iter().any(|m| m.contains("id")),
+            "the rename has to be reported: {:?}",
+            messages(&broken)
+        );
+    }
+
+    /// Every span in a reused query matches the one a fresh compile produces.
+    ///
+    /// This is the property the relocation exists for, and diagnostics cannot see
+    /// it: a reused query passed schema validation before, so it reports no error
+    /// at a stale span — the span is simply wrong for whoever reads it next (hover,
+    /// go-to-definition, a later pass). Comparing the trees directly is the only
+    /// way to check it, and the check is exact: `Debug` prints every `Loc`.
+    fn spans(text: &str) -> Vec<String> {
+        let ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), text.to_string());
+        let compilation = crate::compile::compile(&ws);
+        compilation
+            .queries
+            .iter()
+            .map(|q| match &q.result {
+                Ok(rel) => format!("{}: {rel:?}", q.name),
+                Err(d) => format!("{}: ERR {}", q.name, d.message),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_reused_query_carries_the_spans_a_fresh_compile_would_give_it() {
+        let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), String::new());
+        for text in [BASE, &format!("\n\n\n{BASE}")] {
+            assert!(
+                ws.set_source(ws.root, text.to_string()),
+                "an edit was rejected"
+            );
+            // Compile through the cache, which is what an editor does.
+            let _ = compile_diagnostics(&ws);
+        }
+        let moved = format!("\n\n\n{BASE}");
+        // The cached answer, then the slow one, for the same text.
+        let cached = {
+            let compilation = crate::compile::compile(&ws);
+            compilation
+                .queries
+                .iter()
+                .map(|q| match &q.result {
+                    Ok(rel) => format!("{}: {rel:?}", q.name),
+                    Err(d) => format!("{}: ERR {}", q.name, d.message),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cached, spans(&moved), "the reused spans are stale");
+    }
+
+    #[test]
+    fn an_edit_that_fixes_an_error_clears_it() {
+        let broken = BASE.replace("select { id = .id }", "select { id = .nope }");
+        // Broken first, then fixed: the diagnostic must not survive the fix.
+        assert!(
+            messages(&broken).iter().any(|m| m.contains("nope")),
+            "{:?}",
+            messages(&broken)
+        );
+        assert_eq!(
+            messages_after_edits(&[&broken, BASE]),
+            messages(BASE),
+            "the fixed text has no diagnostics"
+        );
+        assert!(messages(BASE).is_empty(), "{:?}", messages(BASE));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::moved;
     use cagara_syntax::ast::Span;

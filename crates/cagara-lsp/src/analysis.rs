@@ -2347,14 +2347,27 @@ fn suggested_name(message: &str) -> Option<String> {
 
 /// The identifier inside `text` that is closest to `target`, by Levenshtein
 /// distance, if any is close enough to be the typo rather than a coincidence.
-/// The `coalesce` / `just` fix for a nullable mismatch.
+/// The `coalesce` / `just` fix for a nullable mismatch, read off the message.
 ///
-/// The message names both sides — `expected string, found maybe string` — and
-/// the column it happened at (`field \`s\``), so both the direction and the
-/// token to rewrite are in the text the diagnostic covers. The checker cannot
-/// carry this suggestion: the refusal comes out of constraint resolution, where
-/// the failing argument's span is no longer in hand (see `docs/PLAN.md`), so the
-/// rule reads the message the way the sort-key and rename rules do.
+/// The message names both sides — `expected string, found maybe string` — and the
+/// column it happened at (`field \`s\``), so both the direction and the token to
+/// rewrite are in the text the diagnostic covers.
+///
+/// **This is a fallback, and nothing reaches it.** The checker does carry this
+/// suggestion now (`check::ty::nullable_fix` builds it from the same message plus
+/// the diagnostic's span), so `code_actions` finds it in `d.suggestions` and skips
+/// this rule. Measured rather than assumed: instrumenting the guard below and
+/// running the whole language-server suite showed the rule called once, with a
+/// message that failed the guard, and the body never reached at all. It is kept
+/// because it is the only thing that would cover "the checker had a suggestion but
+/// the editor could not apply it" (`suggestion_edits` returning `None` skips
+/// `answered`), which is a real if unexercised path — but the next reader should
+/// know it is unproven rather than assume a test covers it.
+///
+/// When it *is* reached, the message must still be chained: it takes the last
+/// `field \`…\`` as the column to wrap, which is why the checker's message for a
+/// value inside a call is `field \`x\`: field \`s\`: …`. A message with a single
+/// label names the projection field, and `.x` is not on the line — the column is.
 fn nullable_wrap(message: &str, text: &str, p: &Positions<'_>, r: &Range) -> Option<Fix> {
     if !message.contains("only one side is nullable") {
         return None;

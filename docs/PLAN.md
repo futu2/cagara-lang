@@ -4,6 +4,47 @@ The production query path now uses the compile-time normalizer. The compiler
 architecture and its invariants are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md);
 this page tracks the remaining boundaries and language work.
 
+## Work plan
+
+The order below is the order the work is done in. Each item ends the same way: a
+probe that shows the defect, a fix, a test that fails without the fix, and a commit
+that says what was measured rather than what was assumed.
+
+### A. The tooling surfaces
+
+The compiler is well covered (every construct has an engine-backed test). The tools
+around it are not: `cagara-fmt` has property tests for the shapes it was written
+for, `cagara doc` and `cagara check` have one test per mode, and the language server
+has 56 tests against `analysis::*` but 8 against the *server*. A boundary here is
+anything an editor or a script can reach and a test cannot.
+
+| # | item | done when |
+|---|---|---|
+| A1 | **Language server, end to end.** Every capability it advertises (`hover`, `definition`, `references`, `documentHighlight`, `documentSymbol`, `formatting`, `codeAction`, `inlayHint`, `completion`) is driven through the server for a real document, including a UTF-16 position and a document with an import. | each capability has a server-level test, and a request for a capability it does *not* advertise is refused rather than answered |
+| A2 | **`references` and `highlights` across an import.** They walk the root module only (`occurrences`), so a use of `lib.helper` in `main.cagara` is not a reference to `helper`. | a definition used from another open file lists that use |
+| A3 | **`fmt` as an invariant, not examples.** Round trip (format twice = format once), lossless (format then compile = compile), and comments survive — checked over the whole corpus and over the adversarial inputs that break formatters (a comment longer than the width, a string that cannot break, nesting deeper than the width allows). | three property tests over `examples/`, `tests/corpus/` and a generated adversarial set |
+| A4 | **`doc`'s `--json` contract.** Overloads render as one heading in the markdown but arrive as N definitions in JSON, with the doc on the first only. A consumer cannot tell that `sum`'s six signatures are one name. | the JSON groups overloads the way the markdown does, or says in `docs/` why not |
+| A5 | **`check` over a tree.** Exit codes, dedupe across workspaces, a file that imports a broken file, a directory with no `.cagara` files, a path that is not a file. | one test per case, including the exit code |
+
+### B. The deferred language work
+
+These are features with a known shape (see the table at the end of this file). They
+are done in this order because each one is smaller than the next:
+
+| # | item | done when |
+|---|---|---|
+| B1 | name-aligned set operations | `union` aligns by name, with the same-row-in-the-same-order rule kept as an option |
+| B2 | file-declared typed parameters | a file declares its own parameters, so a query runs without `--param` |
+| B3 | richer window frames | `range`/`groups` as two more constructors, with the engine coverage the other frames have |
+| B4 | catalog declarations | a module declares tables without a `query … = table` binding |
+
+### C. Documentation that stays true
+
+| # | item | done when |
+|---|---|---|
+| C1 | every claim in `docs/` is either tested or marked as an expectation | a claim with no test says so in the sentence |
+| C2 | `PLAN.md`, `CHANGELOG.md` and `ARCHITECTURE.md` are updated in the same commit as the change | no commit leaves a doc describing the previous behaviour |
+
 ## Current boundaries
 
 - The compile-time normalizer and relational arena are the only production query

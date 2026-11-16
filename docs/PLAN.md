@@ -136,6 +136,13 @@ properly means either a new IR node for a lambda-over-list (and a lowering rule 
 target) or a stage that takes an expression over `value` and a list — a language change,
 not a prelude addition.
 
+- `textDocument/signatureHelp`: which argument of the innermost call the cursor is in.
+  `textDocument/documentColor` stays refused on purpose — the language has no colour type.
+- Dependencies updated: `sqlglot-rust` 0.11.2, `logos` 0.16.1, `serde_json` 1.0.154.
+  `rowan` stays at 0.17 (0.18 is an alpha). The new sqlglot still does not parse `GROUPS`
+  and still swaps two-argument `LOG`'s arguments; it adds `Expr::ArrayIndex`, which cannot
+  be used for `listAt` because the generator omits the parentheses an aggregate needs.
+
 **Still open: `q = u & where`.** A stage given too few arguments reports
 `type mismatch: expected query {…}, found expr a b`, and three attempts to improve it
 failed for the same reason: `&` is reverse application, so the stage arrives as an

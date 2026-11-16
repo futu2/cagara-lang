@@ -1,10 +1,12 @@
 //! Relational IR to a sqlglot SELECT. Each IR node either fuses into the
 //! current stage or wraps it in a derived table when fusing would change
-//! meaning (e.g. filtering after windows or LIMIT). A filter over an aggregate
-//! is one of the wrapping cases: it becomes an ordinary `WHERE` outside a
-//! derived table rather than a `HAVING` on the aggregate. See `docs/PLAN.md`,
-//! "Current boundaries", for why that fold is deliberately absent and what
-//! reinstating it would take.
+//! meaning (e.g. filtering after `LIMIT`, or a projection over a `DISTINCT`).
+//! A filter after an aggregate is one of the *fusing* cases: it is that
+//! aggregate's `HAVING`, because every column the predicate can name is a
+//! grouping key or an aggregate value. `place_filter` is the one place that
+//! decides among `WHERE`, `HAVING`, `QUALIFY` and a derived table, and it says
+//! why each stage shape falls where it does; `docs/PLAN.md`, "Current
+//! boundaries", states the rule a reader can act on.
 
 use crate::stage::{and_all, col, ident_style, lower_expr, qualify, Fuse, Stage};
 use cagara_hir::ir::{Expr as IrExpr, GroupingShape, JoinKind, Rel, SetKind, Side};

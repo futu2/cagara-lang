@@ -55,10 +55,11 @@ adults =
   &. [asc .label]
   &- 10
 
-## Aggregation, then a filter on the aggregate's own result. A filter after an
-## aggregate wraps a derived table, since SQL cannot filter an aggregate in the
-## same SELECT. Folding it into a `HAVING` is a query-shape optimization this
-## compiler does not perform; see "Current boundaries" in docs/PLAN.md.
+## Aggregation, then a filter on the aggregate's own result. The filter belongs
+## to the aggregate, so it is emitted as `HAVING` on the same statement rather
+## than as a derived table the query then filters — every column it can name is
+## a grouping key or an aggregate value, which is exactly what `HAVING` reads.
+## See "Current boundaries" in docs/PLAN.md for the cases that do wrap.
 ##
 ## `coalesce 0.0 .revenue` is there because `sum` is `maybe`: every aggregate
 ## that can be NULL says so in its type.

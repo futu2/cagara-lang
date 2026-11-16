@@ -212,6 +212,14 @@ INSERT INTO main.g VALUES (1, 1, 1), (1, 2, 2), (2, 1, 3);
 -- gap to 5, so a one-unit offset means a different thing in each unit.
 CREATE TABLE main.frames (k INTEGER, n INTEGER);
 INSERT INTO main.frames VALUES (1, 1), (1, 2), (5, 3);
+-- Calendar differences: the first pair crosses a month boundary without a whole
+-- month passing, which is the case `DATE_DIFF` and an elapsed count disagree on.
+CREATE TABLE main.spans (id INTEGER, a DATE, b DATE);
+INSERT INTO main.spans VALUES (1, '2024-01-31', '2024-02-01'), (2, '2024-01-15', '2024-03-20'), (3, '2020-05-01', '2024-03-20');
+-- Time differences: the second pair crosses midnight, which is where subtracting
+-- the `hour` fields gives the wrong answer.
+CREATE TABLE main.times (id INTEGER, a TIMESTAMP, b TIMESTAMP);
+INSERT INTO main.times VALUES (1, '2024-01-01 10:00:00', '2024-01-01 15:30:45'), (2, '2024-01-01 23:30:00', '2024-01-02 01:15:30');
 ";
 
 const TABLES: &str = "\
@@ -224,6 +232,8 @@ empty : query { id = int } = table \"main\" \"empty\"
 dupes : query { id = int, k = string } = table \"main\" \"dupes\"
 g : query { a = int, b = int, n = int } = table \"main\" \"g\"
 frames : query { k = int, n = int } = table \"main\" \"frames\"
+spans : query { id = int, a = date, b = date } = table \"main\" \"spans\"
+times : query { id = int, a = timestamp, b = timestamp } = table \"main\" \"times\"
 ";
 
 /// `(definition, expected rows)`; a row is its columns joined by `|`, NULL
@@ -584,6 +594,37 @@ const CASES: &[(&str, &[&str])] = &[
     (
         "null_aggs = nums & agg { s = sum .v, a = avg .v, lo = min .v, hi = max .v, n = countOf .v, nd = countDistinct .v }",
         &["60|20.0|10|30|3|3"],
+    ),
+    // The calendar and clock differences, on spans the two semantics disagree about.
+    //
+    // `monthsBetween` is the **elapsed** count: `2024-01-31` to `2024-02-01` crosses a
+    // month boundary and no whole month has passed, so it is `0` — where each engine's
+    // `DATEDIFF('MONTH', …)` says `1`, because those count boundaries. Writing the
+    // prelude function out of `year`/`month`/`day` arithmetic is what makes it mean
+    // one thing on every target; delegating to `DATEDIFF` would have made the answer
+    // depend on which engine ran it.
+    (
+        "months_between = spans & select { id = .id, v = monthsBetween .a .b } & order [asc .id]",
+        &["1|0", "2|2", "3|46"],
+    ),
+    (
+        "years_between = spans & select { id = .id, v = yearsBetween .a .b } & order [asc .id]",
+        &["1|0", "2|0", "3|3"],
+    ),
+    // The clock differences, with one pair that crosses midnight. Subtracting the
+    // `hour` fields gives `1 - 23 = -22` there, which is why all three are derived
+    // from one `secondsBetween` instead.
+    (
+        "hours_between = times & select { id = .id, v = hoursBetween .a .b } & order [asc .id]",
+        &["1|5", "2|1"],
+    ),
+    (
+        "minutes_between = times & select { id = .id, v = minutesBetween .a .b } & order [asc .id]",
+        &["1|330", "2|105"],
+    ),
+    (
+        "seconds_between = times & select { id = .id, v = secondsBetween .a .b } & order [asc .id]",
+        &["1|19845", "2|6330"],
     ),
     // The three frame units, on one table whose order key has a peer group and then
     // a gap. `k` is 1, 1, 5 with `n` 1, 2, 3, so "one before" means:
@@ -1048,8 +1089,32 @@ fn a_list_compares_as_a_value_on_the_engines() {
 ///
 /// The per-dialect rules that *are* checkable are in
 /// [`each_dialect_avoids_what_it_cannot_read`].
+///
+/// **The parse runs on a thread with a 16 MiB stack**, because the re-parse is a
+/// recursive-descent walk over the expression and a `cargo test` thread gets 2 MiB.
+/// A deeply nested expression overflows that: `yearsBetween` is
+/// `(monthsBetween …) / 12`, and `monthsBetween` is a subtraction of three
+/// sub-expressions one of which is a `CASE`, so the SQL is five levels of
+/// parenthesised arithmetic and `sqlglot_rust::parse` needs more than 2 MiB for it.
+///
+/// This is a limit of the *second opinion*, not of the compiler: `compile` produces
+/// that SQL on a 2 MiB thread without difficulty, which was measured before this
+/// thread was added. Raising the stack keeps the check — dropping the case would
+/// have removed the only look at generated text for the dialects that cannot run.
 #[test]
 fn every_statement_is_well_formed_sql() {
+    // The body is a separate function so the stack size is one decision, visible at
+    // the call.
+    let t = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(well_formed_bodies)
+        .expect("spawn the well-formedness thread");
+    if let Err(e) = t.join() {
+        std::panic::resume_unwind(e);
+    }
+}
+
+fn well_formed_bodies() {
     let extra = "\
                 ex_concat = users & select { s = .name ++ \"!\" }\n\
                 ex_paged = users & order [asc .id] & limit 3 & offset 1 & select {.id}\n\
@@ -2192,7 +2257,13 @@ fn trino_agrees_when_a_server_is_running() {
                  INSERT INTO main.g VALUES (1, 1, 1), (1, 2, 2), (2, 1, 3)\n\
                  DROP TABLE IF EXISTS main.frames\n\
                  CREATE TABLE main.frames (k INTEGER, n INTEGER)\n\
-                 INSERT INTO main.frames VALUES (1, 1), (1, 2), (5, 3)\n";
+                 INSERT INTO main.frames VALUES (1, 1), (1, 2), (5, 3)\n\
+                 DROP TABLE IF EXISTS main.spans\n\
+                 CREATE TABLE main.spans (id INTEGER, a DATE, b DATE)\n\
+                 INSERT INTO main.spans VALUES (1, DATE '2024-01-31', DATE '2024-02-01'), (2, DATE '2024-01-15', DATE '2024-03-20'), (3, DATE '2020-05-01', DATE '2024-03-20')\n\
+                 DROP TABLE IF EXISTS main.times\n\
+                 CREATE TABLE main.times (id INTEGER, a TIMESTAMP, b TIMESTAMP)\n\
+                 INSERT INTO main.times VALUES (1, TIMESTAMP '2024-01-01 10:00:00', TIMESTAMP '2024-01-01 15:30:45'), (2, TIMESTAMP '2024-01-01 23:30:00', TIMESTAMP '2024-01-02 01:15:30')\n";
     let trino = Options {
         dialect: Dialect::Trino,
         ..Options::default()
@@ -2297,7 +2368,13 @@ fn mysql_agrees_when_a_server_is_running() {
                  INSERT INTO g VALUES (1, 1, 1), (1, 2, 2), (2, 1, 3)\n\
                  DROP TABLE IF EXISTS frames\n\
                  CREATE TABLE frames (k INT, n INT)\n\
-                 INSERT INTO frames VALUES (1, 1), (1, 2), (5, 3)\n";
+                 INSERT INTO frames VALUES (1, 1), (1, 2), (5, 3)\n\
+                 DROP TABLE IF EXISTS spans\n\
+                 CREATE TABLE spans (id INT, a DATE, b DATE)\n\
+                 INSERT INTO spans VALUES (1, '2024-01-31', '2024-02-01'), (2, '2024-01-15', '2024-03-20'), (3, '2020-05-01', '2024-03-20')\n\
+                 DROP TABLE IF EXISTS times\n\
+                 CREATE TABLE times (id INT, a DATETIME, b DATETIME)\n\
+                 INSERT INTO times VALUES (1, '2024-01-01 10:00:00', '2024-01-01 15:30:45'), (2, '2024-01-01 23:30:00', '2024-01-02 01:15:30')\n";
     let mysql = Options {
         dialect: Dialect::Mysql,
         ..Options::default()
@@ -2376,7 +2453,21 @@ fn mysql_batch(harness: &str, setup: &str, queries: &[String]) -> Vec<Vec<String
 /// cannot translate it faithfully because it does not know the operand types, and
 /// teaching it means passing a schema Python sqlglot does not use for arithmetic
 /// (checked: `annotate_types` with the real column types still emits `a / b`).
-const EMULATION_BLIND: &[(&str, &str)] = &[("div", "ansi"), ("div", "tsql")];
+/// `years_between`, `hours_between` and `minutes_between` divide two integers — by 12,
+/// 3600 and 60 — and so hit exactly the same blindness. They are listed rather than
+/// rewritten because the division is the *definition*: a year count is
+/// `months / 12`, and spelling it another way to please the emulator would be the
+/// tail wagging the dog. All three are checked on the five real engines.
+const EMULATION_BLIND: &[(&str, &str)] = &[
+    ("div", "ansi"),
+    ("div", "tsql"),
+    ("years_between", "ansi"),
+    ("years_between", "tsql"),
+    ("hours_between", "ansi"),
+    ("hours_between", "tsql"),
+    ("minutes_between", "ansi"),
+    ("minutes_between", "tsql"),
+];
 
 /// The statements the emulation cannot *run*, pinned so that a statement which used
 /// to run and stops running is a failure rather than a silent loss of coverage.

@@ -38,6 +38,11 @@
 - An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
   `select { x = upper .id }` does. It named only the operator before.
 
+- `monthsBetween`, `yearsBetween`, `hoursBetween`, `minutesBetween` and `secondsBetween`, plus the
+  `second` field they need. The calendar ones are the **elapsed** count, not the number of boundaries
+  crossed: `2024-01-31` to `2024-02-01` is `0` months, where every engine's `DATEDIFF('MONTH', …)`
+  says `1`.
+
 - `cagara fmt` accepts a directory and formats the sources under it, as `cagara check` reads one.
   It used to fail with `Is a directory (os error 21)` on the same path `check` walked.
 

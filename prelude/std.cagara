@@ -447,10 +447,56 @@ hour : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'HOUR', $1
 ## The minute, 0–59, of a timestamp.
 minute : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'MINUTE', $1)"
 
+## The second, 0–59, of a timestamp. `CAGARA_PART` already had `SECOND`; the field
+## was simply not exposed, which made `secondsBetween` unspellable.
+second : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'SECOND', $1)"
+
 ## `daysBetween start end`: whole days from `start` to `end`, negative if `end`
 ## is earlier. Subject last, so `daysBetween .created_at` is a function of the
 ## end — an age in days.
 daysBetween : expr r date -> expr r date -> expr r int = sql "CAGARA_DAYS_BETWEEN($1, $2)"
+
+## `monthsBetween start end`: whole calendar months from `start` to `end`.
+##
+## The **elapsed** count, not the number of month boundaries crossed. Those differ
+## and the difference is not a rounding detail: `2024-01-31` to `2024-02-01` crosses
+## one boundary and no whole month has passed, so this says `0` where `DATE_DIFF`
+## says `1`. An age is elapsed months, which is why this is the definition — and why
+## it is written out here rather than delegated to each engine's `DATEDIFF`, which
+## does not agree on which of the two it means.
+##
+## Measured equal on DuckDB, SQLite, MariaDB and Trino, because it is plain
+## `year`/`month`/`day` arithmetic and those are already portable.
+monthsBetween : expr r date -> expr r date -> expr r int = a => b =>
+  (year b - year a) * 12 + (month b - month a) - ifThenElse (day b < day a) 1 0
+
+## `yearsBetween start end`: whole calendar years from `start` to `end`, elapsed in
+## the same sense as `monthsBetween` — `2020-05-01` to `2024-03-20` is `3`, because
+## the fourth year is not complete.
+yearsBetween : expr r date -> expr r date -> expr r int = a => b => monthsBetween a b / 12
+
+## `secondsBetween start end`: whole seconds between two timestamps.
+##
+## The elapsed duration, computed as whole days plus the difference between the two
+## times of day. Writing it the obvious way — subtracting the `hour` fields, then the
+## `minute` fields, then the `second` fields — is **wrong across midnight**:
+## `23:30` to `01:15` the next day is 105 minutes, but `hour` gives `1 - 23 = -22`
+## and the fields wrap independently, so the sum comes out as `2 * 60 - 15`. This
+## spelling has no such seam: the day part is already a whole number of days, and the
+## time of day is one signed quantity.
+secondsBetween : expr r timestamp -> expr r timestamp -> expr r int = a => b =>
+  daysBetween (toDate a) (toDate b) * 86400
+  + ((hour b * 3600 + minute b * 60 + second b) - (hour a * 3600 + minute a * 60 + second a))
+
+## `minutesBetween start end`: whole minutes, from `secondsBetween` so the two cannot
+## disagree. Integer division truncates toward zero, so an interval of `-105` seconds
+## is `-1` minute rather than `-2`.
+minutesBetween : expr r timestamp -> expr r timestamp -> expr r int = a => b =>
+  secondsBetween a b / 60
+
+## `hoursBetween start end`: whole hours, from `secondsBetween` for the same reason.
+hoursBetween : expr r timestamp -> expr r timestamp -> expr r int = a => b =>
+  secondsBetween a b / 3600
 
 ## `nullIf a b`: NULL when `a` equals `b`, `a` otherwise — how a sentinel value
 ## is turned into a real NULL.

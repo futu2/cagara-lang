@@ -801,7 +801,10 @@ fn trunc(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
 fn part(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
     let ok = match unit {
         "YEAR" | "QUARTER" | "MONTH" | "DAY" | "DOW" | "DOY" => true,
-        "HOUR" | "MINUTE" => ts,
+        // A date has no time of day, so these three need a timestamp. `SECOND` was
+        // in `field` but not in this list, so `second` was unspellable — the prelude
+        // could not define it and `secondsBetween` had nothing to build on.
+        "HOUR" | "MINUTE" | "SECOND" => ts,
         _ => false,
     };
     if !ok {
@@ -844,6 +847,12 @@ fn part(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
         },
         Fam::Sqlite => {
             let code = |c: &str| cast(func("STRFTIME", vec![s(c), x.clone()]), DataType::Int);
+            // Every unit `ok` above accepts is listed. The previous version ended with
+            // `_ =>` for QUARTER, which made the *quarter* formula the answer for any
+            // unit that was not spelled out — so `SECOND`, once it became accepted,
+            // silently lowered to `(month + 2) / 3`. A catch-all that means one
+            // particular case is a trap; this is exhaustive instead, and `ok` is what
+            // guarantees the fallback is never reached.
             match unit {
                 "YEAR" => code("%Y"),
                 "MONTH" => code("%m"),
@@ -852,12 +861,13 @@ fn part(ts: bool, unit: &str, x: Expr, f: Fam) -> Option<Expr> {
                 "DOY" => code("%j"),
                 "HOUR" => code("%H"),
                 "MINUTE" => code("%M"),
-                // (month + 2) / 3
-                _ => bin(
+                "SECOND" => code("%S"),
+                "QUARTER" => bin(
                     atomic(bin(code("%m"), BinaryOperator::Plus, n("2"))),
                     BinaryOperator::Divide,
                     n("3"),
                 ),
+                _ => return None,
             }
         }
     })

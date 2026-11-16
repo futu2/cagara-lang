@@ -49,6 +49,10 @@ fn core_holds_the_language_and_std_holds_the_helpers() {
         "agg",
         "order",
         "innerJoin",
+        // `join` is SQL's name for `innerJoin`, and `crossJoin` is the cartesian
+        // product; both are part of the join family rather than query helpers.
+        "join",
+        "crossJoin",
         "union",
         "group",
         "count",

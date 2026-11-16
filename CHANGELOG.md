@@ -79,6 +79,11 @@
 - `agg { x = sum -1 }` explains itself too: `-` binds tighter than the argument list, so it reads
   as `sum - 1`. The fix is `sum (-1)`.
 
+- `join` and `crossJoin`. The join family had `innerJoin`/`leftJoin`/`rightJoin`/`fullJoin`/
+  `semiJoin`/`antiJoin` but no name for SQL's `JOIN`, and no cartesian product at all. `join` is
+  `innerJoin` under the name SQL uses; `crossJoin` is `innerJoin s true`, which every engine reads
+  as the same product (measured on five, and SQLite gives both forms the same query plan).
+
 - A stage given no argument says so. `q = u & where` reported
   `type mismatch: expected query {…}, found expr a b` — a shape the reader never wrote. It now names
   what the stage needs (`& where (.id > 1)`, `& limit 5`, `& order [asc .x]`, …), for all six of

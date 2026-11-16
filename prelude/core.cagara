@@ -361,6 +361,19 @@ cube : expr r (maybe a) -> agg (expr r (maybe a)) = primitive "__cube"
 innerJoin : query s -> expr (join r s) bool -> query r -> query (merge r s) =
   primitive "__innerJoin"
 
+## `join` is `innerJoin` under the name SQL uses: `JOIN` and `INNER JOIN` are the
+## same operator, so a query written from SQL should not have to spell it out.
+join : query s -> expr (join r s) bool -> query r -> query (merge r s) = innerJoin
+
+## Every pair of rows, one from each side — a cross join.
+##
+## Written as `innerJoin s true` rather than as its own primitive: the join
+## machinery threads a predicate through every stage, and `ON TRUE` is the same
+## cartesian product (measured on PostgreSQL, DuckDB, MariaDB, SQLite and Trino,
+## which agree row for row, and SQLite gives both forms the same query plan). The
+## generated SQL therefore reads `INNER JOIN … ON TRUE`.
+crossJoin : query s -> query r -> query (merge r s) = s => innerJoin s true
+
 ## Left outer join: every left row survives, and the right side's columns
 ## become `maybe` — they are NULL for the unmatched rows.
 ##

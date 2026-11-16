@@ -278,6 +278,16 @@ const CASES: &[(&str, &[&str])] = &[
         "paged = nums & order [asc .id] & limit 3 & where (.id > 1) & select { id = .id }",
         &["2", "3"],
     ),
+    // `join` is `innerJoin` under the name SQL uses, and `crossJoin` is every pair.
+    (
+        "jin = users & join (orders & select { user_id = .user_id, amount = .amount }) (.<id == .>user_id) & select { id = .id, a = .amount } & order [asc .id, asc .a]",
+        &["1|4.5", "1|5.5", "3|1.0"],
+    ),
+    // 2 rows x 2 rows, and the right operand is renamed so no name is on both sides.
+    (
+        "xjoin = (users & where (.id < 3)) & crossJoin ((nums & where (.id < 3)) & select { na = .a }) & select { u = .id, n = .na } & order [asc .u, asc .n]",
+        &["1|-7", "1|7", "2|-7", "2|7"],
+    ),
     // A computed column of a left join's right side is NULL when unmatched.
     (
         "lj = users & leftJoin (orders & select { user_id = .user_id, one = 1 }) (.<id == .>user_id) & select { id = .id, m = isNull .one } & order [asc .id]",

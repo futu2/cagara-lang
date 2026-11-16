@@ -260,6 +260,20 @@ degrees : expr r float -> expr r float = sql "DEGREES($1)"
 ## Radians from degrees.
 radians : expr r float -> expr r float = sql "RADIANS($1)"
 
+## `random` — a float in `[0, 1)`, different on every row.
+##
+## Not portable, and refused where it is not: SQLite's `random()` returns a **signed
+## 64-bit integer**, not a float — measured, and dividing by 2^63 gives negative values
+## about half the time, so the obvious rewrite is wrong rather than merely awkward. The
+## refusal says so instead of emitting `RANDOM()` there, which would silently change the
+## function's type.
+##
+## A query that is not reproducible is also not a query whose answer can be compared, so
+## this is the one prelude function the differential suite cannot check by rows. Its
+## presence is for sampling — `order [asc (random)] & limit 10` — where the *shape* is
+## what matters.
+random : expr r float = sql "CAGARA_RANDOM()"
+
 ## `greatest a b`: the larger of two non-null values, of any ordered type.
 ## SQLite has no `GREATEST`, so the `CASE` spelling is the portable one; with
 ## non-null arguments no NULL has to be resolved.

@@ -123,6 +123,15 @@ fn node(e: Expr, f: Fam) -> Result<Expr, String> {
 /// dialect is not a parameter because the reason is a property of the *function*: no
 /// target without `REVERSE` can express it, so nothing here depends on which one asked.
 fn refusal(name: &str) -> Option<String> {
+    if name == "CAGARA_RANDOM" {
+        return Some(
+            "`random` is not available on this target: SQLite's `random()` returns a \
+             signed 64-bit integer rather than a float in `[0, 1)`, and dividing by 2^63 \
+             gives negative values about half the time — measured. There is no portable \
+             spelling, so the function is refused rather than given a different type"
+                .to_string(),
+        );
+    }
     if name == "CAGARA_LIST_AT" {
         return Some(
             "`listAt` is available on DuckDB only: PostgreSQL would need `(xs)[i]`, and \
@@ -487,6 +496,7 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
         // these targets name it otherwise, and one has no base-10 logarithm at all.
         ("CAGARA_LOG10", 1) => log10(a[0].clone(), f)?,
         ("CAGARA_LOG2", 1) => log2(a[0].clone(), f)?,
+        ("CAGARA_RANDOM", 0) => random(f)?,
         ("CAGARA_ASCII", 1) => match f {
             // The name differs and the *answer* is the same: the code point of the
             // first character. SQLite and Trino call it `UNICODE`/`CODEPOINT`, which
@@ -1176,6 +1186,28 @@ fn reverse(text: Expr, f: Fam) -> Option<Expr> {
         | Fam::BigQuery
         | Fam::Snowflake
         | Fam::Tsql => Some(func("REVERSE", vec![text])),
+    }
+}
+
+/// A float in `[0, 1)`, on the targets that spell it that way.
+///
+/// SQLite's `random()` is a *signed 64-bit integer*, not a float — measured, and
+/// `random() / 9223372036854775808.0` is negative about half the time, so there is no
+/// portable rewrite. Refusing is the honest outcome: emitting `RANDOM()` there would
+/// give the column a different type than the signature promises.
+fn random(f: Fam) -> Option<Expr> {
+    match f {
+        Fam::Sqlite => None,
+        // `RAND()` on MySQL, `RANDOM()` everywhere else; `random()` in DuckDB, Trino,
+        // PostgreSQL and SQLite all return a double in `[0, 1)` except SQLite's.
+        Fam::Mysql => Some(func("RAND", vec![])),
+        Fam::Ansi
+        | Fam::Duck
+        | Fam::Trino
+        | Fam::Spark
+        | Fam::BigQuery
+        | Fam::Snowflake
+        | Fam::Tsql => Some(func("RANDOM", vec![])),
     }
 }
 

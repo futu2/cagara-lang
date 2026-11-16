@@ -3307,6 +3307,62 @@ a = f & select { s = over { order = [asc .k], frame = range (preceding 1) curren
     .expect("duckdb reads GROUPS");
     assert!(sql.contains("GROUPS BETWEEN"), "{sql}");
 }
+/// `random` is refused on SQLite, because its `random()` is not the same function.
+///
+/// Every other target returns a float in `[0, 1)`. SQLite returns a **signed 64-bit
+/// integer**, and `random() / 9223372036854775808.0` is negative about half the time —
+/// measured over 1000 draws: 490 were outside `[0, 1)`. So there is no portable
+/// rewrite, and emitting `RANDOM()` there would give the column a type the signature
+/// does not promise.
+///
+/// It is also the one prelude function the differential suite cannot check by rows: a
+/// query whose answer changes every run cannot be compared. The *shape* is asserted
+/// instead — the call reaches the SQL — and the type is the checker's business.
+#[test]
+fn sqlite_refuses_random() {
+    const DEFS: &str = "\
+t : query { id = int } = table \"main\" \"users\"\n\
+r = t & select { v = random }\n";
+    let ws = Workspace::from_source(DEFS);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let (_, r) = rels.iter().find(|(n, _)| n == "r").expect("r");
+    let rel = r.as_ref().expect("r type-checks");
+    let err = compile(
+        rel,
+        Options {
+            dialect: Dialect::Sqlite,
+            ..Options::default()
+        },
+    )
+    .expect_err("SQLite's random is an integer");
+    assert!(err.contains("`random`"), "{err}");
+    assert!(err.contains("signed 64-bit integer"), "{err}");
+    // The targets that have the float form compile. Which spelling reaches the SQL is
+    // the generator's business — it rewrites `RANDOM()` to `RAND()` for Trino, and both
+    // mean the same thing there — so the assertion is that *a* random call is present,
+    // not that a particular word is.
+    for d in [
+        Dialect::DuckDb,
+        Dialect::Postgres,
+        Dialect::Mysql,
+        Dialect::Trino,
+    ] {
+        let sql = compile(
+            rel,
+            Options {
+                dialect: d,
+                ..Options::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{d:?}: {e}"));
+        assert!(
+            sql.contains("RAND()") || sql.contains("RANDOM()"),
+            "{d:?} emits a random call: {sql}"
+        );
+    }
+}
+
 /// SQLite has no `REVERSE`, and the refusal says so instead of emitting a call.
 ///
 /// This is the shape the whole "no fake fixes" rule takes for a prelude function: a

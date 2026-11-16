@@ -60,6 +60,10 @@
   the request came from. `documentSymbol` still answers for one document, which is what an outline
   needs. The prelude is excluded — its definitions live in a file the user does not have.
 
+- `random` — a float in `[0, 1)`. Refused on SQLite, whose `random()` is a signed 64-bit integer:
+  dividing by 2^63 gave a negative value in 490 of 1000 measured draws, so there is no portable
+  spelling.
+
 - `exp`, `ln`, `log10`, `log2`, `logBase`, `cbrt`, `degrees` and `radians`. There is deliberately no
   `log`: DuckDB and SQLite read `log(x)` as base 10, MariaDB as the natural logarithm, and Trino
   refuses the one-argument form — a name that means three things is not a name.

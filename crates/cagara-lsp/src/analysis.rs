@@ -1475,6 +1475,59 @@ pub fn symbols(ws: &Workspace) -> Vec<DocumentSymbol> {
     out
 }
 
+/// Every definition in every reachable file, for `workspace/symbol`.
+///
+/// `symbols` answers for one document, because `textDocument/documentSymbol` is defined
+/// that way. A *workspace* symbol is the other question — "where is `revenue` defined,
+/// in any file" — and answering it with the root's definitions would show a short list
+/// without saying so, the same failure `references` had.
+///
+/// The prelude is skipped: its definitions are the language's, they live in a file the
+/// user does not have, and a search for `sum` should not send them to `<prelude>:504`.
+/// The path is what says so, which is the same test `definition` uses.
+pub fn workspace_symbols(ws: &Workspace) -> Vec<(PathBuf, Range, String, SymbolKind)> {
+    let tc = check_reachable(ws);
+    let mut out = Vec::new();
+    for (m, reachable) in ws.modules_reachable_from(ws.root).into_iter().enumerate() {
+        if !reachable {
+            continue;
+        }
+        let md = &ws.modules[m];
+        if md.path.to_string_lossy().starts_with('<') {
+            // `<prelude>` and `<input>`: no file to open. A location naming a path the
+            // editor cannot open is worse than no result.
+            continue;
+        }
+        let p = Positions::new(&md.text);
+        for (i, d) in md.module.defs.iter().enumerate() {
+            let Some((s, e)) = trimmed(&md.text, d.span) else {
+                continue;
+            };
+            let name_end = (s + d.name.len()).min(e);
+            let ty = tc.type_of(m, i).map(str::to_string);
+            let kind = if ty.as_deref().is_some_and(|t| t.contains("->")) {
+                SymbolKind::FUNCTION
+            } else {
+                SymbolKind::VARIABLE
+            };
+            out.push((
+                md.path.clone(),
+                root_range(&p, s, name_end),
+                d.name.clone(),
+                kind,
+            ));
+        }
+    }
+    // A stable order, so two runs of the same tree answer the same way — the editor
+    // keeps the list between keystrokes and a reshuffle is a flicker.
+    out.sort_by(|a, b| {
+        a.2.cmp(&b.2)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.start.line.cmp(&b.1.start.line))
+    });
+    out
+}
+
 /// Names that can be written at the cursor: after `alias.`, the imported
 /// module's definitions; after `.`, `.<`, or `.>`, the columns of that row
 /// (see `field_completion`); after `expr.`, nothing. Otherwise every name
@@ -2442,6 +2495,44 @@ mod tests {
 
     /// A lambda parameter is not matched across files.
     ///
+    /// `workspace_symbols` covers every reachable file, and leaves the prelude out.
+    ///
+    /// `symbols` answers for one document — that is what an outline is. A workspace
+    /// search that returned only the root's definitions would show a short list
+    /// without saying so, which is the failure `references` had.
+    #[test]
+    fn workspace_symbols_cover_every_open_file() {
+        let dir = std::env::temp_dir().join(format!("cagara-lsp-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lib.cagara"), "helper = 1\nother = 2\n").unwrap();
+        let main = dir.join("main.cagara");
+        let src = "import \"lib.cagara\" as lib\nq = lib.helper\n";
+        let ws = Workspace::open_with(&main, src.to_string());
+        let found = workspace_symbols(&ws);
+        let names: Vec<&str> = found.iter().map(|(_, _, n, _)| n.as_str()).collect();
+        // The root's own definition and both of the library's.
+        assert!(names.contains(&"q"), "{names:?}");
+        assert!(names.contains(&"helper"), "the imported file: {names:?}");
+        assert!(names.contains(&"other"), "the imported file: {names:?}");
+        // The prelude is a file the user does not have, so it is not a jump target.
+        assert!(
+            !names.contains(&"sum"),
+            "the prelude is not searchable: {names:?}"
+        );
+        // Every result names a real path, and the imported ones name the library.
+        let paths: Vec<String> = found
+            .iter()
+            .map(|(p, _, _, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(paths.contains(&"lib.cagara".to_string()), "{paths:?}");
+        // Sorted by name, so two runs answer the same way.
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted, "stable order: {names:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A rename of an imported definition reaches into the file that defines it.
     ///
     /// This is the case a single-file rename gets wrong without anyone noticing: the

@@ -38,6 +38,10 @@
 - An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
   `select { x = upper .id }` does. It named only the operator before.
 
+- The language server answers `workspace/symbol`: a definition in any open file, not only the one
+  the request came from. `documentSymbol` still answers for one document, which is what an outline
+  needs. The prelude is excluded — its definitions live in a file the user does not have.
+
 - `exp`, `ln`, `log10`, `log2`, `logBase`, `cbrt`, `degrees` and `radians`. There is deliberately no
   `log`: DuckDB and SQLite read `log(x)` as base 10, MariaDB as the natural logarithm, and Trino
   refuses the one-argument form — a name that means three things is not a name.

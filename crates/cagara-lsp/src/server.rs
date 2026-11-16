@@ -14,6 +14,7 @@ use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest,
     FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest, InlayHintRequest,
     PrepareRenameRequest, References, Rename, Request as _, SemanticTokensFullRequest,
+    WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
@@ -26,9 +27,9 @@ use lsp_types::{
     MarkupKind, MessageType, OneOf, PrepareRenameResponse, PublishDiagnosticsParams,
     ReferenceParams, RenameOptions, RenameParams, SemanticToken, SemanticTokenType, SemanticTokens,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SymbolInformation,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
-    WorkspaceEdit,
+    WorkspaceEdit, WorkspaceSymbolParams,
 };
 use std::collections::HashMap;
 use std::error::Error;
@@ -189,6 +190,9 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
             work_done_progress_options: Default::default(),
         })),
         document_highlight_provider: Some(OneOf::Left(true)),
+        // A definition in *any* open file. `documentSymbol` answers for one document,
+        // which is what an outline needs; this is what "go to symbol" needs.
+        workspace_symbol_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
         // Definitions whose body spans lines, `##` doc blocks, and `catalog` blocks.
@@ -638,6 +642,39 @@ fn request(
                 })
             });
             json(serde_json::to_value(data))
+        }
+        WorkspaceSymbolRequest::METHOD => {
+            let _p: WorkspaceSymbolParams = serde_json::from_value(params).map_err(bad_params)?;
+            // Every open document shares one module graph (`State::ws`), so the search
+            // runs once over it rather than once per document. The root is whichever
+            // was selected last, and every open buffer is in the graph, so the answer
+            // covers them all.
+            let found = analysis::workspace_symbols(&state.ws);
+            let mut syms: Vec<SymbolInformation> = found
+                .into_iter()
+                .filter_map(|(path, range, name, kind)| {
+                    // A path the editor cannot open is not a location. The prelude is
+                    // filtered out in `workspace_symbols`; this is the same rule for
+                    // anything else without a real path.
+                    let u = uri::from_path(&path)?;
+                    Some(SymbolInformation {
+                        name,
+                        kind,
+                        tags: None,
+                        #[allow(deprecated)]
+                        deprecated: None,
+                        location: Location { uri: u, range },
+                        container_name: None,
+                    })
+                })
+                .collect();
+            // Stable order, so the editor's list does not reshuffle between keystrokes.
+            syms.sort_by(|a, b| {
+                a.name
+                    .cmp(&b.name)
+                    .then_with(|| a.location.uri.as_str().cmp(b.location.uri.as_str()))
+            });
+            json(serde_json::to_value(Some(syms)))
         }
         FoldingRangeRequest::METHOD => {
             let p: FoldingRangeParams = serde_json::from_value(params).map_err(bad_params)?;
@@ -1227,6 +1264,21 @@ mod tests {
             "the definition and its use are both renamed: {ren}"
         );
 
+        // `workspace/symbol` searches every open file, which is the difference from
+        // `documentSymbol`. `DOC` defines `adult`, `q` and `users`.
+        let ws_syms = ed.ask("workspace/symbol", json!({ "query": "" }));
+        let names: Vec<&str> = ws_syms
+            .as_array()
+            .unwrap_or_else(|| panic!("workspace/symbol: {ws_syms}"))
+            .iter()
+            .filter_map(|s| s["name"].as_str())
+            .collect();
+        assert!(names.contains(&"adult"), "workspace/symbol: {ws_syms}");
+        assert!(
+            !names.contains(&"sum"),
+            "the prelude's names are not the user's to jump to: {ws_syms}"
+        );
+
         // `foldingRange` and `semanticTokens` are asked through the protocol too: an
         // advertised capability that only its analysis test reaches is advertised and
         // untested, which is what this test exists to prevent.
@@ -1367,15 +1419,11 @@ mod tests {
     fn a_capability_that_is_not_advertised_is_refused() {
         let mut ed = Editor::start();
         ed.open(URI, DOC);
-        // `textDocument/rename` used to be in this list. It is implemented now, so
-        // the list holds only what is still missing — the test is about the server
-        // refusing what it does not advertise, and a method it *does* answer belongs
-        // in `every_advertised_capability_answers` instead.
-        for method in [
-            "textDocument/signatureHelp",
-            "workspace/symbol",
-            "textDocument/documentColor",
-        ] {
+        // `textDocument/rename` and `workspace/symbol` used to be in this list. Both
+        // are implemented now, so the list holds only what is still missing — the test
+        // is about the server refusing what it does not advertise, and a method it
+        // *does* answer belongs in `every_advertised_capability_answers` instead.
+        for method in ["textDocument/signatureHelp", "textDocument/documentColor"] {
             let r = ed.ask(method, Editor::at(URI, 1, 8));
             assert_eq!(
                 r["error"]["code"],

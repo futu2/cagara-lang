@@ -1864,6 +1864,13 @@ impl<'w> Checker<'w> {
             unreachable!("dispatched on ExprKind::App")
         };
         let mut ft = self.infer(env, f)?;
+        // `sum -1` inside a field: `-` applied to a *function*, which is the same slip
+        // `& limit -1` is one level up. Checked here because at this point the callee is
+        // still known to be `-`/`+` and its first argument is the reader's node — inside
+        // the loop the failure has already been raised against a parameter type.
+        if let Some(msg) = self.negative_operand(f, args) {
+            return Err(at(e.span)(msg));
+        }
         let combine_kind = self.callee_combine_kind(f);
         let mut combine_inputs = Vec::new();
         // `unnest .x` is recorded before the parameter type is pushed down: the
@@ -2700,6 +2707,58 @@ impl<'w> Checker<'w> {
     /// differently: one says which field, the other does not. The field spans are
     /// already kept (for the nullable rewrite); this asks them which field holds
     /// this use.
+    /// `sum -1` in a field: a negative argument that `-` took as a subtraction from a
+    /// *function*.
+    ///
+    /// The same precedence slip as `& limit -1`, one level down. `& limit -1` is caught
+    /// where the stage is an argument of `&`; `agg { x = sum -1 }` is caught here, because
+    /// the application is `_-_ sum 1` and the reader's mistake is the *first operand*.
+    /// Both messages say the same thing: the operator binds tighter than the reader
+    /// expected, and parentheses fix it.
+    ///
+    /// Narrow on purpose — the operand must be a name whose **type** is a function or an
+    /// `agg`/`win` producer, so `age - 1` on a column is left alone.
+    fn negative_operand(&mut self, callee: &ast::Expr, args: &[ast::Expr]) -> Option<String> {
+        let ast::ExprKind::Name(op) = &callee.kind else {
+            return None;
+        };
+        let spelling = op.strip_prefix('_')?.strip_suffix('_')?;
+        if !matches!(spelling, "-" | "+") || args.len() != 2 {
+            return None;
+        }
+        let ast::ExprKind::Name(operand) = &args[0].kind else {
+            return None;
+        };
+        let shown = match &args[1].kind {
+            ast::ExprKind::Lit(cagara_syntax::ast::Lit::Int(v)) => v.to_string(),
+            ast::ExprKind::Lit(cagara_syntax::ast::Lit::Float(v)) => v.to_string(),
+            _ => return None,
+        };
+        let binding = self.env.scope.get(operand).cloned()?;
+        let ty = match binding {
+            Binding::Def(m, i) => self.def_scheme(m, i)?.ty,
+            Binding::Overloads(m, is) => self.def_scheme(m, *is.first()?)?.ty,
+            Binding::Module(_) => return None,
+        };
+        let resolved = self.resolve(&ty);
+        let not_a_number = match &resolved {
+            Ty::Fun(..) => true,
+            other => {
+                let rendered = self.show(other);
+                let result = rendered.rsplit(" -> ").next().unwrap_or("");
+                result.starts_with("agg") || result.starts_with("win")
+            }
+        };
+        if !not_a_number {
+            return None;
+        }
+        Some(format!(
+            "`{operand} {spelling}{shown}` reads as `{operand} {spelling} {shown}`: `{spelling}` \
+             binds tighter than the argument list, so this subtracts from `{operand}` rather \
+             than passing it a negative argument. Write `{operand} ({spelling}{shown})`"
+        ))
+    }
+
     /// `& stage -1`: a negative argument that `-` took as a subtraction.
     ///
     /// `-` is infix at a tighter precedence than `&`, so `limit -1` parses as

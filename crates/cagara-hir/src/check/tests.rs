@@ -527,6 +527,32 @@ fn query_output_rows() {
     );
 }
 
+/// `agg { x = sum -1 }` is the same precedence slip one level down.
+///
+/// `sum -1` is `_-_ sum 1`, so the operator is applied to a *function*. Reported at the
+/// application, where the callee is still `-` and the operand is the reader's node; inside
+/// the argument loop the failure is already against a parameter type.
+#[test]
+fn a_negative_aggregate_argument_explains_the_precedence() {
+    let e = err("q = users & agg { x = sum -1 }\n", "q");
+    assert!(e.contains("`sum -1` reads as `sum - 1`"), "{e}");
+    assert!(e.contains("Write `sum (-1)`"), "{e}");
+    assert!(!e.contains("agg (expr a"), "no leaked type: {e}");
+    // The parenthesised form compiles, and an ordinary subtraction is untouched.
+    assert_eq!(
+        ty("q = users & agg { x = sum (-1) }\n", "q"),
+        "query { x = maybe int }"
+    );
+    assert_eq!(
+        ty("q = users & select { x = .age - 1 }\n", "q"),
+        "query { x = int }"
+    );
+    assert_eq!(
+        ty("q = users & select { x = 5 - 1 }\n", "q"),
+        "query { x = int }"
+    );
+}
+
 /// A stage given no argument says so, instead of reporting a type it was never given.
 ///
 /// `q = users & where` is `_&_ users where`, so the stage is the *second* argument of

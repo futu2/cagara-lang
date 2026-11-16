@@ -178,15 +178,13 @@ not a prelude addition.
   `random() / 2^63` landed outside `[0, 1)` in 490 of 1000 measured draws. It is also the
   one prelude function the differential suite cannot check by rows, which its test says.
 
-**Still open: `q = u & where`.** A stage given too few arguments reports
-`type mismatch: expected query {…}, found expr a b`, and three attempts to improve it
-failed for the same reason: `&` is reverse application, so the stage arrives as an
-*argument* whose type is still an unbound variable at the point the application is
-checked, and the failure surfaces later inside `solve` from a constraint one level below
-the application. `mismatch` never sees the stage type; the application sees a `Var`. The
-fix belongs in the constraint solver — reporting "this stage still needs an argument"
-when a `Ty::Fun` ending in `query` is unified against a `query` — rather than in the
-application or the message.
+- A stage given no argument says what it needs. `q = u & where` reported
+  `expected query {…}, found expr a b`; the check had to go in `unify_inner`'s `Fun`/`Fun`
+  arm, where both whole function types still exist — three attempts in `infer_app` and
+  `mismatch` never fired, because by then the stage's type is gone. Two measured details
+  decided the wording: the parameter is `expr a b` with `b` still open (so the printed form
+  cannot be matched), and `select`/`agg` have a `record_expr` parameter rather than an
+  `expr`. An arity test keeps the prelude's own stage-shaped `_&|_` out.
 
 - `& limit -1` says what it parsed. `-` binds tighter than `&`, so it is `limit - 1` —
   a subtraction from the stage — and the diagnostic was `expected expr a b, found expr a
@@ -194,8 +192,9 @@ application or the message.
   because the failure is raised by a queued constraint one level below the application.
   Narrowed to operands whose type is a function or an `agg`/`win` producer, so `age - 1`
   on a column is untouched.
-  **Still open:** `agg { x = sum -1 }` is the same slip through the field checker, which
-  this hook does not reach; it reports the old message.
+- `agg { x = sum -1 }` — the same slip one level down, caught at the application rather
+  than in `infer_app`'s argument loop: the callee is still `-` there and the operand is the
+  reader's node, whereas inside the loop the failure is already against a parameter type.
 
 - A lowering refusal names the stage it is about. `cagara-sql` returned
   `Result<String, String>`, so every refusal reached the user as `file:0:0` — a

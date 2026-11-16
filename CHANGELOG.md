@@ -76,6 +76,9 @@
 - `cagara fmt` accepts a directory and formats the sources under it, as `cagara check` reads one.
   It used to fail with `Is a directory (os error 21)` on the same path `check` walked.
 
+- `agg { x = sum -1 }` explains itself too: `-` binds tighter than the argument list, so it reads
+  as `sum - 1`. The fix is `sum (-1)`.
+
 - A stage given no argument says so. `q = u & where` reported
   `type mismatch: expected query {…}, found expr a b` — a shape the reader never wrote. It now names
   what the stage needs (`& where (.id > 1)`, `& limit 5`, `& order [asc .x]`, …), for all six of

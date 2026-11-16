@@ -953,15 +953,6 @@ pub(crate) struct TyErr {
     /// rather than left for the editor to guess.
     pub(crate) suggestions: Vec<crate::workspace::Suggestion>,
 }
-
-impl TyErr {
-    /// The same error, with fixes the reader can apply.
-    #[allow(dead_code)] // used by the checks that attach a suggestion; kept here with the type
-    pub(crate) fn fixing(mut self, suggestions: Vec<crate::workspace::Suggestion>) -> Self {
-        self.suggestions = suggestions;
-        self
-    }
-}
 pub(crate) type R<T> = Result<T, TyErr>;
 pub(crate) type U = Result<(), String>;
 pub(crate) fn at(span: Span) -> impl FnOnce(String) -> TyErr {

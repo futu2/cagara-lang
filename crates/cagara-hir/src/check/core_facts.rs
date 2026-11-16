@@ -61,8 +61,6 @@ pub enum Resolved {
     /// resolution because which one applies is a fact about *this* occurrence —
     /// recorded in `TypeCheck`'s choices — not a property of the name.
     Overloads { module: usize, defs: Vec<usize> },
-    /// The checker resolved the name to a primitive.
-    Primitive,
 }
 
 impl Resolved {

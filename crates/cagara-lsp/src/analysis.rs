@@ -3393,10 +3393,6 @@ fn suggestion_edits(
     let mut edits = Vec::new();
     for e in &s.edits {
         match e {
-            SuggestionEdit::Replace { span, text: new } => edits.push(TextEdit {
-                range: span_range(p, *span)?,
-                new_text: new.clone(),
-            }),
             SuggestionEdit::Surround {
                 span,
                 before,

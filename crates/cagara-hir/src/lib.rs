@@ -14,7 +14,7 @@ mod elaborate;
 mod normalize;
 pub mod suggest;
 pub use check::{check, check_reachable, probe_fields, TypeCheck};
-pub use checked::{CheckedExpr, ExprKind};
+pub use checked::CheckedExpr;
 pub use compile::{
     compile, compile_checked, compile_diagnostics, compile_input, root_queries,
     root_queries_checked, root_verdicts, Compilation, CompiledQuery, CompilerInput, DefinitionId,

@@ -109,9 +109,6 @@ fn fixes(ws: &Workspace, d: &cagara_hir::workspace::Diag) -> Vec<(String, String
                             .unwrap_or_default()
                     };
                     match e {
-                        SuggestionEdit::Replace { span, text: new } => {
-                            format!("{} → {new}", slice(span))
-                        }
                         SuggestionEdit::Surround {
                             span,
                             before,

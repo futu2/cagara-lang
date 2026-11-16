@@ -10,7 +10,7 @@
 use crate::rules;
 use crate::schema;
 use cagara_syntax::ast::Span;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Where a checked node was written.
 ///
@@ -58,7 +58,8 @@ pub enum ScalarType {
 impl ScalarType {
     /// Is this type not known? Only meaningful to the constructors that
     /// cannot decide without one (`where` needs a bool, joins need rows).
-    pub fn is_unknown(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_unknown(&self) -> bool {
         matches!(self, ScalarType::Unknown)
     }
 
@@ -175,22 +176,6 @@ impl RowType {
         self
     }
 
-    /// The first name that occurs more than once, if any.
-    ///
-    /// A row with a repeated name is not a valid output row: `select` and
-    /// `agg` list their fields, and two fields with one name would produce a
-    /// query whose row cannot address both. The checker rejects it through the
-    /// record's field rule, and schema validation rejects it in an untyped
-    /// relational tree.
-    pub fn duplicate(&self) -> Option<&str> {
-        let mut seen = HashSet::with_capacity(self.columns.len());
-        self.columns
-            .iter()
-            .map(|(name, _)| name)
-            .find(|name| !seen.insert(name.as_str()))
-            .map(String::as_str)
-    }
-
     /// `omit "k"`: the row without column `k`.
     ///
     /// This is the row *former*, so a key the row does not have is a no-op:
@@ -281,9 +266,8 @@ impl RowType {
     /// fields, in the order they were written.
     ///
     /// This does not validate: it is the row *former*. Duplicate field names
-    /// are rejected by the constructors that consume a field list (see
-    /// [`duplicate`](RowType::duplicate)), and a caller that has not validated
-    /// must call that first.
+    /// are rejected by the constructors that consume a field list, and a caller
+    /// that has not validated must do so first.
     pub fn project(fields: &[(String, ScalarType)]) -> RowType {
         RowType::new(fields.to_vec())
     }

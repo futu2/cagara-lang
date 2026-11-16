@@ -13,34 +13,10 @@
 //! Phase and join-side rules come from `crate::rules`, the same module the
 //! checker uses. Column-level name rules come from `crate::schema`.
 
-use crate::check::Choice;
 use crate::core::{Error, Origin, RowType, ScalarType};
 use crate::ir::{Bound, Expr, Frame, JoinKind, Lit, Phase, WinSpec};
 use crate::rules::{self, Place};
 use cagara_syntax::ast::Side;
-
-/// Which expression form produced a [`CheckedExpr`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ExprKind {
-    /// A column reference (`.x`, `.<x`, `.>x`).
-    Column,
-    /// A scalar literal.
-    Lit,
-    /// A scalar SQL template (`sql "..."`).
-    Template,
-    /// An aggregate template (`agg`).
-    AggTemplate,
-    /// A window template (`win`).
-    WinTemplate,
-    /// `in`.
-    In,
-    /// `group`.
-    Group,
-    /// `rollup` / `cube`.
-    Grouping,
-    /// A call still to be inlined by elaboration.
-    Call,
-}
 
 /// The output row of a join, per kind. `join_columns` (via `RowType::merge`)
 /// is the same left-wins rule `schema` uses, and the nullable side's types go
@@ -107,30 +83,13 @@ impl CheckedExpr {
         (self.phase, self.ty, self.node, self.origin)
     }
 
-    /// Which expression form built this, without exposing the node type.
-    pub fn kind(&self) -> ExprKind {
-        match &self.node {
-            CheckedExprNode::Column { .. } => ExprKind::Column,
-            CheckedExprNode::Lit(_) => ExprKind::Lit,
-            CheckedExprNode::Template { .. } => ExprKind::Template,
-            CheckedExprNode::AggTemplate { .. } => ExprKind::AggTemplate,
-            CheckedExprNode::WinTemplate { .. } => ExprKind::WinTemplate,
-            CheckedExprNode::In { .. } => ExprKind::In,
-            CheckedExprNode::Group(_) => ExprKind::Group,
-            CheckedExprNode::Grouping(..) => ExprKind::Grouping,
-            CheckedExprNode::Call { .. } => ExprKind::Call,
-        }
-    }
-
     /// Number of checked expression nodes owned by this expression.
     ///
     /// A call-by-name binding copies its checked tree each time it is forced;
     /// the normalizer uses this count to charge that expansion to its budget.
     pub(crate) fn node_count(&self) -> usize {
         1 + match &self.node {
-            CheckedExprNode::Column { .. }
-            | CheckedExprNode::Lit(_)
-            | CheckedExprNode::Call { .. } => 0,
+            CheckedExprNode::Column { .. } | CheckedExprNode::Lit(_) => 0,
             CheckedExprNode::Template { args, .. } => {
                 args.iter().map(CheckedExpr::node_count).sum()
             }
@@ -380,28 +339,6 @@ impl CheckedExpr {
     pub(crate) fn columns(&self, out: &mut Vec<(Side, String)>) {
         self.node.collect_columns(out);
     }
-
-    /// A use of a checked definition, with the instantiation chosen for its
-    /// overload holes. This is what makes an overload choice explicit at the
-    /// call site instead of a dynamic lookup during normalization.
-    pub fn call(
-        name: impl Into<String>,
-        def: (usize, usize),
-        holes: Vec<Choice>,
-        ty: ScalarType,
-        origin: Origin,
-    ) -> Self {
-        CheckedExpr {
-            phase: Phase::Row,
-            ty,
-            node: CheckedExprNode::Call {
-                name: name.into(),
-                def,
-                holes,
-            },
-            origin,
-        }
-    }
 }
 
 /// A checked expression's node.
@@ -441,13 +378,6 @@ pub(crate) enum CheckedExprNode {
     /// A grouping key that also gets subtotal rows. Its type is `maybe` in the
     /// stage's output, because the subtotal rows leave it out.
     Grouping(crate::ir::GroupingShape, Box<CheckedExpr>),
-    /// A checked definition used as an expression: the callee's name and the
-    /// instantiation chosen for its holes.
-    Call {
-        name: String,
-        def: (usize, usize),
-        holes: Vec<Choice>,
-    },
 }
 
 impl CheckedExprNode {
@@ -464,7 +394,7 @@ impl CheckedExprNode {
     fn collect_columns(&self, out: &mut Vec<(Side, String)>) {
         match self {
             CheckedExprNode::Column { side, name } => out.push((*side, name.clone())),
-            CheckedExprNode::Lit(_) | CheckedExprNode::Call { .. } => {}
+            CheckedExprNode::Lit(_) => {}
             CheckedExprNode::Template { args, .. } | CheckedExprNode::AggTemplate { args, .. } => {
                 for a in args {
                     a.node.collect_columns(out);
@@ -657,35 +587,33 @@ pub(crate) fn update_place() -> Place {
 
 /// Lower a checked expression to the current `Expr`.
 ///
-/// Fallible because a
-/// `CheckedExprNode::Call` is not a SQL expression, and erasing it used to
-/// emit a `/* unresolved call */` template — a *valid* SQL expression that
-/// therefore reached the backend as though it meant something. An unresolved
-/// call is a compiler bug; a `Result` is how the caller finds out.
-pub(crate) fn erase_expr(e: CheckedExpr) -> Result<Expr, Error> {
+/// Infallible: every node a checked expression can hold is a SQL expression.
+/// It used to be fallible for `CheckedExprNode::Call`, which had no spelling
+/// and had to be reported rather than emitted as a `/* unresolved call */`
+/// template — a *valid* SQL expression that reached the backend as though it
+/// meant something. Nothing constructs a `Call` node (elaboration inlines
+/// every call), so the node and the `Result` are both gone.
+pub(crate) fn erase_expr(e: CheckedExpr) -> Expr {
     let (_phase, _ty, node, _origin) = e.into_parts();
-    let expr = match node {
+    match node {
         CheckedExprNode::Column { side, name } => Expr::Col(side, name),
         CheckedExprNode::Lit(l) => Expr::Lit(l),
-        CheckedExprNode::Template { sql, args } => Expr::Tpl(sql, erase_exprs(args)?),
+        CheckedExprNode::Template { sql, args } => Expr::Tpl(sql, erase_exprs(args)),
         CheckedExprNode::AggTemplate { sql, args, filter } => Expr::Agg(
             sql,
-            erase_exprs(args)?,
-            match filter {
-                Some(p) => Some(Box::new(erase_expr(p.as_ref().clone())?)),
-                None => None,
-            },
+            erase_exprs(args),
+            filter.map(|p| Box::new(erase_expr(p.as_ref().clone()))),
         ),
         CheckedExprNode::WinTemplate { sql, args, spec } => Expr::Win(
             sql,
-            erase_exprs(args)?,
+            erase_exprs(args),
             Box::new(WinSpec {
-                partition: erase_exprs(spec.partition)?,
+                partition: erase_exprs(spec.partition),
                 order: spec
                     .order
                     .into_iter()
-                    .map(|(e, asc)| Ok((erase_expr(e)?, asc)))
-                    .collect::<Result<Vec<_>, Error>>()?,
+                    .map(|(e, asc)| (erase_expr(e), asc))
+                    .collect(),
                 frame: spec.frame,
             }),
         ),
@@ -694,20 +622,13 @@ pub(crate) fn erase_expr(e: CheckedExpr) -> Result<Expr, Error> {
             list,
             negated,
             ..
-        } => Expr::In(Box::new(erase_expr(*value)?), erase_exprs(list)?, negated),
-        CheckedExprNode::Group(k) => Expr::Group(Box::new(erase_expr(*k)?)),
-        CheckedExprNode::Grouping(shape, k) => Expr::Grouping(shape, Box::new(erase_expr(*k)?)),
-        CheckedExprNode::Call { name, .. } => {
-            return Err(Error::new(format!(
-                "internal error: the call `{name}` reached erasure; every call must be \
-                 inlined or reduced before the expression is erased"
-            )))
-        }
-    };
-    Ok(expr)
+        } => Expr::In(Box::new(erase_expr(*value)), erase_exprs(list), negated),
+        CheckedExprNode::Group(k) => Expr::Group(Box::new(erase_expr(*k))),
+        CheckedExprNode::Grouping(shape, k) => Expr::Grouping(shape, Box::new(erase_expr(*k))),
+    }
 }
 
-/// Erase a list of checked expressions, stopping at the first that cannot be.
-fn erase_exprs(es: Vec<CheckedExpr>) -> Result<Vec<Expr>, Error> {
+/// Erase a list of checked expressions.
+fn erase_exprs(es: Vec<CheckedExpr>) -> Vec<Expr> {
     es.into_iter().map(erase_expr).collect()
 }

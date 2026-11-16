@@ -25,7 +25,8 @@ pub mod winspec {
     }
 
     /// Is `name` a window spec field?
-    pub fn is_field(name: &str) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_field(name: &str) -> bool {
         ALL.contains(&name)
     }
 }
@@ -38,7 +39,8 @@ pub mod winspec {
 /// Which operators are stages is not listed here: an operator is a stage when
 /// its fixity equals `&`'s in the fixed table, so the table, not this file,
 /// decides which spellings are shorthands.
-pub fn is_pipe_name(name: &str) -> bool {
+#[cfg(test)]
+pub(crate) fn is_pipe_name(name: &str) -> bool {
     cagara_syntax::ops().is_stage_name(name)
 }
 

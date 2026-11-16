@@ -162,7 +162,8 @@ impl TypedBody {
     ///
     /// The span twin of [`TypedBody::node`]: the same question asked by
     /// location instead of by id.
-    pub fn node_at(&self, span: Span) -> Option<&TypedExpr> {
+    #[cfg(test)]
+    pub(crate) fn node_at(&self, span: Span) -> Option<&TypedExpr> {
         let at = self
             .by_span
             .binary_search_by_key(&(span.start, span.end), |(start, end, _)| (*start, *end))

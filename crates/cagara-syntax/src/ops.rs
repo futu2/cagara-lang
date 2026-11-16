@@ -26,6 +26,7 @@ use std::sync::OnceLock;
 /// The prelude defines the language's *meanings* (`_+_`, `_&^_`, …), so this
 /// crate reads it to check that the table and the definitions agree. Every
 /// other use of the prelude is in `cagara-hir`, which loads it as module 0.
+#[cfg(test)]
 pub const PRELUDE_SRC: &str = concat!(
     include_str!("../../../prelude/core.cagara"),
     include_str!("../../../prelude/std.cagara")
@@ -35,6 +36,7 @@ pub const PRELUDE_SRC: &str = concat!(
 /// an operator at level `n` spends `n + 1` on one of its two binding powers,
 /// so a level must leave room for that increment; `MAX_LEVEL + 1` still fits
 /// in `u8`.
+#[cfg(test)]
 pub const MAX_LEVEL: u8 = 250;
 
 /// Binding powers of one operator: the tightness required of its left and

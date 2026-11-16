@@ -89,10 +89,6 @@ impl<'a> ModuleSnapshot<'a> {
         &self.loaded().scope
     }
 
-    pub fn own(&self) -> &'a HashMap<String, Binding> {
-        &self.loaded().own
-    }
-
     fn loaded(&self) -> &'a LoadedModule {
         &self.workspace.modules[self.module]
     }

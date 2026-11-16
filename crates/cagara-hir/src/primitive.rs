@@ -179,10 +179,3 @@ impl Prim {
         }
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TplKind {
-    Scalar,
-    Agg,
-    Win,
-}

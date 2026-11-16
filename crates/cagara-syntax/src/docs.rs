@@ -149,14 +149,6 @@ impl<'a> Docs<'a> {
         }
     }
 
-    /// The documentation of the item whose first token is at `offset`.
-    ///
-    /// The same answer as [`item_doc`], for a caller that already holds an
-    /// index: `cagara doc` asks per definition and wants the line numbers too.
-    pub fn item(&self, offset: usize) -> Option<String> {
-        item_doc(self.src, offset)
-    }
-
     /// The record types in a declared signature, each with its fields in source
     /// order.
     ///

@@ -705,7 +705,7 @@ impl CompiledQuery {
                 columns: Some(columns.clone()),
             },
             (Payload::Predicate(pred), _) => {
-                crate::ir::Rel::Where(child(0)?, crate::checked::erase_expr(pred.clone())?)
+                crate::ir::Rel::Where(child(0)?, crate::checked::erase_expr(pred.clone()))
             }
             (Payload::Fields(fields), QueryNodeKind::Select) => {
                 crate::ir::Rel::Select(child(0)?, erase_fields(fields)?)
@@ -719,10 +719,8 @@ impl CompiledQuery {
             (Payload::Keys(keys), _) => crate::ir::Rel::Order(
                 child(0)?,
                 keys.iter()
-                    .map(|(key, ascending)| {
-                        Ok((crate::checked::erase_expr(key.clone())?, *ascending))
-                    })
-                    .collect::<Result<Vec<_>, crate::core::Error>>()?,
+                    .map(|(key, ascending)| (crate::checked::erase_expr(key.clone()), *ascending))
+                    .collect::<Vec<_>>(),
             ),
             (Payload::Affix { affix, prefix }, _) => {
                 let inner = child(0)?;
@@ -742,18 +740,18 @@ impl CompiledQuery {
             (Payload::Count(n), QueryNodeKind::Offset) => crate::ir::Rel::Offset(child(0)?, *n),
             (Payload::None, QueryNodeKind::Distinct) => crate::ir::Rel::Distinct(child(0)?),
             (Payload::Unnest(expr), QueryNodeKind::Unnest) => {
-                crate::ir::Rel::Unnest(child(0)?, crate::checked::erase_expr(expr.clone())?)
+                crate::ir::Rel::Unnest(child(0)?, crate::checked::erase_expr(expr.clone()))
             }
             (Payload::On(on), QueryNodeKind::MarkExists) => crate::ir::Rel::MarkExists {
                 input: child(0)?,
                 right: child(1)?,
-                on: crate::checked::erase_expr(on.clone())?,
+                on: crate::checked::erase_expr(on.clone()),
             },
             (Payload::On(on), QueryNodeKind::Join(kind)) => crate::ir::Rel::Join {
                 kind,
                 left: child(0)?,
                 right: child(1)?,
-                on: crate::checked::erase_expr(on.clone())?,
+                on: crate::checked::erase_expr(on.clone()),
             },
             (Payload::None, QueryNodeKind::Set(kind)) => crate::ir::Rel::Set {
                 kind,
@@ -777,6 +775,6 @@ fn erase_fields(
 ) -> Result<Vec<(String, crate::ir::Expr)>, crate::core::Error> {
     fields
         .iter()
-        .map(|(name, expr)| Ok((name.clone(), crate::checked::erase_expr(expr.clone())?)))
+        .map(|(name, expr)| Ok((name.clone(), crate::checked::erase_expr(expr.clone()))))
         .collect()
 }

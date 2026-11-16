@@ -158,8 +158,6 @@ impl Severity {
 /// occurrence of a token inside a span (`.<id` inside a join predicate).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SuggestionEdit {
-    /// Replace the span's text.
-    Replace { span: Span, text: String },
     /// Write `before` at the span's start and `after` at its end: `(` … `)`.
     Surround {
         span: Span,

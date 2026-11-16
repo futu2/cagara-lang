@@ -1463,7 +1463,6 @@ fn a_diagnostic_carries_the_fix_it_knows() {
     let (right, pred) = fix.edits.iter().fold((None, None), |(r, p), e| match e {
         SuggestionEdit::Surround { span, .. } => (Some(*span), p),
         SuggestionEdit::Retoken { span, .. } => (r, Some(*span)),
-        _ => (r, p),
     });
     assert_eq!(slice(right.expect("an operand span")), "b");
     assert_eq!(slice(pred.expect("a predicate span")), ".<id == .>id");
@@ -3668,7 +3667,6 @@ fn the_checker_records_what_each_name_resolved_to() {
                     assert!(*d < ws.modules[*module].module.defs.len());
                 }
             }
-            crate::check::Resolved::Primitive => {}
         }
     }
     // `upper` is reached through the alias `up`, and the resolution must name

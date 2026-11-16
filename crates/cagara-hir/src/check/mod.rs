@@ -367,8 +367,9 @@ impl TypeCheck {
     ///
     /// `None` when the checker recorded no type for that id, or recorded one
     /// that is not a scalar (a `Query`, a `Function`, an open row).
-    /// `Some(Unknown)` when it is a scalar the checker never solved. The
-    /// distinction matches [`TypeCheck::def_scalar`], and for the same reason.
+    /// `Some(Unknown)` when it is a scalar the checker never solved — the two
+    /// are different answers, so a caller can tell "no type" from "a type the
+    /// checker left open".
     pub fn use_ty(&self, module: usize, id: u32) -> Option<ScalarType> {
         self.typed_node(module, id)?.ty()
     }
@@ -382,7 +383,8 @@ impl TypeCheck {
     /// definition that failed partway leaves its untyped nodes in the tree with
     /// no view, and an id from one of those would answer `None` to every fact
     /// reader — a node that looks available and has nothing to say.
-    pub fn use_ids(&self, module: usize) -> Vec<u32> {
+    #[cfg(test)]
+    pub(crate) fn use_ids(&self, module: usize) -> Vec<u32> {
         let Some(checked) = self.modules.get(module) else {
             return Vec::new();
         };
@@ -413,7 +415,8 @@ impl TypeCheck {
     }
 
     /// Every `ExprId` in `module` the checker recorded a resolution for.
-    pub fn resolved_ids(&self, module: usize) -> Vec<u32> {
+    #[cfg(test)]
+    pub(crate) fn resolved_ids(&self, module: usize) -> Vec<u32> {
         let Some(checked) = self.modules.get(module) else {
             return Vec::new();
         };
@@ -427,36 +430,6 @@ impl TypeCheck {
         out
     }
 
-    /// The row of a definition's scheme, as closed data: column names and
-    /// [`ScalarType`]s in declaration order.
-    ///
-    /// This is the typed twin of [`TypeCheck::type_of`]. A phase that needs a
-    /// definition's columns reads them here instead of parsing the printed
-    /// string.
-    ///
-    /// The columns of a definition's *closed* query row, or `None` when the
-    /// scheme is not a closed query.
-    ///
-    /// `None` covers every other shape — a function, a scalar, a bare row, a
-    /// `query r` with an open row — because a caller asking for columns wants
-    /// to know whether there are any, and the shapes differ in more ways than
-    /// the answer. Use [`TypeCheck::scheme_view`] to tell *which* shape it is.
-    pub fn scheme_fields(&self, module: usize, def: usize) -> Option<Vec<(String, ScalarType)>> {
-        let s = self.modules.get(module)?.schemes.get(&(module, def))?;
-        match scheme_view(&s.ty) {
-            SchemeView::Query { fields } => fields,
-            SchemeView::Row { fields } => Some(fields),
-            _ => None,
-        }
-    }
-
-    /// What shape a definition's scheme has, structurally.
-    ///
-    /// This is the accessor to branch on. [`TypeCheck::scheme_fields`] and
-    /// [`TypeCheck::def_scalar`] both collapse several shapes into `None`, so
-    /// neither can distinguish "a function taking a query" from "a query";
-    /// this can, because it is computed from the type rather than from the
-    /// shape of a printed string.
     /// The scalar type a definition *returns*, with arguments stripped and any
     /// `expr r a` unwrapped to `a`.
     ///
@@ -467,6 +440,11 @@ impl TypeCheck {
         scheme_result_scalar(&s.ty)
     }
 
+    /// What shape a definition's scheme has, structurally.
+    ///
+    /// This is the accessor to branch on: it distinguishes "a function taking a
+    /// query" from "a query", because it is computed from the type rather than
+    /// from the shape of a printed string.
     pub fn scheme_view(&self, module: usize, def: usize) -> Option<SchemeView> {
         let s = self.modules.get(module)?.schemes.get(&(module, def))?;
         Some(scheme_view(&s.ty))
@@ -503,15 +481,6 @@ impl TypeCheck {
     /// to `Unknown`; this reads the same structural view
     /// [`TypeCheck::scheme_view`] exposes, so a function is now `None` rather
     /// than a misleading `Some(Unknown)`.
-    pub fn def_scalar(&self, module: usize, def: usize) -> Option<ScalarType> {
-        let s = self.modules.get(module)?.schemes.get(&(module, def))?;
-        match scheme_view(&s.ty) {
-            SchemeView::Scalar(t) => Some(t),
-            SchemeView::Open => Some(ScalarType::Unknown),
-            SchemeView::Query { .. } | SchemeView::Row { .. } | SchemeView::Function => None,
-        }
-    }
-
     /// The *error* at one definition, if it has one. A definition whose only
     /// diagnostic is a warning has no error, so elaboration and `--only` do not
     /// treat it as broken.

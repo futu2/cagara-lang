@@ -253,12 +253,6 @@ impl<'a> Normalizer<'a, 'a> {
                 module: target_module,
                 defs,
             }) => self.overloads(target_module, module, expr, &defs),
-            // The checker records a primitive only for a `primitive "…"` body,
-            // which is read as a body form rather than as a name.
-            Some(Resolved::Primitive) => Err(Control::unsupported(
-                origin,
-                "a primitive used as an expression",
-            )),
             // A body no use reaches — a primitive definition's own — has no
             // recorded resolution, so the name is looked up in the scope of the
             // definition being normalized, which is the scope it was written in.
@@ -1498,7 +1492,7 @@ pub(crate) fn rephase(expr: CheckedExpr, phase: crate::ir::Phase) -> CheckedExpr
     // the checked layer. Nothing else reaches here: a constant is a literal and
     // nothing but a literal is a constant.
     let origin = expr.origin();
-    let Ok(crate::ir::Expr::Lit(lit)) = crate::checked::erase_expr(expr) else {
+    let crate::ir::Expr::Lit(lit) = crate::checked::erase_expr(expr) else {
         return original;
     };
     CheckedExpr::const_at(lit, phase, origin)

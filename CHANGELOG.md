@@ -79,6 +79,11 @@
 - `agg { x = sum -1 }` explains itself too: `-` binds tighter than the argument list, so it reads
   as `sum - 1`. The fix is `sum (-1)`.
 
+- `over { … } (rowNumber)` says the function is already a window. It reported
+  `expected agg (…), found winspec a -> win (expr a int)` — true, but silent about `rowNumber`
+  taking the spec itself. The message now names the right spelling for all five window functions
+  of that shape, and leaves `over { … } (sum .n)` alone.
+
 - `join` and `crossJoin`. The join family had `innerJoin`/`leftJoin`/`rightJoin`/`fullJoin`/
   `semiJoin`/`antiJoin` but no name for SQL's `JOIN`, and no cartesian product at all. `join` is
   `innerJoin` under the name SQL uses; `crossJoin` is `innerJoin s true`, which every engine reads

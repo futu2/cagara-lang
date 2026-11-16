@@ -1871,6 +1871,14 @@ impl<'w> Checker<'w> {
         if let Some(msg) = self.negative_operand(f, args) {
             return Err(at(e.span)(msg));
         }
+        // `over spec (rowNumber)`: a window function wrapped in `over`, which wants an
+        // aggregate. Reported here because the argument's own type is still available;
+        // by the time the application's unification fails, the two `over` overloads have
+        // been tried and the message only says `expected agg (…), found winspec a ->
+        // win (…)` — true, but silent about the function never needing `over`.
+        if let Some(msg) = self.over_applied_to_a_window(f, args) {
+            return Err(at(e.span)(msg));
+        }
         let combine_kind = self.callee_combine_kind(f);
         let mut combine_inputs = Vec::new();
         // `unnest .x` is recorded before the parameter type is pushed down: the
@@ -2707,6 +2715,60 @@ impl<'w> Checker<'w> {
     /// differently: one says which field, the other does not. The field spans are
     /// already kept (for the nullable rewrite); this asks them which field holds
     /// this use.
+    /// Is `over` being given a function that is already a window?
+    ///
+    /// `over : winspec r -> agg (expr r a) -> win (expr r a)` turns an *aggregate* into a
+    /// window. `rowNumber` and its relatives are already `winspec r -> win (…)`, so
+    /// `over { … } (rowNumber)` cannot type-check — and the reader who wrote it most
+    /// likely wanted `rowNumber { … }`, which is the same spec without the wrapper.
+    ///
+    /// The test is on the argument's own type, which is why this runs before the
+    /// application is unified: the two `over` overloads are tried in order, and the
+    /// failure that surfaces is between `agg (… c)` and `agg (… (maybe c))` — a detail
+    /// of the overloads rather than of what the reader wrote.
+    fn over_applied_to_a_window(
+        &mut self,
+        callee: &ast::Expr,
+        args: &[ast::Expr],
+    ) -> Option<String> {
+        let ast::ExprKind::Name(name) = &callee.kind else {
+            return None;
+        };
+        if name != "over" {
+            return None;
+        }
+        let ast::ExprKind::Name(window) = &args.last()?.kind else {
+            return None;
+        };
+        let binding = self.env.scope.get(window).cloned()?;
+        let ty = match binding {
+            Binding::Def(m, i) => self.def_scheme(m, i)?.ty,
+            Binding::Overloads(m, is) => self.def_scheme(m, *is.first()?)?.ty,
+            Binding::Module(_) => return None,
+        };
+        let Ty::Fun(first, rest) = self.resolve(&ty) else {
+            return None;
+        };
+        // The result is `expr r (win …)` — `win` is the *phase* argument of `expr`, not a
+        // type of its own — so the second half is checked through it. Measured: the
+        // resolved shape is `Con("winspec", [Gen(0)]) -> Con("expr", [Con("win", []), …])`.
+        let phase = match self.resolve(&rest) {
+            Ty::Con("expr", mut ea) if ea.len() == 3 => ea.remove(0),
+            _ => return None,
+        };
+        if !matches!(self.resolve(&first), Ty::Con("winspec", _))
+            || !matches!(self.resolve(&phase), Ty::Con("win", _))
+        {
+            return None;
+        }
+        Some(
+            "`over` takes an aggregate to turn into a window, and this is already a \
+             window function: it takes the spec itself. Write `rowNumber { order = \
+             [asc .x] }` — and keep `over { … } (sum .n)` for aggregates"
+                .to_string(),
+        )
+    }
+
     /// `sum -1` in a field: a negative argument that `-` took as a subtraction from a
     /// *function*.
     ///

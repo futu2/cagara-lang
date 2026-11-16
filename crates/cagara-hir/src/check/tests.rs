@@ -527,6 +527,44 @@ fn query_output_rows() {
     );
 }
 
+/// A window function wrapped in `over` says so, instead of reporting the overload.
+///
+/// `over : winspec r -> agg (expr r a) -> win (expr r a)` turns an *aggregate* into a
+/// window. `rowNumber` and its relatives are already `winspec r -> win (…)`, so
+/// `over spec (rowNumber)` cannot type-check — and the mismatch that surfaced said
+/// `expected agg (…), found winspec a -> win (expr a int)`, which is true but never
+/// says the function takes the spec itself.
+#[test]
+fn over_applied_to_a_window_function_explains_itself() {
+    let e = err(
+        "q = users & select { r = over { order = [asc .age] } (rowNumber) }\n",
+        "q",
+    );
+    assert!(e.contains("already a window function"), "{e}");
+    assert!(e.contains("rowNumber { order = [asc .x] }"), "{e}");
+    assert!(!e.contains("expected agg"), "no overload detail: {e}");
+
+    // Every window function of this shape gets it, not just `rowNumber`.
+    for f in ["rank", "denseRank", "percentRank", "cumeDist"] {
+        let e = err(
+            &format!("q = users & select {{ r = over {{ order = [asc .age] }} ({f}) }}\n"),
+            "q",
+        );
+        assert!(e.contains("already a window function"), "{f}: {e}");
+    }
+
+    // The two correct spellings are untouched, and so is the nullable overload of
+    // `over` — its argument is still an `agg`, which is what `over` wants.
+    for src in [
+        "q = users & select { r = rowNumber { order = [asc .age] } }\n",
+        "q = users & select { r = over { order = [asc .age] } (sum .age) }\n",
+        "q = users & select { r = over { order = [asc .active] } (sum .age) }\n",
+    ] {
+        let t = ty(src, "q");
+        assert!(t.starts_with("query "), "{src:?}: {t}");
+    }
+}
+
 /// `agg { x = sum -1 }` is the same precedence slip one level down.
 ///
 /// `sum -1` is `_-_ sum 1`, so the operator is applied to a *function*. Reported at the

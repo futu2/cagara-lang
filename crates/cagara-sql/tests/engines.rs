@@ -2,7 +2,9 @@
 //! on real engines, must return the same rows.
 //!
 //! Each engine runs through a shell and is skipped when that shell is not
-//! installed, unless `CAGARA_REQUIRE_ENGINES` is set (as in CI):
+//! installed, unless `CAGARA_REQUIRE_ENGINES` is set. `CAGARA_NO_ENGINES` skips
+//! every one of them unconditionally, which is what CI sets — see
+//! `docs/ENGINE-TESTS.md`:
 //!
 //! | engine | shell | notes |
 //! |---|---|---|
@@ -12,6 +14,20 @@
 //!
 //! Postgres is the only one of the three that can hold a `list`, so it is where
 //! `ARRAY[…]`, `ARRAY_AGG` and `||` are checked by a real planner.
+
+/// Whether this run should skip every test that executes SQL on a real engine.
+///
+/// CI sets `CAGARA_NO_ENGINES=1`. The differential suite needs three downloads and two
+/// servers, which is more than a push should pay for, and leaving the engines out is not
+/// enough on its own: the runner ships an `sqlite3` older than the 3.46 that `floor`
+/// needs, so a present-but-too-old engine would fail rather than skip. This switch is
+/// what makes "not in CI" a decision rather than a side effect of the image.
+///
+/// The tests that only compare generated SQL text do not check this — they are cheap and
+/// they still run, which is what keeps a push from shipping SQL nobody looked at.
+fn engines_disabled() -> bool {
+    std::env::var_os("CAGARA_NO_ENGINES").is_some()
+}
 
 use cagara_hir::{root_queries, Workspace};
 use cagara_sql::{compile, Dialect, Options};
@@ -1051,6 +1067,10 @@ fn run_script(
 /// claim like that is worth a measurement either way.
 #[test]
 fn a_list_compares_as_a_value_on_the_engines() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     let src = "nums2 : query { id = int } = table \"main\" \"nums\"\n\
                q = nums2 & where (.id == 1) & select { same = [1, 2] == [1, 2], \
                diff = [1, 2] == [2, 1], ne = [1] != [2], ord = [1] < [2] }\n";
@@ -1284,6 +1304,10 @@ fn well_formed_bodies() {
 /// with the right shape.
 #[test]
 fn a_set_operation_aligns_by_name_and_keeps_the_left_order() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     const DEFS: &str = "\
 t : query { id = int, name = string } = table \"main\" \"users\"\n\
 a = t & select { id = .id, name = .name }\n\
@@ -1354,6 +1378,10 @@ ba = b & union a & order [asc .id]\n";
 /// clause is fine as long as the answer is this one.
 #[test]
 fn paging_is_a_pipeline_and_the_order_matters() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     const DEFS: &str = "\
 n : query { id = int } = table \"main\" \"nums\"\n\
 skip_then_take = n & order [asc .id] & offset 2 & limit 2\n\
@@ -1598,6 +1626,10 @@ fn strip_literals(sql: &str) -> String {
 
 #[test]
 fn engines_agree() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     let src = format!(
         "{TABLES}{}\n",
         CASES.iter().map(|(d, _)| *d).collect::<Vec<_>>().join("\n")
@@ -1674,6 +1706,10 @@ fn engines_agree() {
 /// instead.
 #[test]
 fn a_parsed_and_printed_date_agrees_on_the_engines() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     let src = format!(
         "{TABLES}\
          fmt = days & select {{ s = formatDate \"%Y-%m-%d %H:%M:%S\" .d, ym = formatDate \"%Y-%m\" .d }}\n"
@@ -1751,6 +1787,10 @@ fn a_parsed_and_printed_date_agrees_on_the_engines() {
 /// the same rows back.
 #[test]
 fn money_is_exact_on_the_engines() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     let setup = "CREATE TABLE main.money (id INTEGER, total DECIMAL(10, 2), part DECIMAL(10, 1));\n\
                  INSERT INTO main.money VALUES (1, 19.99, 0.1), (2, 19.99, 0.2), (3, 19.99, 0.3);\n";
     let src = "money : query { id = int, total = decimal 10 2, part = decimal 10 1 } = \
@@ -1882,6 +1922,10 @@ fn money_is_exact_on_the_engines() {
 /// branch of the guard is what the second row measures.
 #[test]
 fn a_lifted_value_keeps_its_nulls_on_the_engines() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     // DuckDB and SQLite have no schemas unless one is made; both engines get the
     // same `main` schema, which is where the other cases live too.
     let setup = "CREATE SCHEMA IF NOT EXISTS main;\n\
@@ -2025,6 +2069,10 @@ const REPORT_CASES: &[(&str, &[&str], bool)] = &[
 /// compiles and runs, which is what a user actually does.
 #[test]
 fn the_report_example_runs_on_every_engine() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/report.cagara");
     let src = std::fs::read_to_string(path).expect("read examples/report.cagara");
     let ws = Workspace::from_source(&src);
@@ -2110,6 +2158,10 @@ fn the_report_example_runs_on_every_engine() {
 /// values are written the way the shell renders them.
 #[test]
 fn a_list_query_runs_on_duckdb() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     let engine = ENGINES
         .iter()
         .find(|e| e.dialect == "duckdb")
@@ -2261,6 +2313,10 @@ fn trino_batch(harness: &str, setup: &str, queries: &[String]) -> Vec<Vec<String
 /// skips unless one answers. `docs/ENGINE-TESTS.md` says how to start it.
 #[test]
 fn trino_agrees_when_a_server_is_running() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/trino.sh");
     let ready = Command::new("bash")
         .args([harness, "--check"])
@@ -2374,6 +2430,10 @@ fn trino_agrees_when_a_server_is_running() {
 /// Skips unless `MYSQL_SOCKET` and `MYSQL` name a running server.
 #[test]
 fn mysql_agrees_when_a_server_is_running() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/mysql.sh");
     let ready = Command::new("bash")
         .args([harness, "--check"])
@@ -2550,6 +2610,10 @@ const EMULATION_UNREADABLE: &[(&str, &str)] =
 /// dialect. It is a second opinion, not the server.
 #[test]
 fn the_emulated_dialects_mean_the_same_thing() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/emulate.py");
     let python = std::env::var("CAGARA_PYTHON").unwrap_or_else(|_| "python3".to_string());
     let ready = Command::new(&python)
@@ -3427,6 +3491,10 @@ r = t & select { v = reverse .s }\n";
 /// real planner rather than against the text we expect.
 #[test]
 fn postgres_agrees_via_pglite() {
+    if engines_disabled() {
+        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+        return;
+    }
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
     let ready = Command::new("node")
         .args([harness, "--check"])

@@ -15,7 +15,29 @@ them.
 | T-SQL, BigQuery, Snowflake, ANSI | `tests/emulate.py` → DuckDB, via Python sqlglot | `uv pip install sqlglot` |
 
 Every test skips when its engine is missing, unless `CAGARA_REQUIRE_ENGINES` is set,
-in which case a missing engine fails the run. That is what CI does.
+in which case a missing engine fails the run. That is what a full local run does:
+
+```sh
+CAGARA_REQUIRE_ENGINES=1 MYSQL_SOCKET=… MYSQL=… CAGARA_PYTHON=… \
+  cargo test --workspace
+```
+
+## CI does not run these
+
+CI sets `CAGARA_NO_ENGINES=1`, which turns every test that executes SQL on an engine into
+an explicit skip. The reason is weight, not doubt: the comparison needs three downloads
+and two servers on every push.
+
+Leaving the engines out is *not* enough, and that is why the switch exists. The runner
+ships its own `sqlite3`, older than the 3.46 that the `floor` date modifier needs, so the
+engine is present and wrong rather than absent — it would fail instead of skipping.
+`CAGARA_NO_ENGINES` makes the omission a decision.
+
+What still runs in CI is every test that compares the generated SQL *text*
+(`each_dialect_uses_the_spelling_it_has`, `each_dialect_avoids_what_it_cannot_read`,
+`every_statement_is_well_formed_sql`, and the rest), which catches a wrong dialect
+spelling without a server. What CI cannot catch is a dialect that is spelled correctly and
+still means something else; that is what this document is for.
 
 ## Trino
 

@@ -4,6 +4,11 @@
 
 ### Since the 2026-11-14 cut
 
+- CI runs the workspace without any database engine. `CAGARA_NO_ENGINES` makes the
+  differential suite skip explicitly instead of depending on the runner lacking
+  `sqlite3` — the runner has one, older than the 3.46 that `floor` needs, which failed
+  the run rather than skipping it.
+
 - `decimal p s` is a type: `total = decimal 10 2` declares exact fixed point, `1 ≤ s ≤ p ≤ 38`, and the
   parameters are checked where they are written. `toDecimal 10 2 x` and `tryDecimal 10 2 x` return
   `decimal 10 2` / `maybe (decimal 10 2)` (the parameters come from the literals), `toString`,

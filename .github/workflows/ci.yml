@@ -39,22 +39,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # Engines for the differential tests (crates/cagara-sql/tests/engines.rs).
-      # Ubuntu's sqlite3 predates the `floor` date modifier (3.46).
-      - name: Install SQLite and DuckDB shells
-        run: |
-          mkdir -p "$RUNNER_TEMP/engines" && cd "$RUNNER_TEMP/engines"
-          curl -sSfLo sqlite.zip https://www.sqlite.org/2025/sqlite-tools-linux-x64-3500400.zip
-          curl -sSfLo duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.3.2/duckdb_cli-linux-amd64.zip
-          unzip -oq sqlite.zip && unzip -oq duckdb.zip && chmod +x sqlite3 duckdb
-          echo "$RUNNER_TEMP/engines" >> "$GITHUB_PATH"
-      # PostgreSQL for the differential tests, without a server: PGlite is
-      # Postgres compiled to WebAssembly, driven by node.
-      - name: Install PGlite
-        run: npm install --no-save --no-audit --no-fund @electric-sql/pglite
+      # No database engines here on purpose: the differential suite in
+      # `crates/cagara-sql/tests/engines.rs` compares rows against SQLite, DuckDB,
+      # PostgreSQL, Trino, MariaDB and a Python sqlglot emulation, and running it
+      # needs three downloads and two servers. That is too much for every push, so
+      # `CAGARA_NO_ENGINES` turns those tests into skips explicitly — not by leaving
+      # the engines out, because the runner's own `sqlite3` is older than the 3.46
+      # that `floor` needs and would fail instead of skipping.
+      #
+      # What still runs here is every test that compares the generated SQL text, which
+      # is what catches a wrong dialect spelling without a server.
+      # `docs/ENGINE-TESTS.md` is how to run the real comparison.
       - run: cargo test --workspace --locked
         env:
-          CAGARA_REQUIRE_ENGINES: "1"
+          CAGARA_NO_ENGINES: "1"
 
   docs:
     name: Rustdoc

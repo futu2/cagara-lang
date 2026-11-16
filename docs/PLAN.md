@@ -143,6 +143,10 @@ not a prelude addition.
   and still swaps two-argument `LOG`'s arguments; it adds `Expr::ArrayIndex`, which cannot
   be used for `listAt` because the generator omits the parentheses an aggregate needs.
 
+- `random`, refused on SQLite: its `random()` is a signed 64-bit integer, and
+  `random() / 2^63` landed outside `[0, 1)` in 490 of 1000 measured draws. It is also the
+  one prelude function the differential suite cannot check by rows, which its test says.
+
 **Still open: `q = u & where`.** A stage given too few arguments reports
 `type mismatch: expected query {…}, found expr a b`, and three attempts to improve it
 failed for the same reason: `&` is reverse application, so the stage arrives as an

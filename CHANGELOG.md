@@ -255,6 +255,14 @@
   to state is already `cagara check`'s (`Found::fails`), so the predicate is removed rather than
   corrected: a caller that wants a verdict asks whether any diagnostic is `Severity::Error`.
 
+- The editor reads `cagara.dialect`, `cagara.extraArgs`, `cagara.copyOnSave` and
+  `cagara.showSqlOnSave` for the document being compiled. They are `resource`-scoped so
+  a multi-root workspace can compile each folder for its own database, but two call
+  sites — the copy-on-save handler and the compile itself — asked for them with no
+  document and got the window's value, so a folder's settings were silently ignored.
+  `cagara.path` stays window-scoped: the server is launched once, before any document
+  exists.
+
 ### The 2026-11-14 cut
 
 Three threads. **Dates get one interface**: `parseDate`/`parseTimestamp` and

@@ -6,7 +6,7 @@ import * as fs from "fs";
 import * as vscode from "vscode";
 import { LanguageClient, LanguageClientOptions, ServerOptions } from "vscode-languageclient/node";
 
-import { classify, compileArgs, splitArgs, stripBanner } from "./compile";
+import { classify, compileArgs, stripBanner } from "./compile";
 import {
   previewNeedsRefresh,
   SQL_PREVIEW_LANGUAGE,
@@ -16,6 +16,7 @@ import {
 } from "./preview";
 import { formattingOptions, shouldFormat } from "./save";
 import { describeServer, resolveServer, vscodeTarget, type ResolvedServer } from "./serverpath";
+import { compileSettingsFor, copyOnSaveFor, showSqlOnSaveFor } from "./settings";
 
 let client: LanguageClient | undefined;
 
@@ -62,8 +63,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       copySql(context, "cagara.copySql"),
     ),
     vscode.workspace.onDidSaveTextDocument(async (doc) => {
-      const config = vscode.workspace.getConfiguration("cagara");
-      if (!config.get<boolean>("copyOnSave", false) || doc.languageId !== "cagara") {
+      // `cagara.copyOnSave` is `resource`-scoped: in a multi-root workspace
+      // the folder's value is the one that applies to this document, not the
+      // window's, so the lookup is scoped to the document being saved.
+      if (!copyOnSaveFor(vscode.workspace, doc.uri) || doc.languageId !== "cagara") {
         return;
       }
       await copySql(context, "cagara.copyOnSave", doc);
@@ -116,12 +119,16 @@ async function copySql(
     );
     return;
   }
-  const config = vscode.workspace.getConfiguration("cagara");
+  // Scoped to the document, like `formatOnSave` above: `cagara.dialect` and
+  // `cagara.extraArgs` are `resource`-scoped, and a multi-root workspace can
+  // compile each folder for a different database. An unscoped read would
+  // compile this file for the window's dialect instead of its folder's.
+  const settings = compileSettingsFor(vscode.workspace, doc.uri);
   const { command } = serverFor(context);
   const args = compileArgs({
     file: doc.uri.fsPath,
-    dialect: config.get<string>("dialect", ""),
-    extraArgs: splitArgs(config.get<string>("extraArgs", "")),
+    dialect: settings.dialect,
+    extraArgs: settings.extraArgs,
   });
 
   const run = await runCompiler(command, args);
@@ -134,7 +141,7 @@ async function copySql(
       // see the result. On save that would be a pane per save, so it is
       // opt-in, and the clipboard stays the default so the SQL can be pasted
       // without anything moving.
-      const show = trigger === "cagara.copySql" || config.get<boolean>("showSqlOnSave", false);
+      const show = trigger === "cagara.copySql" || showSqlOnSaveFor(vscode.workspace, doc.uri);
       if (show) {
         await showSql(context, sql, doc);
       } else {
@@ -415,6 +422,9 @@ async function stop(): Promise<void> {
 function serverFor(context: vscode.ExtensionContext): ResolvedServer {
   const exe = process.platform === "win32" ? "cagara.exe" : "cagara";
   return resolveServer({
+    // Deliberately unscoped: `cagara.path` is `machine-overridable`, and the
+    // server is launched once for the window before any document exists, so
+    // there is no document whose folder a configured path could belong to.
     configured: vscode.workspace.getConfiguration("cagara").get<string>("path", ""),
     bundled: bundledPath(context, exe),
     // An untrusted workspace never has a repository-local binary executed;

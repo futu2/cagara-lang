@@ -263,6 +263,22 @@
   `cagara.path` stays window-scoped: the server is launched once, before any document
   exists.
 
+- The language server applies every edit in a burst. It advertises incremental sync, so
+  each `didChange` carries a range written against the text the change before it
+  produced — but the batch collector kept only the *last* change of a document and
+  dropped the rest. A burst that renamed a definition and then edited another line lost
+  the rename, because its text existed only in a change that was discarded. Every change
+  is now applied in order, and what is coalesced is the analysis: a burst still costs one
+  check, of the text the user is actually looking at. Measured over stdio: two edits that
+  should leave `bravo` and `zeta` left `alpha` and `zeta`.
+
+- The language server answers without blocking its message loop. The routing thread
+  waited for each analysis result before reading the next message, so one slow request
+  held up every keystroke queued behind it — and `$/cancelRequest`, which is worth
+  reading only immediately, could not be honoured at all. Replies are now sent by the
+  analysis thread, requests are tracked by id, and a cancelled request is answered
+  `RequestCancelled` instead of with a result the client no longer wants.
+
 ### The 2026-11-14 cut
 
 Three threads. **Dates get one interface**: `parseDate`/`parseTimestamp` and

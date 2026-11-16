@@ -1,14 +1,15 @@
-//! The language server over stdio (`cagara lsp`). Full-text sync; each open
-//! document is the root of its own workspace, updated with `set_source`
-//! (reloaded when its imports change). Imported files are read from disk.
+//! The language server over stdio (`cagara lsp`). Incremental sync (a change is
+//! a range to apply, see `apply_change`); each open document is the root of its
+//! own workspace, updated with `set_source` (reloaded when its imports change).
+//! Imported files are read from disk.
 
 use crate::{analysis, uri};
 use cagara_hir::workspace::Workspace;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
-use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
-    DidSaveTextDocument, LogMessage, Notification as _, PublishDiagnostics,
+    Cancel, DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument,
+    DidOpenTextDocument, DidSaveTextDocument, LogMessage, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest,
@@ -17,25 +18,26 @@ use lsp_types::request::{
     SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
+    CancelParams, CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticSeverity, DocumentFormattingParams, DocumentHighlight,
     DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
     FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability, InlayHint,
     InlayHintKind, InlayHintLabel, InlayHintParams, Location, LogMessageParams, MarkupContent,
-    MarkupKind, MessageType, OneOf, PrepareRenameResponse, PublishDiagnosticsParams,
-    ReferenceParams, RenameOptions, RenameParams, SemanticToken, SemanticTokenType, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp,
-    SignatureHelpOptions, SignatureInformation, SymbolInformation, TextDocumentPositionParams,
+    MarkupKind, MessageType, NumberOrString, OneOf, PrepareRenameResponse,
+    PublishDiagnosticsParams, ReferenceParams, RenameOptions, RenameParams, SemanticToken,
+    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
+    SignatureInformation, SymbolInformation, TextDocumentPositionParams,
     TextDocumentSyncCapability, TextDocumentSyncKind, Uri, WorkspaceEdit, WorkspaceSymbolParams,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 pub(crate) type Res<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -164,10 +166,16 @@ pub fn run(build: &str) -> Res<()> {
 /// Two threads: this one only reads messages and routes them, and an analysis
 /// thread owns the workspace and does the work. That split is what keeps
 /// typing from queueing: while a document is being checked, further keystrokes
-/// arrive and pile up here instead of waiting to be read, and [`next_batch`]
-/// then drops the ones a later keystroke has already overwritten. Analysing a
-/// burst of ten keystrokes used to cost ten checks of the file; it now costs
-/// one, of the text the user is actually looking at.
+/// arrive and pile up here instead of waiting to be read. [`next_batch`] then
+/// merges a burst of changes for one document into one notification, so every
+/// edit is applied in order and the file is checked once — of the text the
+/// user is actually looking at, not of a keystroke in the middle of the burst.
+///
+/// Answers are sent by the analysis thread over the same sender as the
+/// diagnostics, so this loop never waits for one. That is what lets a
+/// `$/cancelRequest` be read and honoured while the request it names is still
+/// being computed: when the router waited on the answer, the cancel sat in the
+/// socket until the answer nobody wanted had already gone out.
 fn serve(conn: &Connection, build: &str) -> Res<()> {
     let caps = ServerCapabilities {
         // Incremental: the client sends the range it changed, not the whole
@@ -246,10 +254,16 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
         })?,
     )))?;
     let (work, jobs) = crossbeam_channel::unbounded::<Work>();
+    // The client's cancels, read by the router and honoured by the analysis
+    // thread (see `Cancellations`).
+    let cancelled = Arc::new(Cancellations::default());
     let sender = conn.sender.clone();
     let worker = std::thread::Builder::new()
         .name("cagara-analysis".into())
-        .spawn(move || analyse(jobs, sender))?;
+        .spawn({
+            let cancelled = Arc::clone(&cancelled);
+            move || analyse(jobs, sender, cancelled)
+        })?;
     // A change is published for its own document immediately, so the file
     // being edited shows its diagnostics without waiting. Other open documents
     // may import it, so theirs are refreshed once the typing pauses — and only
@@ -277,29 +291,32 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
                     break;
                 }
                 let Request { id, method, params } = req;
-                let (reply, answer) = mpsc::channel();
-                if work
-                    .send(Work::Request {
-                        method: method.clone(),
-                        params,
-                        reply,
-                    })
-                    .is_err()
-                {
+                // Queued and not awaited: the analysis thread sends the answer
+                // itself, so this loop goes straight back to reading. That is
+                // the whole point — while a slow request is being computed, the
+                // next keystroke, the next request and the cancel for this one
+                // are still read instead of sitting in the socket.
+                cancelled.queued(&id);
+                if work.send(Work::Request { id, method, params }).is_err() {
                     break;
                 }
-                let resp = match answer.recv() {
-                    Ok(Ok(v)) => Response::new_ok(id, v),
-                    Ok(Err((code, msg))) => Response::new_err(id, code as i32, msg),
-                    Err(_) => Response::new_err(
-                        id,
-                        ErrorCode::InternalError as i32,
-                        format!("internal error in {method}: analysis stopped"),
-                    ),
-                };
-                conn.sender.send(Message::Response(resp))?;
             }
             Message::Notification(n) => {
+                // Handled here, not forwarded: the analysis thread has no
+                // handler for it, and a cancel queued behind the request it
+                // names would be read only after that request was answered —
+                // which is exactly the request the client wanted stopped.
+                if n.method == Cancel::METHOD {
+                    match serde_json::from_value::<CancelParams>(n.params) {
+                        Ok(p) => cancelled.cancel(request_id(p.id)),
+                        // A cancel without an id names nothing. It is not a
+                        // reason to end the session.
+                        Err(e) => {
+                            eprintln!("cagara lsp: {}: {e}", Cancel::METHOD);
+                        }
+                    }
+                    continue;
+                }
                 // These change the text the other documents are checked
                 // against, so the documents whose modules moved have their
                 // diagnostics refreshed once the stream goes quiet. Which ones
@@ -323,25 +340,139 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
             Message::Response(_) => {}
         }
     }
-    // The analysis thread ends when its channel closes.
+    // The analysis thread ends when its channel closes. It is joined *before*
+    // anything is answered from here: once it is gone, an id still in flight is
+    // provably unanswered, so this cannot turn into a second response to a
+    // request it did answer. A request whose answer never came is still a
+    // request the client is waiting on, so it gets an error rather than
+    // silence.
     drop(work);
     let _ = worker.join();
+    for id in cancelled.unfinished() {
+        let _ = conn.sender.send(Message::Response(Response::new_err(
+            id,
+            ErrorCode::InternalError as i32,
+            "internal error: analysis stopped before answering".into(),
+        )));
+    }
     Ok(())
+}
+
+/// A protocol id as a `RequestId`: the id on the wire is a number or a string,
+/// which is the pair `RequestId` holds.
+fn request_id(id: NumberOrString) -> RequestId {
+    match id {
+        NumberOrString::Number(n) => RequestId::from(n),
+        NumberOrString::String(s) => RequestId::from(s),
+    }
+}
+
+/// How many cancels the router remembers before the request they name arrives.
+///
+/// Messages are read in order, so a cancel is normally for a request that is
+/// already queued — the in-flight set answers that without any remembering.
+/// This only has to cover the odd cancel read before its request; an id
+/// evicted from here is simply computed, which is what the server did before
+/// it honoured cancels at all.
+const REMEMBERED_CANCELS: usize = 64;
+
+/// The requests a client has cancelled, and the ones still waiting for an
+/// answer.
+///
+/// Shared by the router and the analysis thread because they never otherwise
+/// speak about a request once it is queued: the answer goes straight to the
+/// client. The router is the only writer of cancels — a `$/cancelRequest` is
+/// read there and never reaches `notification()` — and the analysis thread is
+/// the reader, both before it computes (so a cancelled request costs nothing)
+/// and again before it replies (a cancel that arrived while the answer was
+/// being computed must not be answered with a result the client no longer
+/// wants).
+#[derive(Default)]
+struct Cancellations {
+    /// `VecDeque` rather than a set: the cap is a count of recent ids, and the
+    /// oldest is the one worth forgetting.
+    cancelled: Mutex<std::collections::VecDeque<RequestId>>,
+    /// Queued and not yet answered, so a cancel for a request that will arrive
+    /// can be told from one for a request that never will, and so a shutdown
+    /// can answer every request the client is still waiting on.
+    in_flight: Mutex<HashSet<RequestId>>,
+}
+
+impl Cancellations {
+    /// Both sets only ever have an id inserted or removed, so a lock poisoned
+    /// by a panic elsewhere is still consistent; taking it rather than
+    /// unwrapping is what keeps one panic from making the server unable to
+    /// answer anything afterwards.
+    fn cancelled(&self) -> MutexGuard<'_, std::collections::VecDeque<RequestId>> {
+        self.cancelled.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn in_flight(&self) -> MutexGuard<'_, HashSet<RequestId>> {
+        self.in_flight.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The router: a request is on its way to the analysis thread.
+    fn queued(&self, id: &RequestId) {
+        self.in_flight().insert(id.clone());
+    }
+
+    /// The router: the client asked for `id` to be cancelled.
+    fn cancel(&self, id: RequestId) {
+        let mut cancelled = self.cancelled();
+        cancelled.retain(|known| known != &id);
+        cancelled.push_back(id);
+        if cancelled.len() > REMEMBERED_CANCELS {
+            cancelled.pop_front();
+        }
+    }
+
+    /// The analysis thread: has this request been cancelled?
+    fn is_cancelled(&self, id: &RequestId) -> bool {
+        self.cancelled().contains(id)
+    }
+
+    /// The analysis thread: this request has its answer, so forget both marks.
+    fn answered(&self, id: &RequestId) {
+        self.cancelled().retain(|known| known != id);
+        self.in_flight().remove(id);
+    }
+
+    /// The router, once the analysis thread has ended: the ids it never
+    /// answered.
+    fn unfinished(&self) -> Vec<RequestId> {
+        self.in_flight().iter().cloned().collect()
+    }
+}
+
+/// The answer to a request the client cancelled.
+///
+/// The protocol requires a response to every request, so a cancelled one is
+/// answered rather than dropped — with the error code that says "you asked me
+/// to stop", so the editor can discard it instead of drawing a stale hover.
+fn cancelled_fail(method: &str) -> Fail {
+    (
+        ErrorCode::RequestCanceled,
+        format!("{method}: cancelled by the client"),
+    )
 }
 
 /// Work for the analysis thread.
 enum Work {
+    /// A request to answer. It carries its id rather than a reply channel: the
+    /// answer is a `Message::Response` sent to the client directly, so the
+    /// router never has to wait for one to keep reading.
     Request {
+        id: RequestId,
         method: String,
         params: serde_json::Value,
-        reply: mpsc::Sender<Result<serde_json::Value, Fail>>,
     },
     Notify(Notification),
     /// Refresh the diagnostics of every open document.
     Publish,
 }
 
-/// Everything already queued, with superseded document updates dropped.
+/// Everything already queued, with each document's burst of changes merged
+/// into one notification.
 struct Batch {
     notify: Vec<Notification>,
     requests: Vec<Work>,
@@ -349,7 +480,16 @@ struct Batch {
 }
 
 /// The analysis thread: own the workspace, do the work, never read stdin.
-fn analyse(jobs: Receiver<Work>, sender: Sender<Message>) {
+///
+/// Notifications are handled before the requests of the same batch, and that
+/// order is deliberate: a request is read from a client that has already
+/// applied its own edits, so the text it asks about is the newest one. Running
+/// the batch's notifications first means a request that was queued behind a
+/// keystroke answers about the text that keystroke produced — never about the
+/// text the client has already moved past. (A request that has to see older
+/// text is a request for a versioned document, which this server does not
+/// keep.)
+fn analyse(jobs: Receiver<Work>, sender: Sender<Message>, cancelled: Arc<Cancellations>) {
     let mut state = State::new();
     while let Some(batch) = next_batch(&jobs) {
         for n in batch.notify {
@@ -367,15 +507,17 @@ fn analyse(jobs: Receiver<Work>, sender: Sender<Message>) {
             }
         }
         for job in batch.requests {
-            let Work::Request {
-                method,
-                params,
-                reply,
-            } = job
-            else {
+            let Work::Request { id, method, params } = job else {
                 unreachable!("only requests are collected here");
             };
-            let answer =
+            // Checked before the work and again after it: a cancel can arrive
+            // while the answer is being computed, and answering with the result
+            // it cancelled is the one thing a cancel exists to prevent. A
+            // cancelled request is still answered — with `RequestCancelled` —
+            // because a client is waiting for a response either way.
+            let answer = if cancelled.is_cancelled(&id) {
+                Err(cancelled_fail(&method))
+            } else {
                 match catch_unwind(AssertUnwindSafe(|| request(&mut state, &method, params))) {
                     Ok(result) => result,
                     Err(p) => {
@@ -385,8 +527,23 @@ fn analyse(jobs: Receiver<Work>, sender: Sender<Message>) {
                             format!("internal error in {method}: {}", panic_message(&*p)),
                         ))
                     }
-                };
-            let _ = reply.send(answer);
+                }
+            };
+            let answer = if cancelled.is_cancelled(&id) {
+                Err(cancelled_fail(&method))
+            } else {
+                answer
+            };
+            cancelled.answered(&id);
+            let resp = match answer {
+                Ok(v) => Response::new_ok(id, v),
+                Err((code, msg)) => Response::new_err(id, code as i32, msg),
+            };
+            // The writer thread is gone when this fails; there is nobody left
+            // to answer, so stop rather than keep analysing.
+            if sender.send(Message::Response(resp)).is_err() {
+                return;
+            }
         }
         if batch.publish {
             if let Err(e) = publish_dirty(&sender, &mut state) {
@@ -398,10 +555,10 @@ fn analyse(jobs: Receiver<Work>, sender: Sender<Message>) {
 
 /// Wait for one message, then take everything else already queued.
 ///
-/// Requests are all kept — each needs its own answer — but only the newest
-/// text of a document matters, so earlier `didChange`s for the same document
-/// are dropped: their text no longer exists anywhere, and checking it would
-/// only delay the text that does.
+/// Requests are all kept — each needs its own answer — and so is every change:
+/// a burst of edits for one document is merged into a single `didChange`
+/// carrying all of them (see [`coalesce_changes`]), which is what makes the
+/// analysis run once per document per burst without losing an edit.
 fn next_batch(jobs: &Receiver<Work>) -> Option<Batch> {
     let first = jobs.recv().ok()?;
     let mut batch = Batch {
@@ -416,38 +573,99 @@ fn next_batch(jobs: &Receiver<Work>) -> Option<Batch> {
             request @ Work::Request { .. } => batch.requests.push(request),
         }
     }
-    drop_superseded_changes(&mut batch.notify);
+    batch.notify = coalesce_changes(batch.notify);
     Some(batch)
 }
 
-/// Keep only the last `didChange` for each document.
-fn drop_superseded_changes(notifications: &mut Vec<Notification>) {
-    if notifications.len() < 2 {
-        return;
-    }
-    let uri_of = |n: &Notification| -> Option<String> {
-        if n.method != DidChangeTextDocument::METHOD {
-            return None;
+/// Merge a run of `didChange` notifications for one document into one.
+///
+/// A ranged edit is relative to the text the edit before it produced, so every
+/// change in a burst has to be applied, in order. Keeping only the last one —
+/// which is what this used to do — applied its range to text it was never
+/// written against: a burst that renamed a definition and then edited another
+/// line lost the rename, because the rename's text existed only in the change
+/// that was dropped. What can be coalesced is the analysis, not the edits: the
+/// merged notification carries all of a burst's changes and the newest version,
+/// and the analysis thread's `for change in p.content_changes` applies them in
+/// order, so a burst of ten keystrokes still costs one check of the text the
+/// user is looking at.
+///
+/// The merged notification sits where the first one was, so a document's
+/// changes are still handled in the order the client sent them relative to
+/// everything else. A `didOpen`, `didSave` or `didClose` for the same document
+/// is a barrier: those reset or overwrite the text the earlier changes were
+/// relative to, so changes on either side of one are never merged. A
+/// notification for another document is not a barrier — it does not touch this
+/// document's text.
+fn coalesce_changes(notifications: Vec<Notification>) -> Vec<Notification> {
+    // Where each document's open run of changes sits in `out`. A document has
+    // an entry exactly while changes after its last barrier are being merged.
+    let mut open: HashMap<String, usize> = HashMap::new();
+    let mut out: Vec<Notification> = Vec::with_capacity(notifications.len());
+    for n in notifications {
+        let Some(uri) = text_document_uri(&n) else {
+            out.push(n);
+            continue;
+        };
+        match n.method.as_str() {
+            DidChangeTextDocument::METHOD => match open.get(&uri) {
+                Some(&at) => merge_changes(&mut out[at], n),
+                None => {
+                    open.insert(uri, out.len());
+                    out.push(n);
+                }
+            },
+            // The only other notifications with a `textDocument` are the
+            // barriers: they close the run, so the next change for this
+            // document starts a new notification after them.
+            _ => {
+                open.remove(&uri);
+                out.push(n);
+            }
         }
-        n.params
+    }
+    out
+}
+
+/// The document a notification opens, edits, saves or closes, by URI.
+fn text_document_uri(n: &Notification) -> Option<String> {
+    match n.method.as_str() {
+        DidOpenTextDocument::METHOD
+        | DidChangeTextDocument::METHOD
+        | DidSaveTextDocument::METHOD
+        | DidCloseTextDocument::METHOD => n
+            .params
             .pointer("/textDocument/uri")
             .and_then(|v| v.as_str())
-            .map(str::to_string)
-    };
-    let mut last: HashMap<String, usize> = HashMap::new();
-    for (i, n) in notifications.iter().enumerate() {
-        if let Some(uri) = uri_of(n) {
-            last.insert(uri, i);
-        }
+            .map(str::to_string),
+        _ => None,
     }
-    let mut kept = Vec::with_capacity(notifications.len());
-    for (i, n) in notifications.drain(..).enumerate() {
-        let superseded = uri_of(&n).is_some_and(|uri| last.get(&uri) != Some(&i));
-        if !superseded {
-            kept.push(n);
-        }
+}
+
+/// Move `later`'s changes onto the end of `earlier`, and take its version.
+///
+/// The version has to be the client's newest: the merged notification produces
+/// the text of the last change, and diagnostics echo the version back, so a
+/// stale number would let a client read a current publish as out of order.
+fn merge_changes(earlier: &mut Notification, mut later: Notification) {
+    // Read the version before taking the changes: `take` leaves a null behind,
+    // but the two live in different objects and a reader should not have to
+    // check that.
+    let version = later
+        .params
+        .pointer("/textDocument/version")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let more = later
+        .params
+        .get_mut("contentChanges")
+        .map(serde_json::Value::take);
+    if let (Some(serde_json::Value::Array(changes)), Some(serde_json::Value::Array(more))) =
+        (earlier.params.get_mut("contentChanges"), more)
+    {
+        changes.extend(more);
     }
-    *notifications = kept;
+    earlier.params["textDocument"]["version"] = version;
 }
 
 /// A panic may have left a workspace half-updated (completion edits the
@@ -1037,12 +1255,15 @@ fn publish(sender: &Sender<Message>, uri: Uri, ws: &Workspace, version: Option<i
 
 #[cfg(test)]
 mod tests {
-    use super::{serve, LogMessage, LogMessageParams, MessageType, PublishDiagnostics};
+    use super::{
+        analyse, apply_change, coalesce_changes, serve, Cancellations, LogMessage,
+        LogMessageParams, MessageType, PublishDiagnostics, Work,
+    };
     use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
     // `LogMessage::METHOD` is a method of this trait, and `lsp_server` has a
     // `Notification` of its own, hence the anonymous import.
     use lsp_types::notification::Notification as _;
-    use lsp_types::PublishDiagnosticsParams;
+    use lsp_types::{DidChangeTextDocumentParams, PublishDiagnosticsParams};
     use serde_json::{json, Value};
     use std::time::Duration;
 
@@ -1059,6 +1280,15 @@ mod tests {
             method: method.into(),
             params,
         })
+    }
+
+    /// The notification on its own, for the tests that drive the batch
+    /// collector directly instead of a connection.
+    fn notification(method: &str, params: Value) -> Notification {
+        Notification {
+            method: method.into(),
+            params,
+        }
     }
 
     /// The response to request `id`, skipping notifications.
@@ -1765,6 +1995,382 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Run one burst through the analysis thread, and report what an editor
+    /// would be left with: the document's symbol names, the diagnostics of the
+    /// last publish, and how many publishes the burst produced.
+    ///
+    /// The work is queued before the thread starts, so `next_batch` takes all
+    /// of it: a burst is one batch however fast the analysis is. That is what
+    /// makes a test of burst behaviour deterministic instead of a race against
+    /// the analysis thread draining the queue between two keystrokes.
+    fn burst_outcome(queued: Vec<Notification>, uri: &str) -> (Vec<String>, Vec<String>, usize) {
+        let (work, jobs) = crossbeam_channel::unbounded::<Work>();
+        let (out, sent) = crossbeam_channel::unbounded::<Message>();
+        for n in queued {
+            work.send(Work::Notify(n)).expect("queue");
+        }
+        work.send(Work::Request {
+            id: RequestId::from(99),
+            method: "textDocument/documentSymbol".into(),
+            params: json!({ "textDocument": { "uri": uri } }),
+        })
+        .expect("queue");
+        let t = std::thread::spawn({
+            let cancelled = std::sync::Arc::new(Cancellations::default());
+            move || analyse(jobs, out, cancelled)
+        });
+        // The answer arrives as a response message, like every other answer
+        // now that the analysis thread replies directly. Everything the burst
+        // published arrives on the same channel before it, so it is collected
+        // on the way.
+        let mut publishes = 0;
+        let mut diagnostics = Vec::new();
+        let symbols = loop {
+            let m = sent
+                .recv_timeout(Duration::from_secs(60))
+                .unwrap_or_else(|e| panic!("no documentSymbol answer: {e}"));
+            let Message::Response(r) = m else {
+                if let Message::Notification(n) = m {
+                    if n.method != PublishDiagnostics::METHOD {
+                        continue;
+                    }
+                    let p: PublishDiagnosticsParams =
+                        serde_json::from_value(n.params).expect("publish");
+                    if p.uri.as_str() != uri {
+                        continue;
+                    }
+                    publishes += 1;
+                    diagnostics = p.diagnostics.iter().map(|d| d.message.clone()).collect();
+                }
+                continue;
+            };
+            assert_eq!(r.id, RequestId::from(99), "the answer to the request");
+            match r.response_result {
+                Ok(v) => break v,
+                Err(e) => panic!("documentSymbol failed: {}", e.message),
+            }
+        };
+        let names: Vec<String> = symbols
+            .as_array()
+            .unwrap_or_else(|| panic!("symbols: {symbols}"))
+            .iter()
+            .filter_map(|s| s["name"].as_str().map(str::to_string))
+            .collect();
+        // Closing the work channel is what ends the analysis thread.
+        drop(work);
+        t.join().expect("the analysis thread ended");
+        (names, diagnostics, publishes)
+    }
+
+    /// A burst of ranged changes is one notification that reproduces exactly
+    /// the text the client sent.
+    ///
+    /// Each range is written against the text the change before it produced —
+    /// that is what the protocol means — so the edits only line up when all of
+    /// them are applied, in order. The collector used to keep just the last
+    /// `didChange` of a document, and the second range here then points past
+    /// the end of the un-edited line: the rename disappeared from the document
+    /// and the user's first keystrokes were checked as if they never happened.
+    #[test]
+    fn a_burst_of_ranged_changes_coalesces_without_losing_an_edit() {
+        let original = "alpha = 1\nzeta = 2\n";
+        // `alpha` -> `alphabet` (line 0, units 0..5), then the `1` that the
+        // longer name pushed to unit 11 -> `42`. The second range only exists
+        // in the text the first change produced.
+        let first = notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": URI, "version": 2 },
+                "contentChanges": [{
+                    "range": { "start": { "line": 0, "character": 0 },
+                               "end": { "line": 0, "character": 5 } },
+                    "text": "alphabet"
+                }]
+            }),
+        );
+        let second = notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": URI, "version": 3 },
+                "contentChanges": [{
+                    "range": { "start": { "line": 0, "character": 11 },
+                               "end": { "line": 0, "character": 12 } },
+                    "text": "42"
+                }]
+            }),
+        );
+
+        let batch = coalesce_changes(vec![first, second]);
+        assert_eq!(batch.len(), 1, "a burst is one analysis, not one per edit");
+        let params: DidChangeTextDocumentParams =
+            serde_json::from_value(batch[0].params.clone()).expect("a didChange");
+        assert_eq!(
+            params.text_document.version, 3,
+            "the newest version is the one diagnostics echo back"
+        );
+        let mut text = original.to_string();
+        for change in params.content_changes {
+            text = match change.range {
+                None => change.text,
+                Some(range) => apply_change(&text, range, &change.text),
+            };
+        }
+        assert_eq!(text, "alphabet = 42\nzeta = 2\n", "every edit, in order");
+    }
+
+    /// A save of the document splits a burst; another document's change does
+    /// not.
+    ///
+    /// A save can replace the buffer with the text the client wrote to disk, so
+    /// a change before it and a change after it are written against different
+    /// texts and must not be merged across it. A change for a different
+    /// document touches nothing here, so the run carries on through it.
+    #[test]
+    fn only_a_barrier_for_the_same_document_splits_a_burst() {
+        let change = |uri: &str, version: i32, text: &str| {
+            notification(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": { "uri": uri, "version": version },
+                    "contentChanges": [{
+                        "range": { "start": { "line": 0, "character": 0 },
+                                   "end": { "line": 0, "character": 0 } },
+                        "text": text
+                    }]
+                }),
+            )
+        };
+        let other = "file:///nonexistent/cagara-caps/other.cagara";
+
+        let merged = coalesce_changes(vec![
+            change(URI, 2, "a"),
+            change(other, 2, "b"),
+            change(URI, 3, "c"),
+        ]);
+        assert_eq!(
+            merged.len(),
+            2,
+            "one notification for this document, one for the other"
+        );
+        let p: DidChangeTextDocumentParams =
+            serde_json::from_value(merged[0].params.clone()).expect("a didChange");
+        assert_eq!(p.text_document.version, 3);
+        assert_eq!(
+            p.content_changes.len(),
+            2,
+            "both of this document's changes survive, in order"
+        );
+
+        let saved = coalesce_changes(vec![
+            change(URI, 2, "a"),
+            notification(
+                "textDocument/didSave",
+                json!({ "textDocument": { "uri": URI }, "text": "alpha = 1\n" }),
+            ),
+            change(URI, 3, "b"),
+        ]);
+        assert_eq!(saved.len(), 3, "a save is not merged over");
+        let before: DidChangeTextDocumentParams =
+            serde_json::from_value(saved[0].params.clone()).expect("a didChange");
+        let after: DidChangeTextDocumentParams =
+            serde_json::from_value(saved[2].params.clone()).expect("a didChange");
+        assert_eq!(before.content_changes.len(), 1);
+        assert_eq!(after.content_changes.len(), 1);
+        assert_eq!(before.text_document.version, 2);
+        assert_eq!(after.text_document.version, 3);
+    }
+
+    /// A burst of ranged edits leaves the document exactly as opening the
+    /// final text would: same symbols, same diagnostics, and one analysis.
+    ///
+    /// This is the end-to-end shape of the bug the coalescing fixes. The first
+    /// change renames `alpha`, the second uses the new name from another line.
+    /// Keeping only the second change checked `bravo` in a document that never
+    /// defines it, so the burst and the fresh open disagreed on both the
+    /// outline and the errors.
+    #[test]
+    fn a_burst_of_ranged_edits_matches_opening_the_final_text() {
+        let opened = notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": {
+                "uri": URI, "languageId": "cagara", "version": 1,
+                "text": "alpha = 1\nzeta = 2\n"
+            } }),
+        );
+        let first = notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": URI, "version": 2 },
+                "contentChanges": [{
+                    "range": { "start": { "line": 0, "character": 0 },
+                               "end": { "line": 0, "character": 5 } },
+                    "text": "bravo"
+                }]
+            }),
+        );
+        let second = notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": URI, "version": 3 },
+                "contentChanges": [{
+                    "range": { "start": { "line": 1, "character": 7 },
+                               "end": { "line": 1, "character": 8 } },
+                    "text": "bravo + 1"
+                }]
+            }),
+        );
+        let (names, diagnostics, publishes) = burst_outcome(vec![opened, first, second], URI);
+        assert_eq!(
+            names,
+            ["bravo", "zeta"].map(str::to_string),
+            "both edits were applied, in order: {names:?}"
+        );
+        assert_eq!(
+            publishes, 2,
+            "one publish for the open and one for the burst — not one per edit"
+        );
+
+        // The same document, opened already holding the text the burst ended
+        // with. If the burst was checked as the document the client sent, the
+        // two agree on everything an editor shows.
+        let fresh = notification(
+            "textDocument/didOpen",
+            json!({ "textDocument": {
+                "uri": URI, "languageId": "cagara", "version": 3,
+                "text": "bravo = 1\nzeta = bravo + 1\n"
+            } }),
+        );
+        let (fresh_names, fresh_diagnostics, _) = burst_outcome(vec![fresh], URI);
+        assert_eq!(
+            names, fresh_names,
+            "a burst leaves the same outline as opening the final text"
+        );
+        assert_eq!(
+            diagnostics, fresh_diagnostics,
+            "and the same diagnostics: the burst was checked as the final text"
+        );
+    }
+
+    /// A request the client cancels is answered `RequestCancelled`, not with a
+    /// result it no longer wants.
+    ///
+    /// The cancel is sent immediately before the request it names, so it is the
+    /// first of the two the router reads, and the answer is decided before any
+    /// analysis happens — no part of this test depends on which thread wins.
+    /// It is also the case the blocking router could not serve at all: it
+    /// waited for the answer to one request before reading the next message, so
+    /// a cancel was still unread when the result it was meant to stop had
+    /// already been sent.
+    ///
+    /// The protocol wants a response to every request, so the cancelled one is
+    /// answered rather than dropped; the editor sees the code and discards it
+    /// instead of drawing a stale hover.
+    #[test]
+    fn a_cancelled_request_is_answered_with_request_cancelled() {
+        let mut ed = Editor::start();
+        ed.open(URI, DOC);
+        let _ = ed.published(URI, Duration::from_millis(600));
+
+        let id = ed.next;
+        ed.next += 1;
+        ed.client
+            .sender
+            .send(notify("$/cancelRequest", json!({ "id": id })))
+            .expect("cancel");
+        ed.client
+            .sender
+            .send(request(
+                id,
+                "textDocument/documentSymbol",
+                json!({ "textDocument": { "uri": URI } }),
+            ))
+            .expect("request");
+        let r = response(&ed.client, id);
+        let e = r
+            .response_result
+            .expect_err("a cancelled request must not be answered with a result");
+        assert_eq!(
+            e.code,
+            ErrorCode::RequestCanceled as i32,
+            "RequestCancelled, -32800: {}",
+            e.message
+        );
+        // Pinned as the number on the wire, not just the enum the crate spells
+        // with one `l`: an editor compares the protocol's code.
+        assert_eq!(e.code, -32800);
+
+        // The cancel is for one request, not for the session: the same question
+        // asked again is answered.
+        let syms = ed.ask(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": URI } }),
+        );
+        assert!(
+            syms.as_array().is_some_and(|a| !a.is_empty()),
+            "symbols after a cancel: {syms}"
+        );
+        ed.close();
+    }
+
+    /// A burst of requests is answered exactly once each.
+    ///
+    /// Requests used to be answered one at a time, each waiting for the answer
+    /// to the one before it. Now the router queues them and keeps reading, so
+    /// the answers come from the analysis thread; the risk that buys is a
+    /// request answered twice, or not at all, and this is the test for it.
+    #[test]
+    fn a_burst_of_requests_is_each_answered_exactly_once() {
+        let mut ed = Editor::start();
+        ed.open(URI, DOC);
+        let _ = ed.published(URI, Duration::from_millis(600));
+
+        let ids: Vec<i32> = (100..108).collect();
+        for id in &ids {
+            ed.client
+                .sender
+                .send(request(
+                    *id,
+                    "textDocument/documentSymbol",
+                    json!({ "textDocument": { "uri": URI } }),
+                ))
+                .expect("request");
+        }
+        let mut answered: Vec<i32> = Vec::new();
+        while answered.len() < ids.len() {
+            match ed.client.receiver.recv_timeout(Duration::from_secs(60)) {
+                Ok(Message::Response(r)) => {
+                    let id = r.id.to_string().parse().expect("a numeric id");
+                    answered.push(id);
+                }
+                // The publishes of the open and of the burst arrive between the
+                // answers and are not what this test is about.
+                Ok(_) => {}
+                Err(e) => panic!(
+                    "{} of {} requests answered before the stream went quiet: {e}",
+                    answered.len(),
+                    ids.len()
+                ),
+            }
+        }
+        answered.sort();
+        assert_eq!(answered, ids, "one answer per request");
+
+        // Nothing follows: a second answer to any of them would show up here.
+        let extra: Vec<i32> = ed
+            .notifications(Duration::from_millis(400))
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Response(r) => r.id.to_string().parse().ok(),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            extra.is_empty(),
+            "a request was answered twice: {extra:?} after {ids:?}"
+        );
+        ed.close();
     }
 
     /// A ranged `didChange` is an *edit*, not a whole-document replacement.

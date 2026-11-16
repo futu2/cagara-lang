@@ -100,6 +100,33 @@ need their own intrinsic per dialect.
 
 ## Recently closed
 
+- `monthsBetween`/`yearsBetween`/`hoursBetween`/`minutesBetween`/`secondsBetween`, and the
+  `second` field they needed. The calendar ones are the **elapsed** count, written from
+  `year`/`month`/`day` rather than delegated to `DATE_DIFF`, which counts boundaries and
+  disagrees with an age (`2024-01-31` to `2024-02-01` is `0` elapsed, `1` crossed).
+  Measuring the clock ones found two bugs: the obvious `hour b - hour a` is wrong across
+  midnight, and SQLite's `CAGARA_PART` had a `_ =>` catch-all that made *any* newly
+  accepted unit lower to the quarter formula.
+- `exp`, `ln`, `log10`, `log2`, `logBase`, `cbrt`, `degrees`, `radians` — and deliberately
+  no `log`, which means base 10 on DuckDB and SQLite, base `e` on MariaDB, and is refused
+  by Trino. `cbrt` is `exp(ln|x|/3)` and `logBase` is `ln x / ln base`, both because
+  measurement showed the obvious spelling wrong: `power(abs(x), 1.0/3)` is
+  `1.9999999986` on MariaDB, and `sqlglot`'s generator swaps the arguments of
+  two-argument `LOG`.
+- `workspace/symbol` in the language server: a definition in any open file.
+- `cagara fmt` walks a directory with the same walk `cagara check` uses.
+- `& limit -1` explains that `-` binds tighter than `&`.
+
+**Still open: `q = u & where`.** A stage given too few arguments reports
+`type mismatch: expected query {…}, found expr a b`, and three attempts to improve it
+failed for the same reason: `&` is reverse application, so the stage arrives as an
+*argument* whose type is still an unbound variable at the point the application is
+checked, and the failure surfaces later inside `solve` from a constraint one level below
+the application. `mismatch` never sees the stage type; the application sees a `Var`. The
+fix belongs in the constraint solver — reporting "this stage still needs an argument"
+when a `Ty::Fun` ending in `query` is unified against a `query` — rather than in the
+application or the message.
+
 - `& limit -1` says what it parsed. `-` binds tighter than `&`, so it is `limit - 1` —
   a subtraction from the stage — and the diagnostic was `expected expr a b, found expr a
   int -> query a -> query a`. The check has to run *before* the argument is checked,

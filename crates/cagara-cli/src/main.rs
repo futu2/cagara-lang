@@ -13,6 +13,7 @@
 mod check;
 mod doc;
 mod fmt;
+mod walk;
 
 use cagara_hir::check::SchemeView;
 use cagara_hir::{compile_checked, TypeCheck, Workspace};

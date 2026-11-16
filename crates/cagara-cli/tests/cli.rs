@@ -440,6 +440,78 @@ fn fmt_rewrites_in_place_and_is_idempotent() {
     assert!(!once.contains("select{x=.a}"), "still unformatted: {once}");
 }
 
+/// `fmt` on a directory formats the sources under it, as `check` reads them.
+///
+/// `cagara fmt examples/` used to fail with `Is a directory (os error 21)` while
+/// `cagara check examples/` walked the same tree — two commands disagreeing about what
+/// a path is, with no reason behind it. Both use one walk now.
+#[test]
+fn fmt_walks_a_directory() {
+    let dir = TempDir::new("fmt-dir");
+    let top = dir.write("a.cagara", "q=1\n");
+    std::fs::create_dir_all(dir.0.path().join("sub")).expect("mkdir");
+    let nested = dir.0.path().join("sub/b.cagara");
+    std::fs::write(&nested, "x=2\n").expect("write");
+    // A file that is not a source is left alone, not read as one.
+    let other = dir.write("notes.txt", "not cagara\n");
+
+    let out = cagara([OsStr::new("fmt"), dir.0.path().as_os_str()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    for (path, want) in [(&top, "q = 1\n"), (&nested, "x = 2\n")] {
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read"),
+            want,
+            "{} was not formatted",
+            path.display()
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&other).expect("read"),
+        "not cagara\n",
+        "a non-source file was rewritten"
+    );
+
+    // `--check` sees the whole tree too: a directory that is already formatted passes.
+    let out = cagara([
+        OsStr::new("fmt"),
+        OsStr::new("--check"),
+        dir.0.path().as_os_str(),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    // And one unformatted file anywhere under it fails the run.
+    std::fs::write(&nested, "x=3\n").expect("write");
+    let out = cagara([
+        OsStr::new("fmt"),
+        OsStr::new("--check"),
+        dir.0.path().as_os_str(),
+    ]);
+    assert!(!out.status.success(), "an unformatted file under the tree");
+    // `--check` lists the files that need formatting on stdout, so a hook can pipe
+    // them into `fmt`.
+    assert!(
+        stdout(&out).contains("b.cagara"),
+        "the failing file is named: {}",
+        stdout(&out)
+    );
+}
+
+/// A directory with no sources under it says so and is not an error.
+///
+/// A tree that has been cleaned, or one whose sources live elsewhere, is a normal
+/// thing to point at. Silence would leave the reader wondering whether it ran.
+#[test]
+fn fmt_says_when_a_directory_has_no_sources() {
+    let dir = TempDir::new("fmt-empty");
+    std::fs::create_dir_all(dir.0.path().join("nothing")).expect("mkdir");
+    let out = cagara([OsStr::new("fmt"), dir.0.path().join("nothing").as_os_str()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("no `.cagara` files"),
+        "says so: {}",
+        stderr(&out)
+    );
+}
+
 /// `fmt --check` reports an unformatted file and fails, without rewriting it.
 #[test]
 fn fmt_check_reports_without_rewriting() {

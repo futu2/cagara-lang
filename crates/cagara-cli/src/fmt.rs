@@ -9,7 +9,7 @@ use crate::{display, done, out, usage, USAGE};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitCode> {
@@ -37,8 +37,35 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitC
             "`cagara fmt` needs files to format (or `-` for stdin)",
         ));
     }
-    let mut failed = false;
-    for file in &files {
+    let mut failed_before = false;
+    // A directory means the sources under it, exactly as `cagara check` reads one.
+    // Reading the argument directly made `cagara fmt examples/` fail with
+    // `Is a directory (os error 21)` while `cagara check examples/` walked the same
+    // tree — the two commands disagreed about what a path is, for no reason.
+    //
+    // `-` is stdin and is never walked; it is not a path.
+    let mut expanded: Vec<OsString> = Vec::new();
+    for file in files {
+        if file == OsStr::new("-") {
+            expanded.push(file);
+            continue;
+        }
+        match crate::walk::sources_under(Path::new(&file)) {
+            Ok(found) if found.is_empty() => {
+                // A directory with no `.cagara` files under it. Not an error: a tree
+                // that has been cleaned, or one whose sources are elsewhere, is a
+                // normal thing to point at.
+                eprintln!("{}: no `.cagara` files under it", display(&file));
+            }
+            Ok(found) => expanded.extend(found.into_iter().map(PathBuf::into_os_string)),
+            Err(e) => {
+                eprintln!("{}: {e}", display(&file));
+                failed_before = true;
+            }
+        }
+    }
+    let mut failed = failed_before;
+    for file in &expanded {
         let stdin = file == OsStr::new("-");
         let displayed = display(file);
         let name = if stdin { "<stdin>" } else { displayed.as_str() };

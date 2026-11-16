@@ -147,6 +147,37 @@ not a prelude addition.
   `random() / 2^63` landed outside `[0, 1)` in 490 of 1000 measured draws. It is also the
   one prelude function the differential suite cannot check by rows, which its test says.
 
+- A stage given no argument says what it needs. `q = u & where` reported
+  `expected query {…}, found expr a b`; the check had to go in `unify_inner`'s `Fun`/`Fun`
+  arm, where both whole function types still exist — three attempts in `infer_app` and
+  `mismatch` never fired, because by then the stage's type is gone. Two measured details
+  decided the wording: the parameter is `expr a b` with `b` still open (so the printed form
+  cannot be matched), and `select`/`agg` have a `record_expr` parameter rather than an
+  `expr`. An arity test keeps the prelude's own stage-shaped `_&|_` out.
+
+**`listMap` and `listFilter` cannot be built, and this was measured rather than assumed.**
+They need the engine to run a lambda over each element — DuckDB's
+`list_transform(xs, x -> x + 1)`, PostgreSQL's `ARRAY(SELECT f(x) FROM unnest(xs) x)`. A
+Cagara lambda is a *compile-time* value: it beta-reduces away, and a `sql "…"` template
+receives its argument as an opaque expression, not as something whose parameter can be
+substituted. Measured: a helper `lf : (expr r int -> expr r bool) -> … = p => xs => xs`
+compiles and the lambda is simply dropped — the generated SQL is `SELECT xs AS v`. There
+is no way to render `x -> x + 1` from it, so both functions would be a lie. Doing it
+properly means either a new IR node for a lambda-over-list (and a lowering rule per
+target) or a stage that takes an expression over `value` and a list — a language change,
+not a prelude addition.
+
+- `textDocument/signatureHelp`: which argument of the innermost call the cursor is in.
+  `textDocument/documentColor` stays refused on purpose — the language has no colour type.
+- Dependencies updated: `sqlglot-rust` 0.11.2, `logos` 0.16.1, `serde_json` 1.0.154.
+  `rowan` stays at 0.17 (0.18 is an alpha). The new sqlglot still does not parse `GROUPS`
+  and still swaps two-argument `LOG`'s arguments; it adds `Expr::ArrayIndex`, which cannot
+  be used for `listAt` because the generator omits the parentheses an aggregate needs.
+
+- `random`, refused on SQLite: its `random()` is a signed 64-bit integer, and
+  `random() / 2^63` landed outside `[0, 1)` in 490 of 1000 measured draws. It is also the
+  one prelude function the differential suite cannot check by rows, which its test says.
+
 **Still open: `q = u & where`.** A stage given too few arguments reports
 `type mismatch: expected query {…}, found expr a b`, and three attempts to improve it
 failed for the same reason: `&` is reverse application, so the stage arrives as an

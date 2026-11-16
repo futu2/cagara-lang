@@ -53,6 +53,9 @@
   cast on Trino. `reverse` is **refused** on SQLite with a message naming what it lacks, rather than
   emitted as a call the engine rejects.
 
+- The language server answers `textDocument/signatureHelp`: which argument of the call the cursor is
+  in, for the innermost call. `hover` says what a name is; this says what the next argument should be.
+
 - The language server answers `workspace/symbol`: a definition in any open file, not only the one
   the request came from. `documentSymbol` still answers for one document, which is what an outline
   needs. The prelude is excluded — its definitions live in a file the user does not have.

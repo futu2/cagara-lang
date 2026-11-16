@@ -847,6 +847,100 @@ fn atom_hover(ws: &Workspace, occs: &[Occ], offset: usize) -> Option<String> {
     Some(out)
 }
 
+/// What `signatureHelp` shows: the signatures of the name being applied, and which
+/// argument the cursor is on.
+///
+/// `hover` already answers "what is this name". This answers the *positional* question a
+/// signature help popup exists for: `arrayAgg`'s first argument is the expression, its
+/// second is nothing — but `toDecimal`'s first is the precision, its second the scale and
+/// its third the value, and a reader who has typed two arguments wants to know what the
+/// third is.
+///
+/// The parameter is found by walking the application spine and asking which argument
+/// *contains* the cursor. That is deliberately syntactic: the checker has no notion of an
+/// argument being "in progress", and a half-typed one does not type-check at all.
+pub fn signature_help(ws: &Workspace, pos: Position) -> Option<(Vec<String>, usize)> {
+    let md = &ws.modules[ws.root];
+    let p = Positions::new(&md.text);
+    let offset = p.offset(pos)?;
+    // The innermost application whose argument list contains the cursor.
+    let mut best: Option<(&Expr, usize)> = None;
+    for d in &md.module.defs {
+        app_at(&d.body, offset, &mut best);
+    }
+    let (call, active) = best?;
+    let ExprKind::App(f, _) = &call.kind else {
+        return None;
+    };
+    // The name being applied, resolved so an alias and an overload set both work.
+    let ExprKind::Name(name) = &f.kind else {
+        return None;
+    };
+    let tc = check_reachable(ws);
+    let occs = occurrences(ws, ws.root);
+    let o = occs
+        .iter()
+        .find(|o| o.start <= f.span.start as usize && (f.span.end as usize) <= o.end)?;
+    let Target::Global(binding) = &o.target else {
+        return None;
+    };
+    let defs: Vec<(usize, usize)> = match binding {
+        Binding::Def(m, i) => vec![(*m, *i)],
+        Binding::Overloads(m, is) => is.iter().map(|&i| (*m, i)).collect(),
+        Binding::Module(_) => return None,
+    };
+    let sigs: Vec<String> = defs
+        .into_iter()
+        .filter_map(|(m, i)| {
+            let ty = tc.type_of(m, i)?;
+            Some(sig(name, ty))
+        })
+        .collect();
+    (!sigs.is_empty()).then_some((sigs, active))
+}
+
+/// The innermost `App` whose arguments contain `offset`, and which one.
+///
+/// Innermost because `f (g x)` puts the cursor in `g`'s argument list, not `f`'s, and the
+/// popup should describe the call the reader is typing. An argument's span is used rather
+/// than the parentheses, because a half-typed argument may have no closing one.
+fn app_at<'a>(e: &'a Expr, offset: usize, best: &mut Option<(&'a Expr, usize)>) {
+    match &e.kind {
+        ExprKind::App(f, args) => {
+            // Children first, and a match found deeper **wins over** this one. The
+            // outermost application's argument spans contain everything inside them, so
+            // `q = t & select { v = toDecimal 10 2 1.5 }` has `_&_` as a match at every
+            // offset — and the first version, which took the outermost, reported `_&_`'s
+            // signature for a cursor sitting inside `toDecimal`.
+            //
+            // `best.is_none()` is what makes depth win: once a deeper call has claimed
+            // the offset, the enclosing application leaves it alone.
+            app_at(f, offset, best);
+            for a in args {
+                app_at(a, offset, best);
+            }
+            if best.is_some() {
+                return;
+            }
+            if let Some(i) = args
+                .iter()
+                .position(|a| (a.span.start as usize) <= offset && offset <= (a.span.end as usize))
+            {
+                *best = Some((e, i));
+            }
+        }
+        ExprKind::Proj(inner, _) => app_at(inner, offset, best),
+        ExprKind::Lambda(_, body) => app_at(body, offset, best),
+        ExprKind::Record(fs) => fs.iter().for_each(|(_, v)| app_at(v, offset, best)),
+        ExprKind::List(xs) => xs.iter().for_each(|x| app_at(x, offset, best)),
+        ExprKind::Case(arms) => arms.iter().for_each(|(c, v)| {
+            app_at(c, offset, best);
+            app_at(v, offset, best);
+        }),
+        _ => {}
+    }
+}
+
 /// The row a column reference is an expression over: the input row, or the
 /// joined row for the side-qualified form.
 fn row_of(side: Side) -> &'static str {
@@ -2681,6 +2775,38 @@ mod tests {
             rename(&ws, at("where adult", 7), "adult"),
             Rename::Edits(Vec::new())
         );
+    }
+
+    /// `signature_help` reports the call the cursor is *in*, and which argument.
+    ///
+    /// The trap is nesting: `q = users & select { v = toDecimal 10 2 1.5 }` has `_&_`
+    /// as an application whose second argument span contains everything after it, so
+    /// taking the outermost match reports `_&_`'s signature for a cursor sitting inside
+    /// `toDecimal`. The innermost call is what the reader is typing.
+    #[test]
+    fn signature_help_finds_the_innermost_call() {
+        let src = "t : query { id = int } = table \"m\" \"t\"\n\
+                   q = t & select { v = toDecimal 10 2 1.5 }\n";
+        let ws = Workspace::from_source(src);
+        // The three argument positions of `toDecimal`, and the call itself.
+        let base = src.find("toDecimal").expect("toDecimal");
+        let at_byte = |off: usize| {
+            let before = &src[..off];
+            let line = before.matches('\n').count() as u32;
+            let character = before.rsplit('\n').next().unwrap().chars().count() as u32;
+            Position { line, character }
+        };
+        for (want, off) in [(0usize, base + 11), (1, base + 14), (2, base + 16)] {
+            let (sigs, active) =
+                signature_help(&ws, at_byte(off)).unwrap_or_else(|| panic!("no help at {off}"));
+            assert!(
+                sigs[0].starts_with("toDecimal"),
+                "the innermost call, not `&`: {sigs:?}"
+            );
+            assert_eq!(active, want, "argument {want} at offset {off}");
+        }
+        // Outside any call's arguments, there is nothing to say.
+        assert!(signature_help(&ws, at_byte(0)).is_none());
     }
 
     /// `prepareRename` answers with the range the editor should select.

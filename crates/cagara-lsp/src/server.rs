@@ -14,7 +14,7 @@ use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest,
     FoldingRangeRequest, Formatting, GotoDefinition, HoverRequest, InlayHintRequest,
     PrepareRenameRequest, References, Rename, Request as _, SemanticTokensFullRequest,
-    WorkspaceSymbolRequest,
+    SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
@@ -27,9 +27,9 @@ use lsp_types::{
     MarkupKind, MessageType, OneOf, PrepareRenameResponse, PublishDiagnosticsParams,
     ReferenceParams, RenameOptions, RenameParams, SemanticToken, SemanticTokenType, SemanticTokens,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SymbolInformation,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
-    WorkspaceEdit, WorkspaceSymbolParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp,
+    SignatureHelpOptions, SignatureInformation, SymbolInformation, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Uri, WorkspaceEdit, WorkspaceSymbolParams,
 };
 use std::collections::HashMap;
 use std::error::Error;
@@ -178,6 +178,14 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
             TextDocumentSyncKind::INCREMENTAL,
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        // Which argument of the call the cursor is in. `hover` says what a name is;
+        // this says what the *next* argument should be, which is the question a
+        // signature popup exists to answer.
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: None,
+            retrigger_characters: None,
+            work_done_progress_options: Default::default(),
+        }),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         // `analysis::rename` rewrites a definition's name and every use of it, in
@@ -675,6 +683,29 @@ fn request(
                     .then_with(|| a.location.uri.as_str().cmp(b.location.uri.as_str()))
             });
             json(serde_json::to_value(Some(syms)))
+        }
+        SignatureHelpRequest::METHOD => {
+            let p: TextDocumentPositionParams =
+                serde_json::from_value(params).map_err(bad_params)?;
+            let key = doc_key(&p.text_document.uri);
+            let help: Option<SignatureHelp> = state
+                .select(&key)
+                .then(|| analysis::signature_help(&state.ws, p.position))
+                .flatten()
+                .map(|(sigs, active)| SignatureHelp {
+                    signatures: sigs
+                        .into_iter()
+                        .map(|label| SignatureInformation {
+                            label,
+                            documentation: None,
+                            parameters: None,
+                            active_parameter: Some(active as u32),
+                        })
+                        .collect(),
+                    active_signature: Some(0),
+                    active_parameter: Some(active as u32),
+                });
+            json(serde_json::to_value(help))
         }
         FoldingRangeRequest::METHOD => {
             let p: FoldingRangeParams = serde_json::from_value(params).map_err(bad_params)?;
@@ -1264,6 +1295,16 @@ mod tests {
             "the definition and its use are both renamed: {ren}"
         );
 
+        // `signatureHelp` says which argument the cursor is in. `DOC` has
+        // `q = users & where adult & select { id = .id, who = .name }`.
+        let sig = ed.ask("textDocument/signatureHelp", Editor::at(URI, 2, 12));
+        assert!(
+            sig["signatures"][0]["label"]
+                .as_str()
+                .is_some_and(|l| !l.is_empty()),
+            "signatureHelp: {sig}"
+        );
+
         // `workspace/symbol` searches every open file, which is the difference from
         // `documentSymbol`. `DOC` defines `adult`, `q` and `users`.
         let ws_syms = ed.ask("workspace/symbol", json!({ "query": "" }));
@@ -1419,18 +1460,23 @@ mod tests {
     fn a_capability_that_is_not_advertised_is_refused() {
         let mut ed = Editor::start();
         ed.open(URI, DOC);
-        // `textDocument/rename` and `workspace/symbol` used to be in this list. Both
-        // are implemented now, so the list holds only what is still missing — the test
-        // is about the server refusing what it does not advertise, and a method it
-        // *does* answer belongs in `every_advertised_capability_answers` instead.
-        for method in ["textDocument/signatureHelp", "textDocument/documentColor"] {
-            let r = ed.ask(method, Editor::at(URI, 1, 8));
-            assert_eq!(
-                r["error"]["code"],
-                ErrorCode::MethodNotFound as i32,
-                "{method} must be refused: {r}"
-            );
-        }
+        // `textDocument/rename`, `workspace/symbol` and `textDocument/signatureHelp`
+        // used to be in this list. All three are implemented now, so it holds only what
+        // is still missing — the test is about the server refusing what it does not
+        // advertise, and a method it *does* answer belongs in
+        // `every_advertised_capability_answers` instead.
+        //
+        // `documentColor` stays missing on purpose: the language has no colour type, so
+        // there is nothing to colour. Answering "no colours" for every document would be
+        // what an editor already assumes when the capability is absent.
+        // One left, so no loop: `documentColor` is the only advertised-capability
+        // shape the server still does not answer.
+        let r = ed.ask("textDocument/documentColor", Editor::at(URI, 1, 8));
+        assert_eq!(
+            r["error"]["code"],
+            ErrorCode::MethodNotFound as i32,
+            "documentColor must be refused: {r}"
+        );
         ed.close();
     }
 

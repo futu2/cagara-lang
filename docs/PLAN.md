@@ -100,6 +100,20 @@ need their own intrinsic per dialect.
 
 ## Recently closed
 
+- `join` and `crossJoin`. The join family had six members and neither of the two names a
+  SQL reader reaches for first. `join = innerJoin`; `crossJoin s = innerJoin s true`,
+  because the join machinery threads a predicate through every stage and `ON TRUE` is the
+  same product — measured on five engines, with SQLite giving both forms one query plan.
+- `over { … } (rowNumber)` says the function already takes the spec. The old message
+  (`expected agg (…), found winspec a -> win (…)`) described the overload set rather than
+  the mistake. Reported in `infer_app`, where the argument's type is still available.
+- `docs/PERFORMANCE.md` no longer implies `nix develop` is needed for the benchmark.
+
+**Checked and not a defect:** field names never need quoting — `.order` as a column and
+`{ order = .id }` as an output both reach the SQL as `"order"`, which is what
+`LEARN.md` already says. The syntax error I hit came from writing `{ "order" = .id }`,
+which the language does not offer and does not need to.
+
 - `monthsBetween`/`yearsBetween`/`hoursBetween`/`minutesBetween`/`secondsBetween`, and the
   `second` field they needed. The calendar ones are the **elapsed** count, written from
   `year`/`month`/`day` rather than delegated to `DATE_DIFF`, which counts boundaries and

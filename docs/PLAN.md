@@ -100,6 +100,15 @@ need their own intrinsic per dialect.
 
 ## Recently closed
 
+- `& limit -1` says what it parsed. `-` binds tighter than `&`, so it is `limit - 1` —
+  a subtraction from the stage — and the diagnostic was `expected expr a b, found expr a
+  int -> query a -> query a`. The check has to run *before* the argument is checked,
+  because the failure is raised by a queued constraint one level below the application.
+  Narrowed to operands whose type is a function or an `agg`/`win` producer, so `age - 1`
+  on a column is untouched.
+  **Still open:** `agg { x = sum -1 }` is the same slip through the field checker, which
+  this hook does not reach; it reports the old message.
+
 - A lowering refusal names the stage it is about. `cagara-sql` returned
   `Result<String, String>`, so every refusal reached the user as `file:0:0` — a
   pre-commit hook's output was unusable and an editor would underline the first line.

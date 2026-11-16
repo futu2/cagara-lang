@@ -64,7 +64,7 @@ fn large_definition_cache_benchmark() {
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
     drop(tc);
     let first = timed("cold_compile_owned", || compile(&ws));
-    assert!(first.is_ok(), "{:?}", first.diagnostics);
+    assert!(!has_errors(&first), "{:?}", first.diagnostics);
     assert_eq!(
         first.queries.len(),
         if layout == "root" { count } else { 1 }
@@ -96,7 +96,7 @@ fn large_definition_cache_benchmark() {
     assert!(tc.errors().is_empty(), "{:?}", tc.errors());
     drop(tc);
     let second = timed("edited_compile_owned", || compile(&ws));
-    assert!(second.is_ok(), "{:?}", second.diagnostics);
+    assert!(!has_errors(&second), "{:?}", second.diagnostics);
     assert_eq!(
         second.queries.len(),
         if layout == "root" { count } else { 1 }

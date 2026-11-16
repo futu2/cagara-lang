@@ -248,6 +248,13 @@
   join's parts, and `cagara check` prints the fix (`fix: Use `?? ""` — .s → (.s ?? "")`) and carries
   it in `--json` as `"fixes": [{"title":…, "edit":…}]`, so a hook or a script can act on it too.
 
+- `Compilation::is_ok` is gone. It asked for an empty diagnostics list, but that list carries
+  warnings on purpose — the editor and `cagara check` read it — so a valid overlapping-column join,
+  which compiles and warns that the right side's `id` cannot be read afterwards, answered `false`
+  while its query was there. Nothing outside the crate's own tests called it, and the rule it tried
+  to state is already `cagara check`'s (`Found::fails`), so the predicate is removed rather than
+  corrected: a caller that wants a verdict asks whether any diagnostic is `Severity::Error`.
+
 ### The 2026-11-14 cut
 
 Three threads. **Dates get one interface**: `parseDate`/`parseTimestamp` and

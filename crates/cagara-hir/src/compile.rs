@@ -136,16 +136,18 @@ pub struct CompiledQuery {
 }
 
 /// The complete result of checking and compiling a workspace's root module.
+///
+/// Both lists are reported rather than judged: `diagnostics` carries warnings as
+/// well as errors, and `Diag::severity` is what tells them apart, so a caller
+/// that needs "did this fail" asks for an error-severity diagnostic. There is
+/// deliberately no `is_ok`: the only rule it could hold is the one
+/// `cagara check` already applies (`Found::fails`), and a second copy of it here
+/// was both unused outside this crate's tests and wrong — it asked for an empty
+/// diagnostics list, which made a warning-only compilation look like a failure.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Compilation {
     pub queries: Vec<CompiledQuery>,
     pub diagnostics: Vec<Diag>,
-}
-
-impl Compilation {
-    pub fn is_ok(&self) -> bool {
-        self.diagnostics.is_empty()
-    }
 }
 
 /// Check and compile every query in the root module.
@@ -344,6 +346,23 @@ fn internal_error(input: CompilerInput<'_>, name: &str, error: &Error) -> Diag {
     let detail = error.message.clone();
     let message = format!("internal error in `{name}`: {detail}");
     input.diagnostic(error.origin, message)
+}
+
+/// Whether a compilation failed: an error-severity diagnostic is what fails a
+/// build, and warnings travel in the same list on purpose.
+///
+/// Test-only, and deliberately so. Nothing outside this crate's tests asks the
+/// question — `cagara check` decides a run by `Found::fails`, which is the same
+/// rule, and the language server publishes the diagnostics and lets the editor
+/// draw them. A public verdict here was a second copy of that rule that no
+/// caller wanted, and the copy was wrong: it asked for an empty diagnostics
+/// list, so a warning-only compilation read as a failure.
+#[cfg(test)]
+fn has_errors(compilation: &Compilation) -> bool {
+    compilation
+        .diagnostics
+        .iter()
+        .any(|diag| diag.severity == crate::workspace::Severity::Error)
 }
 
 #[cfg(test)]

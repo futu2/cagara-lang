@@ -1,4 +1,5 @@
 use super::*;
+use crate::workspace::Severity;
 
 fn assert_matches_fresh(ws: &Workspace) -> Compilation {
     let cached = compile(ws);
@@ -756,7 +757,7 @@ fn cached_compilation_matches_fresh_across_edits_errors_and_overloads() {
     let query = "q = users & select { v = .a + 1 }\n";
     let initial = format!("{table}{query}");
     let mut ws = Workspace::from_source(&initial);
-    assert!(assert_matches_fresh(&ws).is_ok());
+    assert!(!has_errors(&assert_matches_fresh(&ws)));
     for source in [
         initial.replace("one", "two"),
         format!("{table}alias = users\nq = alias & select {{ v = .a + 1 }}\n"),
@@ -784,7 +785,7 @@ fn imported_dependency_edits_and_locations_match_fresh_compilation() {
     let lib = "value : query { a = int } = table \"s\" \"one\"\n";
     let buffers = HashMap::from([(lib_path.clone(), lib.to_string())]);
     let mut ws = Workspace::open_with_buffers(&root_path, root.into(), &buffers);
-    assert!(assert_matches_fresh(&ws).is_ok());
+    assert!(!has_errors(&assert_matches_fresh(&ws)));
     let module = ws.module_for_path(&lib_path).unwrap();
     for source in [
         lib.replace("one", "two"),
@@ -808,7 +809,7 @@ fn transitive_users_change_while_an_independent_query_is_reused() {
                alias = base\nq = alias\n\
                alone : query { a = int } = table \"s\" \"own\"\n";
     let mut ws = Workspace::from_source(src);
-    assert!(compile(&ws).is_ok());
+    assert!(!has_errors(&compile(&ws)));
     let before = crate::elaborate::elaborated_defs().len();
     assert!(ws.set_source(ws.root, src.replace("\"one\"", "\"two\"")));
     let edited = compile(&ws);
@@ -837,7 +838,7 @@ fn a_row_change_dirties_the_definitions_that_use_it() {
                q = users & prefix \"p_\"\n\
                alone : query { a = int } = table \"s\" \"own\"\n";
     let mut ws = Workspace::from_source(src);
-    assert!(compile(&ws).is_ok());
+    assert!(!has_errors(&compile(&ws)));
     let before = crate::elaborate::elaborated_defs().len();
     // Only `users`'s declaration: `alone` has the same text and must keep it.
     assert!(ws.set_source(ws.root, src.replacen("{ a = int }", "{ b = int }", 1)));
@@ -865,7 +866,7 @@ fn dependency_walk_handles_long_chains_and_cycles_without_recursing() {
         source.push_str(&format!("d{i} = d{}\n", i - 1));
     }
     let ws = Workspace::from_source(&source);
-    assert!(compile(&ws).is_ok());
+    assert!(!has_errors(&compile(&ws)));
     let mut ws = Workspace::from_source("a = b\nb = a\n");
     assert_matches_fresh(&ws);
     assert!(ws.set_source(ws.root, "a = b\nb = 1\n".into()));
@@ -897,13 +898,67 @@ fn production_normalizer_rejects_a_recursive_query_alias_without_recursing() {
 fn cached_relations_keep_current_source_locations() {
     let src = "q : query { a = int } = table \"public\" \"items\"\n";
     let mut ws = Workspace::from_source(src);
-    assert!(compile(&ws).is_ok());
+    assert!(!has_errors(&compile(&ws)));
     assert!(ws.set_source(ws.root, format!("# moved\n{src}")));
     let cached = compile(&ws);
     let fresh = compile_checked(&ws, &crate::check::check(&ws));
     assert_eq!(
         cached, fresh,
         "cache reuse must preserve every Rel::At span"
+    );
+}
+
+/// A warning travels in `diagnostics` without making the compilation a failure.
+///
+/// `compile_reusing` deliberately carries warnings in the same list as errors
+/// ("Warnings travel with the errors: the editor and `cagara check` read this
+/// list"), so "did this compile" cannot be asked as "is the list empty" — that
+/// question called a valid overlapping-column join broken. The severity on the
+/// diagnostic is what answers it, and `cagara check` decides a run the same way
+/// (`Found::fails`); `a_warning_is_reported_and_does_not_fail_the_build` in
+/// `cagara-cli` pins the user-visible half of that.
+#[test]
+fn a_warning_does_not_fail_a_compilation() {
+    let src = "a : query { id = int } = table \"s\" \"a\"\n\
+               b : query { id = int } = table \"s\" \"b\"\n\
+               q = a & innerJoin b (.<id == .>id)\n";
+    let compilation = compile(&Workspace::from_source(src));
+    let query = compilation
+        .queries
+        .iter()
+        .find(|query| query.name == "q")
+        .unwrap_or_else(|| panic!("`q` did not compile: {:?}", compilation.diagnostics));
+    assert!(query.result.is_ok(), "{:?}", query.result);
+    assert_eq!(
+        compilation.diagnostics.len(),
+        1,
+        "one overlapping-column warning, no error: {:?}",
+        compilation.diagnostics
+    );
+    assert_eq!(compilation.diagnostics[0].severity, Severity::Warning);
+    assert!(
+        !has_errors(&compilation),
+        "a warning does not make the compilation a failure: {:?}",
+        compilation.diagnostics
+    );
+}
+
+/// The converse: an error-severity diagnostic is what fails a compilation, so
+/// `has_errors` cannot be satisfied by always answering `false`.
+#[test]
+fn an_error_diagnostic_fails_a_compilation() {
+    let ws = Workspace::from_source(
+        "a : query { id = int } = table \"s\" \"a\"\nq = a & select { x = .missing }\n",
+    );
+    let compilation = compile(&ws);
+    assert!(has_errors(&compilation), "{:?}", compilation.diagnostics);
+    assert!(
+        compilation
+            .diagnostics
+            .iter()
+            .any(|diag| diag.severity == Severity::Error),
+        "the failure is reported with its severity: {:?}",
+        compilation.diagnostics
     );
 }
 

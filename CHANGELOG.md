@@ -76,6 +76,11 @@
 - `cagara fmt` accepts a directory and formats the sources under it, as `cagara check` reads one.
   It used to fail with `Is a directory (os error 21)` on the same path `check` walked.
 
+- A stage given no argument says so. `q = u & where` reported
+  `type mismatch: expected query {…}, found expr a b` — a shape the reader never wrote. It now names
+  what the stage needs (`& where (.id > 1)`, `& limit 5`, `& order [asc .x]`, …), for all six of
+  `where`, `select`, `agg`, `order`, `limit` and `offset`.
+
 - `& limit -1` explains itself: `-` binds tighter than `&`, so it reads as `limit - 1`, and the
   diagnostic used to be `type mismatch: expected expr a b, found expr a int -> query a -> query a`.
   It now says what it parsed and that the fix is `limit (-1)`.

@@ -584,11 +584,100 @@ impl<'w> Checker<'w> {
             }
             (Ty::Fun(a1, r1), Ty::Fun(a2, r2)) => {
                 let (a1, r1, a2, r2) = (a1.clone(), r1.clone(), a2.clone(), r2.clone());
+                // A stage handed the query where it wanted its own argument.
+                //
+                // `u & where` is `_&_ u where`, so `where : expr r bool -> query r ->
+                // query r` is unified against `query {…} -> b` — measured, those are the
+                // two types this arm receives. Unifying the parameters then fails between
+                // `expr r bool` and `query {…}`, which is reported one level up as
+                // `expected query {…}, found expr a b`: a shape the reader never wrote,
+                // and one that never says the stage is short of an argument.
+                //
+                // Checked here because this arm still has both *whole* function types.
+                // By the time the inner unification fails, only one parameter is left.
+                if let Some(msg) = self.unsaturated_stage(&a, &a2, &e) {
+                    return Err(msg);
+                }
                 self.unify(&a1, &a2)?;
                 self.unify(&r1, &r2)
             }
             _ => Err(self.mismatch(&a, &e)),
         }
+    }
+
+    /// Is a stage being given the query where it still wants an argument?
+    ///
+    /// The shape is exact, which is what keeps this from being a guess: a stage of this
+    /// kind is `P -> query r -> query q` — two parameters, the second the query it
+    /// consumes, the result a query. All six of `where`, `select`, `agg`, `order`,
+    /// `limit` and `offset` have it; `distinct` has one parameter and `_&_`'s result is
+    /// not a query, so neither is confused for one.
+    ///
+    /// `other_param` is what the other function wanted at that position. A `query` there
+    /// means the caller supplied the pipeline's value instead of the argument.
+    fn unsaturated_stage(&mut self, whole: &Ty, other_param: &Ty, other: &Ty) -> Option<String> {
+        let Ty::Fun(first, rest) = whole else {
+            return None;
+        };
+        let Ty::Fun(second, result) = rest.as_ref() else {
+            return None;
+        };
+        if !matches!(self.resolve(second), Ty::Con("query", _))
+            || !matches!(self.resolve(result), Ty::Con("query", _))
+            || !matches!(self.resolve(other_param), Ty::Con("query", _))
+        {
+            return None;
+        }
+        // The other side is `query {…} -> b` with `b` still unbound — it is the `b` of
+        // `_&_`'s own signature — so its *result* cannot be asked about. What identifies
+        // the slip is the pair: a stage-shaped function on one side, a `query` in the
+        // parameter slot on the other, and **one parameter fewer** on that side.
+        //
+        // The arity test is what keeps the prelude's own definitions out. `_&|_` is
+        // `query s -> query r -> query r` — stage-shaped by every other measure — and it
+        // is unified against its own signature whenever a definition is reconciled with
+        // the type it declares. Both sides having two parameters means two stages, not a
+        // stage handed a pipeline; only `query -> b` is that.
+        let mut other_arity = 0usize;
+        let mut t = other;
+        while let Ty::Fun(_, next) = t {
+            other_arity += 1;
+            t = next;
+        }
+        if other_arity != 1 {
+            return None;
+        }
+        // What it still wants, in the reader's words.
+        //
+        // Read from the *type structure*, not from its printed form: `where`'s parameter
+        // is `expr a b` with `b` still an unbound variable, so a check for the word
+        // `bool` never matches and every stage fell through to the generic message. The
+        // third argument of `expr` is the value's type — `bool` for a predicate, `int`
+        // for a count, an open variable for a record of fields — and that is what tells
+        // the six apart.
+        let (what, example) = match self.resolve(first) {
+            Ty::Con("list", _) => ("a list of sort keys", "& order [asc .x]"),
+            // A stage whose argument is a record of field expressions. The first slot of
+            // `record_expr` is the *kind* the record is being used as — `row` for
+            // `select`/`update`, `agg` for `agg` — measured, because a plain `expr` check
+            // never matches: by the time the record is written, the parameter has already
+            // been replaced by the record form.
+            Ty::Con("record_expr", ra) if ra.len() == 4 => match self.resolve(&ra[0]) {
+                Ty::Con("agg", _) => ("an aggregate", "& agg { n = count }"),
+                _ => ("a record of fields", "& select { x = .id }"),
+            },
+            // `expr r a` with the value type still open or known: `where`'s predicate and
+            // `limit`/`offset`'s count, which are the two that are not records.
+            Ty::Con("expr", ea) if ea.len() == 3 => match self.resolve(&ea[2]) {
+                Ty::Con("bool", _) => ("a predicate", "& where (.id > 1)"),
+                Ty::Con("int", _) => ("a count", "& limit 5"),
+                _ => ("a predicate", "& where (.id > 1)"),
+            },
+            _ => ("an argument", "& <stage> <argument>"),
+        };
+        Some(format!(
+            "this stage still needs {what}: `&` supplies the query, so write `{example}`"
+        ))
     }
 
     pub(crate) fn unify_rows(&mut self, actual: &Ty, expected: &Ty) -> U {

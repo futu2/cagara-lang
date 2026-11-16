@@ -527,6 +527,45 @@ fn query_output_rows() {
     );
 }
 
+/// A stage given no argument says so, instead of reporting a type it was never given.
+///
+/// `q = users & where` is `_&_ users where`, so the stage is the *second* argument of
+/// `&` and its slot there is the pipeline's query. The mismatch surfaced as
+/// `expected query {…}, found expr a b` — a shape the reader never wrote, which never
+/// says the stage is short of an argument.
+///
+/// Each of the six stages that take one argument gets the sentence that belongs to it:
+/// the parameter's *shape* is what says which it is, because `where`'s is `expr a b` with
+/// `b` still open and `select`'s is a `record_expr` rather than an `expr`.
+#[test]
+fn a_stage_with_no_argument_says_what_it_needs() {
+    for (src, want) in [
+        ("q = users & where\n", "needs a predicate"),
+        ("q = users & select\n", "needs a record of fields"),
+        ("q = users & agg\n", "needs an aggregate"),
+        ("q = users & order\n", "needs a list of sort keys"),
+        ("q = users & limit\n", "needs a count"),
+        ("q = users & offset\n", "needs a count"),
+    ] {
+        let e = err(src, "q");
+        assert!(e.contains(want), "{src:?}: expected {want:?}, got {e}");
+        // The internal type is gone, and the fix is named.
+        assert!(!e.contains("expr a b"), "no leaked type: {e}");
+        assert!(e.contains("`&` supplies the query"), "{e}");
+    }
+    // A stage that *has* its argument is untouched, and so is a prelude definition that
+    // is itself stage-shaped — `_&|_ : query s -> query r -> query r` is reconciled with
+    // its own signature on every check, and the arity test is what keeps it out.
+    for src in [
+        "q = users & where (.age > 1) & select { x = .id } & order [asc .x] & limit 5 & offset 1\n",
+        "q = users & union users\n",
+        "q = users & intersect users\n",
+    ] {
+        let t = ty(src, "q");
+        assert!(t.starts_with("query "), "{src:?}: {t}");
+    }
+}
+
 /// `& limit -1` says what went wrong, not what the type system saw.
 ///
 /// `-` is infix at precedence 17 and `&` at 1, so `limit -1` parses as `limit - 1` —

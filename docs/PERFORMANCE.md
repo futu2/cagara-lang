@@ -7,13 +7,17 @@ checked facts and dependencies are unchanged. Inference still runs per definitio
 
 ## Reproducing the measurements
 
-Run the opt-in benchmark through the development shell:
+Run the opt-in benchmark:
 
 ```sh
 CAGARA_BENCH_DEFINITIONS=1000000 CAGARA_BENCH_LAYOUT=import \
-  nix develop -c cargo test --release -p cagara-hir \
+  cargo test --release -p cagara-hir \
   large_definition_cache_benchmark -- --ignored --nocapture
 ```
+
+Plain `cargo test` is enough — the benchmark needs no shell, service or engine. (`nix
+develop -c` works too if that is how the toolchain is pinned on your machine; it is a
+wrapper around the same command, not a requirement.)
 
 `CAGARA_BENCH_LAYOUT=root` puts all generated definitions in the root file.
 `import` puts them in `catalog.cagara`, imported through an alias by a small

@@ -79,6 +79,9 @@
 - `agg { x = sum -1 }` explains itself too: `-` binds tighter than the argument list, so it reads
   as `sum - 1`. The fix is `sum (-1)`.
 
+- `docs/PERFORMANCE.md` no longer wraps the benchmark command in `nix develop -c`. Plain
+  `cargo test` runs it — measured at 2,000, 10,000, 100,000 and 1,000,000 definitions.
+
 - `over { … } (rowNumber)` says the function is already a window. It reported
   `expected agg (…), found winspec a -> win (expr a int)` — true, but silent about `rowNumber`
   taking the spec itself. The message now names the right spelling for all five window functions

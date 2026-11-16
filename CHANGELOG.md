@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 — 2026-11-16
+
+### Since the 2026-11-14 cut
 
 - `decimal p s` is a type: `total = decimal 10 2` declares exact fixed point, `1 ≤ s ≤ p ≤ 38`, and the
   parameters are checked where they are written. `toDecimal 10 2 x` and `tryDecimal 10 2 x` return
@@ -241,7 +243,7 @@
   join's parts, and `cagara check` prints the fix (`fix: Use `?? ""` — .s → (.s ?? "")`) and carries
   it in `--json` as `"fixes": [{"title":…, "edit":…}]`, so a hook or a script can act on it too.
 
-## 0.4.2 — 2026-11-14
+### The 2026-11-14 cut
 
 Three threads. **Dates get one interface**: `parseDate`/`parseTimestamp` and
 their `format*` inverses take a format written once (`%Y %m %d %H %M %S`) and

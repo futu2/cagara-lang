@@ -13,9 +13,19 @@ cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
 
-The SQL differential tests use the `sqlite3` and `duckdb` command-line shells.
-They skip a missing engine by default; set `CAGARA_REQUIRE_ENGINES=1` to make a
-missing engine fail instead. CI requires both.
+The SQL differential tests in `crates/cagara-sql/tests/engines.rs` compare rows
+against real engines. An engine that is not installed is skipped by default; set
+`CAGARA_REQUIRE_ENGINES=1` to turn a missing engine into a failure, which is what
+a full local run does. [`docs/ENGINE-TESTS.md`](docs/ENGINE-TESTS.md) has the
+command and the setup for each engine — SQLite, DuckDB, PostgreSQL through
+PGlite, Trino and MariaDB — and for the sqlglot emulation of the rest.
+
+CI does not run these: it installs no engines and sets `CAGARA_NO_ENGINES=1`, so
+every execution test skips while the SQL-text checks (and the rest of the suite)
+still run. That is deliberate — the comparison needs three downloads and two
+servers on every push, and the runner's own `sqlite3` is older than the 3.46 that
+`floor` needs, so omitting the engine would fail rather than skip. See "CI does
+not run these" in `docs/ENGINE-TESTS.md`.
 
 The pipeline snapshot is updated deliberately:
 

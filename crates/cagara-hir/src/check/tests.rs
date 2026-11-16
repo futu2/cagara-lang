@@ -527,6 +527,49 @@ fn query_output_rows() {
     );
 }
 
+/// `& limit -1` says what went wrong, not what the type system saw.
+///
+/// `-` is infix at precedence 17 and `&` at 1, so `limit -1` parses as `limit - 1` —
+/// subtracting one from the `limit` *function*. The diagnostic that follows was
+/// `type mismatch: expected expr a b, found expr a int -> query a -> query a`, which
+/// names neither the operator nor the fix, and the fix is one pair of parentheses.
+#[test]
+fn a_negative_stage_argument_explains_the_precedence() {
+    for (src, stage) in [
+        ("q = users & limit -1\n", "limit"),
+        ("q = users & offset -1\n", "offset"),
+    ] {
+        let e = err(src, "q");
+        assert!(
+            e.contains(&format!("`{stage} -1` reads as `{stage} - 1`")),
+            "{stage}: {e}"
+        );
+        assert!(
+            e.contains(&format!("Write `{stage} (-1)`")),
+            "{stage} names the fix: {e}"
+        );
+        // The internal type is gone.
+        assert!(!e.contains("expr a b"), "no leaked type: {e}");
+    }
+    // The parenthesised spelling reaches the stage's own check instead. That check
+    // is a *lowering* refusal (`limit` rejects a negative count), not a checker one,
+    // so it is asserted where it happens — `crates/cagara-cli/tests/cli.rs` — rather
+    // than here, where `err` only sees the checker's verdict.
+    // And a subtraction on an ordinary value is not reported this way: `.age - 1` is
+    // a real expression, so the message would be a guess. It type-checks, which is the
+    // negative control this needs — the predicate must be about the *type* of the left
+    // operand, not about the spelling of an operator.
+    assert!(
+        types("q = users & select { x = .age - 1 }\n")
+            .into_iter()
+            .find(|(n, _)| n == "q")
+            .expect("q")
+            .1
+            .is_ok(),
+        "a subtraction on a column is a real expression"
+    );
+}
+
 /// A set operation answers with its **left** operand's row.
 ///
 /// The left operand is the one written first in the source, which `&` makes the

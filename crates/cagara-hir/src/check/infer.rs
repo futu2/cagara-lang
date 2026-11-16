@@ -1994,6 +1994,18 @@ impl<'w> Checker<'w> {
                     // `check` re-records a literal argument at the type it was
                     // lifted to (`18` in `.age >= 18` has the value type it was
                     // lifted to), so no special case is needed here.
+                    // `& limit -1` reads as `& (limit - 1)`: `-` binds tighter than
+                    // `&`, so the reader wrote a subtraction from a *function*.
+                    //
+                    // Reported **before** the argument is checked, not after.
+                    // Checking it raises `expected expr a b, found expr a int ->
+                    // query a -> query a` from a queued constraint inside `solve` — a
+                    // failure one level below the `&` whose parameter is what the
+                    // reader actually wrote — so rewriting that error here never sees
+                    // it.
+                    if let Some(msg) = self.negative_argument(arg) {
+                        return Err(at(arg.span)(msg));
+                    }
                     let checked = self.check(env, arg, &p)?;
                     // A `sortkey` result is what says this argument is a *key*:
                     // `asc` and `desc` are the only producers, and they take an
@@ -2688,6 +2700,70 @@ impl<'w> Checker<'w> {
     /// differently: one says which field, the other does not. The field spans are
     /// already kept (for the nullable rewrite); this asks them which field holds
     /// this use.
+    /// `& stage -1`: a negative argument that `-` took as a subtraction.
+    ///
+    /// `-` is infix at a tighter precedence than `&`, so `limit -1` parses as
+    /// `limit - 1` — subtracting one from the `limit` *function* — and the diagnostic
+    /// that follows talks about function types the reader never wrote. The spelling
+    /// that works is `limit (-1)`, and that is what this says.
+    ///
+    /// Narrow on purpose: the argument must be a numeric operator applied to a name
+    /// that **resolves to a function**. That is the condition that makes this not a
+    /// guess — a function is never a number, so `stage - 1` cannot be a program, while
+    /// `n - 1` on an ordinary value is left alone. That is why the name's *type* is
+    /// looked up rather than its spelling.
+    fn negative_argument(&mut self, arg: &ast::Expr) -> Option<String> {
+        let ast::ExprKind::App(f, args) = &arg.kind else {
+            return None;
+        };
+        let ast::ExprKind::Name(op) = &f.kind else {
+            return None;
+        };
+        let spelling = op.strip_prefix('_')?.strip_suffix('_')?;
+        if !matches!(spelling, "-" | "+") || args.len() != 2 {
+            return None;
+        }
+        let ast::ExprKind::Name(callee) = &args[0].kind else {
+            return None;
+        };
+        // The operand as written, when it is a literal: the reader recognises their own
+        // `-1` faster than a description of it.
+        let shown = match &args[1].kind {
+            ast::ExprKind::Lit(cagara_syntax::ast::Lit::Int(v)) => v.to_string(),
+            ast::ExprKind::Lit(cagara_syntax::ast::Lit::Float(v)) => v.to_string(),
+            _ => return None,
+        };
+        // Is the left operand something a number cannot be? A stage is a function;
+        // `sum` is an `expr r a -> agg (expr r a)`, and `sum - 1` is the same slip in
+        // a field. A plain number or column is neither, and is left alone — which is
+        // why the name's *type* is looked up rather than its spelling.
+        let binding = self.env.scope.get(callee).cloned()?;
+        let ty = match binding {
+            Binding::Def(m, i) => self.def_scheme(m, i)?.ty,
+            Binding::Overloads(m, is) => self.def_scheme(m, *is.first()?)?.ty,
+            Binding::Module(_) => return None,
+        };
+        let resolved = self.resolve(&ty);
+        let not_a_number = match &resolved {
+            // A stage: `limit`, `where`, `order` — and `sum`, whose result is an
+            // `agg (expr r a)`.
+            Ty::Fun(..) => true,
+            other => {
+                let shown = self.show(other);
+                let result = shown.rsplit(" -> ").next().unwrap_or("");
+                result.starts_with("agg") || result.starts_with("win")
+            }
+        };
+        if !not_a_number {
+            return None;
+        }
+        Some(format!(
+            "`{callee} {spelling}{shown}` reads as `{callee} {spelling} {shown}`: `{spelling}` \
+             binds tighter than `&`, so this subtracts from the `{callee}` stage instead of \
+             passing it a negative argument. Write `{callee} ({spelling}{shown})`"
+        ))
+    }
+
     fn no_overload_at(
         &mut self,
         module: usize,

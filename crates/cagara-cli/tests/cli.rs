@@ -814,6 +814,53 @@ fn check_reports_a_lowering_error() {
     assert!(!sql.status.success(), "{}", stdout(&sql));
 }
 
+/// `& limit -1` explains the precedence instead of leaking a function type.
+///
+/// `-` binds tighter than `&`, so `limit -1` is `limit - 1` — subtracting from the
+/// `limit` *function*. The diagnostic used to be
+/// `type mismatch: expected expr a b, found expr a int -> query a -> query a`, which
+/// names neither the operator nor the fix.
+#[test]
+fn a_negative_stage_argument_explains_the_precedence() {
+    let dir = TempDir::new("negative-arg");
+    for stage in ["limit", "offset"] {
+        let f = dir.write(
+            "t.cagara",
+            &format!("t : query {{ id = int }} = table \"m\" \"t\"\nq = t & {stage} -1\n"),
+        );
+        let out = Command::new(env!("CARGO_BIN_EXE_cagara"))
+            .arg(&f)
+            .args(["--only", "q"])
+            .output()
+            .expect("run cagara");
+        assert!(!out.status.success(), "{stage}: should fail");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains(&format!("`{stage} -1` reads as `{stage} - 1`")),
+            "{stage}: {err}"
+        );
+        assert!(
+            err.contains(&format!("Write `{stage} (-1)`")),
+            "{stage} names the fix: {err}"
+        );
+        assert!(!err.contains("expr a b"), "{stage}: no leaked type: {err}");
+    }
+    // The parenthesised spelling gets the stage's own refusal, which is about the
+    // value rather than about parsing.
+    let f = dir.write(
+        "p.cagara",
+        "t : query { id = int } = table \"m\" \"t\"\nq = t & limit (-1)\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_cagara"))
+        .arg(&f)
+        .args(["--only", "q"])
+        .output()
+        .expect("run cagara");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("non-negative count"), "{err}");
+    assert!(!err.contains("binds tighter than `&`"), "{err}");
+}
+
 /// A lowering refusal names a line and column, not `0:0`.
 ///
 /// The refusal comes from `cagara-sql`, whose `Rel` is built bottom-up — only

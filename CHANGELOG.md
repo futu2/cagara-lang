@@ -38,6 +38,10 @@
 - An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
   `select { x = upper .id }` does. It named only the operator before.
 
+- `& limit -1` explains itself: `-` binds tighter than `&`, so it reads as `limit - 1`, and the
+  diagnostic used to be `type mismatch: expected expr a b, found expr a int -> query a -> query a`.
+  It now says what it parsed and that the fix is `limit (-1)`.
+
 - The language server publishes the refusals `cagara-sql` produces, so the editor shows what the
   compiler will reject. A `distinct` after an `order` on an expression the projection dropped used to
   look clean in the editor and fail in the build. The check runs on ANSI, which refuses nothing about

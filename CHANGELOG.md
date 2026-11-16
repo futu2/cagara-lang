@@ -38,6 +38,10 @@
 - An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
   `select { x = upper .id }` does. It named only the operator before.
 
+- `listAt i xs` — the element at 1-based position `i`, NULL when the list is shorter. DuckDB only:
+  PostgreSQL has the subscript it would be written as, but `sqlglot-rust` 0.10.30's AST has no
+  subscript node, so it cannot be emitted.
+
 - `position`, `ascii`, `chr`, `repeat` and `reverse` in the prelude. Each needed a per-target
   spelling found by measurement: `repeat` is `replace(hex(zeroblob(n)), '00', s)` on SQLite and
   `array_join(repeat(s, n), '')` on Trino, and `ascii` is `unicode`/`codepoint` with a `varchar(1)`

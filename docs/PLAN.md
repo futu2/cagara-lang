@@ -117,6 +117,25 @@ need their own intrinsic per dialect.
 - `cagara fmt` walks a directory with the same walk `cagara check` uses.
 - `& limit -1` explains that `-` binds tighter than `&`.
 
+- `position`, `ascii`, `chr`, `repeat`, `reverse` and `listAt`. Every spelling was found by
+  measurement, and two were not what the documentation suggests: `repeat` is
+  `replace(hex(zeroblob(n)), '00', s)` on SQLite and `array_join(repeat(s, n), '')` on Trino
+  (whose `repeat` returns an *array*), and `ascii` is `codepoint` with a `varchar(1)` cast on
+  Trino, whose type check runs before constant folding. `reverse` and `listAt` are **refused**
+  on the targets that cannot express them, with a message naming what is missing.
+
+**`listMap` and `listFilter` cannot be built, and this was measured rather than assumed.**
+They need the engine to run a lambda over each element — DuckDB's
+`list_transform(xs, x -> x + 1)`, PostgreSQL's `ARRAY(SELECT f(x) FROM unnest(xs) x)`. A
+Cagara lambda is a *compile-time* value: it beta-reduces away, and a `sql "…"` template
+receives its argument as an opaque expression, not as something whose parameter can be
+substituted. Measured: a helper `lf : (expr r int -> expr r bool) -> … = p => xs => xs`
+compiles and the lambda is simply dropped — the generated SQL is `SELECT xs AS v`. There
+is no way to render `x -> x + 1` from it, so both functions would be a lie. Doing it
+properly means either a new IR node for a lambda-over-list (and a lowering rule per
+target) or a stage that takes an expression over `value` and a list — a language change,
+not a prelude addition.
+
 **Still open: `q = u & where`.** A stage given too few arguments reports
 `type mismatch: expected query {…}, found expr a b`, and three attempts to improve it
 failed for the same reason: `&` is reverse application, so the stage arrives as an

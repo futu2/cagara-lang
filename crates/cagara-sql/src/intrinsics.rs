@@ -123,6 +123,16 @@ fn node(e: Expr, f: Fam) -> Result<Expr, String> {
 /// dialect is not a parameter because the reason is a property of the *function*: no
 /// target without `REVERSE` can express it, so nothing here depends on which one asked.
 fn refusal(name: &str) -> Option<String> {
+    if name == "CAGARA_LIST_AT" {
+        return Some(
+            "`listAt` is available on DuckDB only: PostgreSQL has the subscript it \
+             would be written as, but `sqlglot-rust` 0.10.30's AST has no subscript \
+             node, so there is no way to emit `(ARRAY[…])[i]` — only a `list_extract` \
+             call, which PostgreSQL does not have. Trino's `element_at` would work, but \
+             `list` is not enabled there at all yet"
+                .to_string(),
+        );
+    }
     let what = match name {
         "CAGARA_REVERSE" => "`reverse`",
         _ => return None,
@@ -399,6 +409,7 @@ fn list_refusal(name: &str, f: Fam) -> Option<String> {
         "CAGARA_LIST_CONCAT" => "`<>` on a list",
         "CAGARA_LIST_LENGTH" => "`listLength`",
         "CAGARA_LIST_CONTAINS" => "`listContains`",
+        "CAGARA_LIST_AT" => "`listAt`",
         "CAGARA_UNNEST" => "`unnest`",
         _ => return None,
     };
@@ -609,6 +620,39 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
         ("CAGARA_LIST_LENGTH", 1) => match f {
             Fam::Duck => func("len", a.to_vec()),
             _ => func("cardinality", a.to_vec()),
+        },
+        ("CAGARA_LIST_AT", 2) => match f {
+            // DuckDB has `list_extract(xs, i)`, which is 1-based and NULL when the
+            // list is shorter — measured. That is exactly what `maybe a` promises, so
+            // no guard is needed.
+            //
+            // It is a *function* rather than a subscript because `sqlglot-rust` 0.10.30
+            // has no subscript node in its AST, and that is what keeps PostgreSQL out:
+            // `(ARRAY[…])[i]` is the spelling there, it works (measured on PGlite,
+            // including the NULL for an out-of-range index), and there is no way to
+            // build it. A `list_extract` call would be `function list_extract(integer[],
+            // integer) does not exist`.
+            Fam::Duck => func("list_extract", vec![a[0].clone(), a[1].clone()]),
+            // A target with no array type never reaches here: `list_refusal` refuses
+            // the whole query first, with a message naming what needs an array. Listed
+            // so the match is exhaustive rather than falling into a catch-all that
+            // would silently emit `list_extract` for MySQL.
+            //
+            // Trino is here because `has_list` does not include it. Trino *does* have
+            // `ARRAY_AGG` and `element_at` — measured — so `has_list` is narrower than
+            // the truth; widening it is a separate change, because it would turn every
+            // existing `arrayAgg` on Trino from a refusal into a query, and that
+            // deserves its own tests rather than riding along with `listAt`.
+            // PostgreSQL is here for a *different* reason from the rest: it has arrays
+            // and a subscript, but the AST cannot express one.
+            Fam::Mysql
+            | Fam::Sqlite
+            | Fam::Tsql
+            | Fam::BigQuery
+            | Fam::Snowflake
+            | Fam::Spark
+            | Fam::Trino
+            | Fam::Ansi => return None,
         },
         ("CAGARA_LIST_CONTAINS", 2) => match f {
             Fam::Duck => func("list_contains", a.to_vec()),

@@ -277,6 +277,15 @@ listLength : expr r (list a) -> expr r int = sql "CAGARA_LIST_LENGTH($1)"
 ## a list *value*: the literal membership operator is `in`.
 listContains : expr r (list a) -> expr r a -> expr r bool = sql "CAGARA_LIST_CONTAINS($1, $2)"
 
+## `listAt i xs` — the element at 1-based position `i`, NULL when the list is shorter.
+##
+## 1-based because every engine's array subscript is: PostgreSQL's `xs[i]`, DuckDB's
+## `xs[i]` and Trino's `element_at(xs, i)` all count from 1, and a 0-based name here
+## would mean the compiler had to add one to every call. Out of range is NULL rather
+## than an error, which is what `element_at` does and what a query can handle; an
+## engine that raises instead is one whose own semantics say so.
+listAt : expr r int -> expr r (list a) -> expr r (maybe a) = sql "CAGARA_LIST_AT($2, $1)"
+
 ## `lift f x` — apply a function to the value inside a `maybe`: `nothing` stays
 ## `nothing`, `just v` becomes `just (f v)`. The result is a `maybe`, so a
 ## missing value never flows into a place that expects a present one — and a

@@ -616,8 +616,14 @@ const CASES: &[(&str, &[&str])] = &[
     // `listAt` is DuckDB-only, and this is the one place `list` values are read by
     // position. 1-based, NULL out of range.
     (
+        // `dupes` has ids 1, 1, 2, 3: the second element is 1 and the ninth is NULL.
         "list_at = (dupes & agg { xs = arrayAgg .id }) & select { a = listAt 2 .xs, b = listAt 9 .xs }",
         &["1|NULL"],
+    ),
+    // The first element, so a 1-based/0-based mistake would show.
+    (
+        "list_at_first = (dupes & agg { xs = arrayAgg .id }) & select { a = listAt 1 .xs, b = listAt 4 .xs }",
+        &["1|3"],
     ),
     // The string functions the prelude gained. Each was checked on four engines
     // while being written, and two of them needed a different spelling per target:
@@ -3403,10 +3409,11 @@ fn postgres_agrees_via_pglite() {
         ("l2", &["1|{1,2}", "2|{1,2}", "3|{1,2}", "4|{1,2}"], false),
         ("l3", &["{1}"], false),
     ];
-    // A case the language offers and this target cannot express is not a failure:
-    // `listAt` needs a subscript and the AST cannot build one, so PostgreSQL is
-    // refused by name. Skipping it keeps the row comparison for everything PostgreSQL
-    // can run; `sqlite_refuses_reverse` covers the refusals themselves.
+    // A case the language offers and this target cannot express is not a failure —
+    // `reverse` and `listAt` are refused by name on some targets — so a case that
+    // fails to compile is skipped rather than reported. What must not happen is a
+    // case silently disappearing: `every_case_runs_on_the_engines_that_should` pins
+    // which targets refuse what.
     let mut wanted: Vec<(&str, &[&str], bool)> = Vec::new();
     for (d, w) in CASES {
         let name = d.split_whitespace().next().expect("name");

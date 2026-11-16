@@ -169,7 +169,12 @@ kind_table! {
         /// every definition on the following line, and did so **silently**: a
         /// CR-only file reported one definition where it had two, with no error,
         /// because the second was inside the comment token.
-        Comment TRIVIA #[regex(r"#[^\r\n]*")],
+        // `allow_greedy` because a comment *is* everything to the end of the line:
+        // logos 0.16 rejects an unbounded repetition by default, since one token that
+        // consumes the rest of the input can hide a later token. Here that is the
+        // intent — the newline is excluded, so the token stops at the line's end and
+        // nothing after it is swallowed.
+        Comment TRIVIA #[regex(r"#[^\r\n]*", allow_greedy = true)],
 
         ImportKw #[token("import")],
         AsKw #[token("as")],

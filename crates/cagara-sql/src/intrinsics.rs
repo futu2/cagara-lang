@@ -125,12 +125,12 @@ fn node(e: Expr, f: Fam) -> Result<Expr, String> {
 fn refusal(name: &str) -> Option<String> {
     if name == "CAGARA_LIST_AT" {
         return Some(
-            "`listAt` is available on DuckDB only: PostgreSQL has the subscript it \
-             would be written as, but `sqlglot-rust` 0.10.30's AST has no subscript \
-             node, so there is no way to emit `(ARRAY[…])[i]` — only a `list_extract` \
-             call, which PostgreSQL does not have. Trino's `element_at` would work, but \
-             `list` is not enabled there at all yet"
-                .to_string(),
+            "`listAt` is available on DuckDB only: PostgreSQL would need `(xs)[i]`, and \
+             `sqlglot-rust` 0.11.2 generates `xs[i]` without the parentheses an aggregate \
+             needs — `(ARRAY_AGG(id)[2])` is a syntax error there, measured on PGlite. \
+             Trino's `element_at` would work, but `list` is not enabled on Trino at all \
+             yet"
+            .to_string(),
         );
     }
     let what = match name {
@@ -626,12 +626,16 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
             // list is shorter — measured. That is exactly what `maybe a` promises, so
             // no guard is needed.
             //
-            // It is a *function* rather than a subscript because `sqlglot-rust` 0.10.30
-            // has no subscript node in its AST, and that is what keeps PostgreSQL out:
-            // `(ARRAY[…])[i]` is the spelling there, it works (measured on PGlite,
-            // including the NULL for an out-of-range index), and there is no way to
-            // build it. A `list_extract` call would be `function list_extract(integer[],
-            // integer) does not exist`.
+            // DuckDB has `list_extract(xs, i)`, which is 1-based and NULL when the
+            // list is shorter — measured. That is exactly what `maybe a` promises.
+            //
+            // PostgreSQL would need the subscript `xs[i]`, and `sqlglot-rust` 0.11.2 can
+            // now *build* that node (`Expr::ArrayIndex`) but not *parenthesise* it:
+            // `(ARRAY_AGG(id)[2])` is what it generates, and PostgreSQL rejects it with
+            // `syntax error at or near "["` — the aggregate has to be wrapped,
+            // `(ARRAY_AGG(id))[2]`. Measured on PGlite: the wrapped form is `20`. Since
+            // the only list a query can subscript is usually an aggregate's result,
+            // emitting the unwrapped form would be SQL that runs nowhere.
             Fam::Duck => func("list_extract", vec![a[0].clone(), a[1].clone()]),
             // A target with no array type never reaches here: `list_refusal` refuses
             // the whole query first, with a message naming what needs an array. Listed
@@ -643,8 +647,8 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
             // the truth; widening it is a separate change, because it would turn every
             // existing `arrayAgg` on Trino from a refusal into a query, and that
             // deserves its own tests rather than riding along with `listAt`.
-            // PostgreSQL is here for a *different* reason from the rest: it has arrays
-            // and a subscript, but the AST cannot express one.
+            // PostgreSQL is here for the parenthesisation reason above, not for want of
+            // an array type or a subscript.
             Fam::Mysql
             | Fam::Sqlite
             | Fam::Tsql

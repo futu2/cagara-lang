@@ -11,7 +11,7 @@ rust-version = "1.88"
 [workspace.dependencies]
 rowan = "=0.17.0"
 salsa = "=0.28.5"
-sqlglot-rust = "=0.10.30"
+sqlglot-rust = "=0.11.2"
 cagara-syntax = { path = "crates/cagara-syntax" }
 cagara-hir = { path = "crates/cagara-hir" }
 cagara-sql = { path = "crates/cagara-sql" }

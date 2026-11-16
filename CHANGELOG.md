@@ -38,6 +38,11 @@
 - An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
   `select { x = upper .id }` does. It named only the operator before.
 
+- Dependencies updated: `sqlglot-rust` 0.10.30 → **0.11.2**, `logos` 0.15.1 → **0.16.1**,
+  `serde_json` 1.0.151 → **1.0.154**. `rowan` stays at 0.17.0 (0.18 is still an alpha), and
+  `salsa`, `lsp-server`, `lsp-types`, `url`, `crossbeam-channel`, `line-index` and `tempfile` were
+  already current.
+
 - `listAt i xs` — the element at 1-based position `i`, NULL when the list is shorter. DuckDB only:
   PostgreSQL has the subscript it would be written as, but `sqlglot-rust` 0.10.30's AST has no
   subscript node, so it cannot be emitted.

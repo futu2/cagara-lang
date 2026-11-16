@@ -8,4 +8,4 @@ publish = false
 
 [dependencies]
 rowan.workspace = true
-logos = "0.15.1"
+logos = "=0.16.1"

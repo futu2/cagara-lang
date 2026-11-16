@@ -38,6 +38,10 @@
 - An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
   `select { x = upper .id }` does. It named only the operator before.
 
+- `exp`, `ln`, `log10`, `log2`, `logBase`, `cbrt`, `degrees` and `radians`. There is deliberately no
+  `log`: DuckDB and SQLite read `log(x)` as base 10, MariaDB as the natural logarithm, and Trino
+  refuses the one-argument form — a name that means three things is not a name.
+
 - `monthsBetween`, `yearsBetween`, `hoursBetween`, `minutesBetween` and `secondsBetween`, plus the
   `second` field they need. The calendar ones are the **elapsed** count, not the number of boundaries
   crossed: `2024-01-31` to `2024-02-01` is `0` months, where every engine's `DATEDIFF('MONTH', …)`

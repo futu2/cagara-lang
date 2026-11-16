@@ -445,6 +445,10 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
         // engine spells it.
         ("CAGARA_TO_INT", 1) => cast(a[0].clone(), DataType::BigInt),
         ("CAGARA_TRUNC_INT", 1) => trunc_int(a[0].clone(), f),
+        // `LOG10` is the spelling on DuckDB, SQLite, MariaDB, Trino and Snowflake;
+        // these targets name it otherwise, and one has no base-10 logarithm at all.
+        ("CAGARA_LOG10", 1) => log10(a[0].clone(), f)?,
+        ("CAGARA_LOG2", 1) => log2(a[0].clone(), f)?,
         ("CAGARA_TO_FLOAT", 1) => cast(a[0].clone(), float_type(f)),
         // `TRY_CAST` cannot be spelled as a template: sqlglot's parser reads
         // `TRY_CAST(x AS INT)` as `Cast`, dropping the "try" before the
@@ -949,6 +953,57 @@ fn field(unit: &str) -> Option<DateTimeField> {
         "MINUTE" => DateTimeField::Minute,
         "SECOND" => DateTimeField::Second,
         _ => return None,
+    })
+}
+
+/// The base-10 logarithm, on targets that do not spell it `LOG10`.
+///
+/// `None` where the target has no base-10 logarithm, which is a *refusal* rather than
+/// an emitted call: SQL Server has only `LOG(x)` (base `e`) and `LOG(x, base)`, and a
+/// template that guessed would produce SQL the engine rejects with a message that does
+/// not say what the author wrote.
+fn log10(x: Expr, f: Fam) -> Option<Expr> {
+    Some(match f {
+        // `LOG(x, 10)` is the two-argument form; T-SQL reads it as base-second, so
+        // this is exact rather than `LOG(x) / LOG(10)`.
+        Fam::Tsql => func("LOG", vec![atomic(x), n("10")]),
+        // Every other family has the name: ANSI/Postgres, DuckDB, SQLite, MariaDB,
+        // Trino, Spark, BigQuery and Snowflake all read `LOG10`. Listed rather than
+        // reached by a catch-all so a new family has to decide.
+        Fam::Ansi
+        | Fam::Duck
+        | Fam::Sqlite
+        | Fam::Mysql
+        | Fam::Trino
+        | Fam::Spark
+        | Fam::BigQuery
+        | Fam::Snowflake => func("LOG10", vec![x]),
+    })
+}
+
+/// The base-2 logarithm, on the targets that do not spell it `LOG2`.
+///
+/// PostgreSQL has only `LOG` (base 10) and `LN`, so the base-2 log is `LN(x) / LN(2)`
+/// there — exact for the powers of two these are used on, and the same expression the
+/// language uses for `logBase` elsewhere.
+fn log2(x: Expr, f: Fam) -> Option<Expr> {
+    Some(match f {
+        Fam::Ansi => {
+            let two = Expr::Number("2.0".into());
+            bin(
+                func("LN", vec![atomic(x)]),
+                BinaryOperator::Divide,
+                func("LN", vec![two]),
+            )
+        }
+        Fam::Duck
+        | Fam::Sqlite
+        | Fam::Mysql
+        | Fam::Trino
+        | Fam::Spark
+        | Fam::BigQuery
+        | Fam::Snowflake
+        | Fam::Tsql => func("LOG2", vec![x]),
     })
 }
 

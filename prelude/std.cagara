@@ -186,6 +186,49 @@ power : expr r float -> expr r float -> expr r float = sql "POWER($2, $1)"
 sign : expr r int -> expr r int = sql "SIGN($1)"
 sign : expr r float -> expr r float = sql "SIGN($1)"
 
+# Exponentials and logarithms. `exp` and `ln` are spelled the same on every target
+# that has them; the logarithms are named for their base, because the bare `log`
+# does not mean one thing: DuckDB and SQLite read `log(x)` as base 10, MariaDB reads
+# it as the natural logarithm, and Trino refuses the one-argument form outright.
+# A name that means three things is not a name, so there is no `log`.
+
+## `e` raised to a power.
+exp : expr r float -> expr r float = sql "EXP($1)"
+
+## The natural logarithm — the inverse of `exp`. Named for its base, like the two
+## below: `log` alone means base 10 on DuckDB and SQLite and base `e` on MariaDB,
+## so the language does not offer it.
+ln : expr r float -> expr r float = sql "LN($1)"
+
+## The base-10 logarithm. `LOG10` on DuckDB, SQLite, MariaDB, Trino and Snowflake;
+## the `CAGARA_LOG10` rewrite covers the targets that spell it otherwise.
+log10 : expr r float -> expr r float = sql "CAGARA_LOG10($1)"
+
+## The base-2 logarithm. PostgreSQL has no `LOG2`, so `CAGARA_LOG2` spells it as
+## `ln x / ln 2` there and as `LOG2` everywhere else.
+log2 : expr r float -> expr r float = sql "CAGARA_LOG2($1)"
+
+## `logBase base x`: the logarithm of `x` to `base`.
+##
+## Written as `ln x / ln base` rather than as the two-argument `LOG(base, x)`, which
+## every engine *runs* the same way — measured on DuckDB, SQLite, MariaDB and Trino —
+## but which `sqlglot-rust` does not *generate* the same way: a template
+## `LOG($1, $2)` comes back out as `LOG(x, base)`, so `logBase 2.0 8.0` lowered to
+## `LOG(8.0, 2.0)` and answered `0.333` instead of `3`. The division has no such
+## ambiguity and is exact on all four.
+logBase : expr r float -> expr r float -> expr r float = base => x => ln x / ln base
+
+## Cube root. `CBRT` exists on DuckDB, Trino and MariaDB but not on SQLite, so this
+## is `exp(ln|x| / 3)` with the sign put back: measured exact on all four, where
+## `power(abs(x), 1.0/3)` is `1.9999999986` on MariaDB.
+cbrt : expr r float -> expr r float = x => sign x * exp (ln (abs x) / 3)
+
+## Degrees from radians.
+degrees : expr r float -> expr r float = sql "DEGREES($1)"
+
+## Radians from degrees.
+radians : expr r float -> expr r float = sql "RADIANS($1)"
+
 ## `greatest a b`: the larger of two non-null values, of any ordered type.
 ## SQLite has no `GREATEST`, so the `CASE` spelling is the portable one; with
 ## non-null arguments no NULL has to be resolved.

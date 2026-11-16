@@ -595,6 +595,24 @@ const CASES: &[(&str, &[&str])] = &[
         "null_aggs = nums & agg { s = sum .v, a = avg .v, lo = min .v, hi = max .v, n = countOf .v, nd = countDistinct .v }",
         &["60|20.0|10|30|3|3"],
     ),
+    // The math functions the prelude gained. Values chosen so a wrong base is
+    // visible: `log2 8` is 3 and `log10 100` is 2, and `logBase 2 8` is 3 — the last
+    // one is written as `ln x / ln base` because sqlglot's generator swaps the
+    // arguments of the two-argument `LOG`, which was measured giving `0.333`.
+    // Only the values that are *exact* are asserted on: SQLite prints a double to
+    // 17 significant digits where DuckDB prints 16, so `ln 2` differs in the last
+    // place between engines that agree on the number. `exp 0`, `log10 100`,
+    // `log2 8` and `logBase 2 8` are integers, and `cbrt 8` is `2` on all four
+    // (measured — `power(abs(x), 1.0/3)` is `1.9999999986` on MariaDB, which is why
+    // the prelude uses `exp(ln|x|/3)`).
+    (
+        "math_fns = nums & select { id = .id, e = exp 0.0, t = log10 100.0, w = log2 8.0, b = logBase 2.0 8.0, c = cbrt 8.0, d = degrees 0.0, r = radians 0.0 } & order [asc .id] & limit 1",
+        &["1|1.0|2.0|3.0|3.0|2.0|0.0|0.0"],
+    ),
+    (
+        "math_cbrt_negative = nums & select { id = .id, c = cbrt (0.0 - 8.0) } & order [asc .id] & limit 1",
+        &["1|-2.0"],
+    ),
     // The calendar and clock differences, on spans the two semantics disagree about.
     //
     // `monthsBetween` is the **elapsed** count: `2024-01-31` to `2024-02-01` crosses a

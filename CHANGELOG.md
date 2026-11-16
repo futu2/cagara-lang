@@ -38,6 +38,12 @@
 - An overload failure names the field it is in: `select { x = .name + 1 }` says `field `x`` like
   `select { x = upper .id }` does. It named only the operator before.
 
+- `position`, `ascii`, `chr`, `repeat` and `reverse` in the prelude. Each needed a per-target
+  spelling found by measurement: `repeat` is `replace(hex(zeroblob(n)), '00', s)` on SQLite and
+  `array_join(repeat(s, n), '')` on Trino, and `ascii` is `unicode`/`codepoint` with a `varchar(1)`
+  cast on Trino. `reverse` is **refused** on SQLite with a message naming what it lacks, rather than
+  emitted as a call the engine rejects.
+
 - The language server answers `workspace/symbol`: a definition in any open file, not only the one
   the request came from. `documentSymbol` still answers for one document, which is what an outline
   needs. The prelude is excluded — its definitions live in a file the user does not have.

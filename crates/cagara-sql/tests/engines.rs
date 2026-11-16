@@ -613,6 +613,17 @@ const CASES: &[(&str, &[&str])] = &[
         "math_cbrt_negative = nums & select { id = .id, c = cbrt (0.0 - 8.0) } & order [asc .id] & limit 1",
         &["1|-2.0"],
     ),
+    // The string functions the prelude gained. Each was checked on four engines
+    // while being written, and two of them needed a different spelling per target:
+    // `repeat` is `replace(hex(zeroblob(n)), '00', s)` on SQLite and
+    // `array_join(repeat(s, n), '')` on Trino (whose `repeat` returns an array), and
+    // `ascii` is `unicode`/`codepoint` with a `varchar(1)` cast on Trino.
+    (
+        "str_fns = users & select { id = .id, p = position \"n\" .name, a = ascii .name, c = chr 65, r = repeat 2 \"ab\", v = reverse .name } & where (.id == 1)",
+        // `users.name` for id 1 is `ann`: `position "n"` is 2, `ascii` of `a` is 97,
+        // and `reverse` is `nna`.
+        &["1|2|97|A|abab|nna"],
+    ),
     // The calendar and clock differences, on spans the two semantics disagree about.
     //
     // `monthsBetween` is the **elapsed** count: `2024-01-31` to `2024-02-01` crosses a
@@ -3283,6 +3294,50 @@ a = f & select { s = over { order = [asc .k], frame = range (preceding 1) curren
     )
     .expect("duckdb reads GROUPS");
     assert!(sql.contains("GROUPS BETWEEN"), "{sql}");
+}
+/// SQLite has no `REVERSE`, and the refusal says so instead of emitting a call.
+///
+/// This is the shape the whole "no fake fixes" rule takes for a prelude function: a
+/// target that cannot express one is refused with a message naming what it lacks,
+/// rather than given a template that produces SQL the engine rejects — the engine's
+/// own error would be `no such function: REVERSE`, which does not say the author
+/// wrote something the *language* offers.
+#[test]
+fn sqlite_refuses_reverse() {
+    const DEFS: &str = "\
+t : query { id = int, s = string } = table \"main\" \"users\"\n\
+r = t & select { v = reverse .s }\n";
+    let ws = Workspace::from_source(DEFS);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let (_, r) = rels.iter().find(|(n, _)| n == "r").expect("r");
+    let rel = r.as_ref().expect("r type-checks");
+    let err = compile(
+        rel,
+        Options {
+            dialect: Dialect::Sqlite,
+            ..Options::default()
+        },
+    )
+    .expect_err("SQLite has no REVERSE");
+    assert!(err.contains("`reverse`"), "{err}");
+    assert!(err.contains("no `REVERSE`"), "{err}");
+    // And the targets that do have it compile.
+    for d in [
+        Dialect::DuckDb,
+        Dialect::Postgres,
+        Dialect::Mysql,
+        Dialect::Trino,
+    ] {
+        compile(
+            rel,
+            Options {
+                dialect: d,
+                ..Options::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{d:?} has REVERSE: {e}"));
+    }
 }
 
 /// Postgres, through PGlite — Postgres compiled to WebAssembly and driven by

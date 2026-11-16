@@ -151,6 +151,37 @@ startsWith : expr r string -> expr r string -> expr r bool =
 endsWith : expr r string -> expr r string -> expr r bool =
   sql "CAGARA_RIGHT($2, CAGARA_LENGTH($1)) = $1"
 
+## `position sub s`: the 1-based position of the first `sub` in `s`, or 0 when it is
+## absent — the same answer `strpos` gives, under SQL's own name for it. `STRPOS` is
+## spelled `INSTR` on SQLite and `LOCATE` on MySQL, which `CAGARA_STRPOS` already
+## handles, so this is an alias rather than a second implementation.
+position : expr r string -> expr r string -> expr r int = strpos
+
+## `ascii s`: the code point of the first character of `s`, or 0 for an empty string.
+##
+## `ASCII` on DuckDB and MySQL, `UNICODE` on SQLite and PostgreSQL — the latter is the
+## more honest name, since the answer is a code point and not a byte.
+ascii : expr r string -> expr r int = sql "CAGARA_ASCII($1)"
+
+## `chr n`: the character whose code point is `n`.
+##
+## `CHR` on DuckDB, MySQL, PostgreSQL and Trino; SQLite spells it `CHAR`. The
+## `CAGARA_CHR` rewrite covers the two.
+chr : expr r int -> expr r string = sql "CAGARA_CHR($1)"
+
+## `repeat n s`: `s` repeated `n` times.
+##
+## `REPEAT` on DuckDB, MySQL, PostgreSQL and Trino; SQLite has no such function, and
+## `replace(hex(zeroblob(n)), "00", s)` is the portable spelling — measured on all four.
+repeat : expr r int -> expr r string -> expr r string = sql "CAGARA_REPEAT($2, $1)"
+
+## `reverse s`: the characters of `s` in the opposite order.
+##
+## `REVERSE` on DuckDB, MySQL, PostgreSQL and Trino; SQLite has nothing equivalent, so
+## `CAGARA_REVERSE` is a refusal there rather than an emitted call — there is no
+## portable spelling that is not a correlated subquery over the string's characters.
+reverse : expr r string -> expr r string = sql "CAGARA_REVERSE($1)"
+
 # Math is scalar and non-null.
 
 ## Absolute value, overloaded on `int` and `float`.

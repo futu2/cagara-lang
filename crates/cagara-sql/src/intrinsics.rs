@@ -100,11 +100,38 @@ fn node(e: Expr, f: Fam) -> Result<Expr, String> {
         // Non-atomic results are parenthesized so they keep precedence
         // inside whatever template they were substituted into.
         Some(out) => Ok(atomic(out)),
-        None => Err(format!(
-            "unknown SQL intrinsic `{upper}` with {} argument(s)",
-            args.len()
-        )),
+        None => Err(match refusal(&upper) {
+            // A known intrinsic this target cannot express. The message names the
+            // function the *reader* wrote and says what the target lacks — the
+            // difference between "the compiler has a gap" and "this engine has no
+            // such function" is the whole point of refusing rather than guessing.
+            Some(why) => why,
+            None => format!(
+                "unknown SQL intrinsic `{upper}` with {} argument(s)",
+                args.len()
+            ),
+        }),
     }
+}
+
+/// Why a *known* intrinsic cannot be lowered on this target, when that is the reason.
+///
+/// `None` from [`intrinsic`] means either "no such intrinsic" or "this target cannot
+/// express it", and those are different messages. `reverse` is the first case of the
+/// second kind: SQLite has no `REVERSE` and no portable spelling short of a
+/// correlated subquery, so the function is refused there rather than emitted. The
+/// dialect is not a parameter because the reason is a property of the *function*: no
+/// target without `REVERSE` can express it, so nothing here depends on which one asked.
+fn refusal(name: &str) -> Option<String> {
+    let what = match name {
+        "CAGARA_REVERSE" => "`reverse`",
+        _ => return None,
+    };
+    Some(format!(
+        "{what} is not available on this target: it has no `REVERSE`, and no portable \
+         spelling short of a subquery over the string's characters. PostgreSQL, DuckDB, \
+         MySQL, Trino, Spark, BigQuery, Snowflake and T-SQL have it"
+    ))
 }
 
 /// The format vocabulary the language writes, and how a target spells it.
@@ -449,6 +476,42 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
         // these targets name it otherwise, and one has no base-10 logarithm at all.
         ("CAGARA_LOG10", 1) => log10(a[0].clone(), f)?,
         ("CAGARA_LOG2", 1) => log2(a[0].clone(), f)?,
+        ("CAGARA_ASCII", 1) => match f {
+            // The name differs and the *answer* is the same: the code point of the
+            // first character. SQLite and Trino call it `UNICODE`/`CODEPOINT`, which
+            // is the more honest name — `ASCII` implies a byte, and the function
+            // returns a code point.
+            Fam::Sqlite => func("UNICODE", vec![a[0].clone()]),
+            // Trino's `codepoint` is declared `codepoint(varchar(1))` and its type
+            // check runs before any constant folding — measured: `codepoint(substr(s,
+            // 1, 1))` is rejected as `varchar`, not as `varchar(1)`. The cast is what
+            // says the length, and without it there is no spelling of this function on
+            // Trino at all.
+            Fam::Trino => func(
+                "CODEPOINT",
+                vec![cast(
+                    func(
+                        "SUBSTR",
+                        vec![
+                            a[0].clone(),
+                            Expr::Number("1".into()),
+                            Expr::Number("1".into()),
+                        ],
+                    ),
+                    DataType::UserDefined("VARCHAR(1)".into()),
+                )],
+            ),
+            _ => func("ASCII", vec![a[0].clone()]),
+        },
+        ("CAGARA_CHR", 1) => match f {
+            Fam::Sqlite => func("CHAR", vec![a[0].clone()]),
+            _ => func("CHR", vec![a[0].clone()]),
+        },
+        // The prelude's template already puts the string first (`CAGARA_REPEAT($2, $1)`,
+        // because the language's `repeat` takes the count first like every stage), so
+        // the intrinsic receives `(s, n)` — the order every target wants.
+        ("CAGARA_REPEAT", 2) => repeat(a[0].clone(), a[1].clone(), f)?,
+        ("CAGARA_REVERSE", 1) => reverse(a[0].clone(), f)?,
         ("CAGARA_TO_FLOAT", 1) => cast(a[0].clone(), float_type(f)),
         // `TRY_CAST` cannot be spelled as a template: sqlglot's parser reads
         // `TRY_CAST(x AS INT)` as `Cast`, dropping the "try" before the
@@ -1005,6 +1068,67 @@ fn log2(x: Expr, f: Fam) -> Option<Expr> {
         | Fam::Snowflake
         | Fam::Tsql => func("LOG2", vec![x]),
     })
+}
+
+/// `repeat n s`, on targets that spell it differently.
+///
+/// SQLite has no `REPEAT`. `replace(hex(zeroblob(n)), '00', s)` is the portable
+/// spelling — `zeroblob(n)` is `n` zero bytes, `hex` makes that `2n` characters of
+/// `"00"`, and replacing each with `s` gives `n` copies — measured on all four
+/// engines. It is exact rather than approximate, which is why it is used rather than
+/// refusing the function on SQLite.
+fn repeat(text: Expr, n: Expr, f: Fam) -> Option<Expr> {
+    Some(match f {
+        Fam::Sqlite => func(
+            "REPLACE",
+            vec![
+                func("HEX", vec![func("ZEROBLOB", vec![atomic(n)])]),
+                s("00"),
+                atomic(text),
+            ],
+        ),
+        // Trino's `repeat` returns an *array* of copies, not a string — measured:
+        // `repeat('a', 3)` is `['a','a','a']`. `array_join` is what makes it the
+        // string the language promised, and returning the array would be a type the
+        // signature does not allow.
+        Fam::Trino => func(
+            "ARRAY_JOIN",
+            vec![
+                func("REPEAT", vec![atomic(text), n]),
+                Expr::StringLiteral(String::new()),
+            ],
+        ),
+        // Every other family has `REPEAT` as a string function, in the
+        // `(string, count)` order.
+        Fam::Ansi
+        | Fam::Duck
+        | Fam::Mysql
+        | Fam::Spark
+        | Fam::BigQuery
+        | Fam::Snowflake
+        | Fam::Tsql => func("REPEAT", vec![atomic(text), n]),
+    })
+}
+
+/// `reverse s`, on targets that spell it differently.
+///
+/// SQLite has no `REVERSE` and no portable spelling short of a correlated subquery
+/// over the string's characters, so this is a **refusal** there rather than an emitted
+/// call: a template that guessed would produce SQL the engine rejects with a message
+/// that does not say what the author wrote.
+fn reverse(text: Expr, f: Fam) -> Option<Expr> {
+    match f {
+        Fam::Sqlite => None,
+        // T-SQL spells it `REVERSE` too; `REVERSE` exists on every other family here.
+        Fam::Ansi
+        | Fam::Duck
+        | Fam::Mysql
+        | Fam::Trino
+        | Fam::Spark
+        | Fam::BigQuery
+        | Fam::Snowflake
+        | Fam::Tsql => Some(func("REVERSE", vec![text])),
+    }
 }
 
 fn timestamp() -> DataType {

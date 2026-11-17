@@ -856,6 +856,10 @@ main =
 - `order` takes a list of `asc`/`desc` keys; keys are expressions over the current row. Every key
   says its direction — there is no bare-key-means-ascending form, so `order [.a]` is an error and
   `order [asc .a]` is the only way to say it.
+- NULLs sort **last** in both directions. `nullsFirst (asc .m)` puts them first, and `nullsLast`
+  states the default; both wrap a *direction*, so `nullsFirst .m` is an error — where NULLs go
+  depends on the direction the default already chose. The emitted SQL is two keys,
+  `m IS NULL DESC, m ASC`, which is the spelling you would otherwise have to work out.
 - A second `order` sorts rows that are already sorted, so its keys lead and the earlier ones become
   tiebreakers: `order [asc .a] & order [desc .id]` is `ORDER BY id DESC, a`.
 - NULLs sort **last** in both directions; this is fixed by the language.
@@ -1221,6 +1225,8 @@ _$_    : (?a -> ?b) -> ?a -> ?b          f $ x      = f x
 _>>>_  : (a -> b) -> (b -> c) -> a -> c
 _<<<_  : (b -> c) -> (a -> b) -> a -> c
 id     : a -> a
+asc desc : expr ?r a -> sortkey ?r
+nullsFirst nullsLast : sortkey ?r -> sortkey ?r
 ```
 
 ### 7.2 Comparison, logic, arithmetic, strings

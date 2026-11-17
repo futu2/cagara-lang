@@ -260,6 +260,23 @@ asc : expr ?r (maybe ?a) -> sortkey ?r = primitive "__asc"
 desc : expr ?r ?a -> sortkey ?r = primitive "__desc"
 desc : expr ?r (maybe ?a) -> sortkey ?r = primitive "__desc"
 
+## `nullsFirst (asc .m)`: the NULLs sort before the values in this key.
+##
+## NULLs sort **last** in both directions by default, which is what makes `asc`
+## and `desc` agree about where the missing values are. When a report wants the
+## blanks at the top — "the rows with no date first" — that is this, and it is a
+## modifier on a direction rather than a fourth word, because where NULLs go
+## depends on the direction the default already chose.
+##
+## The emitted SQL is two keys: `m IS NULL DESC, m ASC`. That is the spelling a
+## reader would otherwise have to work out, and it is why this needs no clause of
+## its own and no per-target support.
+nullsFirst : sortkey ?r -> sortkey ?r = primitive "__nullsFirst"
+
+## `nullsLast (asc .m)`: the default, stated. Useful where a key sits beside a
+## `nullsFirst` one and the contrast is the point.
+nullsLast : sortkey ?r -> sortkey ?r = primitive "__nullsLast"
+
 ## `arrayAgg e` — the values of `e` in one list, one per row of the group.
 ## `agg { k = group .user_id, amounts = arrayAgg .amount }` is
 ## `ARRAY_AGG(amount)` beside the grouping key.

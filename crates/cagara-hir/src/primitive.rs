@@ -53,6 +53,11 @@ pub enum Prim {
     Cube,
     Asc,
     Desc,
+    /// `nullsFirst key`: the NULLs sort first in this key, overriding the
+    /// language's default (last, in both directions).
+    NullsFirst,
+    /// `nullsLast key`: the default, stated.
+    NullsLast,
     Rows,
     /// `range start end`: a frame counted in the order key's *values*.
     Range,
@@ -111,6 +116,8 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__rollup", Prim::Rollup),
     ("__cube", Prim::Cube),
     ("__asc", Prim::Asc),
+    ("__nullsFirst", Prim::NullsFirst),
+    ("__nullsLast", Prim::NullsLast),
     ("__desc", Prim::Desc),
     ("__rows", Prim::Rows),
     ("__range", Prim::Range),
@@ -167,7 +174,7 @@ impl Prim {
         use Prim::*;
         match self {
             UnboundedPreceding | UnboundedFollowing | CurrentRow => 0,
-            Group | Rollup | Cube | Asc | Desc | Preceding | Following => 1,
+            Group | Rollup | Cube | Asc | Desc | NullsFirst | NullsLast | Preceding | Following => 1,
             Where | Unnest | Select | Update | Omit | AggStage | Order | Limit | Offset | Table
             | Rows | Range | Groups | Prefix | Suffix | Merge | MapValue | Lift => 2,
             Distinct => 1,

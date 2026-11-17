@@ -3350,6 +3350,14 @@ impl<'w> Checker<'w> {
                 let (r, a) = (self.fresh(), self.fresh());
                 fun(expr(con("row"), r.clone(), a), sortkey(r))
             }
+            // `nullsFirst (asc .x)`: a sort key, with the NULLs moved. Taking a
+            // `sortkey` rather than an `expr` is what makes the direction
+            // mandatory — `nullsFirst .x` has no meaning, because where NULLs go
+            // depends on the direction the default already chose.
+            NullsFirst | NullsLast => {
+                let r = self.fresh();
+                fun(sortkey(r.clone()), sortkey(r))
+            }
             Rows | Range | Groups => fun(con("bound"), fun(con("bound"), con("frame"))),
             UnboundedPreceding | UnboundedFollowing | CurrentRow => con("bound"),
             Preceding | Following => fun(i, con("bound")),

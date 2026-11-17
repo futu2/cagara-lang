@@ -395,12 +395,34 @@ impl<'a> Normalizer<'a, 'a> {
             Value::Table { args, origin, .. } => self.apply_table(&args, arg, origin),
             Value::Direction {
                 ascending,
+                nulls,
                 mut args,
                 origin: _,
             } => {
                 let key = self.as_expr(arg, self.call_module(), self.call_expr()?)?;
                 args.clear();
-                Ok(Value::SortKey(key, ascending))
+                Ok(Value::SortKey(key, ascending, nulls))
+            }
+            // `nullsFirst key`: a sort key with its NULL placement moved. The
+            // inner value must already be a `sortkey` — the checker enforces
+            // that, which is what makes the direction mandatory.
+            Value::NullsOrder {
+                order,
+                args: _,
+                origin,
+            } => {
+                match arg {
+                    Value::SortKey(key, ascending, _) => {
+                        Ok(Value::SortKey(key, ascending, Some(order)))
+                    }
+                    other => Err(Control::unsupported(
+                        origin,
+                        format!(
+                            "`nullsFirst`/`nullsLast` modify a sort key, and this is {}",
+                            value_class(&other)
+                        ),
+                    )),
+                }
             }
             Value::Group { arg: None, origin } => {
                 let key = self.as_expr(arg, self.call_module(), self.call_expr()?)?;
@@ -756,7 +778,24 @@ impl<'a> Normalizer<'a, 'a> {
                 let mut keys = Vec::with_capacity(items.len());
                 for item in items {
                     match item {
-                        Value::SortKey(expr, ascending) => keys.push((expr.clone(), *ascending)),
+                        Value::SortKey(expr, ascending, nulls) => {
+                            // `nullsFirst (asc .m)` is two keys: `desc (isNull
+                            // .m)` puts the NULLs first, then `asc .m` sorts what
+                            // is left. That is the spelling a reader would have
+                            // had to work out, and it is what this expands to —
+                            // no new clause, so no new dialect support.
+                            if *nulls == Some(crate::ir::NullOrder::First) {
+                                let is_null = crate::checked::CheckedExpr::template(
+                                    "$1 IS NULL",
+                                    vec![expr.clone()],
+                                    crate::core::ScalarType::Bool,
+                                    expr.origin(),
+                                )
+                                .map_err(Control::Program)?;
+                                keys.push((is_null, false));
+                            }
+                            keys.push((expr.clone(), *ascending));
+                        }
                         Value::Scalar(expr) => keys.push((expr.clone(), true)),
                         other => {
                             return Err(Control::unsupported(
@@ -1326,7 +1365,7 @@ pub(crate) fn own(value: &Value<'_>) -> Value<'static> {
         Value::Query(id) => Value::Query(*id),
         Value::Scalar(expr) => Value::Scalar(expr.clone()),
         Value::Label(label) => Value::Label(label.clone()),
-        Value::SortKey(expr, ascending) => Value::SortKey(expr.clone(), *ascending),
+        Value::SortKey(expr, ascending, nulls) => Value::SortKey(expr.clone(), *ascending, *nulls),
         Value::WinSpec(spec) => Value::WinSpec(spec.clone()),
         Value::Frame(frame) => Value::Frame(*frame),
         Value::Bound(bound) => Value::Bound(*bound),
@@ -1341,10 +1380,17 @@ pub(crate) fn own(value: &Value<'_>) -> Value<'static> {
         },
         Value::Direction {
             ascending,
+            nulls,
             args,
             origin,
         } => Value::Direction {
             ascending: *ascending,
+            nulls: *nulls,
+            args: args.iter().map(own).collect(),
+            origin: *origin,
+        },
+        Value::NullsOrder { order, args, origin } => Value::NullsOrder {
+            order: *order,
             args: args.iter().map(own).collect(),
             origin: *origin,
         },
@@ -1402,6 +1448,7 @@ pub(crate) fn value_class(value: &Value<'_>) -> &'static str {
         Value::Label(_) => "a label",
         Value::Direction { .. } => "a sort direction",
         Value::SortKey(..) => "a sort key",
+        Value::NullsOrder { .. } => "a null-order modifier",
         Value::Group { .. } => "a grouping key",
         Value::Grouping { .. } => "a grouping key with subtotals",
         Value::Membership { .. } => "a membership test",

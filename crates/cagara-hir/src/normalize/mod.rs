@@ -185,11 +185,22 @@ pub(crate) enum Value<'a> {
     /// `asc expr` / `desc expr`, awaiting the key.
     Direction {
         ascending: bool,
+        /// `nullsFirst`/`nullsLast`, when one wrapped this direction.
+        nulls: Option<crate::ir::NullOrder>,
+        args: Vec<Value<'static>>,
+        origin: Origin,
+    },
+    /// `nullsFirst` / `nullsLast`, awaiting a sort key.
+    NullsOrder {
+        order: crate::ir::NullOrder,
         args: Vec<Value<'static>>,
         origin: Origin,
     },
     /// A sort key: the expression and its direction.
-    SortKey(crate::checked::CheckedExpr, bool),
+    /// `asc e` / `desc e`, with the direction and — when `nullsFirst` wrapped it
+    /// — where the NULLs go. `None` is the language's default, which is last in
+    /// both directions.
+    SortKey(crate::checked::CheckedExpr, bool, Option<crate::ir::NullOrder>),
     /// `group expr`, awaiting the key.
     Group {
         arg: Option<crate::checked::CheckedExpr>,

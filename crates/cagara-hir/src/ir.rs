@@ -13,6 +13,17 @@ pub struct Loc {
     pub span: Span,
 }
 
+/// Where NULLs sort in one key.
+///
+/// `None` on a key means the language's default, which is last in both
+/// directions: `asc` and `desc` agree about where the missing values are, so
+/// paging in either order is stable. `nullsFirst (asc .m)` overrides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NullOrder {
+    First,
+    Last,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Lit {
     Int(i64),

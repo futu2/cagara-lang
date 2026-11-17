@@ -91,11 +91,23 @@ pub(crate) fn primitive<'a>(
         // resolved to, not the word `asc` in some source file.
         crate::primitive::Prim::Asc => Ok(Value::Direction {
             ascending: true,
+            nulls: None,
             args: Vec::new(),
             origin,
         }),
         crate::primitive::Prim::Desc => Ok(Value::Direction {
             ascending: false,
+            nulls: None,
+            args: Vec::new(),
+            origin,
+        }),
+        crate::primitive::Prim::NullsFirst => Ok(Value::NullsOrder {
+            order: crate::ir::NullOrder::First,
+            args: Vec::new(),
+            origin,
+        }),
+        crate::primitive::Prim::NullsLast => Ok(Value::NullsOrder {
+            order: crate::ir::NullOrder::Last,
             args: Vec::new(),
             origin,
         }),
@@ -592,7 +604,7 @@ pub(crate) fn window_spec<'a>(
                 };
                 for item in items {
                     match item {
-                        Value::SortKey(key, ascending) => order.push((key.clone(), *ascending)),
+                        Value::SortKey(key, ascending, _) => order.push((key.clone(), *ascending)),
                         other => order.push((ev.as_expr(other.clone(), module, expr)?, true)),
                     }
                 }

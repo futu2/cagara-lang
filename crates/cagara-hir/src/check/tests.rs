@@ -4213,8 +4213,8 @@ fn an_aggregate_cannot_be_a_sort_key_even_when_wrapped() {
 #[test]
 fn a_date_function_over_constants_is_a_value() {
     // Values: nothing in them reads a row.
-    assert_eq!(ty("y : int = year currentDate\n", "y"), "int");
-    assert_eq!(ty("m : int = month currentTimestamp\n", "m"), "int");
+    assert_eq!(ty("y : int = yearOfDate currentDate\n", "y"), "int");
+    assert_eq!(ty("m : int = monthOfYear currentTimestamp\n", "m"), "int");
     assert_eq!(
         ty("start : date = truncYear currentDate\n", "start"),
         "date"
@@ -4230,7 +4230,7 @@ fn a_date_function_over_constants_is_a_value() {
     assert_eq!(
         ty(
             "t : query { d = date, ts = timestamp } = table \"s\" \"t\"\n\
-             q = t & select { a = truncYear .d, b = year .d, c = year .ts }\n",
+             q = t & select { a = truncYear .d, b = yearOfDate .d, c = yearOfDate .ts }\n",
             "q"
         ),
         "query { a = date, b = int, c = int }"

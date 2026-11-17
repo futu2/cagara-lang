@@ -71,6 +71,23 @@ pub(crate) fn from_another_language(name: &str) -> Option<&'static str> {
         "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" => {
             "aggregates are lowercase here: `count`, `sum`, `avg`, `min`, `max`"
         }
+        // The date field extractors were `year`/`month`/`day` until the names
+        // said *which field* rather than *which bucket*: `group (month .d)` was
+        // `EXTRACT(MONTH …)`, so every January in the table landed in one row.
+        // A reader who learned the old name needs to be told both the new name
+        // and, if they wanted a bucket, the different function that gives one.
+        "year" => {
+            "the field is `yearOfDate`; a year *bucket* is `truncYear`, whose \
+             result is a date"
+        }
+        "month" => {
+            "the field is `monthOfYear`; a month *bucket* is `truncMonth`, whose \
+             result is a date — `group (monthOfYear .d)` merges every January"
+        }
+        "day" => {
+            "the field is `dayOfMonth`; a day *bucket* is `truncDay`. `dayOfWeek` \
+             and `dayOfYear` are the other two fields"
+        }
         // Set operators written as words.
         "UNION" | "JOIN" => {
             "a set operation is a stage: `& union`, `& unionAll`, `& intersect`, `& except`; a \

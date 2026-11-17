@@ -517,21 +517,34 @@ truncMinute : expr ?r timestamp -> expr ?r timestamp = sql "CAGARA_TRUNC('TIMEST
 
 # Fields as integers.
 
-## The year of a date or timestamp: `year .created_at`.
-year : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'YEAR', $1)"
-year : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'YEAR', $1)"
+## The year of a date or timestamp: `yearOfDate .created_at`.
+##
+## Named `yearOfDate` and not `year` because a field *of* a value and a bucket
+## *of* a value are different questions, and `year` read as both. `group (year
+## .d)` looked like "group by year" and was `GROUP BY EXTRACT(YEAR …)` — correct,
+## by luck, because a year number is unique across years. `group (month .d)` was
+## not: `EXTRACT(MONTH …)` is 1–12, so every January in the table became one row.
+## The extractors say *which field*, the `trunc*` functions give a bucket, and the
+## names now say which is which.
+yearOfDate : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'YEAR', $1)"
+yearOfDate : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'YEAR', $1)"
 
 ## The quarter, 1–4.
 quarter : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'QUARTER', $1)"
 quarter : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'QUARTER', $1)"
 
-## The month, 1–12.
-month : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'MONTH', $1)"
-month : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'MONTH', $1)"
+## The month number, 1–12 — a *field*, not a bucket.
+##
+## `group (monthOfYear .d)` groups January 2024 with January 2025, because both
+## are 1. That is what the name now says. For a month bucket use `truncMonth`,
+## whose result is a date: `group (truncMonth .d)`.
+monthOfYear : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'MONTH', $1)"
+monthOfYear : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'MONTH', $1)"
 
-## The day of the month, 1–31.
-day : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'DAY', $1)"
-day : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'DAY', $1)"
+## The day of the month, 1–31 — a field, like `monthOfYear`. For a day bucket
+## use `truncDay`, whose result is a timestamp.
+dayOfMonth : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'DAY', $1)"
+dayOfMonth : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'DAY', $1)"
 
 ## The day of the week, 0 for Sunday — the numbering SQL engines use, not
 ## ISO's.
@@ -567,9 +580,11 @@ daysBetween : expr ?r date -> expr ?r date -> expr ?r int = sql "CAGARA_DAYS_BET
 ## does not agree on which of the two it means.
 ##
 ## Measured equal on DuckDB, SQLite, MariaDB and Trino, because it is plain
-## `year`/`month`/`day` arithmetic and those are already portable.
+## `yearOfDate`/`monthOfYear`/`dayOfMonth` arithmetic and those are already portable.
 monthsBetween : expr ?r date -> expr ?r date -> expr ?r int = a => b =>
-  (year b - year a) * 12 + (month b - month a) - ifThenElse (day b < day a) 1 0
+  (yearOfDate b - yearOfDate a) * 12
+  + (monthOfYear b - monthOfYear a)
+  - ifThenElse (dayOfMonth b < dayOfMonth a) 1 0
 
 ## `yearsBetween start end`: whole calendar years from `start` to `end`, elapsed in
 ## the same sense as `monthsBetween` — `2020-05-01` to `2024-03-20` is `3`, because

@@ -1880,7 +1880,7 @@ can emit the right thing per dialect. The same expression therefore lowers
 differently depending on `--dialect`:
 
 ```haskell
-t = orders & select {.id, y = year .created_at, d = dayOfWeek .created_at}
+t = orders & select {.id, y = yearOfDate .created_at, d = dayOfWeek .created_at}
 ```
 
 ```sql

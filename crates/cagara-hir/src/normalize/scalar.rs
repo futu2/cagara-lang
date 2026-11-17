@@ -455,7 +455,7 @@ fn rewrite_null_comparison(sql: &str, args: &[CheckedExpr], origin: Origin, ty: 
         (true, false) => b,
         _ => return None,
     };
-    Some(CheckedExpr::template(template, vec![other.clone()], ty, origin).ok()?)
+    CheckedExpr::template(template, vec![other.clone()], ty, origin).ok()
 }
 
 fn build<'a>(

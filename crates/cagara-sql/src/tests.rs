@@ -1488,7 +1488,7 @@ fn date_trunc_and_parts_per_dialect() {
         ]),
         ("truncQuarter .d", &[("mysql", "CAST(DATE_ADD(MAKEDATE(YEAR(d), 1), INTERVAL ((QUARTER(d) - 1) * 3) MONTH) AS DATE)")]),
         ("truncHour .at", &[("sqlite", "STRFTIME('%Y-%m-%d %H:00:00', at)"), ("bigquery", "TIMESTAMP_TRUNC(at, HOUR)")]),
-        ("year .d", &[("postgres", "EXTRACT(YEAR FROM d)::INT"), ("sqlite", "CAST(STRFTIME('%Y', d) AS INT)"), ("tsql", "DATEPART(YEAR, d)")]),
+        ("yearOfDate .d", &[("postgres", "EXTRACT(YEAR FROM d)::INT"), ("sqlite", "CAST(STRFTIME('%Y', d) AS INT)"), ("tsql", "DATEPART(YEAR, d)")]),
         ("dayOfWeek .d", &[
             ("postgres", "EXTRACT(DOW FROM d)::INT"),
             ("mysql", "(DAYOFWEEK(d) - 1)"),
@@ -2240,7 +2240,7 @@ fn backslashes_are_escaped_where_they_are_escapes() {
 
 #[test]
 fn intrinsics_are_lowered_inside_window_specs() {
-    let w = "w = orders & select { id = .id, rn = rowNumber { partition = [year .created_at], order = [asc .id] } }\n";
+    let w = "w = orders & select { id = .id, rn = rowNumber { partition = [yearOfDate .created_at], order = [asc .id] } }\n";
     let s = sql(w, "w");
     assert!(!s.contains("CAGARA_"), "{s}");
     assert!(

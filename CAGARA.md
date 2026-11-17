@@ -597,7 +597,7 @@ expression whose row is still unknown is read as its value wherever a scalar is 
 
 ```cagara
 start : date = truncYear currentDate      # a value: nothing here reads a row
-y : int = year currentDate                # likewise
+y : int = yearOfDate currentDate           # likewise
 cutoff : date = addDays (-7) currentDate  # so parametric helpers compose
 ```
 
@@ -1338,7 +1338,7 @@ truncYear truncQuarter truncMonth truncWeek
 truncDay truncHour truncMinute
                  : expr ?r timestamp -> expr ?r timestamp
 
-year quarter month day dayOfWeek dayOfYear
+yearOfDate quarter monthOfYear dayOfMonth dayOfWeek dayOfYear
                  : expr ?r date|timestamp -> expr ?r int
 hour minute      : expr ?r timestamp -> expr ?r int
 daysBetween      : expr r date -> expr r date -> expr r int

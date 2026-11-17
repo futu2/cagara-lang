@@ -406,6 +406,50 @@ impl<'a> Normalizer<'a, 'a> {
             // `nullsFirst key`: a sort key with its NULL placement moved. The
             // inner value must already be a `sortkey` — the checker enforces
             // that, which is what makes the direction mandatory.
+            // `arrayAggBy [asc .ts] .id`: the key list first, then the value.
+            Value::OrderedAgg {
+                keys: None,
+                args,
+                origin,
+            } => {
+                let Some(Value::Tuple { items, .. }) = Some(arg.clone()) else {
+                    return Err(Control::unsupported(origin, "`arrayAggBy` takes a key list"));
+                };
+                let mut keys = Vec::with_capacity(items.len());
+                for item in &items {
+                    match item {
+                        Value::SortKey(k, asc, _) => keys.push((k.clone(), *asc)),
+                        other => {
+                            return Err(Control::unsupported(
+                                origin,
+                                format!("`arrayAggBy` sorts by a key, not {}", value_class(other)),
+                            ))
+                        }
+                    }
+                }
+                Ok(Value::OrderedAgg {
+                    keys: Some(keys),
+                    args,
+                    origin,
+                })
+            }
+            Value::OrderedAgg {
+                keys: Some(keys),
+                args,
+                origin,
+            } => {
+                let value = self.as_expr(arg, self.call_module(), self.call_expr()?)?;
+                let _ = args;
+                crate::checked::CheckedExpr::agg_template_ordered(
+                    "CAGARA_ARRAY_AGG($1)",
+                    vec![value],
+                    keys,
+                    self.ty_at(origin).unwrap_or(crate::core::ScalarType::Unknown),
+                    origin,
+                )
+                .map(Value::Scalar)
+                .map_err(Control::Program)
+            }
             Value::NullsOrder {
                 order,
                 args: _,
@@ -1394,6 +1438,15 @@ pub(crate) fn own(value: &Value<'_>) -> Value<'static> {
             args: args.iter().map(own).collect(),
             origin: *origin,
         },
+        Value::OrderedAgg {
+            keys,
+            args,
+            origin,
+        } => Value::OrderedAgg {
+            keys: keys.clone(),
+            args: args.iter().map(own).collect(),
+            origin: *origin,
+        },
         Value::Group { arg, origin } => Value::Group {
             arg: arg.clone(),
             origin: *origin,
@@ -1449,6 +1502,7 @@ pub(crate) fn value_class(value: &Value<'_>) -> &'static str {
         Value::Direction { .. } => "a sort direction",
         Value::SortKey(..) => "a sort key",
         Value::NullsOrder { .. } => "a null-order modifier",
+        Value::OrderedAgg { .. } => "an ordered aggregate awaiting its value",
         Value::Group { .. } => "a grouping key",
         Value::Grouping { .. } => "a grouping key with subtotals",
         Value::Membership { .. } => "a membership test",

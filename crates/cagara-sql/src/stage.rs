@@ -911,16 +911,61 @@ pub fn lower_expr(e: &ir::Expr, r: &Resolver) -> Result<Expr, String> {
             })
         }
         ir::Expr::Tpl(sql, args) => template(sql, all(args)?),
-        ir::Expr::Agg(sql, args, filter) => {
+        ir::Expr::Agg(sql, args, filter, order) => {
             let args = all(args)?;
+            let ordered = if order.is_empty() {
+                None
+            } else {
+                // `ARRAY_AGG(x ORDER BY ts)`: the keys go inside the call's
+                // parentheses, so they are lowered here rather than as a clause.
+                Some(
+                    order
+                        .iter()
+                        .map(|(k, asc)| {
+                            Ok(OrderByItem {
+                                expr: lower_expr(k, r)?,
+                                ascending: *asc,
+                                nulls_first: Some(false),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?,
+                )
+            };
+            let attach_order = |e: Expr| -> Result<Expr, String> {
+                let Some(keys) = ordered.clone() else {
+                    return Ok(e);
+                };
+                match e {
+                    Expr::Function {
+                        name,
+                        args,
+                        distinct,
+                        filter,
+                        over,
+                        order_by: _,
+                        within_group,
+                    } => Ok(Expr::Function {
+                        name,
+                        args,
+                        distinct,
+                        filter,
+                        over,
+                        order_by: keys,
+                        within_group,
+                    }),
+                    other => Err(format!(
+                        "internal: an ordered aggregate's template `{other:?}` is not a call"
+                    )),
+                }
+            };
             match filter {
                 Some(p) if is_plain_call(sql) => {
                     let e = template(sql, args)?;
                     let predicate = lower_expr(p, r)?;
-                    attach_filter(e, predicate)
+                    attach_order(attach_filter(e, predicate)?)
                 }
-                Some(p) => portable_filter(sql, args, lower_expr(p, r)?),
-                None => template(sql, args),
+                Some(p) => attach_order(portable_filter(sql, args, lower_expr(p, r)?)?),
+                None => attach_order(template(sql, args)?),
             }
         }
         // A grouping key resolves to its expression wherever it is read. The

@@ -286,6 +286,20 @@ nullsLast : sortkey ?r -> sortkey ?r = primitive "__nullsLast"
 ## (PostgreSQL, DuckDB); one without refuses the query rather than writing
 ## something else.
 arrayAgg : expr ?r ?a -> agg (expr ?r (list ?a)) = sql "CAGARA_ARRAY_AGG($1)"
+
+## `arrayAggBy [asc .ts] .id`: the values of `e` in one list, **in the order the
+## keys give** — `ARRAY_AGG(id ORDER BY ts)`.
+##
+## `arrayAgg` has no order of its own, so its list is whatever the engine happened
+## to produce: a column of it is unstable between runs, and "the last three ids"
+## cannot be said at all. The keys are the same `asc`/`desc` list `order` takes,
+## so the spelling is one the reader already knows.
+##
+## The order is *inside the call*, not a clause of the stage, so it needs no
+## separate `ORDER BY` and does not reorder the rows the aggregate is computed
+## over — which is why an ordered aggregate cannot take `filtered` or
+## `distinctAgg`: those rewrite the argument, and a key list is not an argument.
+arrayAggBy : list (sortkey ?r) -> expr ?r ?a -> agg (expr ?r (list ?a)) = primitive "__arrayAggBy"
 ## `listLength xs` — how many elements a list has. `CAGARA_LIST_LENGTH` is
 ## `cardinality` on PostgreSQL and `len` on DuckDB.
 listLength : expr ?r (list ?a) -> expr ?r int = sql "CAGARA_LIST_LENGTH($1)"

@@ -277,12 +277,16 @@ fn select_groups(e: &Expr, included: &[(GroupingShape, &Expr)]) -> Expr {
             list.iter().map(|a| select_groups(a, included)).collect(),
             *negated,
         ),
-        Expr::Agg(sql, args, filter) => Expr::Agg(
+        Expr::Agg(sql, args, filter, order) => Expr::Agg(
             sql.clone(),
             args.iter().map(|a| select_groups(a, included)).collect(),
             filter
                 .as_ref()
                 .map(|p| Box::new(select_groups(p, included))),
+            order
+                .iter()
+                .map(|(e, asc)| (select_groups(e, included), *asc))
+                .collect(),
         ),
         Expr::Win(sql, args, spec) => Expr::Win(
             sql.clone(),
@@ -348,10 +352,11 @@ fn swap_sides(e: &Expr) -> Expr {
             list.iter().map(swap_sides).collect(),
             *negated,
         ),
-        Expr::Agg(sql, args, filter) => Expr::Agg(
+        Expr::Agg(sql, args, filter, order) => Expr::Agg(
             sql.clone(),
             args.iter().map(swap_sides).collect(),
             filter.as_ref().map(|p| Box::new(swap_sides(p))),
+            order.iter().map(|(e, asc)| (swap_sides(e), *asc)).collect(),
         ),
         Expr::Group(k) => Expr::Group(Box::new(swap_sides(k))),
         Expr::Grouping(shape, k) => Expr::Grouping(*shape, Box::new(swap_sides(k))),

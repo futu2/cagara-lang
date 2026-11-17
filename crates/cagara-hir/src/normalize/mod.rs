@@ -190,6 +190,13 @@ pub(crate) enum Value<'a> {
         args: Vec<Value<'static>>,
         origin: Origin,
     },
+    /// `arrayAggBy keys value`: the ordered list aggregate, awaiting its keys and
+    /// then its value.
+    OrderedAgg {
+        keys: Option<Vec<(crate::checked::CheckedExpr, bool)>>,
+        args: Vec<Value<'static>>,
+        origin: Origin,
+    },
     /// `nullsFirst` / `nullsLast`, awaiting a sort key.
     NullsOrder {
         order: crate::ir::NullOrder,

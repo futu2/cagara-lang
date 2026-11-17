@@ -30,7 +30,8 @@
 use crate::dialect::{fam, support, Cap, Fam};
 use crate::stage::atomic;
 use sqlglot_rust::ast::{
-    BinaryOperator, DataType, DateTimeField, Expr, QuoteStyle, TypedFunction, UnaryOperator,
+    BinaryOperator, DataType, DateTimeField, Expr, OrderByItem, QuoteStyle, TypedFunction,
+    UnaryOperator,
 };
 use sqlglot_rust::Dialect;
 
@@ -106,7 +107,12 @@ fn node(e: Expr, to: Dialect) -> Result<Expr, String> {
         // `ARRAY_AGG(x)`: the predicate reached this function attached to the
         // call, and the rebuilt call dropped it. Only an aggregate can carry
         // either, so an intrinsic without one cannot reach here with them set.
-        Some(out) => Ok(atomic(with_aggregate_modifiers(out, distinct, filter))),
+        Some(out) => Ok(atomic(with_aggregate_modifiers(
+            out,
+            distinct,
+            filter,
+            order_by,
+        ))),
         None => Err(match refusal(&upper) {
             // A known intrinsic this target cannot express. The message names the
             // function the *reader* wrote and says what the target lacks — the
@@ -129,8 +135,13 @@ fn node(e: Expr, to: Dialect) -> Result<Expr, String> {
 /// non-function result (an array literal, a cast, a `CASE`) has nowhere to put
 /// them; that is a bug in the table rather than in the program, so it is left
 /// alone rather than silently losing the modifier again.
-fn with_aggregate_modifiers(e: Expr, distinct: bool, filter: Option<Box<Expr>>) -> Expr {
-    if !distinct && filter.is_none() {
+fn with_aggregate_modifiers(
+    e: Expr,
+    distinct: bool,
+    filter: Option<Box<Expr>>,
+    order_by: Vec<OrderByItem>,
+) -> Expr {
+    if !distinct && filter.is_none() && order_by.is_empty() {
         return e;
     }
     match e {
@@ -140,7 +151,7 @@ fn with_aggregate_modifiers(e: Expr, distinct: bool, filter: Option<Box<Expr>>) 
             distinct: existing_distinct,
             filter: existing_filter,
             over,
-            order_by,
+            order_by: existing_order,
             within_group,
         } => Expr::Function {
             name,
@@ -148,7 +159,14 @@ fn with_aggregate_modifiers(e: Expr, distinct: bool, filter: Option<Box<Expr>>) 
             distinct: distinct || existing_distinct,
             filter: filter.or(existing_filter),
             over,
-            order_by,
+            // An ordered aggregate's keys (`arrayAggBy`) travel the same way the
+            // modifiers do, and were dropped the same way: the rebuilt call is
+            // made from the argument vector, which has no room for them.
+            order_by: if order_by.is_empty() {
+                existing_order
+            } else {
+                order_by
+            },
             within_group,
         },
         other => other,

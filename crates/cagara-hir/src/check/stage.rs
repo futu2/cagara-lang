@@ -139,8 +139,8 @@ impl RowStage {
             Offset => RowStage::Offset,
             Distinct => RowStage::Distinct,
             Table | Merge | In | Lift | Join(_) | Set(_) | MarkExists | Group | Rollup | Cube
-            | Asc | Desc | NullsFirst | NullsLast | Rows | Range | Groups | Filtered
-            | DistinctAgg | Over
+            | Asc | Desc | NullsFirst | NullsLast | ArrayAggBy | Rows | Range | Groups
+            | Filtered | DistinctAgg | Over
             | UnboundedPreceding | UnboundedFollowing | CurrentRow | Preceding | Following => {
                 return None
             }

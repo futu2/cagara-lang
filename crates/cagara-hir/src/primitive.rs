@@ -58,6 +58,9 @@ pub enum Prim {
     NullsFirst,
     /// `nullsLast key`: the default, stated.
     NullsLast,
+    /// `arrayAggBy keys e`: an ordered list aggregate, the one aggregate that
+    /// carries sort keys inside its call.
+    ArrayAggBy,
     Rows,
     /// `range start end`: a frame counted in the order key's *values*.
     Range,
@@ -118,6 +121,7 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__asc", Prim::Asc),
     ("__nullsFirst", Prim::NullsFirst),
     ("__nullsLast", Prim::NullsLast),
+    ("__arrayAggBy", Prim::ArrayAggBy),
     ("__desc", Prim::Desc),
     ("__rows", Prim::Rows),
     ("__range", Prim::Range),
@@ -180,7 +184,7 @@ impl Prim {
             Distinct => 1,
             In => 2,
             Join(_) | MarkExists => 3,
-            Filtered | Over => 2,
+            Filtered | Over | ArrayAggBy => 2,
             DistinctAgg => 1,
             Set(_) => 2,
         }

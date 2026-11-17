@@ -619,6 +619,7 @@ twice   = t & agg { k = group .id, xs = arrayAgg .n }
             & select { k = .k, both = .xs <> .xs }           # `<>` concatenates lists
 sized   = t & select { n = listLength [1, 2, 3] }            # 3
 found   = t & select { y = listContains [1, 2, 3] 2 }        # true
+ordered = t & agg { k = group .id, xs = arrayAggBy [asc .n] .n }   # the list, sorted
 back    = t & agg { xs = arrayAgg .n } & unnest .xs          # the rows again…
             & select { n = .value }                          # …as `value`
 lifted  = t & agg { k = group .id, xs = arrayAgg .n }
@@ -631,6 +632,10 @@ lifted  = t & agg { k = group .id, xs = arrayAgg .n }
 used on a nullable column without a nullable overload of every function — `lift (parseDate
 "%Y%m%d") .d` is a `maybe date` from a `maybe string`. `x` appears twice in the SQL, so bind an
 expensive expression with `let` first.
+
+`arrayAggBy [asc .ts] .id` is the *ordered* list aggregate — `ARRAY_AGG(id ORDER BY ts)`. `arrayAgg`
+has no order of its own, so its list is whatever the engine produced: unstable between runs, and
+"the last three ids" cannot be said. The keys are the same `asc`/`desc` list `order` takes.
 
 `listAt i xs` reads one element, counting from 1 like every SQL array subscript — `listAt 1 .xs` is
 the first, and a position past the end is `nothing` rather than an error. `listLength` and

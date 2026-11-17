@@ -93,9 +93,15 @@ impl CheckedExpr {
             CheckedExprNode::Template { args, .. } => {
                 args.iter().map(CheckedExpr::node_count).sum()
             }
-            CheckedExprNode::AggTemplate { args, filter, .. } => {
+            CheckedExprNode::AggTemplate {
+                args,
+                filter,
+                order,
+                ..
+            } => {
                 args.iter().map(CheckedExpr::node_count).sum::<usize>()
                     + filter.as_ref().map_or(0, |p| p.node_count())
+                    + order.iter().map(|(e, _)| e.node_count()).sum::<usize>()
             }
             CheckedExprNode::WinTemplate { args, spec, .. } => {
                 args.iter().map(CheckedExpr::node_count).sum::<usize>()
@@ -198,6 +204,33 @@ impl CheckedExpr {
                 sql: sql.into(),
                 args,
                 filter: None,
+                order: Vec::new(),
+            },
+            origin,
+        })
+    }
+
+    /// An ordered aggregate: `arrayAggBy keys e`, whose keys ride inside the
+    /// call — `ARRAY_AGG(e ORDER BY k)` — rather than as a clause of the stage.
+    pub fn agg_template_ordered(
+        sql: impl Into<String>,
+        args: Vec<CheckedExpr>,
+        order: Vec<(CheckedExpr, bool)>,
+        ty: ScalarType,
+        origin: Origin,
+    ) -> Result<Self, Error> {
+        row_args("an aggregate argument", &args, origin)?;
+        for (k, _) in &order {
+            row_args("an aggregate sort key", std::slice::from_ref(k), origin)?;
+        }
+        Ok(CheckedExpr {
+            phase: Phase::Agg,
+            ty,
+            node: CheckedExprNode::AggTemplate {
+                sql: sql.into(),
+                args,
+                filter: None,
+                order,
             },
             origin,
         })
@@ -224,6 +257,7 @@ impl CheckedExpr {
                 sql: sql.into(),
                 args,
                 filter: filter.map(Box::new),
+                order: Vec::new(),
             },
             origin,
         })
@@ -362,6 +396,9 @@ pub(crate) enum CheckedExprNode {
         /// target has it, and as the portable `CASE` spelling where it does
         /// not.
         filter: Option<Box<CheckedExpr>>,
+        /// The sort keys an ordered aggregate carries — `arrayAggBy [asc .ts]
+        /// .id` is `ARRAY_AGG(id ORDER BY ts)`. Empty for every other aggregate.
+        order: Vec<(CheckedExpr, bool)>,
     },
     WinTemplate {
         sql: String,
@@ -621,10 +658,19 @@ pub(crate) fn erase_expr(e: CheckedExpr) -> Expr {
         CheckedExprNode::Column { side, name } => Expr::Col(side, name),
         CheckedExprNode::Lit(l) => Expr::Lit(l),
         CheckedExprNode::Template { sql, args } => Expr::Tpl(sql, erase_exprs(args)),
-        CheckedExprNode::AggTemplate { sql, args, filter } => Expr::Agg(
+        CheckedExprNode::AggTemplate {
+            sql,
+            args,
+            filter,
+            order,
+        } => Expr::Agg(
             sql,
             erase_exprs(args),
             filter.map(|p| Box::new(erase_expr(p.as_ref().clone()))),
+            order
+                .iter()
+                .map(|(e, asc)| (erase_expr(e.clone()), *asc))
+                .collect(),
         ),
         CheckedExprNode::WinTemplate { sql, args, spec } => Expr::Win(
             sql,

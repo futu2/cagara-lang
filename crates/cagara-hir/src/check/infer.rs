@@ -3358,6 +3358,19 @@ impl<'w> Checker<'w> {
                 let r = self.fresh();
                 fun(sortkey(r.clone()), sortkey(r))
             }
+            // `arrayAggBy [asc .ts] .id`: a key list, then the value. The result
+            // is `list a` in `agg` phase, like `arrayAgg` — the difference is the
+            // order the keys give, which is the whole point.
+            ArrayAggBy => {
+                let (r, a) = (self.fresh(), self.fresh());
+                fun(
+                    list(sortkey(r.clone())),
+                    fun(
+                        expr(con("row"), r.clone(), a.clone()),
+                        expr(con("agg"), r, list(a)),
+                    ),
+                )
+            }
             Rows | Range | Groups => fun(con("bound"), fun(con("bound"), con("frame"))),
             UnboundedPreceding | UnboundedFollowing | CurrentRow => con("bound"),
             Preceding | Following => fun(i, con("bound")),

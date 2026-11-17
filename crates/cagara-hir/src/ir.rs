@@ -103,7 +103,14 @@ pub enum Expr {
     /// where the target has `FILTER`, and the portable `CASE` spelling where it
     /// does not (decided in the dialect pass, which is where the target is
     /// known).
-    Agg(String, Vec<Expr>, Option<Box<Expr>>),
+    /// An aggregate template, its arguments, its `filtered` predicate, and the
+    /// sort keys an ordered aggregate (`arrayAggBy`) carries.
+    Agg(
+        String,
+        Vec<Expr>,
+        Option<Box<Expr>>,
+        Vec<(Expr, bool)>,
+    ),
     /// Grouping key (`group e`).
     Group(Box<Expr>),
     /// A grouping key that also gets subtotal rows (`rollup e`, `cube e`). The
@@ -147,7 +154,7 @@ impl Expr {
                 .iter()
                 .chain(std::iter::once(value.as_ref()))
                 .try_fold(Phase::Const, |acc, a| rules::mix(acc, a.phase()?)),
-            Expr::Agg(_, args, filter) => {
+            Expr::Agg(_, args, filter, _order) => {
                 args.iter()
                     .try_for_each(|a| row_only(a, "an aggregate argument"))?;
                 if let Some(p) = filter {
@@ -170,7 +177,11 @@ impl Expr {
         match self {
             Expr::Col(..) | Expr::Lit(_) => vec![],
             Expr::Tpl(_, a) => a.iter().collect(),
-            Expr::Agg(_, a, filter) => a.iter().chain(filter.iter().map(|p| p.as_ref())).collect(),
+            Expr::Agg(_, a, filter, order) => a
+                .iter()
+                .chain(filter.iter().map(|p| p.as_ref()))
+                .chain(order.iter().map(|(e, _)| e))
+                .collect(),
             Expr::In(value, list, _) => {
                 list.iter().chain(std::iter::once(value.as_ref())).collect()
             }
@@ -204,7 +215,7 @@ impl Expr {
         match self {
             Expr::Col(..) | Expr::Lit(_) => {}
             Expr::Tpl(_, args) => args.iter().for_each(&mut f),
-            Expr::Agg(_, args, filter) => {
+            Expr::Agg(_, args, filter, _order) => {
                 args.iter().for_each(&mut f);
                 if let Some(p) = filter {
                     f(p);
@@ -227,7 +238,7 @@ impl Expr {
         match self {
             Expr::Col(..) | Expr::Lit(_) => Ok(()),
             Expr::Tpl(_, args) => args.iter().try_for_each(f),
-            Expr::Agg(_, args, filter) => {
+            Expr::Agg(_, args, filter, _order) => {
                 args.iter().try_for_each(&mut f)?;
                 match filter {
                     Some(p) => f(p),
@@ -251,7 +262,7 @@ impl Expr {
         match self {
             Expr::Col(..) | Expr::Lit(_) => false,
             Expr::Tpl(_, args) => args.iter().any(predicate),
-            Expr::Agg(_, args, filter) => {
+            Expr::Agg(_, args, filter, _order) => {
                 args.iter().any(&mut predicate) || filter.as_ref().is_some_and(|p| predicate(p))
             }
             Expr::In(value, list, _) => list.iter().any(&mut predicate) || predicate(value),

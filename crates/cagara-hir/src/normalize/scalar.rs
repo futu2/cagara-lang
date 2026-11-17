@@ -101,6 +101,11 @@ pub(crate) fn primitive<'a>(
             args: Vec::new(),
             origin,
         }),
+        crate::primitive::Prim::ArrayAggBy => Ok(Value::OrderedAgg {
+            keys: None,
+            args: Vec::new(),
+            origin,
+        }),
         crate::primitive::Prim::NullsFirst => Ok(Value::NullsOrder {
             order: crate::ir::NullOrder::First,
             args: Vec::new(),
@@ -333,11 +338,26 @@ type AggParts = (String, Vec<CheckedExpr>, Option<CheckedExpr>);
 
 fn agg_parts(agg: &CheckedExpr, origin: Origin) -> Result<AggParts, Control> {
     match agg.node() {
-        crate::checked::CheckedExprNode::AggTemplate { sql, args, filter } => Ok((
-            sql.clone(),
-            args.clone(),
-            filter.as_ref().map(|p| p.as_ref().clone()),
-        )),
+        crate::checked::CheckedExprNode::AggTemplate {
+            sql,
+            args,
+            filter,
+            order,
+        } => {
+            if !order.is_empty() {
+                // An ordered aggregate already carries keys; wrapping it in a
+                // modifier would silently drop them.
+                return Err(Control::unsupported(
+                    origin,
+                    "an ordered aggregate (`arrayAggBy`) cannot take a modifier",
+                ));
+            }
+            Ok((
+                sql.clone(),
+                args.clone(),
+                filter.as_ref().map(|p| p.as_ref().clone()),
+            ))
+        }
         _ => Err(Control::unsupported(
             origin,
             "only an aggregate can be filtered, made distinct or windowed",

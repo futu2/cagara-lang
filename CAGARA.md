@@ -632,7 +632,9 @@ used on a nullable column without a nullable overload of every function — `lif
 "%Y%m%d") .d` is a `maybe date` from a `maybe string`. `x` appears twice in the SQL, so bind an
 expensive expression with `let` first.
 
-`listLength` and `listContains` measure and search a list; `unnest` expands each row once per
+`listAt i xs` reads one element, counting from 1 like every SQL array subscript — `listAt 1 .xs` is
+the first, and a position past the end is `nothing` rather than an error. `listLength` and
+`listContains` measure and search a list; `unnest` expands each row once per
 element, keeping the other columns (the SQL is a `CROSS JOIN LATERAL`, so they repeat) and naming the
 element `value`. That name is fixed, so a row that already has a `value` is refused: two columns of
 the same name would make the second unreachable. `listContains` takes a list *value* — a column or an `arrayAgg` result — where `in`
@@ -695,7 +697,9 @@ are expression constructors used *inside* stages, not query stages themselves.
 | `leftJoin q p` | same, result right side nullable | left then right-only | right columns `maybe` |
 | `rightJoin q p` | same, result left side nullable | left then right-only | left columns `maybe` |
 | `fullJoin q p` | same, both sides nullable | left then right-only | both sides `maybe` |
-| `semiJoin q p` | `query ?s -> expr (join r s) bool -> query ?r -> query ?r` | left only | rows with a match |
+| `crossJoin q                | `q & crossJoin s` | every pair, one from each side
+markExists q p             | `q & markExists s p` | the left row plus `exists = bool`
+semiJoin q p` | `query ?s -> expr (join r s) bool -> query ?r -> query ?r` | left only | rows with a match |
 | `antiJoin q p` | same | left only | rows without a match |
 | `union q2` | `query ?r -> query ?r -> query ?r` | left row | deduplicates |
 | `unionAll q2` | same | left row | keeps duplicates |
@@ -916,7 +920,9 @@ no join spelling of its own for this: reshaping a side is what `select` and `upd
 | `leftJoin q p` | `q <? p` | all left rows |
 | `rightJoin q p` | `q ?> p` | all right rows |
 | `fullJoin q p` | `q <?> p` | all rows from both |
-| `semiJoin q p` | — | left rows with a match (left columns only) |
+| `crossJoin q                | `q & crossJoin s` | every pair, one from each side
+markExists q p             | `q & markExists s p` | the left row plus `exists = bool`
+semiJoin q p` | — | left rows with a match (left columns only) |
 | `antiJoin q p` | — | left rows with no match (left columns only) |
 
 Output columns: left input's columns, then the right input's columns that the left does not have.
@@ -1247,14 +1253,26 @@ contains               : expr r string -> expr r string -> expr r bool
 startsWith endsWith    : expr ?r string -> expr ?r string -> expr ?r bool
 like ilike             : expr ?r string -> expr ?r string -> expr ?r bool
 
-abs                    : expr r int|float -> same
+abs                    : expr r int|float|decimal p s -> same
+negate                 : expr r int|float|decimal p s -> same
 round                  : expr r float -> expr r float
 roundTo                : expr r int -> expr r float -> expr r float
 floor ceil             : expr ?r float -> expr ?r float
 sqrt                   : expr r float -> expr r float
+cbrt                   : expr ?r float -> expr ?r float
+exp ln                 : expr ?r float -> expr ?r float
+log2 log10             : expr ?r float -> expr ?r float
+logBase                : expr ?r float -> expr ?r float -> expr ?r float
 power                  : expr r float -> expr r float -> expr r float
-sign                   : expr r int|float -> same
+radians degrees        : expr ?r float -> expr ?r float
+sign                   : expr r int -> expr r int;  expr r float -> expr r int
 greatest least         : expr ?r a -> expr ?r a -> expr ?r a     (two arguments)
+
+between                : expr ?r a -> expr ?r a -> expr ?r a -> expr ?r bool   between lo hi x
+ratio                  : expr ?r int|float -> ... -> expr ?r float            ratio whole part
+percentOf              : expr ?r int|float -> ... -> expr ?r float            percentOf whole part
+chr ascii              : expr ?r int -> expr ?r string / expr ?r string -> expr ?r int
+random                 : expr ?r float
 ```
 
 Argument order is subject-last, which is the reverse of the SQL spelling:
@@ -1293,7 +1311,7 @@ main = orders & select {
 ```text
 toInt        : expr r float|string -> expr r int
 toFloat      : expr r int|string -> expr r float
-toBool       : expr r int|float -> expr r bool
+toBool       : expr r int|float|string -> expr r bool   (a string reads true/t/yes/y/1)
 toString     : expr r int|float|date|timestamp|bool -> expr r string
 toDate       : expr r timestamp|string -> expr r date
 toTimestamp  : expr r date|string -> expr r timestamp
@@ -1338,11 +1356,25 @@ truncYear truncQuarter truncMonth truncWeek
 truncDay truncHour truncMinute
                  : expr ?r timestamp -> expr ?r timestamp
 
-yearOfDate quarter monthOfYear dayOfMonth dayOfWeek dayOfYear
+yearOfDate quarter monthOfYear dayOfMonth dayOfWeek dayOfYear weekOfYear
                  : expr ?r date|timestamp -> expr ?r int
 hour minute      : expr ?r timestamp -> expr ?r int
+monthName monthAbbrev dayName dayAbbrev
+                 : expr ?r date|timestamp -> expr ?r string
+
 daysBetween      : expr r date -> expr r date -> expr r int
+weeksBetween     : expr ?r date -> expr ?r date -> expr ?r int
+monthsBetween    : expr ?r date -> expr ?r date -> expr ?r int
+quartersBetween  : expr ?r date -> expr ?r date -> expr ?r int
+yearsBetween     : expr ?r date -> expr ?r date -> expr ?r int
+secondsBetween minutesBetween hoursBetween
+                 : expr ?r timestamp -> expr ?r timestamp -> expr ?r int
 ```
+
+A **field** and a **bucket** are different questions, and the names say which: `monthOfYear .d` is
+1–12, so `group (monthOfYear .d)` puts January 2024 and January 2025 in one row. For a month bucket
+use `truncMonth .d`, whose result is a date. `monthName`/`dayName` are the English names, for a
+label rather than a number.
 
 - `parseDate "%Y%m%d" s`, `parseTimestamp "%Y-%m-%d %H:%M:%S" s` and their `format*` inverses take a
   **format**, written once for every dialect: the language reads `%Y %m %d %H %M %S` and `%%`, and the backend translates it
@@ -1379,6 +1411,7 @@ isNull     : expr r (maybe a) -> expr r bool
 isNotNull  : expr r (maybe a) -> expr r bool
 isTrue     : expr r (maybe bool) -> expr r bool
 eqMaybe    : expr r (maybe a) -> expr r (maybe a) -> expr r bool
+whereTrue  : expr ?r (maybe bool) -> query ?r -> query ?r     (the same filter as `where`)
 ```
 
 `coalesce` takes the default **first**; `??` takes the value first: `coalesce 0 .score` and
@@ -1393,6 +1426,22 @@ or an aggregate/window with no value. In particular, `just 1` still emits `1`, w
 `isNull nothing` is legal anywhere). A bare projection such as `n = nothing` stays `maybe a` until
 another use constrains it.
 
+`x == nothing` is `x IS NULL` and `x != nothing` is `x IS NOT NULL`: SQL cannot compare against
+NULL, so the comparison is rewritten rather than emitted.
+
+A quotient that can be undefined has a spelling that says so. `/` is typed `int`, and a zero
+divisor yields NULL on every target (the ones whose own `/` raises get `NULLIF`):
+
+```text
+safeDiv    : expr ?r int -> expr ?r int -> expr ?r (maybe int)   safeDiv b a  = a / b, or NULL when b = 0
+safeMod    : expr ?r int -> expr ?r int -> expr ?r (maybe int)   safeMod b a  = a % b, or NULL when b = 0
+```
+
+`toBool` and `tryBool` read the spellings warehouses actually hold (`"true"`/`"t"`/`"yes"`/`"y"`/`"1"`
+and the negatives, case-insensitively). `toBool` reads anything else as false; `tryBool` answers
+NULL. `tryBoolTrue`/`tryBoolFalse`/`tryBoolOr` are the halves it is built from — implementation,
+not vocabulary to reach for.
+
 ### 7.6 Aggregates (only in `agg`)
 
 ```text
@@ -1401,6 +1450,8 @@ countOf            : expr r a -> agg (expr r int)                  COUNT(x)
 countOf            : expr r (maybe a) -> agg (expr r int)          COUNT(x)
 countDistinct      : expr r a -> agg (expr r int)                  COUNT(DISTINCT x)
 countDistinct      : expr r (maybe a) -> agg (expr r int)          COUNT(DISTINCT x)
+countOfMaybe       : expr r (maybe a) -> agg (expr r int)          COUNT(x), stated as nullable
+countDistinctMaybe : expr r (maybe a) -> agg (expr r int)          COUNT(DISTINCT x), stated as nullable
 
 sum : expr r int -> agg (expr r (maybe int))        sum : expr r (maybe int) -> agg (expr r (maybe int))
 sum : expr r float -> agg (expr r (maybe float))    sum : expr r (maybe float) -> agg (expr r (maybe float))
@@ -1451,11 +1502,12 @@ such as `truncMonth .ts` are fine, but aggregates and windows are not.
 ```text
 rowNumber rank denseRank : winspec ?r -> win (expr ?r int)
 lag lead                 : winspec ?r -> expr ?r a -> win (expr ?r (maybe a))
+lagBy leadBy             : winspec ?r -> expr ?r int -> expr ?r a -> win (expr ?r (maybe a))
 firstValue lastValue     : winspec ?r -> expr ?r a -> win (expr ?r (maybe a))
 ntile                    : winspec r -> expr r int -> win (expr r int)
 percentRank cumeDist     : winspec ?r -> win (expr ?r float)
 
-rows                     : bound -> bound -> frame
+rows range groups        : bound -> bound -> frame
 unboundedPreceding       : bound
 unboundedFollowing       : bound
 currentRow               : bound
@@ -1474,6 +1526,10 @@ main = orders & select {
     running = over {partition = [.user_id], order = [asc .ts], frame = runningFrame} (sum .amount)
   }
 ```
+
+`lag spec .x` is the previous row; `lagBy spec 12 .x` is twelve rows back — a year-over-year
+comparison over a monthly partition. They are separate names because a name's definitions must all
+take the same number of parameters, so `lag spec` and `lag spec 2` could not be overloads.
 
 A frame is not a spec: `lag wholePartition .amount` is wrong; write
 `lag {frame = wholePartition} .amount`. A spec is a record, not a list: `rowNumber [asc .id]` is

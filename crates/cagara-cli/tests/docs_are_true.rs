@@ -193,6 +193,61 @@ fn every_doc_example_compiles_or_is_a_known_fragment() {
     );
 }
 
+/// Every name the prelude defines is in the manual that claims to list them.
+///
+/// `CAGARA.md` §7 is introduced as "the exact names and argument order" and tells
+/// an agent to "use only names from §7" — so a name missing from it is a name a
+/// reader is told does not exist. That happened at scale: `rollup`, `cube`,
+/// `crossJoin`, `markExists`, `listAt`, the log family and the whole `*Between`
+/// family were all defined and all absent, and `cagara doc --prelude` printed
+/// them the whole time. This is the drift made into a build failure.
+///
+/// The check is one-way on purpose. The manual may name things that are not
+/// prelude functions — stage names, types, `main` — but it may not omit one.
+#[test]
+fn every_prelude_name_is_in_the_reference() {
+    let root = repo_root();
+    let doc = std::fs::read_to_string(root.join("CAGARA.md")).expect("CAGARA.md");
+    let out = Command::new(env!("CARGO_BIN_EXE_cagara"))
+        .args(["doc", "--prelude"])
+        .output()
+        .expect("run cagara doc --prelude");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    // The catalog prints one `## `name`` heading per entry.
+    let mut missing: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("## `") else {
+            continue;
+        };
+        let Some(name) = rest.split('`').next() else {
+            continue;
+        };
+        // An operator is written `_+_` in the prelude and `+` in prose, so the
+        // manual is searched for the spelling a reader would recognise.
+        let spelled = name.trim_start_matches('_').trim_end_matches('_');
+        // A table cell escapes the pipe (`&\|`), and an operator's spelling in
+        // prose has no underscores, so both spellings are tried.
+        let escaped = spelled.replace('|', "\\|");
+        let found = doc.contains(name)
+            || (!spelled.is_empty()
+                && (doc.contains(&format!("`{spelled}`"))
+                    || doc.contains(&format!("`{escaped}`"))
+                    || doc.contains(&escaped)));
+        if !found {
+            missing.push(name.to_string());
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "these prelude names are absent from CAGARA.md §7, which tells a reader \
+         only those names exist: {missing:?}"
+    );
+}
+
 /// Every document in `docs/` itself is reachable from somewhere a reader starts.
 ///
 /// `docs/` had sixteen files and no way to tell which four were current: the dated

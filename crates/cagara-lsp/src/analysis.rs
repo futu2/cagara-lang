@@ -5,7 +5,7 @@
 
 use cagara_hir::check::{check_reachable, TypeCheck, PROBE_FIELD};
 use cagara_hir::compile_diagnostics;
-use cagara_hir::workspace::{Binding, Diag, Severity, Workspace};
+use cagara_hir::workspace::{Binding, Diag, DiagKind, Severity, Workspace};
 use cagara_syntax::ast::{Expr, ExprKind, Side, Span};
 use cagara_syntax::docs::Docs;
 use line_index::{LineIndex, TextRange, TextSize, WideEncoding};
@@ -17,9 +17,50 @@ use lsp_types::{FoldingRange, FoldingRangeKind};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+/// A diagnostic as the language server publishes it.
+///
+/// The `kind` is the diagnostic's machine-readable identity — what the client
+/// sees as its `code` — and it travels with the message from where the
+/// diagnostic was *produced*. It is deliberately not derived from the message:
+/// the message is wording, and a client filtering on a code must not be
+/// affected by rewording one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Report {
+    pub range: Range,
+    pub message: String,
+    pub severity: Severity,
+    pub kind: DiagKind,
+}
+
+/// Every diagnostic in the root file, for a document with no configured dialect.
+///
+/// ANSI is the fallback — see [`diagnostics_with`] — and it is what every caller that
+/// does not know the document's target should ask for.
+pub fn diagnostics(ws: &Workspace) -> Vec<Report> {
+    diagnostics_with(ws, cagara_sql::Dialect::Ansi)
+}
+
 /// Every diagnostic in the root file: loading (syntax, imports, overloads),
-/// type errors, and compilation errors.
-pub fn diagnostics(ws: &Workspace) -> Vec<(Range, String, Severity)> {
+/// type errors, and compilation errors — lowered for `dialect`.
+///
+/// `dialect` is the document's configured target (`cagara.dialect`, from the
+/// client's `initializationOptions` or `workspace/didChangeConfiguration`). It affects
+/// exactly one thing: the refusals that `cagara-sql` makes *about a target* — a
+/// `groups` window frame on MySQL, a `list` on a dialect with no array type. The
+/// editor and `cagara --dialect` therefore agree about the same file, which they did
+/// not when the server always asked ANSI: a file written for MySQL looked clean in the
+/// editor and failed on the command line.
+///
+/// ANSI remains the fallback when no target is configured, and it is the right one for
+/// a different reason than before: it is the most permissive target — `FULL JOIN`,
+/// grouping sets, all three frame units, arrays, an exact decimal — so a document whose
+/// target nobody stated gets refusals that are about the *program* rather than about a
+/// target's spelling, and a reader is never shown a squiggle that is only true of a
+/// target they did not choose.
+///
+/// The cost of lowering at all is about a tenth of a check: measured on 80 queries,
+/// `check` took 68 ms and lowering all of them took 6.5 ms in a debug build.
+pub fn diagnostics_with(ws: &Workspace, dialect: cagara_sql::Dialect) -> Vec<Report> {
     let compilation_diagnostics = compile_diagnostics(ws);
     let root = ws.modules[ws.root].path.display().to_string();
     // The checker is not the last thing that can refuse. `cagara-sql` builds the
@@ -28,15 +69,20 @@ pub fn diagnostics(ws: &Workspace) -> Vec<(Range, String, Severity)> {
     // real error with a message telling the author what to write. Without this the
     // editor showed nothing for a file `cagara --only` rejects, so "it compiles in my
     // editor" was false in exactly the case the author needed to know about.
-    let lowering = lowering_diagnostics(ws);
+    let lowering = lowering_diagnostics(ws, dialect);
     // Deduped through a set, not `Vec::contains`: a file being typed has as
     // many diagnostics as it has errors, and comparing each against every one
     // already collected made publishing quadratic in them. The compiler's own
     // collector dedupes the same way (`compile::push_unique`).
-    let mut out: Vec<(Range, String, Severity)> = Vec::new();
-    let mut seen: HashSet<(Range, String, Severity)> = HashSet::new();
+    let mut out: Vec<Report> = Vec::new();
+    let mut seen: HashSet<Report> = HashSet::new();
     for d in compilation_diagnostics.iter().filter(|d| d.path == root) {
-        let item = (diag_range(d), d.message.clone(), d.severity);
+        let item = Report {
+            range: diag_range(d),
+            message: d.message.clone(),
+            severity: d.severity,
+            kind: d.kind,
+        };
         if seen.insert(item.clone()) {
             out.push(item);
         }
@@ -51,14 +97,20 @@ pub fn diagnostics(ws: &Workspace) -> Vec<(Range, String, Severity)> {
 
 /// What the SQL lowering refuses about the root file, positioned at the stage.
 ///
-/// The dialect is **ANSI**, and that is the whole reason this is safe to show in an
-/// editor. ANSI is the permissive target: it has `FULL JOIN`, grouping sets, all three
-/// frame units, and no `NULLS LAST` emulation, so `dialect.rs` refuses nothing about it.
-/// What is left are the refusals that are about the *relation* rather than about a
-/// target's spelling — and those are errors wherever the file is headed. Asking for the
-/// file's real target instead would paint `fullJoin` red in a file targeting MySQL and
-/// `groups` red in a file targeting MySQL, which is a true statement about a target the
-/// editor does not know the user chose.
+/// The dialect comes from the caller — the document's `cagara.dialect` setting, or ANSI
+/// when none is configured. Which target is asked matters, and both answers are right
+/// in their own case:
+///
+/// * **ANSI, the fallback,** is the permissive target: it has `FULL JOIN`, grouping
+///   sets, all three frame units, arrays and an exact decimal, so what is left are the
+///   refusals about the *relation* rather than about a target's spelling. A document
+///   whose target nobody stated must not be painted with a refusal that is only true of
+///   some other target — that is a squiggle about a choice the user never made.
+/// * **The configured target,** once there is one, is the honest question: the editor
+///   then reports exactly what `cagara --dialect <that>` reports, so a file that shows
+///   clean in the editor no longer fails on the command line. Before the setting
+///   existed, a MySQL-targeted file with a `groups` frame looked fine in the editor and
+///   was refused by the compiler.
 ///
 /// It costs about a tenth of a check: measured on 80 queries, `check` took 68 ms and
 /// lowering all of them to SQL took 6.5 ms in a debug build.
@@ -66,7 +118,7 @@ pub fn diagnostics(ws: &Workspace) -> Vec<(Range, String, Severity)> {
 /// Only the root module is reported, for the same reason `diagnostics` filters on the
 /// root path: an imported file is its own document, and reporting its errors against
 /// this one would put them in a file the user is not looking at.
-fn lowering_diagnostics(ws: &Workspace) -> Vec<(Range, String, Severity)> {
+fn lowering_diagnostics(ws: &Workspace, dialect: cagara_sql::Dialect) -> Vec<Report> {
     let tc = check_reachable(ws);
     let md = &ws.modules[ws.root];
     let p = Positions::new(&md.text);
@@ -80,7 +132,7 @@ fn lowering_diagnostics(ws: &Workspace) -> Vec<(Range, String, Severity)> {
         let Err((loc, message)) = cagara_sql::compile_located(
             &rel,
             cagara_sql::Options {
-                dialect: cagara_sql::Dialect::Ansi,
+                dialect,
                 pretty: false,
                 optimize: false,
             },
@@ -109,11 +161,16 @@ fn lowering_diagnostics(ws: &Workspace) -> Vec<(Range, String, Severity)> {
                 },
             },
         };
-        out.push((
+        out.push(Report {
             range,
-            format!("error in `{name}`: {message}"),
-            Severity::Error,
-        ));
+            message: format!("error in `{name}`: {message}"),
+            severity: Severity::Error,
+            // A refusal of the SQL lowering. Today these are about the
+            // *relation*, not the target (see this function's note on ANSI);
+            // a target-specific refusal would carry the same kind, because what
+            // it reports is the same thing — this construct cannot be written.
+            kind: DiagKind::Lowering,
+        });
     }
     out
 }
@@ -601,34 +658,19 @@ fn declares_record(ws: &Workspace, m: usize, i: usize) -> bool {
 /// A stable slug for a diagnostic, so a client can filter or link on it.
 ///
 /// The *message* is the language's wording and is meant to change as the
-/// wording improves; the code is the identity. The mapping is deliberately
-/// coarse — one code per kind of mistake, not per sentence — because a code
-/// that changes whenever a message is reworded is worse than none.
-pub(crate) fn diagnostic_code(message: &str) -> &'static str {
-    let lower = message;
-    if lower.contains("no column") || lower.contains("has no column") {
-        "unknown-column"
-    } else if lower.contains("unknown name") || lower.contains("unknown type") {
-        "unknown-name"
-    } else if lower.contains("type mismatch") {
-        "type-mismatch"
-    } else if lower.contains("ambiguous use") || lower.contains("no overload") {
-        "overload"
-    } else if lower.contains("must be") && lower.contains("bool") {
-        "not-a-condition"
-    } else if lower.contains("aggregate") {
-        "aggregate-placement"
-    } else if lower.contains("on both sides") || lower.contains("`take` names") {
-        "join-overlap"
-    } else if lower.contains("only be used in a join predicate") {
-        "join-side"
-    } else if lower.contains("syntax error") {
-        "syntax"
-    } else if lower.contains("refers to itself") {
-        "recursion"
-    } else {
-        "error"
-    }
+/// wording improves; the code is the identity. So the code comes from
+/// [`DiagKind`], which the producer set where it knew the category — never from
+/// the text. Reading it off the message is what this used to do, and it made
+/// rewording a message a silent change to machine-readable behaviour: the
+/// `unknown-column` arm matched `"no column"`, so an improvement to that
+/// sentence would have quietly reclassified every missing-column diagnostic as
+/// the catch-all `error`.
+///
+/// The mapping is deliberately coarse — one code per kind of mistake, not per
+/// sentence — because a code that changes whenever a message is reworded is
+/// worse than none.
+pub(crate) fn diagnostic_code(kind: DiagKind) -> &'static str {
+    kind.code()
 }
 
 /// Whether an expression is a pipeline step. `&` is the only spelling — the
@@ -2062,33 +2104,101 @@ mod tests {
     /// The code is the diagnostic's identity while the message is its wording:
     /// a client may filter or link on it, and rewording a message must not
     /// change it.
+    /// The code a client sees is the diagnostic's **kind**, and every kind
+    /// maps to a stable slug.
+    ///
+    /// The set below is exactly the mapping the server published while the code
+    /// was read off the message text, so a client that filters on these strings
+    /// keeps working. It is asserted on the kind → code direction, which is the
+    /// one that matters: the message is wording and may be reworded, and the
+    /// code must not move when it is.
     #[test]
     fn every_diagnostic_kind_has_a_stable_code() {
-        for (message, code) in [
-            ("field `x`: no column `x`; available: id", "unknown-column"),
-            ("unknown name `nope`", "unknown-name"),
-            ("type mismatch: expected int, found string", "type-mismatch"),
-            ("ambiguous use of `sum` at type …", "overload"),
-            ("no overload of `sum` matches …", "overload"),
-            ("this join has `id` on both sides", "join-overlap"),
-            (
-                "`take` names `id`, which the left input already has",
-                "join-overlap",
-            ),
-            ("syntax error: unknown operator `&?`", "syntax"),
-            (
-                "`q` refers to itself; recursion is not supported",
-                "recursion",
-            ),
-            ("something nobody classified", "error"),
+        for (kind, code) in [
+            (DiagKind::UnknownColumn, "unknown-column"),
+            (DiagKind::UnknownName, "unknown-name"),
+            (DiagKind::TypeMismatch, "type-mismatch"),
+            (DiagKind::Overload, "overload"),
+            (DiagKind::NotACondition, "not-a-condition"),
+            (DiagKind::AggregatePlacement, "aggregate-placement"),
+            (DiagKind::JoinOverlap, "join-overlap"),
+            (DiagKind::JoinSide, "join-side"),
+            (DiagKind::Syntax, "syntax"),
+            (DiagKind::Recursion, "recursion"),
+            (DiagKind::Lowering, "lowering"),
+            (DiagKind::Other, "error"),
         ] {
-            assert_eq!(diagnostic_code(message), code, "{message}");
+            assert_eq!(diagnostic_code(kind), code, "{kind:?}");
+            // The slug is the kind's own, so the two cannot drift apart.
+            assert_eq!(kind.code(), code, "{kind:?}");
         }
-        // The same shape of mistake gets the same code however it is worded.
-        assert_eq!(
-            diagnostic_code("the left join input has no column `nope`; available: id"),
-            diagnostic_code("field `x`: no column `x`; available: id")
-        );
+    }
+
+    /// Each kind is reachable from a real program, and reaches the editor with
+    /// its own code.
+    ///
+    /// The mapping above is only half the contract: a kind that no producer ever
+    /// sets is a code no client will ever see, and the classification being
+    /// right in the enum but wrong at the construction site is the bug this
+    /// change exists to prevent. So each case below is a program, the diagnostic
+    /// the editor publishes for it, and the code it must carry.
+    #[test]
+    fn a_real_diagnostic_of_each_kind_reaches_the_editor_with_its_code() {
+        // (source, the code the published diagnostic must carry)
+        for (src, code) in [
+            // A column the row does not have.
+            (
+                "t : query { id = int } = table \"m\" \"t\"\n\
+                 q = t & select { x = .nope }\n",
+                "unknown-column",
+            ),
+            // A name the language does not have.
+            ("q = nope\n", "unknown-name"),
+            // Two types that do not unify.
+            ("q : int = \"s\"\n", "type-mismatch"),
+            // An overload set with no fitting candidate: `+` has no candidate
+            // that takes a string and an int. (`sum` in a `select` used to be the
+            // example here; it is classified as `aggregate-placement` now, which
+            // is the more precise answer, so it moved to the case below.)
+            ("q = \"a\" + 1\n", "overload"),
+            // An aggregate where a row expression is required.
+            (
+                "t : query { id = int } = table \"m\" \"t\"\n\
+                 q = t & select { x = sum .id }\n",
+                "aggregate-placement",
+            ),
+            // An aggregate where a row expression is required. `count` rather than
+            // `sum .id`, because `sum` returns a `maybe` and comparing it to `1`
+            // reports the nullability mismatch first — also a real answer, but not the
+            // one this case is about.
+            (
+                "t : query { id = int } = table \"m\" \"t\"\n\
+                 q = t & where (count > 1)\n",
+                "aggregate-placement",
+            ),
+            // A join-side column outside a join predicate.
+            (
+                "a : query { id = int } = table \"m\" \"a\"\n\
+                 q = a & select { x = .<id }\n",
+                "join-side",
+            ),
+            // A token the grammar does not accept. (`1 &? 2` is a well-formed pipeline
+            // over an `int`, so it is a *type* error, not a syntax one — the parser
+            // accepts it and the checker is right to refuse it.)
+            ("q = @\n", "syntax"),
+            // A definition that refers to itself.
+            ("q = q\n", "recursion"),
+        ] {
+            let ws = Workspace::from_source(src);
+            let ds = diagnostics(&ws);
+            assert!(
+                ds.iter().any(|d| diagnostic_code(d.kind) == code),
+                "expected a `{code}` diagnostic for {src:?}, got {:?}",
+                ds.iter()
+                    .map(|d| (diagnostic_code(d.kind), &d.message))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     /// A file the *lowering* refuses is reported in the editor, at the stage.
@@ -2105,57 +2215,102 @@ mod tests {
         let ws = Workspace::from_source(src);
         let ds = diagnostics(&ws);
         assert_eq!(ds.len(), 1, "{ds:?}");
-        let (r, msg, severity) = &ds[0];
+        let Report {
+            range: r,
+            message: msg,
+            severity,
+            kind,
+        } = &ds[0];
         assert_eq!(*severity, Severity::Error);
+        // A lowering refusal is its own kind: the program is well typed and the
+        // target cannot express it, which is not a type error.
+        assert_eq!(*kind, DiagKind::Lowering, "{msg}");
         assert!(msg.contains("cannot follow an `order`"), "{msg}");
         // The refusal is on line 1 and points at the stage, not at the file's start.
         assert_eq!(r.start.line, 1, "{r:?}");
         assert!(r.start.character > 0, "not column zero: {r:?}");
     }
 
-    /// A refusal that is about a *target* is not reported, because the editor does not
-    /// know the target.
+    /// With no dialect configured, a refusal that is about a *target* is not
+    /// reported.
     ///
-    /// This is the negative control for asking ANSI. `fullJoin` is refused on MySQL and
-    /// fine on ANSI; painting it red in a file that targets MySQL would be a true
-    /// statement about a choice the editor was never told, and painting it red in a
-    /// file that targets Postgres would be simply wrong. So the editor reports what is
-    /// true of every target, and a target-specific refusal stays where the target is
-    /// known — `cagara --dialect`.
+    /// This is the negative control for the ANSI fallback. A `groups` frame is refused
+    /// on MySQL and T-SQL and fine on ANSI; painting it red in a file whose target the
+    /// server was never told about would be a true statement about somebody else's
+    /// choice. So with no `cagara.dialect` the editor reports what is true of every
+    /// target, and [`a_configured_dialect_reaches_the_lowering`] is the positive half:
+    /// once the target *is* known, the refusal appears.
     #[test]
-    fn a_target_specific_refusal_is_not_reported() {
-        let src = "a : query { id = int } = table \"m\" \"a\"\n\
-                   b : query { id = int } = table \"m\" \"b\"\n\
-                   q = a & fullJoin b (.<id == .>id)\n";
+    fn a_target_specific_refusal_is_not_reported_without_a_configured_dialect() {
+        let src = "f : query { k = int, n = int } = table \"m\" \"f\"\n\
+                   q = f & select { s = over { order = [asc .k], \
+                   frame = groups (preceding 1) currentRow } (sum .n) }\n";
         let ws = Workspace::from_source(src);
         let ds = diagnostics(&ws);
         assert!(
-            !ds.iter().any(|(_, m, _)| m.contains("fullJoin")),
-            "`fullJoin` is fine on ANSI, which is what the editor asks: {ds:?}"
+            !ds.iter()
+                .any(|d| d.message.contains("`groups` window frame")),
+            "a `groups` frame is fine on ANSI, which is the fallback: {ds:?}"
         );
-        // And it *is* refused when a target is named, so the silence above is about
-        // the dialect and not about the check being missing.
+        // And it *is* refused when a target that lacks the clause is named, so the
+        // silence above is about the dialect and not about the check being missing.
         let rels = cagara_hir::root_queries(&ws);
         let (_, r) = rels.iter().find(|(n, _)| n == "q").expect("q");
         let rel = r.as_ref().expect("q type-checks");
-        assert!(
-            cagara_sql::compile(
-                rel,
-                cagara_sql::Options {
-                    dialect: cagara_sql::Dialect::Mysql,
-                    ..Default::default()
-                }
-            )
-            .is_err(),
-            "MySQL refuses it"
-        );
+        for dialect in [cagara_sql::Dialect::Mysql, cagara_sql::Dialect::Tsql] {
+            assert!(
+                cagara_sql::compile(
+                    rel,
+                    cagara_sql::Options {
+                        dialect,
+                        ..Default::default()
+                    }
+                )
+                .is_err(),
+                "{dialect:?} refuses it"
+            );
+        }
+    }
+
+    /// The configured dialect reaches the lowering, so the editor and the compiler
+    /// agree about a target-specific refusal.
+    ///
+    /// This is the point of the setting: a file written for MySQL should show the
+    /// `groups` squiggle the compiler will report, and the same file written for
+    /// DuckDB should not. The diagnostic is the observable, so the test asks for it
+    /// under both targets rather than trusting that the value was threaded.
+    #[test]
+    fn a_configured_dialect_reaches_the_lowering() {
+        let src = "f : query { k = int, n = int } = table \"m\" \"f\"\n\
+                   q = f & select { s = over { order = [asc .k], \
+                   frame = groups (preceding 1) currentRow } (sum .n) }\n";
+        let ws = Workspace::from_source(src);
+        let refused = |d: cagara_sql::Dialect| {
+            diagnostics_with(&ws, d)
+                .into_iter()
+                .any(|r| r.message.contains("`groups` window frame"))
+        };
+        // MySQL and T-SQL document `{ ROWS | RANGE }`, so the frame is refused and the
+        // editor says so.
+        assert!(refused(cagara_sql::Dialect::Mysql), "mysql");
+        assert!(refused(cagara_sql::Dialect::Tsql), "tsql");
+        // DuckDB and PostgreSQL read `GROUPS`, so the same file is clean.
+        assert!(!refused(cagara_sql::Dialect::DuckDb), "duckdb");
+        assert!(!refused(cagara_sql::Dialect::Postgres), "postgres");
+        // And the fallback is ANSI, which has every frame unit: no diagnostic.
+        assert!(!refused(cagara_sql::Dialect::Ansi), "ansi");
     }
 
     #[test]
     fn diagnostics_have_utf16_ranges() {
         let ds = diagnostics(&ws());
         assert_eq!(ds.len(), 1, "{ds:?}");
-        let (r, msg, severity) = &ds[0];
+        let Report {
+            range: r,
+            message: msg,
+            severity,
+            ..
+        } = &ds[0];
         assert_eq!(*severity, Severity::Error);
         assert!(msg.contains("type mismatch"), "{msg}");
         assert_eq!(r.start.line, 3);
@@ -3177,7 +3332,7 @@ mod tests {
 
 #[cfg(test)]
 mod severity_tests {
-    use super::diagnostics;
+    use super::{diagnostics, Report};
     use cagara_hir::workspace::{Severity, Workspace};
 
     /// A warning reaches the editor as a warning.
@@ -3195,7 +3350,9 @@ mod severity_tests {
         assert!(ws.diags.is_empty(), "{:?}", ws.diags);
         let ds = diagnostics(&ws);
         assert_eq!(ds.len(), 1, "{ds:?}");
-        let (_, message, severity) = &ds[0];
+        let Report {
+            message, severity, ..
+        } = &ds[0];
         assert_eq!(*severity, Severity::Warning);
         assert!(message.contains("on both sides"), "{message}");
     }
@@ -3328,7 +3485,10 @@ pub fn code_actions(ws: &Workspace, range: Range) -> Vec<Fix> {
     }
     // Then the rules that are read off the message, for the diagnostics that
     // carry no suggestion.
-    for (r, message, _) in diagnostics(ws) {
+    for Report {
+        range: r, message, ..
+    } in diagnostics(ws)
+    {
         if answered.iter().any(|(ar, _)| *ar == r) {
             continue;
         }

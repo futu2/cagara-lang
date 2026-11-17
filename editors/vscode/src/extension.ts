@@ -358,6 +358,24 @@ async function start(context: vscode.ExtensionContext): Promise<void> {
     documentSelector: [{ scheme: "file", language: "cagara" }],
     synchronize: {
       fileEvents: vscode.workspace.createFileSystemWatcher("**/*.cagara"),
+      // `cagara.dialect` names the target the document is written for, and the
+      // server needs it to report the refusals the compiler will report. Declaring
+      // the section is what makes the client send `workspace/didChangeConfiguration`
+      // when it moves, so the squiggles follow the setting instead of the editor
+      // disagreeing with the next save until the window is reloaded.
+      configurationSection: "cagara",
+    },
+    // The starting value. Without it the server falls back to `ansi`, which is the
+    // permissive target: it reports only what is wrong with the program and nothing
+    // about a target the user did state.
+    //
+    // Read at the window scope, not per document: an LSP session has one dialect, and
+    // `cagara.dialect` is `resource`-scoped for the compile command. In a multi-root
+    // workspace whose folders pick different targets, the diagnostics therefore follow
+    // the window's value while each file still compiles with its folder's — a
+    // limitation worth knowing, and the reason the fallback is the permissive target.
+    initializationOptions: {
+      cagara: { dialect: vscode.workspace.getConfiguration("cagara").get<string>("dialect", "") },
     },
   };
   client = new LanguageClient("cagara", "Cagara Language Server", serverOptions, clientOptions);

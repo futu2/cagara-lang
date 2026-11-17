@@ -224,7 +224,7 @@ outcomes record what the work measured.
 |---|---|---|
 | ~~B1~~ | **Done, after a revert and a language decision.** Aligning by name makes the checker's row order and the SQL's column order disagree: `&` is reverse application, so the primitive's first parameter is the operand written on the *right*, while `step_set` binds the output to `left`. The SQL keeps the left's order; the type said the right's. The first attempt was reverted because settling that is a language decision rather than a projection in the arena. It found a real bug on the way: `cagara check` accepted the mismatched-order file that `cagara --only` refused — fixed separately. The decision was then made (a set operation answers with its left operand's row) and alignment by name landed; see "The set-operation decision" below. |
 | ~~B2~~ | **Done.** A file declares a parameter with a default and `--param` overrides the value, keeping the file's type |
-| ~~B3~~ | **Done, with two dialect refusals that measurement forced.** `range` and `groups` are constructors and `Frame` carries the unit; MySQL refuses `groups` (syntax error) and every dialect that emulates `NULLS LAST` refuses `range` (it needs one sort key; the emulation adds a second) |
+| ~~B3~~ | **Done, with two dialect refusals that measurement forced.** `range` and `groups` are constructors and `Frame` carries the unit; MySQL refuses `groups` (syntax error) and every dialect that emulates `NULLS LAST` refuses `range` (it needs one sort key; the emulation adds a second). **Extended:** the `groups` refusal is now asked of a capability table rather than of the MySQL family, because T-SQL documents `{ ROWS \| RANGE }` too and the family test accepted it — see [Capabilities](#capabilities) |
 | ~~B4~~ | **Done.** `catalog "schema" { name = { … } }` lowers to one ordinary table definition per entry, so nothing downstream needed a case for it |
 
 ### C. Documentation that stays true
@@ -330,15 +330,44 @@ literals). It is a second opinion, not a server: blind to anything both
 implementations get wrong, to any type, and it runs on DuckDB's engine. Those limits
 are written down in [`ENGINE-TESTS.md`](ENGINE-TESTS.md) and pinned in the test.
 
-**The capability tables are checked too.** `supports_qualify`, `supports_filter`,
-`supports_full_join`, `null_order` and the paging order are hand-written, and a wrong
-entry is SQL that looks right — which is how the two BigQuery bugs got in.
+**The capability tables are checked too.** The `Cap`/`Support` table, `null_order`
+and the paging order are hand-written, and a wrong entry is SQL that looks right —
+which is how the two BigQuery bugs got in.
 `every_construct_we_emit_is_one_the_engine_reads` compiles one query per conditional
 rule and *runs* whatever came out, asserting the implication rather than a recorded
-string. It was verified by mutation: adding SQLite to `supports_qualify` makes it fail,
-and the first version of it silently passed because it compiled the table definition
-instead of the query. No table turned out to be wrong — they were unchecked, not
-broken — and the same mutation test is what makes that statement worth anything.
+string. It was verified by mutation: adding SQLite to the `QUALIFY` entry makes it
+fail, and the first version of it silently passed because it compiled the table
+definition instead of the query. The same mutation test is what makes that statement
+worth anything.
+
+## Capabilities
+
+A family is a *grammar* grouping, and capabilities do not follow grammar, so the
+questions "does this target have X" are answered by one table in
+[`crates/cagara-sql/src/dialect.rs`](../crates/cagara-sql/src/dialect.rs) rather than
+by `fam(d) != Fam::Mysql`-shaped tests. The table has four answers —
+`Native`, `Emulated`, `Unverified`, `Unsupported` — and matches on `Dialect`
+exhaustively, so a dialect added to `sqlglot-rust` is a compile error here instead of a
+new target that inherits whichever family claimed it.
+
+Two rounds of bugs are why it exists:
+
+- **`GROUPS` on T-SQL.** `supports_groups_frame` was `fam(d) != Fam::Mysql`. T-SQL is
+  in a different family and has no `GROUPS` frame either, so `--dialect tsql` emitted
+  `GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW` for a server whose frame syntax is
+  `{ ROWS | RANGE }`.
+- **A check that stopped at a `Select`.** Each capability check wrote its own walk and
+  treated `Rel::Select`/`Rel::Agg` as leaves, so an unsupported construct behind a
+  later stage was never seen: `agg { k = rollup .k, n = count } & agg { total = count }`
+  compiled for SQLite and then failed at the server with `no such function: ROLLUP`.
+  The walk now lives in one place (`cagara-sql/src/visit.rs`) and is exhaustive over
+  `Rel`, so a node with an expression in it cannot be skipped without a compile error.
+
+Two constructs that used to be refused are now **emulated**, because an equivalent
+exists and refusing made the language's surface depend on the target:
+`fullJoin` on the MySQL family (a left join unioned with an anti-join of the right
+rows that have no match) and `rollup`/`cube` on SQLite and MySQL (one `agg` per
+grouping set, `UNION ALL`ed). Both are in `cagara-sql/src/emulate.rs`.
 
 ### Completed language decisions
 

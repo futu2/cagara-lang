@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased
+
+### Dialect-independent compilation
+
+- **An unsupported construct is refused wherever it appears, not only at the top.**
+  The capability checks inspected a `Select`'s or an `Agg`'s own expressions and
+  treated the node as a leaf, so an unsupported construct behind a later stage was
+  never seen: `f & agg { k = rollup .k, n = count } & agg { total = count }` compiled
+  with `--dialect sqlite` and then failed at the server with `no such function:
+  ROLLUP`. The same bypass let a `groups` frame through behind `& select { s = .s }`
+  for MySQL. One exhaustive relation walk now backs every check
+  (`crates/cagara-sql/src/visit.rs`), so a node that carries an expression cannot be
+  skipped without a compile error.
+
+- **A per-dialect capability table replaces the family tests.** `Cap` × `Dialect` →
+  `Native` / `Emulated` / `Unverified` / `Unsupported`, matched exhaustively so a new
+  `sqlglot-rust` dialect is a compile error rather than a target that inherits
+  whichever family claimed it. This is what fixes the second reported bug: `GROUPS`
+  was accepted for T-SQL because the check was `fam(d) != Fam::Mysql`, and SQL Server's
+  frame syntax is `{ ROWS | RANGE }`. `Unverified` is a distinct answer from `Native`
+  — it means the spelling is intended and no run has shown the target accepts it.
+
+- **`fullJoin` and `rollup`/`cube` are emulated instead of refused.** The language no
+  longer changes with `--dialect`:
+  - `fullJoin` on the MySQL family becomes `(l LEFT JOIN r ON p) UNION ALL` the right
+    rows with no match. The second branch is an anti-join on the same predicate with
+    the sides exchanged — not `RIGHT JOIN … WHERE <some left column> IS NULL`, which
+    double-counts a matched row whenever that column is NULL (measured on SQLite).
+  - `rollup`/`cube` on SQLite and the MySQL family become one `agg` per grouping set,
+    `UNION ALL`ed, with the excluded keys NULL. `ROLLUP(a, b)` is
+    `{(a, b), (a), ()}`, and two shapes in one clause are their cross product.
+  Both are `Rel -> Rel` rewrites in `crates/cagara-sql/src/emulate.rs`, so the lowerer
+  and the dialect passes see ordinary nodes.
+
+- **CI runs SQLite and DuckDB on every push**, from pinned versions of both shells.
+  `CAGARA_ENGINES` is an allow-list, so the job requires the two engines it installs
+  without failing on the three it does not; `CAGARA_REQUIRE_ENGINES` still fails the
+  run when an allowed engine is missing. The full five-engine matrix stays local.
+
+- **Diagnostics carry a kind, and the language server knows the document's dialect.**
+  LSP diagnostic codes were inferred from message substrings, so rewording a message
+  changed machine-readable behaviour; they now come from a `DiagKind` on the
+  diagnostic. Editor diagnostics also lower against the configured dialect instead of
+  always ANSI, so the squiggles and `cagara --dialect` agree.
+
 ## 0.4.2 — 2026-11-16
 
 ### Since the 2026-11-14 cut

@@ -21,12 +21,60 @@ thing, not that the target *accepts* it. MariaDB rejects a `GROUPS` frame outrig
 refuses a `range` frame with two sort keys, and no amount of translation could have shown
 either; see [`ENGINE-TESTS.md`](ENGINE-TESTS.md).
 
+## The capability table
+
+Whether a target can say a construct is **data**, not a family test. `sqlglot-rust`
+groups dialects by grammar, and capabilities do not follow grammar: T-SQL shares no
+family with MySQL, yet neither has a `GROUPS` window frame, and Doris shares MySQL's
+family yet the two are classified separately. So every question of the form "does this
+dialect have X" goes through one table in
+[`crates/cagara-sql/src/dialect.rs`](../crates/cagara-sql/src/dialect.rs), which answers
+with one of four values:
+
+| answer | meaning | what the compiler does |
+|---|---|---|
+| `Native` | the target has it | writes it out |
+| `Emulated` | the target lacks it, an equivalent exists | rewrites it (see [Rewritten instead of refused](#rewritten-instead-of-refused)) |
+| `Unverified` | the compiler writes it and no run has shown the target accepts it | writes it out — refusing would be indistinguishable from a real refusal — and this file says so |
+| `Unsupported` | the target lacks it and there is no equivalent | refuses, naming what to write instead |
+
+The table matches on `Dialect` exhaustively, with no wildcard arm, so a dialect added
+to `sqlglot-rust` is a compile error here rather than a new target that silently
+inherits whichever family happened to claim it. That is not hypothetical: the
+`GROUPS` bug was `fam(d) != Fam::Mysql`, which accepted T-SQL and emitted
+`GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW` for a server whose frame syntax is
+`{ ROWS | RANGE }`.
+
+| capability | native | emulated | unsupported |
+|---|---|---|---|
+| `FULL [OUTER] JOIN` | everything else | MySQL, Doris, SingleStore, StarRocks | — |
+| `ROLLUP` / `CUBE` | everything else | SQLite, MySQL, Doris, SingleStore, StarRocks | — |
+| `GROUPS` frame | ANSI, PostgreSQL, DuckDB, SQLite, Trino, Presto, Athena, Oracle, Spark, Databricks | — | MySQL family, T-SQL, Fabric, BigQuery, Snowflake, Redshift, Teradata, Hive |
+| `RANGE` frame | every target whose `NULLS LAST` is native | — | every target that emulates `NULLS LAST` with a second sort key |
+| `QUALIFY` | DuckDB, Snowflake, BigQuery, Teradata | everywhere else (a derived table) | — |
+| `FILTER (WHERE …)` | ANSI, PostgreSQL, DuckDB, SQLite, Trino, Presto, Athena, Snowflake, Redshift | everywhere else (`SUM(CASE WHEN …)`) | — |
+| `list` / arrays | ANSI, PostgreSQL, DuckDB | — | everywhere else |
+| exact `DECIMAL(p, s)` | everything else | — | SQLite |
+
+The `RANGE` row is derived rather than listed twice: a dialect needs the second sort
+key exactly when its entry in `null_order` says there is no `NULLS LAST` syntax, so
+`supports_range_frame` reads that entry instead of keeping a second list that could
+disagree with it.
+
+`Unverified` is not a fifth kind of support. It is the honest name for "the spelling
+is what this compiler intends and nothing more is known", and the coverage table at the
+top of this file is where those targets are listed.
+
 Rust unit tests check generated SQL for selected constructs across these
 dialects. Those tests catch regressions in the emitted text, while the differential
 tests check query results for the cases in
 [`crates/cagara-sql/tests/engines.rs`](../crates/cagara-sql/tests/engines.rs).
-The live-engine suite is required in CI and can be skipped locally when the
-shells are unavailable.
+
+CI runs the SQLite and DuckDB half of that suite on every push, from pinned
+versions of both shells; the other three engines (PostgreSQL through PGlite, Trino,
+MariaDB) are a local run. `CAGARA_ENGINES` picks the engines a run may use, so the
+CI job requires the two it installs without failing on the three it does not — see
+[`ENGINE-TESTS.md`](ENGINE-TESTS.md).
 
 `list` is the one value type that is not portable. `arrayAgg`, a list literal, `<>`, `listLength`,
 `listContains` and `unnest` are spelled for PostgreSQL (`ARRAY[…]`, `ARRAY_AGG`, `||`,
@@ -64,13 +112,31 @@ SQLite and T-SQL have no format *parser* (SQLite reads ISO strings only, T-SQL's
 `PARSE` is culture-driven), so `parseDate` is refused there; both can still print
 by format.
 
-Two constructs are deliberately refused rather than emitted in a dialect that
-cannot mean them:
+## Rewritten instead of refused
 
-- `fullJoin` is an error for the MySQL family, which has no
-  `FULL [OUTER] JOIN`. Rewriting it would require deciding which predicate
-  null-extends which side; the portable workaround is
-  `leftJoin`/`rightJoin` plus `unionAll`.
+A construct the target cannot spell is **rewritten into equivalent SQL** wherever an
+equivalent exists, so the language does not change with `--dialect`. Two are:
+
+- `fullJoin` on the MySQL family. MySQL has only `LEFT`/`RIGHT` joins, so the join
+  becomes `(l LEFT JOIN r ON p) UNION ALL (r` with no match`)`, and the second branch
+  is an anti-join on the same predicate with the sides exchanged rather than
+  `RIGHT JOIN … WHERE <some left column> IS NULL`. The anti-join is what makes it
+  exact. The `IS NULL` test has to name a column, and is only correct if that column
+  is non-NULL on every matched row — which no general predicate promises. Measured on
+  SQLite with a matched pair whose left `name` is NULL, the `IS NULL` form returned
+  that row twice; the anti-join returned it once, exactly as `FULL JOIN` did.
+- `rollup`/`cube` on SQLite and the MySQL family. Grouping sets are a family of key
+  lists — `ROLLUP(a, b)` is `{(a, b), (a), ()}` — so the rewrite enumerates them: one
+  `agg` per set over the same input, `UNION ALL`ed, with the excluded keys written as
+  NULL. Two shapes in one clause are their cross product, which is what the clause
+  means. MySQL's `WITH ROLLUP` is *not* used: it rolls up the whole key list and
+  cannot be combined with `ORDER BY`.
+
+Both rewrites are in [`crates/cagara-sql/src/emulate.rs`](../crates/cagara-sql/src/emulate.rs)
+and produce ordinary relational algebra, so the lowerer sees nothing new.
+
+One construct is refused rather than emitted in a dialect that cannot mean it:
+
 - An empty `inList []` lowers to a constant `FALSE` (or `TRUE` when negated),
   because SQL has no empty `IN ()`. The target never sees an empty list.
 
@@ -90,7 +156,7 @@ different intrinsic spelling or semantic adjustment.
 ## Why the date and string intrinsics are spelled in Rust
 
 It is tempting to write the prelude's date and string operations as ANSI SQL
-and let `sqlglot-rust` transpile them. The pinned version (0.10.30, the newest
+and let `sqlglot-rust` transpile them. The pinned version (0.11.2, the newest
 published) cannot do that, and feeding it dialect-specific SQL text is actively
 unsafe:
 

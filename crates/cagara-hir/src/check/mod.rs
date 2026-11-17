@@ -122,6 +122,11 @@ pub(crate) struct RawTypeError {
     def: usize,
     span: Span,
     message: String,
+    /// The diagnostic's machine-readable identity. `RawErrorKind` below is a
+    /// different question — how the *aggregator* must treat it — and both are
+    /// needed: one says what kind of mistake this is, the other whether it is
+    /// one of a chain's many copies.
+    diag_kind: crate::workspace::DiagKind,
     kind: RawErrorKind,
     /// `Warning` for a diagnostic the program is allowed to produce: the query
     /// compiles and means what its types say, and the reader is told anyway.
@@ -631,7 +636,12 @@ fn def_check(db: &dyn salsa::Database, input: ModuleInput, def: usize) -> Arc<De
     // attributed to *its* own definition, and that definition's check reports
     // it. Passing it on here would report it twice.
     let errors: Vec<RawTypeError> = c.errors.iter().filter(|e| e.def == def).cloned().collect();
-    let warnings: Vec<(Span, String, Vec<crate::workspace::Suggestion>)> = c.warnings.clone();
+    let warnings: Vec<(
+        Span,
+        String,
+        crate::workspace::DiagKind,
+        Vec<crate::workspace::Suggestion>,
+    )> = c.warnings.clone();
     Arc::new(DefCheck {
         scheme,
         failed,
@@ -654,7 +664,13 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
     let mut schemes = HashMap::new();
     let mut types = HashMap::new();
     let mut errors = Vec::new();
-    let mut warned: Vec<(usize, Span, String, Vec<crate::workspace::Suggestion>)> = Vec::new();
+    let mut warned: Vec<(
+        usize,
+        Span,
+        String,
+        crate::workspace::DiagKind,
+        Vec<crate::workspace::Suggestion>,
+    )> = Vec::new();
     let mut typed = HashMap::new();
     let mut probe_fields = None;
     let mut chain_reported = false;
@@ -677,8 +693,8 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
             }
             errors.push(error.clone());
         }
-        for (span, message, suggestions) in &checked.warnings {
-            warned.push((def, *span, message.clone(), suggestions.clone()));
+        for (span, message, kind, suggestions) in &checked.warnings {
+            warned.push((def, *span, message.clone(), *kind, suggestions.clone()));
         }
         if let Some(body) = &checked.typed {
             typed.insert((m, def), body.clone());
@@ -734,6 +750,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
                     start,
                     end,
                     e.message,
+                    e.diag_kind,
                     e.suggestions,
                 );
                 TypeError {
@@ -752,7 +769,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
     // against this module's text and carrying the span the checker reported —
     // and are told apart by the severity on the diagnostic.
     let mut errors: Vec<TypeError> = errors;
-    for (def, span, message, suggestions) in warned {
+    for (def, span, message, kind, suggestions) in warned {
         let (start, end) = place(span, def);
         errors.push(TypeError {
             module: m,
@@ -764,6 +781,7 @@ fn module_check(db: &dyn salsa::Database, input: ModuleInput) -> Arc<ModuleCheck
                 start,
                 end,
                 message,
+                kind,
                 suggestions,
             )
             .as_warning(),
@@ -820,7 +838,12 @@ struct DefCheck {
     errors: Vec<RawTypeError>,
     /// Advice reported at this definition: kept apart from `errors` so no
     /// reader that asks "did this check" has to filter by severity.
-    warnings: Vec<(Span, String, Vec<crate::workspace::Suggestion>)>,
+    warnings: Vec<(
+        Span,
+        String,
+        crate::workspace::DiagKind,
+        Vec<crate::workspace::Suggestion>,
+    )>,
     /// The row a `PROBE_FIELD` column saw here, if this is the definition that
     /// referenced it.
     probe_fields: Option<Vec<(String, String)>>,

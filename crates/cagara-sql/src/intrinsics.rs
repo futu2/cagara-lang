@@ -27,7 +27,7 @@
 //! `kind` is `DATE` or `TIMESTAMP`. Dialects not named below get the ANSI /
 //! Postgres spelling.
 
-use crate::dialect::{fam, Fam};
+use crate::dialect::{fam, support, Cap, Fam};
 use crate::stage::atomic;
 use sqlglot_rust::ast::{
     BinaryOperator, DataType, DateTimeField, Expr, QuoteStyle, TypedFunction, UnaryOperator,
@@ -38,11 +38,11 @@ use sqlglot_rust::Dialect;
 /// A `CAGARA_*` call that is not a known intrinsic is an error rather than
 /// SQL that the target engine would reject.
 pub fn lower(e: Expr, to: Dialect) -> Result<Expr, String> {
-    let f = fam(to);
-    crate::stage::try_transform_deep(e, &|e| node(e, f))
+    crate::stage::try_transform_deep(e, &|e| node(e, to))
 }
 
-fn node(e: Expr, f: Fam) -> Result<Expr, String> {
+fn node(e: Expr, to: Dialect) -> Result<Expr, String> {
+    let f = fam(to);
     let Expr::Function {
         name,
         args,
@@ -67,10 +67,10 @@ fn node(e: Expr, f: Fam) -> Result<Expr, String> {
             within_group,
         });
     }
-    if let Some(msg) = list_refusal(&upper, f) {
+    if let Some(msg) = list_refusal(&upper, to) {
         return Err(msg);
     }
-    if let Some(msg) = decimal_refusal(&upper, f) {
+    if let Some(msg) = decimal_refusal(&upper, to) {
         return Err(msg);
     }
     // A format conversion takes a *format string*, which the language writes in
@@ -360,16 +360,20 @@ fn parse_or_format(name: &str, args: &[Expr], f: Fam) -> Result<Expr, String> {
 /// The message a dialect without an array type gives. A `list` has no SQL type
 /// there, and pretending it is JSON text would change the type without saying
 /// so.
-fn no_list(name: &str) -> String {
+///
+/// The target is named: a refusal is advice, and advice that does not say which
+/// `--dialect` produced it leaves the reader guessing which of their flags to change.
+fn no_list(name: &str, d: Dialect) -> String {
     format!(
-        "`{name}` needs a dialect with an array type, and this one has none; \
-         `list` values are PostgreSQL and DuckDB only"
+        "`{name}` needs a dialect with an array type, and `{}` has none; \
+         `list` values are PostgreSQL and DuckDB only",
+        crate::dialect::name(d)
     )
 }
 
 /// The dialects that can express a `list` at all.
-fn has_list(f: Fam) -> bool {
-    matches!(f, Fam::Ansi | Fam::Duck)
+fn has_list(d: Dialect) -> bool {
+    support(Cap::Arrays, d).emits()
 }
 
 /// The dialects that can hold an exact decimal.
@@ -378,18 +382,18 @@ fn has_list(f: Fam) -> bool {
 /// value cast to `DECIMAL(10, 2)` there is a binary float wearing the type's
 /// name — the one thing this type exists to prevent. Refusing is the honest
 /// answer, the same way `list` and `try*` are refused.
-fn has_decimal(f: Fam) -> bool {
-    !matches!(f, Fam::Sqlite)
+fn has_decimal(d: Dialect) -> bool {
+    support(Cap::ExactDecimal, d).emits()
 }
 
 /// The refusal for a decimal cast on a dialect that cannot hold one.
-fn decimal_refusal(name: &str, f: Fam) -> Option<String> {
+fn decimal_refusal(name: &str, d: Dialect) -> Option<String> {
     let what = match name {
         "CAGARA_TO_DECIMAL" => "`toDecimal`",
         "CAGARA_TRY_DECIMAL" => "`tryDecimal`",
         _ => return None,
     };
-    (!has_decimal(f)).then(|| {
+    (!has_decimal(d)).then(|| {
         format!(
             "{what} needs an exact decimal type, and this dialect has none: SQLite's \
              NUMERIC affinity stores the value as REAL or INTEGER, so the precision \
@@ -402,8 +406,8 @@ fn decimal_refusal(name: &str, f: Fam) -> Option<String> {
 
 /// The refusal for `unnest`, which is a relational node rather than a template:
 /// the lowerer emits its SQL directly, so it asks here for the wording.
-pub(crate) fn unnest_refusal(f: Fam) -> Option<String> {
-    list_refusal("CAGARA_UNNEST", f)
+pub(crate) fn unnest_refusal(d: Dialect) -> Option<String> {
+    list_refusal("CAGARA_UNNEST", d)
 }
 
 /// The refusal for a `list` intrinsic on a dialect with no array type.
@@ -411,7 +415,7 @@ pub(crate) fn unnest_refusal(f: Fam) -> Option<String> {
 /// Checked before the intrinsic is lowered, so the message is about the target
 /// rather than about an unknown name: `list` is a type the language has, and
 /// this engine is the thing that cannot hold it.
-fn list_refusal(name: &str, f: Fam) -> Option<String> {
+fn list_refusal(name: &str, d: Dialect) -> Option<String> {
     let list_intrinsic = match name {
         "CAGARA_LIST" => "a list literal",
         "CAGARA_ARRAY_AGG" => "`arrayAgg`",
@@ -422,7 +426,7 @@ fn list_refusal(name: &str, f: Fam) -> Option<String> {
         "CAGARA_UNNEST" => "`unnest`",
         _ => return None,
     };
-    (!has_list(f)).then(|| no_list(list_intrinsic))
+    (!has_list(d)).then(|| no_list(list_intrinsic, d))
 }
 
 fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {

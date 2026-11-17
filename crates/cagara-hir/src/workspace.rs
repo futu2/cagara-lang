@@ -188,10 +188,78 @@ impl Suggestion {
     }
 }
 
+/// What kind of mistake a diagnostic is: its machine-readable identity.
+///
+/// The *message* is the language's wording and is meant to change as the wording
+/// improves. A client that filters, links or counts on a diagnostic needs an identity
+/// that does not move when a sentence is reworded, so the kind is carried on the
+/// diagnostic rather than inferred by matching the message text.
+///
+/// That inference is what this replaced: the language server derived its `code` by
+/// searching the message for substrings (`"type mismatch"` → `type-mismatch`), which
+/// made an edit to the wording a silent change to machine-readable behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DiagKind {
+    /// A column the row does not have.
+    UnknownColumn,
+    /// A name or a type the language does not have.
+    UnknownName,
+    /// Two types that do not unify.
+    TypeMismatch,
+    /// An overload set with no fitting candidate, or a use that fits several.
+    Overload,
+    /// An expression where a condition (`bool`) was needed.
+    NotACondition,
+    /// An aggregate or a window function where one cannot go.
+    AggregatePlacement,
+    /// A join whose two inputs share a column name.
+    JoinOverlap,
+    /// A join-side column (`.<x`, `.>x`) where it means nothing.
+    JoinSide,
+    /// A token the grammar does not accept.
+    Syntax,
+    /// A definition that refers to itself.
+    Recursion,
+    /// A construct the target cannot express: the SQL lowering's refusals, and
+    /// the ones that are about the target's dialect rather than the program.
+    Lowering,
+    /// A failure that is none of the above. The catch-all, so that a kind is
+    /// always known and a caller never has to guess.
+    #[default]
+    Other,
+}
+
+impl DiagKind {
+    /// The stable slug a client sees.
+    ///
+    /// These strings are the ones the language server published before the kind
+    /// existed (derived by matching the message text), so a client that filters
+    /// on them keeps working.
+    pub fn code(self) -> &'static str {
+        match self {
+            DiagKind::UnknownColumn => "unknown-column",
+            DiagKind::UnknownName => "unknown-name",
+            DiagKind::TypeMismatch => "type-mismatch",
+            DiagKind::Overload => "overload",
+            DiagKind::NotACondition => "not-a-condition",
+            DiagKind::AggregatePlacement => "aggregate-placement",
+            DiagKind::JoinOverlap => "join-overlap",
+            DiagKind::JoinSide => "join-side",
+            DiagKind::Syntax => "syntax",
+            DiagKind::Recursion => "recursion",
+            DiagKind::Lowering => "lowering",
+            DiagKind::Other => "error",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Diag {
     /// Whether this fails the build or only informs it.
     pub severity: Severity,
+    /// What kind of mistake this is: the machine-readable identity, which the
+    /// message (its wording) is not.
+    pub kind: DiagKind,
     pub path: String,
     pub line: usize,
     /// One-based **byte** offset in `source`. The language server slices with
@@ -396,6 +464,7 @@ impl Workspace {
                 // that was never loaded.
                 ws.import_diags.push(Diag {
                     severity: Severity::Error,
+                    kind: DiagKind::Other,
                     path: p.display().to_string(),
                     line: 0,
                     col: 0,
@@ -1011,7 +1080,8 @@ impl Workspace {
         let offset = imp.span.start as usize;
         if self.stack.contains(&target) {
             let msg = format!("import cycle: `{}` is already being loaded", imp.path);
-            self.import_diags.push(make_diag(from, text, offset, msg));
+            self.import_diags
+                .push(make_diag(from, text, offset, msg, DiagKind::Other));
             return None;
         }
         match self
@@ -1024,13 +1094,20 @@ impl Workspace {
             Ok(t) => Some(self.add(target, t)),
             Err(e) => {
                 let msg = format!("cannot import `{}`: {e}", imp.path);
-                self.import_diags.push(make_diag(from, text, offset, msg));
+                self.import_diags
+                    .push(make_diag(from, text, offset, msg, DiagKind::Other));
                 None
             }
         }
     }
 
-    pub fn diag(&self, m: usize, offset: usize, message: impl Into<String>) -> Diag {
+    pub fn diag(
+        &self,
+        m: usize,
+        offset: usize,
+        message: impl Into<String>,
+        kind: DiagKind,
+    ) -> Diag {
         let md = &self.modules[m];
         make_diag_indexed(
             &md.path,
@@ -1039,12 +1116,19 @@ impl Workspace {
             offset,
             offset,
             message.into(),
+            kind,
             Vec::new(),
         )
     }
 
     /// A diagnostic underlining `span` in module `m`.
-    pub fn diag_span(&self, m: usize, span: Span, message: impl Into<String>) -> Diag {
+    pub fn diag_span(
+        &self,
+        m: usize,
+        span: Span,
+        message: impl Into<String>,
+        kind: DiagKind,
+    ) -> Diag {
         let md = &self.modules[m];
         make_diag_indexed(
             &md.path,
@@ -1053,6 +1137,7 @@ impl Workspace {
             span.start as usize,
             span.end as usize,
             message.into(),
+            kind,
             Vec::new(),
         )
     }
@@ -1102,6 +1187,7 @@ fn file_diags(
                 e.offset,
                 e.offset,
                 format!("syntax error: {}", e.message),
+                DiagKind::Syntax,
                 Vec::new(),
             )
         })
@@ -1126,6 +1212,7 @@ fn file_diags(
             parsed.module.defs[i].span.start as usize,
             parsed.module.defs[i].span.start as usize,
             msg,
+            DiagKind::Overload,
             Vec::new(),
         ));
     }
@@ -1188,6 +1275,7 @@ fn file_diags(
             parsed.module.defs[j].span.start as usize,
             parsed.module.defs[j].span.start as usize,
             msg,
+            DiagKind::Overload,
             Vec::new(),
         ));
     }
@@ -1205,6 +1293,7 @@ fn file_diags(
             parsed.module.defs[i].span.start as usize,
             parsed.module.defs[i].span.start as usize,
             msg,
+            DiagKind::Overload,
             Vec::new(),
         ));
     }
@@ -1314,8 +1403,8 @@ fn params_of(ty: &TypeExpr) -> usize {
     }
 }
 
-fn make_diag(path: &Path, text: &str, offset: usize, message: String) -> Diag {
-    make_diag_range(path, text, offset, offset, message)
+fn make_diag(path: &Path, text: &str, offset: usize, message: String, kind: DiagKind) -> Diag {
+    make_diag_range(path, text, offset, offset, message, kind)
 }
 
 /// Byte offsets where each line of `text` starts, always including `0`.
@@ -1336,6 +1425,10 @@ fn line_at(starts: &[usize], offset: usize) -> usize {
 
 /// Build a diagnostic from a precomputed line index. Prefer this over
 /// [`make_diag_range`] whenever several diagnostics share one text.
+// Every argument is one field of the `Diag` below, and a caller always has all of
+// them; the alternative is a builder that would let the location and the message be
+// separated, which is exactly how a diagnostic ends up pointing at the wrong line.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn make_diag_indexed(
     path: &Path,
     text: &str,
@@ -1343,6 +1436,7 @@ pub(crate) fn make_diag_indexed(
     start: usize,
     end: usize,
     message: String,
+    kind: DiagKind,
     suggestions: Vec<Suggestion>,
 ) -> Diag {
     // An offset from a parse of a *different* text can land inside a
@@ -1367,6 +1461,7 @@ pub(crate) fn make_diag_indexed(
         // reporting something that fails the build. `with_severity` is how the
         // checker marks the handful that only advise.
         severity: Severity::Error,
+        kind,
         suggestions,
         path: path.display().to_string(),
         line,
@@ -1387,7 +1482,14 @@ impl Diag {
 
 /// [`make_diag_indexed`] for a caller with no line index: builds one per call,
 /// so it is linear in the text length. Use the indexed form for repeated calls.
-fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: String) -> Diag {
+fn make_diag_range(
+    path: &Path,
+    text: &str,
+    start: usize,
+    end: usize,
+    message: String,
+    kind: DiagKind,
+) -> Diag {
     make_diag_indexed(
         path,
         text,
@@ -1395,13 +1497,14 @@ fn make_diag_range(path: &Path, text: &str, start: usize, end: usize, message: S
         start,
         end,
         message,
+        kind,
         Vec::new(),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Diag, Severity, Workspace};
+    use super::{Diag, DiagKind, Severity, Workspace};
     use crate::db::SourceFile;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -1642,7 +1745,7 @@ mod tests {
         }
         // Diagnostics render against the same text the span came from, so an
         // offset that is not a char boundary of it cannot panic.
-        let _ = ws.diag(root, 7, "boom");
+        let _ = ws.diag(root, 7, "boom", DiagKind::Other);
     }
 
     #[test]
@@ -1650,9 +1753,14 @@ mod tests {
         // A span from a parse of another text can land inside a multi-byte
         // character; rendering must not panic.
         let ws = Workspace::from_source("q = \"héllo\"\n");
-        let diag = ws.diag(ws.root, 7, "boom");
+        let diag = ws.diag(ws.root, 7, "boom", DiagKind::Other);
         assert_eq!(diag.line, 1, "{diag:?}");
-        let diag = ws.diag(ws.root, "q = \"héllo\"\n".len() - 1, "boom");
+        let diag = ws.diag(
+            ws.root,
+            "q = \"héllo\"\n".len() - 1,
+            "boom",
+            DiagKind::Other,
+        );
         assert_eq!(diag.line, 1, "{diag:?}");
     }
 
@@ -1667,7 +1775,7 @@ mod tests {
             if !text.is_char_boundary(offset) {
                 continue;
             }
-            let d = ws.diag(ws.root, offset, "x");
+            let d = ws.diag(ws.root, offset, "x", DiagKind::Other);
             let before = &text[..offset];
             let expected_line = before.matches('\n').count() + 1;
             let line_start = before.rfind('\n').map_or(0, |i| i + 1);
@@ -1683,6 +1791,7 @@ mod tests {
         let diag = Diag {
             suggestions: Vec::new(),
             severity: Severity::Error,
+            kind: DiagKind::Other,
             path: "q.cagara".into(),
             line: 1,
             col: 12,
@@ -1706,6 +1815,7 @@ mod tests {
         let diag = Diag {
             suggestions: Vec::new(),
             severity: Severity::Error,
+            kind: DiagKind::Other,
             path: "q.cagara".into(),
             line: 1,
             col: 500,

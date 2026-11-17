@@ -22,7 +22,7 @@ pub use compile::{
 };
 pub use core::{Error, Fault, Origin, RowType, ScalarType};
 pub use db::{Database, SourceFile};
-pub use workspace::{Diag, Workspace};
+pub use workspace::{Diag, DiagKind, Workspace};
 
 mod compile;
 mod incremental;

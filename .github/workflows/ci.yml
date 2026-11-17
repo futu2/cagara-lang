@@ -39,20 +39,100 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # No database engines here on purpose: the differential suite in
+      # No database engines in *this* job on purpose: the differential suite in
       # `crates/cagara-sql/tests/engines.rs` compares rows against SQLite, DuckDB,
-      # PostgreSQL, Trino, MariaDB and a Python sqlglot emulation, and running it
-      # needs three downloads and two servers. That is too much for every push, so
-      # `CAGARA_NO_ENGINES` turns those tests into skips explicitly — not by leaving
-      # the engines out, because the runner's own `sqlite3` is older than the 3.46
-      # that `floor` needs and would fail instead of skipping.
+      # PostgreSQL, Trino, MariaDB and a Python sqlglot emulation, and the full run
+      # needs three downloads and two servers. `CAGARA_NO_ENGINES` turns those tests
+      # into skips explicitly — not by leaving the engines out, because the runner's
+      # own `sqlite3` is older than the 3.46 that `floor` needs and would fail instead
+      # of skipping.
       #
       # What still runs here is every test that compares the generated SQL text, which
-      # is what catches a wrong dialect spelling without a server.
-      # `docs/ENGINE-TESTS.md` is how to run the real comparison.
+      # is what catches a wrong dialect spelling without a server. The two engines that
+      # need no server are executed by the `engines` job below, on every push.
       - run: cargo test --workspace --locked
         env:
           CAGARA_NO_ENGINES: "1"
+
+  # SQLite and DuckDB run on every push, at versions this workflow pins itself.
+  # PostgreSQL (PGlite), Trino and MariaDB are still not here: they need downloads
+  # and servers a push should not pay for. `docs/ENGINE-TESTS.md` is how to run the
+  # whole matrix, and what each engine is worth as evidence.
+  #
+  # The pin is the point, not decoration. `ubuntu-latest` ships an `sqlite3` older
+  # than the 3.46 that the `floor` date modifier needs, so the engine is present and
+  # wrong rather than absent, and the suite fails instead of skipping. Downloading a
+  # fixed version also means a green run says something about the version the dev
+  # shell has, instead of about whatever the image happened to carry that week.
+  engines:
+    name: Engines (SQLite, DuckDB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # Both versions live here and nowhere else. `docs/ENGINE-TESTS.md` names the
+      # same two; the check step below fails if what runs is not what is written here.
+      SQLITE_VERSION: "3.54.1"
+      SQLITE_YEAR: "2026"
+      # `3540100` is 3.54.1 in SQLite's own `MmmPPpp` numbering.
+      SQLITE_ARCHIVE: "sqlite-tools-linux-x64-3540100.zip"
+      SQLITE_SHA256: "a21062b333c7d66d7d8c42054c0fab1c1899729185289ad14bd4f25f9f576d14"
+      DUCKDB_VERSION: "v1.5.6"
+      DUCKDB_ARCHIVE: "duckdb_cli-linux-amd64.zip"
+      DUCKDB_SHA256: "6e89deac1ebbc36eed0291caf8b567b030c7b86ac35998f71854e22b3c5d5e2f"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # Keep in sync with `rust-toolchain.toml`; the `rust` job checks it.
+          toolchain: "1.100.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the pinned engines
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/engines/bin"
+          cd "$RUNNER_TEMP/engines"
+          curl -fsSL --retry 3 --retry-delay 2 -o "$SQLITE_ARCHIVE" \
+            "https://sqlite.org/$SQLITE_YEAR/$SQLITE_ARCHIVE"
+          curl -fsSL --retry 3 --retry-delay 2 -o "$DUCKDB_ARCHIVE" \
+            "https://github.com/duckdb/duckdb/releases/download/$DUCKDB_VERSION/$DUCKDB_ARCHIVE"
+          # Neither project publishes a checksum file next to these archives, so the
+          # digests above were recorded when the versions were chosen. A truncated
+          # transfer or an upstream re-upload fails here rather than in the suite.
+          echo "$SQLITE_SHA256  $SQLITE_ARCHIVE" | sha256sum -c -
+          echo "$DUCKDB_SHA256  $DUCKDB_ARCHIVE" | sha256sum -c -
+          unzip -q -o "$SQLITE_ARCHIVE" -d sqlite
+          unzip -q -o "$DUCKDB_ARCHIVE" -d duckdb
+          install -m 0755 sqlite/sqlite3 duckdb/duckdb "$RUNNER_TEMP/engines/bin/"
+          echo "$RUNNER_TEMP/engines/bin" >> "$GITHUB_PATH"
+      - name: The installed versions are the pinned ones
+        run: |
+          set -euo pipefail
+          sqlite_got="$(sqlite3 --version | cut -d' ' -f1)"
+          duckdb_got="$(duckdb --version | cut -d' ' -f1)"
+          echo "sqlite3 $sqlite_got, duckdb $duckdb_got"
+          if [ "$sqlite_got" != "$SQLITE_VERSION" ]; then
+            echo "::error::sqlite3 is $sqlite_got, not the pinned $SQLITE_VERSION"
+            exit 1
+          fi
+          if [ "$duckdb_got" != "$DUCKDB_VERSION" ]; then
+            echo "::error::duckdb is $duckdb_got, not the pinned $DUCKDB_VERSION"
+            exit 1
+          fi
+          # 3.46 is why this job pins at all: `floor` as a date modifier exists only
+          # from there, and an older `sqlite3` fails the suite instead of skipping.
+          if [ "$(printf '%s\n%s\n' 3.46 "$sqlite_got" | sort -V | head -n1)" != "3.46" ]; then
+            echo "::error::sqlite3 $sqlite_got is below the 3.46 the suite needs"
+            exit 1
+          fi
+      - name: Differential tests, SQLite and DuckDB only
+        run: |
+          set -euo pipefail
+          # The allow-list is what keeps this honest: `CAGARA_REQUIRE_ENGINES=1` then
+          # means "the two engines named here must be present", not "every engine in
+          # the suite must be present", so the absent Trino/MariaDB/PostgreSQL cannot
+          # turn a green run red for being absent on purpose.
+          CAGARA_ENGINES=sqlite,duckdb CAGARA_REQUIRE_ENGINES=1 \
+            cargo test -p cagara-sql --test engines --locked
 
   docs:
     name: Rustdoc

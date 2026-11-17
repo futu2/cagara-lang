@@ -179,10 +179,10 @@ pub(crate) enum RowError {
 
 impl RowError {
     /// The diagnostic for the stage that owns the obligation.
-    pub(crate) fn message(&self) -> String {
+    pub(crate) fn message(&self) -> Fail {
         match self {
             RowError::MissingLabel { label, fields } => missing(label, fields),
-            RowError::UnknownWrapper { name } => format!("unknown wrapper `{name}`"),
+            RowError::UnknownWrapper { name } => Fail::from(format!("unknown wrapper `{name}`")),
         }
     }
 }
@@ -468,7 +468,10 @@ mod tests {
         );
         match reduce_row(&Unbound, &removed) {
             RowOutcome::Failed { error, .. } => {
-                assert!(error.message().contains("no column `nope`"), "{error:?}");
+                assert!(
+                    error.message().message.contains("no column `nope`"),
+                    "{error:?}"
+                );
             }
             other => panic!("expected a failure, got {other:?}"),
         }

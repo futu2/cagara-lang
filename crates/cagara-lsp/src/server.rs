@@ -5,11 +5,13 @@
 
 use crate::{analysis, uri};
 use cagara_hir::workspace::Workspace;
+use cagara_sql::Dialect;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
-    Cancel, DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument,
-    DidOpenTextDocument, DidSaveTextDocument, LogMessage, Notification as _, PublishDiagnostics,
+    Cancel, DidChangeConfiguration, DidChangeTextDocument, DidChangeWatchedFiles,
+    DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, LogMessage, Notification as _,
+    PublishDiagnostics, ShowMessage,
 };
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest,
@@ -29,8 +31,8 @@ use lsp_types::{
     PublishDiagnosticsParams, ReferenceParams, RenameOptions, RenameParams, SaveOptions,
     SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
-    SignatureInformation, SymbolInformation, TextDocumentPositionParams,
+    SemanticTokensServerCapabilities, ServerCapabilities, ShowMessageParams, SignatureHelp,
+    SignatureHelpOptions, SignatureInformation, SymbolInformation, TextDocumentPositionParams,
     TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
     TextDocumentSyncSaveOptions, Uri, WorkspaceEdit, WorkspaceSymbolParams,
 };
@@ -59,6 +61,14 @@ struct State {
     /// All open buffers share one module graph. The selected root is changed
     /// for each request so imported unsaved files are visible everywhere.
     ws: Workspace,
+    /// The target the documents are written for, from `cagara.dialect`.
+    ///
+    /// [`Dialect::Ansi`] until the client says otherwise, which is the right fallback:
+    /// ANSI is the permissive target, so a document whose target nobody stated gets
+    /// only the refusals that are about the program. Once it is set, the diagnostics
+    /// here are the ones `cagara --dialect <that>` reports — see
+    /// `analysis::diagnostics_with`.
+    dialect: Dialect,
 }
 
 impl State {
@@ -66,6 +76,7 @@ impl State {
         Self {
             docs: HashMap::new(),
             ws: Workspace::from_source(""),
+            dialect: Dialect::Ansi,
         }
     }
 
@@ -262,9 +273,28 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
             trigger_characters: Some(vec![".".into()]),
             ..Default::default()
         }),
+        // The dialect arrives through `initializationOptions` and changes through
+        // `workspace/didChangeConfiguration`. There is no server capability that
+        // advertises the latter — the protocol has the client send it to every server
+        // it has a configuration section for — so nothing is declared for it here. The
+        // handler below is what makes it work, and the VS Code client is configured to
+        // send it (see `editors/vscode`).
         ..Default::default()
     };
-    conn.initialize(serde_json::to_value(caps)?)?;
+    // The return value is the client's `initialize` params, which is where the
+    // configured dialect arrives. `Connection::initialize` builds the reply itself,
+    // so this is the one place the request is visible without re-implementing it.
+    let init_params = conn.initialize(serde_json::to_value(caps)?)?;
+    let dialect = dialect_from_initialize(&init_params);
+    if dialect != Dialect::Ansi {
+        conn.sender.send(Message::Notification(Notification::new(
+            LogMessage::METHOD.to_string(),
+            serde_json::to_value(LogMessageParams {
+                typ: MessageType::INFO,
+                message: format!("cagara: dialect `{}`", cagara_sql::dialect::name(dialect)),
+            })?,
+        )))?;
+    }
     // The client logs this next to its own output, so the answer to "which
     // compiler is this window running" is in the log rather than in a guess.
     // A copy carries the copy's timestamp and a staged file looks new, so the
@@ -285,7 +315,7 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
         .name("cagara-analysis".into())
         .spawn({
             let cancelled = Arc::clone(&cancelled);
-            move || analyse(jobs, sender, cancelled)
+            move || analyse(jobs, sender, cancelled, dialect)
         })?;
     // A change is published for its own document immediately, so the file
     // being edited shows its diagnostics without waiting. Other open documents
@@ -512,8 +542,14 @@ struct Batch {
 /// text the client has already moved past. (A request that has to see older
 /// text is a request for a versioned document, which this server does not
 /// keep.)
-fn analyse(jobs: Receiver<Work>, sender: Sender<Message>, cancelled: Arc<Cancellations>) {
+fn analyse(
+    jobs: Receiver<Work>,
+    sender: Sender<Message>,
+    cancelled: Arc<Cancellations>,
+    dialect: Dialect,
+) {
     let mut state = State::new();
+    state.dialect = dialect;
     while let Some(batch) = next_batch(&jobs) {
         for n in batch.notify {
             let method = n.method.clone();
@@ -1168,6 +1204,51 @@ fn notification(sender: &Sender<Message>, state: &mut State, n: Notification) ->
             }
             Ok(())
         }
+        // The target moved. Every open document's diagnostics depend on it now — a
+        // `groups` frame is refused for MySQL and fine for DuckDB — so the whole set
+        // is republished rather than only the roots the workspace considers dirty. It
+        // is a settings change, not a keystroke: it happens once, and a document whose
+        // squiggle did not move is cheap to leave alone only if nothing recomputed it,
+        // which is the opposite of what changed here.
+        DidChangeConfiguration::METHOD => {
+            // `DidChangeConfigurationParams` is `{ settings: Value }`, and the server
+            // does not ask for `workspace/configuration` because that is a *request*
+            // from server to client, which this loop answers rather than makes. So the
+            // settings are read from what the client sent.
+            let _: lsp_types::DidChangeConfigurationParams =
+                serde_json::from_value(n.params.clone())?;
+            let settings = n.params.get("settings").cloned().unwrap_or_default();
+            let Some((dialect, unknown)) = dialect_from_settings(&settings) else {
+                return Ok(());
+            };
+            if let Some(name) = unknown {
+                // Reported, not fatal: a misspelled dialect must not take the session
+                // down, and the fallback keeps the diagnostics coming.
+                sender.send(Message::Notification(Notification::new(
+                    ShowMessage::METHOD.to_string(),
+                    serde_json::to_value(ShowMessageParams {
+                        typ: MessageType::WARNING,
+                        message: format!(
+                            "cagara: unknown dialect `{name}`; using `ansi`. Known: \
+                             ansi, postgres, duckdb, sqlite, mysql, trino, spark, bigquery, \
+                             snowflake, tsql, and the aliases each of those accepts"
+                        ),
+                    })?,
+                )))?;
+            }
+            if dialect == state.dialect {
+                return Ok(());
+            }
+            state.dialect = dialect;
+            // Every open document, because the answer changed for all of them. The
+            // set is the open tabs, not the tree, so this is a handful of documents —
+            // and it is a settings change, so it happens once rather than per keystroke.
+            let keys: Vec<String> = state.docs.keys().cloned().collect();
+            for key in keys {
+                publish_doc(sender, state, &key)?;
+            }
+            Ok(())
+        }
         DidChangeWatchedFiles::METHOD => {
             let _: lsp_types::DidChangeWatchedFilesParams = serde_json::from_value(n.params)?;
             // Same as a save, and for the same reason: a watcher event is one
@@ -1224,7 +1305,7 @@ fn publish_doc(sender: &Sender<Message>, state: &mut State, key: &str) -> Res<()
         .parse()
         .map_err(|e| format!("invalid document URI: {e}"))?;
     let version = state.docs.get(key).and_then(|d| d.version);
-    publish(sender, uri, &state.ws, version)?;
+    publish(sender, uri, &state.ws, version, state.dialect)?;
     // These diagnostics were computed from the workspace as it is now, so this
     // root has nothing outstanding.
     let root = state.ws.root;
@@ -1266,27 +1347,69 @@ fn publish_dirty(sender: &Sender<Message>, state: &mut State) -> Res<()> {
             .parse()
             .map_err(|e| format!("invalid document URI: {e}"))?;
         let version = state.docs.get(&key).and_then(|d| d.version);
-        publish(sender, uri, &state.ws, version)?;
+        publish(sender, uri, &state.ws, version, state.dialect)?;
     }
     Ok(())
 }
 
-fn publish(sender: &Sender<Message>, uri: Uri, ws: &Workspace, version: Option<i32>) -> Res<()> {
-    let diagnostics: Vec<Diagnostic> = analysis::diagnostics(ws)
+/// The dialect named in a client's `initialize` params, or ANSI.
+///
+/// Two spellings are accepted, because the two clients this project has differ: VS Code
+/// passes the whole `cagara` namespace (`{ "cagara": { "dialect": "mysql" } }`, which is
+/// what `contributes.configuration` produces), and anything else may send the flat form
+/// (`{ "dialect": "mysql" }`). Reading both means a client does not have to know which
+/// one the server prefers.
+///
+/// An unrecognized name is *not* an error here: it is reported once to the client and
+/// the fallback is used, because a save-time crash over a config value is worse than a
+/// diagnostic computed against ANSI.
+fn dialect_from_settings(value: &serde_json::Value) -> Option<(Dialect, Option<String>)> {
+    let name = value
+        .get("cagara")
+        .and_then(|c| c.get("dialect"))
+        .or_else(|| value.get("dialect"))
+        .and_then(|d| d.as_str())?;
+    match cagara_sql::dialect(name) {
+        Some(d) => Some((d, None)),
+        None => Some((Dialect::Ansi, Some(name.to_string()))),
+    }
+}
+
+/// `initialize` params → the configured dialect, ANSI when none is set.
+fn dialect_from_initialize(params: &serde_json::Value) -> Dialect {
+    let Some(options) = params.get("initializationOptions") else {
+        return Dialect::Ansi;
+    };
+    match dialect_from_settings(options) {
+        Some((d, _)) => d,
+        None => Dialect::Ansi,
+    }
+}
+
+fn publish(
+    sender: &Sender<Message>,
+    uri: Uri,
+    ws: &Workspace,
+    version: Option<i32>,
+    dialect: Dialect,
+) -> Res<()> {
+    let diagnostics: Vec<Diagnostic> = analysis::diagnostics_with(ws, dialect)
         .into_iter()
-        .map(|(range, message, severity)| {
-            let code = analysis::diagnostic_code(&message);
-            Diagnostic {
-                range,
-                severity: Some(match severity {
-                    cagara_hir::workspace::Severity::Error => DiagnosticSeverity::ERROR,
-                    cagara_hir::workspace::Severity::Warning => DiagnosticSeverity::WARNING,
-                }),
-                code: Some(lsp_types::NumberOrString::String(code.into())),
-                source: Some("cagara".into()),
-                message,
-                ..Default::default()
-            }
+        .map(|report| Diagnostic {
+            range: report.range,
+            severity: Some(match report.severity {
+                cagara_hir::workspace::Severity::Error => DiagnosticSeverity::ERROR,
+                cagara_hir::workspace::Severity::Warning => DiagnosticSeverity::WARNING,
+            }),
+            // The code is the diagnostic's *kind*, not a reading of its
+            // message: rewording a message must not change what a client
+            // filters or links on.
+            code: Some(lsp_types::NumberOrString::String(
+                analysis::diagnostic_code(report.kind).into(),
+            )),
+            source: Some("cagara".into()),
+            message: report.message,
+            ..Default::default()
         })
         .collect();
     let params = PublishDiagnosticsParams {
@@ -1417,6 +1540,14 @@ mod tests {
 
     impl Editor {
         fn start() -> Self {
+            Self::start_with(json!({ "capabilities": {} }))
+        }
+
+        /// A server started with these `initialize` params.
+        ///
+        /// The dialect comes in through `initializationOptions`, so a test that wants
+        /// one has to send the real request rather than `start`'s minimum.
+        fn start_with(params: Value) -> Self {
             let (server, client) = Connection::memory();
             let thread = std::thread::spawn(move || {
                 serve(&server, "0.0.0 (test)").map_err(|e| e.to_string())
@@ -1427,7 +1558,7 @@ mod tests {
                 next: 1,
                 caps: Value::Null,
             };
-            ed.caps = ed.ask("initialize", json!({ "capabilities": {} }));
+            ed.caps = ed.ask("initialize", params);
             ed.client
                 .sender
                 .send(notify("initialized", json!({})))
@@ -2112,7 +2243,7 @@ mod tests {
         .expect("queue");
         let t = std::thread::spawn({
             let cancelled = std::sync::Arc::new(Cancellations::default());
-            move || analyse(jobs, out, cancelled)
+            move || analyse(jobs, out, cancelled, cagara_sql::Dialect::Ansi)
         });
         // The answer arrives as a response message, like every other answer
         // now that the analysis thread replies directly. Everything the burst
@@ -2635,6 +2766,117 @@ mod tests {
             symbol_names(&after),
             ["alpha", "q"],
             "a save with no text must leave the buffer alone"
+        );
+        ed.close();
+    }
+
+    /// The dialect a client configures reaches the diagnostics it is shown.
+    ///
+    /// This is the setting the finding asked for, end to end through the protocol: a
+    /// `groups` window frame is refused for MySQL and T-SQL (both document
+    /// `{ ROWS | RANGE }`) and fine for DuckDB. So the same document must gain a
+    /// diagnostic when the server is initialized for MySQL and lose it when it is
+    /// re-initialized for DuckDB — which only happens if `cagara.dialect` is read and
+    /// threaded all the way into `cagara_sql::Options`.
+    ///
+    /// The negative control is built in: with no setting, the fallback is ANSI, which
+    /// has every frame unit, so the document is clean. A server that ignored the
+    /// setting would pass the ANSI case and fail the MySQL one.
+    #[test]
+    fn a_configured_dialect_reaches_the_diagnostics() {
+        const FRAME: &str = "f : query { k = int, n = int } = table \"m\" \"f\"\n\
+                            q = f & select { s = over { order = [asc .k], \
+                            frame = groups (preceding 1) currentRow } (sum .n) }\n";
+
+        // No setting: ANSI, which reads `GROUPS`, so nothing is reported.
+        let mut ed = Editor::start();
+        ed.open(URI, FRAME);
+        let none = ed.published(URI, Duration::from_secs(2));
+        assert!(
+            !none.iter().any(|d| d["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("`groups` window frame"))),
+            "with no dialect the fallback is ANSI, which has `GROUPS`: {none:?}"
+        );
+        ed.close();
+
+        // Initialized for MySQL, which does not: the refusal is published.
+        let mut ed = Editor::start_with(json!({
+            "capabilities": {},
+            "initializationOptions": { "cagara": { "dialect": "mysql" } },
+        }));
+        ed.open(URI, FRAME);
+        let mysql = ed.published(URI, Duration::from_secs(2));
+        assert!(
+            mysql.iter().any(|d| d["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("`groups` window frame"))),
+            "a MySQL window must show the frame refusal: {mysql:?}"
+        );
+        // And the code is the structured kind, not a reading of the message.
+        let refused = mysql
+            .iter()
+            .find(|d| {
+                d["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("`groups` window frame"))
+            })
+            .expect("the refusal");
+        assert_eq!(refused["code"], json!("lowering"), "{refused:?}");
+
+        // A settings change re-publishes: the same open document, now for DuckDB,
+        // which reads `GROUPS`, so the diagnostic goes away without reopening it.
+        ed.client
+            .sender
+            .send(notify(
+                "workspace/didChangeConfiguration",
+                json!({ "settings": { "cagara": { "dialect": "duckdb" } } }),
+            ))
+            .unwrap();
+        let duckdb = ed.published(URI, Duration::from_secs(2));
+        assert!(
+            duckdb.is_empty()
+                || !duckdb.iter().any(|d| d["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("`groups` window frame"))),
+            "after switching to duckdb the frame is readable: {duckdb:?}"
+        );
+        ed.close();
+    }
+
+    /// A misspelled dialect warns and falls back, rather than killing the session.
+    ///
+    /// A configuration value is not program text: getting it wrong must not stop the
+    /// editor working. The warning says what the known names are, and diagnostics keep
+    /// coming on the fallback so the user sees why nothing else changed.
+    #[test]
+    fn an_unknown_dialect_warns_and_falls_back() {
+        let mut ed = Editor::start_with(json!({
+            "capabilities": {},
+            "initializationOptions": { "cagara": { "dialect": "mysql" } },
+        }));
+        ed.open(URI, "q = 1\n");
+        let _ = ed.published(URI, Duration::from_secs(2));
+        ed.client
+            .sender
+            .send(notify(
+                "workspace/didChangeConfiguration",
+                json!({ "settings": { "cagara": { "dialect": "maysql" } } }),
+            ))
+            .unwrap();
+        let warnings: Vec<String> = ed
+            .notifications(Duration::from_secs(2))
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Notification(n) if n.method == "window/showMessage" => {
+                    n.params["message"].as_str().map(str::to_string)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            warnings.iter().any(|w| w.contains("maysql")),
+            "the warning must name the value that was not understood: {warnings:?}"
         );
         ed.close();
     }

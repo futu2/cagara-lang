@@ -281,6 +281,10 @@ impl RowType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Error {
     pub message: String,
+    /// What kind of mistake this is: the diagnostic's machine-readable identity,
+    /// carried from the constructor that knew the category to the `Diag` it
+    /// becomes. The message is only the wording.
+    pub kind: crate::workspace::DiagKind,
     pub origin: Option<Origin>,
     pub def: Option<usize>,
     /// Who is at fault: the program, or this phase?
@@ -330,9 +334,18 @@ impl Error {
     pub fn new(message: impl Into<String>) -> Self {
         Error {
             message: message.into(),
+            kind: crate::workspace::DiagKind::Other,
             origin: None,
             def: None,
             fault: Fault::Program,
+        }
+    }
+
+    /// An error whose kind the constructor knows.
+    pub fn kinded(kind: crate::workspace::DiagKind, message: impl Into<String>) -> Self {
+        Error {
+            kind,
+            ..Error::new(message)
         }
     }
 
@@ -342,6 +355,7 @@ impl Error {
     pub fn unsupported(message: impl Into<String>) -> Self {
         Error {
             message: message.into(),
+            kind: crate::workspace::DiagKind::Other,
             origin: None,
             def: None,
             fault: Fault::Compiler,

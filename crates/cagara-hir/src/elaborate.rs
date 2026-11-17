@@ -39,6 +39,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) const NOT_A_QUERY: Error = Error {
     message: String::new(),
+    kind: crate::workspace::DiagKind::Other,
     origin: None,
     def: None,
     fault: crate::core::Fault::NotAQuery,

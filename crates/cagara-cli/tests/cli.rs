@@ -1317,13 +1317,13 @@ fn the_editor_and_the_command_line_agree() {
     let ws = cagara_hir::workspace::Workspace::open(&path);
     let mut from_lsp: Vec<(u32, u32, String, String)> = cagara_lsp::analysis::diagnostics(&ws)
         .into_iter()
-        .map(|(range, message, severity)| {
+        .map(|report| {
             // 0-based line and UTF-16 column, which is what the protocol counts.
             (
-                range.start.line + 1,
-                range.start.character + 1,
-                severity.as_str().to_string(),
-                message,
+                report.range.start.line + 1,
+                report.range.start.character + 1,
+                report.severity.as_str().to_string(),
+                report.message,
             )
         })
         .collect();

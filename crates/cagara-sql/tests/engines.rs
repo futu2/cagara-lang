@@ -29,6 +29,81 @@ fn engines_disabled() -> bool {
     std::env::var_os("CAGARA_NO_ENGINES").is_some()
 }
 
+/// The engines this invocation is allowed to run, or `None` for "all of them".
+///
+/// `CAGARA_NO_ENGINES` is all-or-nothing, and CI needed something in between: a job
+/// that runs SQLite and DuckDB on every push without paying for Trino, MariaDB and
+/// PGlite. Without an allow-list the only way to run those two is to leave the other
+/// three out and *not* set `CAGARA_REQUIRE_ENGINES` — which also stops the run from
+/// noticing that SQLite is missing, so a job could pass by running nothing at all.
+///
+/// With `CAGARA_ENGINES=sqlite,duckdb` the absent engines are skipped by decision and
+/// the present ones are required, so the run proves both "these two executed" and
+/// "nothing silently disappeared".
+///
+/// The tokens are the engine's *name*, not its shell: `sqlite` rather than `sqlite3`,
+/// and `postgres` rather than `node`/`pglite`, because a shell is an implementation
+/// detail of how this file reaches the engine and the name is what a workflow wants
+/// to say. `emulated` is the Python-sqlglot translation to DuckDB, which is not an
+/// engine at all but is gated the same way because it needs its own install.
+fn allowed_engines() -> Option<Vec<String>> {
+    let list = std::env::var("CAGARA_ENGINES").ok()?;
+    let tokens: Vec<String> = list
+        .split(',')
+        .map(|e| e.trim().to_ascii_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect();
+    // Validate the *tokens*, not the names looked up later. The lookup only ever asks
+    // about the six real engine names, so a typo in the allow-list would never be
+    // seen by it — `CAGARA_ENGINES=sqlite,duckdbx` would simply enable SQLite and skip
+    // DuckDB, and a job that meant to run two engines would pass running one. Measured:
+    // that typo halved the run (482 engine runs → 238) and exited 0.
+    for t in &tokens {
+        assert!(
+            KNOWN_ENGINES.contains(&t.as_str()),
+            "`{t}` is not an engine name; CAGARA_ENGINES takes some of {KNOWN_ENGINES:?}"
+        );
+    }
+    Some(tokens)
+}
+
+/// Whether `name` may run in this invocation.
+///
+/// `name` is the engine name, not the shell — see [`allowed_engines`]. The token
+/// validation lives there, because this function only ever asks about real names.
+fn engine_enabled(name: &str) -> bool {
+    if engines_disabled() {
+        return false;
+    }
+    let Some(allowed) = allowed_engines() else {
+        return true;
+    };
+    allowed.iter().any(|e| e == name)
+}
+
+/// The names `CAGARA_ENGINES` accepts.
+const KNOWN_ENGINES: &[&str] = &["sqlite", "duckdb", "postgres", "trino", "mysql", "emulated"];
+
+/// Whether a missing `name` engine should fail this run rather than skip.
+///
+/// A test that cannot run because the engine is not installed is a skip, unless
+/// `CAGARA_REQUIRE_ENGINES` says a skip would be a lie — but an engine left out of
+/// `CAGARA_ENGINES` was never going to run, so its absence says nothing and must not
+/// fail the run either. Both conditions are asked here so the answer is one function
+/// rather than a conjunction repeated at every call site.
+fn must_run(name: &str) -> bool {
+    engine_enabled(name) && std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some()
+}
+
+/// The engine name of a shell-driven [`Engine`], for the allow-list.
+fn engine_name(e: &Engine) -> &'static str {
+    match e.shell {
+        "sqlite3" => "sqlite",
+        "duckdb" => "duckdb",
+        other => panic!("`{other}` has no engine name; add it to `engine_name`"),
+    }
+}
+
 use cagara_hir::{root_queries, Workspace};
 use cagara_sql::{compile, Dialect, Options};
 use std::io::Write;
@@ -1067,8 +1142,8 @@ fn run_script(
 /// claim like that is worth a measurement either way.
 #[test]
 fn a_list_compares_as_a_value_on_the_engines() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("duckdb") && !engine_enabled("postgres") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     let src = "nums2 : query { id = int } = table \"main\" \"nums\"\n\
@@ -1105,7 +1180,7 @@ fn a_list_compares_as_a_value_on_the_engines() {
     match run_setup(&duck, SETUP, &sql) {
         Some(Ok(rows)) => assert_eq!(rows, want, "{sql}"),
         Some(Err(m)) => panic!("duckdb: {m}\n  {sql}"),
-        None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
+        None if must_run("duckdb") => {
             panic!("`duckdb` is not installed (CAGARA_REQUIRE_ENGINES is set)")
         }
         None => eprintln!("skipping duckdb: not installed"),
@@ -1120,7 +1195,7 @@ fn a_list_compares_as_a_value_on_the_engines() {
         .unwrap_or(false);
     if !ready {
         assert!(
-            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            !must_run("postgres"),
             "`node` with @electric-sql/pglite is not installed (CAGARA_REQUIRE_ENGINES is set)"
         );
         return;
@@ -1304,8 +1379,8 @@ fn well_formed_bodies() {
 /// with the right shape.
 #[test]
 fn a_set_operation_aligns_by_name_and_keeps_the_left_order() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("duckdb") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     const DEFS: &str = "\
@@ -1378,8 +1453,8 @@ ba = b & union a & order [asc .id]\n";
 /// clause is fine as long as the answer is this one.
 #[test]
 fn paging_is_a_pipeline_and_the_order_matters() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("duckdb") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     const DEFS: &str = "\
@@ -1626,8 +1701,8 @@ fn strip_literals(sql: &str) -> String {
 
 #[test]
 fn engines_agree() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("sqlite") && !engine_enabled("duckdb") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     let src = format!(
@@ -1639,7 +1714,7 @@ fn engines_agree() {
     let rels = root_queries(&ws);
     let mut ran = 0;
     let mut failures = Vec::new();
-    for e in ENGINES {
+    for e in ENGINES.iter().filter(|e| engine_enabled(engine_name(e))) {
         let base = Options {
             dialect: Dialect::from_str(e.dialect).expect("dialect"),
             ..Options::default()
@@ -1671,7 +1746,7 @@ fn engines_agree() {
                     e.shell.to_string()
                 };
                 match run(e, &sql) {
-                    None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
+                    None if must_run(engine_name(e)) => {
                         panic!(
                             "`{}` is not installed (CAGARA_REQUIRE_ENGINES is set)",
                             e.shell
@@ -1706,8 +1781,8 @@ fn engines_agree() {
 /// instead.
 #[test]
 fn a_parsed_and_printed_date_agrees_on_the_engines() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("duckdb") && !engine_enabled("postgres") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     let src = format!(
@@ -1744,7 +1819,7 @@ fn a_parsed_and_printed_date_agrees_on_the_engines() {
     match run(&duck, &sql) {
         Some(Ok(rows)) => assert_eq!(rows, want, "{sql}"),
         Some(Err(m)) => panic!("duckdb: {m}\n  {sql}"),
-        None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
+        None if must_run("duckdb") => {
             panic!("`duckdb` is not installed (CAGARA_REQUIRE_ENGINES is set)")
         }
         None => eprintln!("skipping duckdb: not installed"),
@@ -1759,7 +1834,7 @@ fn a_parsed_and_printed_date_agrees_on_the_engines() {
         .unwrap_or(false);
     if !ready {
         assert!(
-            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            !must_run("postgres"),
             "`node` with @electric-sql/pglite is not installed (CAGARA_REQUIRE_ENGINES is set)"
         );
         eprintln!("skipping postgres: node or @electric-sql/pglite is not installed");
@@ -1787,8 +1862,8 @@ fn a_parsed_and_printed_date_agrees_on_the_engines() {
 /// the same rows back.
 #[test]
 fn money_is_exact_on_the_engines() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("duckdb") && !engine_enabled("postgres") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     let setup = "CREATE TABLE main.money (id INTEGER, total DECIMAL(10, 2), part DECIMAL(10, 1));\n\
@@ -1852,7 +1927,7 @@ fn money_is_exact_on_the_engines() {
     match out {
         Some(Ok(rows)) => assert_eq!(rows, want, "{sql}"),
         Some(Err(m)) => panic!("duckdb: {m}\n  {sql}"),
-        None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
+        None if must_run("duckdb") => {
             panic!("`duckdb` is not installed (CAGARA_REQUIRE_ENGINES is set)")
         }
         None => eprintln!("skipping duckdb: not installed"),
@@ -1880,7 +1955,7 @@ fn money_is_exact_on_the_engines() {
         .unwrap_or(false);
     if !ready {
         assert!(
-            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            !must_run("postgres"),
             "`node` with @electric-sql/pglite is not installed (CAGARA_REQUIRE_ENGINES is set)"
         );
         return;
@@ -1922,8 +1997,8 @@ fn money_is_exact_on_the_engines() {
 /// branch of the guard is what the second row measures.
 #[test]
 fn a_lifted_value_keeps_its_nulls_on_the_engines() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("duckdb") && !engine_enabled("postgres") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     // DuckDB and SQLite have no schemas unless one is made; both engines get the
@@ -2069,8 +2144,8 @@ const REPORT_CASES: &[(&str, &[&str], bool)] = &[
 /// compiles and runs, which is what a user actually does.
 #[test]
 fn the_report_example_runs_on_every_engine() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("sqlite") && !engine_enabled("duckdb") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/report.cagara");
@@ -2080,7 +2155,7 @@ fn the_report_example_runs_on_every_engine() {
     let rels = root_queries(&ws);
     let mut ran = 0;
     let mut failures = Vec::new();
-    for e in ENGINES {
+    for e in ENGINES.iter().filter(|e| engine_enabled(engine_name(e))) {
         let setup = if e.shell == "sqlite3" {
             REPORT_SETUP_SQLITE
         } else {
@@ -2110,7 +2185,7 @@ fn the_report_example_runs_on_every_engine() {
             };
             let args: Vec<&std::ffi::OsStr> = e.args.iter().map(std::ffi::OsStr::new).collect();
             match run_script(e.shell, &args, setup, &sql) {
-                None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
+                None if must_run(engine_name(e)) => {
                     panic!(
                         "`{}` is not installed (CAGARA_REQUIRE_ENGINES is set)",
                         e.shell
@@ -2158,8 +2233,8 @@ fn the_report_example_runs_on_every_engine() {
 /// values are written the way the shell renders them.
 #[test]
 fn a_list_query_runs_on_duckdb() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("duckdb") && !engine_enabled("sqlite") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     let engine = ENGINES
@@ -2193,7 +2268,7 @@ fn a_list_query_runs_on_duckdb() {
             .unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
         let sql = compile(rel, opts).unwrap_or_else(|m| panic!("`{name}`: {m}"));
         match run(engine, &sql) {
-            None if std::env::var_os("CAGARA_REQUIRE_ENGINES").is_some() => {
+            None if must_run("duckdb") => {
                 panic!("`duckdb` is not installed (CAGARA_REQUIRE_ENGINES is set)")
             }
             None => {
@@ -2313,8 +2388,8 @@ fn trino_batch(harness: &str, setup: &str, queries: &[String]) -> Vec<Vec<String
 /// skips unless one answers. `docs/ENGINE-TESTS.md` says how to start it.
 #[test]
 fn trino_agrees_when_a_server_is_running() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("trino") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/trino.sh");
@@ -2325,7 +2400,7 @@ fn trino_agrees_when_a_server_is_running() {
         .unwrap_or(false);
     if !ready {
         assert!(
-            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            !must_run("trino"),
             "no Trino at ${{TRINO_URL:-http://localhost:18080}} (CAGARA_REQUIRE_ENGINES is set)"
         );
         eprintln!("skipping trino: no server answers");
@@ -2430,8 +2505,8 @@ fn trino_agrees_when_a_server_is_running() {
 /// Skips unless `MYSQL_SOCKET` and `MYSQL` name a running server.
 #[test]
 fn mysql_agrees_when_a_server_is_running() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("mysql") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/mysql.sh");
@@ -2442,7 +2517,7 @@ fn mysql_agrees_when_a_server_is_running() {
         .unwrap_or(false);
     if !ready {
         assert!(
-            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            !must_run("mysql"),
             "no MySQL server (set MYSQL_SOCKET and MYSQL; CAGARA_REQUIRE_ENGINES is set)"
         );
         eprintln!("skipping mysql: no server answers");
@@ -2610,8 +2685,8 @@ const EMULATION_UNREADABLE: &[(&str, &str)] =
 /// dialect. It is a second opinion, not the server.
 #[test]
 fn the_emulated_dialects_mean_the_same_thing() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("emulated") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/emulate.py");
@@ -2623,7 +2698,7 @@ fn the_emulated_dialects_mean_the_same_thing() {
         .unwrap_or(false);
     if !ready {
         assert!(
-            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            !must_run("emulated"),
             "no `sqlglot` for {python} (set CAGARA_PYTHON; CAGARA_REQUIRE_ENGINES is set)"
         );
         eprintln!("skipping the emulated dialects: sqlglot is not importable");
@@ -3274,12 +3349,14 @@ q = nums & select { id = .id, m = .a % .b } & order [asc .id]\
     }
 }
 
-/// The dialects that emulate `NULLS LAST` read `ROWS` and refuse the other two units.
+/// The targets that cannot read a frame unit refuse it — and the two lists differ.
 ///
-/// Two different reasons, both measured on a real engine:
-///
-/// * `GROUPS` is a syntax error — `near 'GROUPS BETWEEN …'`. The three units differ
-///   by one word in the clause, which is the shape that gets assumed wrong.
+/// * `GROUPS` is a syntax error on the MySQL family — `near 'GROUPS BETWEEN …'`,
+///   measured on MariaDB 11.4 — and SQL Server documents `{ ROWS | RANGE }` only, so
+///   T-SQL refuses it too. That second list is the one a family test got wrong: T-SQL
+///   shares no family with MySQL, so `fam(d) != Fam::Mysql` accepted it and the
+///   compiler emitted `GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW` for a server that
+///   has no such clause.
 /// * `RANGE` is *supported*, but only with a single sort key: MariaDB says
 ///   `RANGE-type frame requires ORDER BY clause with single sort key` (4019), and the
 ///   T-SQL emulation refuses the same thing (`RANGE frames must have only one ORDER BY
@@ -3290,8 +3367,12 @@ q = nums & select { id = .id, m = .a % .b } & order [asc .id]\
 /// A refusal is better than a rewrite in both cases: `RANGE` would answer the same as
 /// `GROUPS` only when the order key has no peers within the offset, which is the case
 /// `groups` exists to handle.
+///
+/// The last block is the regression this test grew: a `groups` frame is refused even
+/// when it is behind another stage, which is what a check that inspected only a
+/// `Select`'s own expressions missed.
 #[test]
-fn the_mysql_family_refuses_a_groups_frame() {
+fn the_targets_without_a_frame_unit_refuse_it() {
     const DEFS: &str = "\
 f : query { k = int, n = int } = table \"main\" \"frames\"\n\
 g = f & select { s = over { order = [asc .k], frame = groups (preceding 1) currentRow } (sum .n) }\n\
@@ -3309,9 +3390,22 @@ a = f & select { s = over { order = [asc .k], frame = range (preceding 1) curren
             .unwrap_or_else(|d| panic!("{n}: {}", d.message))
             .clone()
     };
-    // `GROUPS` is refused by the MySQL family only: T-SQL has it (SQL Server 2022),
-    // and the emulation's own output shows sqlglot carrying the clause through.
-    for d in [Dialect::Mysql, Dialect::SingleStore, Dialect::Doris] {
+    // `GROUPS` is refused by the MySQL family *and* by T-SQL and the other targets
+    // documented as `{ ROWS | RANGE }`. Two separate lists, because they are two
+    // separate reasons and a family test conflated them.
+    for d in [
+        Dialect::Mysql,
+        Dialect::SingleStore,
+        Dialect::Doris,
+        Dialect::StarRocks,
+        Dialect::Tsql,
+        Dialect::Fabric,
+        Dialect::BigQuery,
+        Dialect::Snowflake,
+        Dialect::Redshift,
+        Dialect::Teradata,
+        Dialect::Hive,
+    ] {
         let err = compile(
             &rel("g"),
             Options {
@@ -3319,9 +3413,8 @@ a = f & select { s = over { order = [asc .k], frame = range (preceding 1) curren
                 ..Options::default()
             },
         )
-        .expect_err("a `groups` frame must be refused");
+        .expect_err("this target has no `GROUPS` frame");
         assert!(err.contains("`groups` window frame"), "{d:?}: {err}");
-        assert!(err.contains("rejects `GROUPS`"), "{d:?}: {err}");
     }
     // `range` is refused by every target whose `NULLS LAST` needs the second key —
     // the MySQL family *and* T-SQL, which is a different list.
@@ -3371,15 +3464,61 @@ a = f & select { s = over { order = [asc .k], frame = range (preceding 1) curren
         .unwrap_or_else(|e| panic!("{d:?} / range: {e}"));
     }
     // And a target that reads `GROUPS` emits it.
-    let sql = compile(
-        &rel("g"),
-        Options {
-            dialect: Dialect::DuckDb,
-            ..Options::default()
-        },
-    )
-    .expect("duckdb reads GROUPS");
-    assert!(sql.contains("GROUPS BETWEEN"), "{sql}");
+    for d in [
+        Dialect::DuckDb,
+        Dialect::Postgres,
+        Dialect::Trino,
+        Dialect::Sqlite,
+    ] {
+        let sql = compile(
+            &rel("g"),
+            Options {
+                dialect: d,
+                ..Options::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{d:?} reads GROUPS: {e}"));
+        assert!(sql.contains("GROUPS BETWEEN"), "{d:?}: {sql}");
+    }
+}
+
+/// A frame the target cannot read is refused **behind a wrapper**, too.
+///
+/// The capability checks used to inspect a `Select`'s own expressions and stop, so a
+/// `groups` frame was only seen when the `select` carrying it was the outermost stage.
+/// Appending `& select { s = .s }` turned a refusal into SQL that the target rejects
+/// at the server — which is the bug this test is named for.
+///
+/// The wrapper is written as a projection of the same column, so the only difference
+/// between the two programs is that one has a stage in front of the frame.
+#[test]
+fn a_frame_is_refused_behind_a_wrapper() {
+    const BARE: &str = "\
+f : query { k = int, n = int } = table \"main\" \"frames\"\n\
+q = f & select { s = over { order = [asc .k], frame = groups (preceding 1) currentRow } (sum .n) }\n";
+    const WRAPPED: &str = "\
+f : query { k = int, n = int } = table \"main\" \"frames\"\n\
+q = f & select { s = over { order = [asc .k], frame = groups (preceding 1) currentRow } (sum .n) } \
+& select { s = .s }\n";
+    for defs in [BARE, WRAPPED] {
+        let ws = Workspace::from_source(defs);
+        assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+        let (_, rel) = root_queries(&ws)
+            .into_iter()
+            .find(|(n, _)| n == "q")
+            .expect("q");
+        let rel = rel.unwrap_or_else(|d| panic!("q: {}", d.message));
+        for d in [Dialect::Tsql, Dialect::Mysql, Dialect::BigQuery] {
+            compile(
+                &rel,
+                Options {
+                    dialect: d,
+                    ..Options::default()
+                },
+            )
+            .expect_err("a `groups` frame must be refused however it is wrapped");
+        }
+    }
 }
 /// `random` is refused on SQLite, because its `random()` is not the same function.
 ///
@@ -3491,8 +3630,8 @@ r = t & select { v = reverse .s }\n";
 /// real planner rather than against the text we expect.
 #[test]
 fn postgres_agrees_via_pglite() {
-    if engines_disabled() {
-        eprintln!("skipping: CAGARA_NO_ENGINES is set");
+    if !engine_enabled("postgres") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
         return;
     }
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
@@ -3503,7 +3642,7 @@ fn postgres_agrees_via_pglite() {
         .unwrap_or(false);
     if !ready {
         assert!(
-            std::env::var_os("CAGARA_REQUIRE_ENGINES").is_none(),
+            !must_run("postgres"),
             "`node` with @electric-sql/pglite is not installed (CAGARA_REQUIRE_ENGINES is set)"
         );
         eprintln!("skipping postgres: node or @electric-sql/pglite is not installed");
@@ -3629,4 +3768,298 @@ fn postgres_agrees_via_pglite() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// The emulations mean what the constructs mean — settled on a real engine.
+///
+/// `fullJoin` on the MySQL family and `rollup`/`cube` on SQLite are rewritten into
+/// other SQL, and a rewrite is exactly the kind of change that looks right and answers
+/// a different question. Text assertions cannot tell the two apart, so this test does
+/// the only thing that can: it compiles **one Cagara query twice**, once for a target
+/// that has the construct and once for a target that must emulate it, and runs *both*
+/// on the same engine.
+///
+/// The native one is the reference. A disagreement is a wrong row, named as such,
+/// rather than a diff in a string. This is stronger than `engines_agree`, which
+/// compares two engines against a recorded expectation — there, a construct emulated
+/// on both sides would agree while both being wrong.
+///
+/// The pairs are chosen so the reference really is native:
+///
+/// * `fullJoin`: PostgreSQL, DuckDB and SQLite have it; the MySQL family emulates it.
+/// * `rollup`/`cube`: DuckDB has grouping sets; SQLite emulates them.
+///
+/// The queries sort, because a union has no row order and the comparison is in order.
+#[test]
+fn an_emulated_construct_answers_the_same_rows_as_the_native_one() {
+    if !engine_enabled("sqlite") && !engine_enabled("duckdb") {
+        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
+        return;
+    }
+    // `(name, cagara query, native dialect, emulated dialect)`.
+    //
+    // The rows are worked out from `SETUP`, not recorded from a run — see the note in
+    // the plan about a recorded expectation that could not catch the bug it was
+    // recorded from.
+    const PAIRS: &[(&str, &str, &str, &str)] = &[
+        // Every order, matched or not, plus the users no order mentions (`it's a\b `).
+        // Sorted by the user name (NULLs last) then the order id, so the unmatched
+        // order rows come before the unmatched user row.
+        (
+            "full_join",
+            "q = orders & fullJoin ((users & where (.id > 2)) & select { u_id = .id, name = .name }) \
+             (.<user_id == .>u_id) & select { oid = .id, amount = .amount, n = .name } \
+             & order [asc (coalesce \"~\" .n), asc (coalesce 2147483647 .oid)]",
+            "sqlite",
+            "mysql",
+        ),
+        // The same join with a filter below it, which is the case that puts the
+        // right input behind a derived table — the emulation has to line the two
+        // branches up by column, and a derived table renames the row.
+        (
+            "full_join_filtered",
+            "q = (orders & where (.amount > 4.5)) & fullJoin \
+             ((users & where (.id > 2)) & select { u_id = .id, name = .name }) \
+             (.<user_id == .>u_id) & select { oid = .id, amount = .amount, n = .name } \
+             & order [asc (coalesce \"~\" .n), asc (coalesce 2147483647 .oid)]",
+            "sqlite",
+            "mysql",
+        ),
+        // `ROLLUP(a)` is `{(a), ()}`: the per-`a` sums and the grand total, with the
+        // key NULL on the total. The emulation is two aggregates unioned.
+        (
+            "rollup_one_key",
+            "q = g & agg { a = rollup .a, s = sum .n } & select { a = .a, s = .s } & order [asc .a]",
+            "duckdb",
+            "sqlite",
+        ),
+        // `ROLLUP(a, b)` is `{(a, b), (a), ()}`, so a `b`-only row must NOT appear —
+        // that is what distinguishes it from `CUBE`.
+        (
+            "rollup_two_keys",
+            "q = g & agg { a = rollup .a, b = rollup .b, s = sum .n } \
+             & select { a = .a, b = .b, s = .s } & order [asc .a, asc .b]",
+            "duckdb",
+            "sqlite",
+        ),
+        // Every subset, including the two singletons.
+        (
+            "cube_two_keys",
+            "q = g & agg { a = cube .a, b = cube .b, s = sum .n } \
+             & select { a = .a, b = .b, s = .s } & order [asc .a, asc .b]",
+            "duckdb",
+            "sqlite",
+        ),
+        // A plain key beside a rolled-up one: the plain key groups *within* the
+        // subtotals, which is the ordering rule the emulation has to preserve.
+        (
+            "rollup_with_a_plain_key",
+            "q = g & agg { a = group .a, b = rollup .b, s = sum .n } \
+             & select { a = .a, b = .b ?? -1, s = .s } & order [asc .a, asc .b]",
+            "duckdb",
+            "sqlite",
+        ),
+    ];
+    let engines = [
+        Engine {
+            shell: "sqlite3",
+            args: &[
+                "-batch",
+                "-list",
+                "-noheader",
+                "-nullvalue",
+                "NULL",
+                ":memory:",
+            ],
+            dialect: "sqlite",
+        },
+        Engine {
+            shell: "duckdb",
+            args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+            dialect: "duckdb",
+        },
+    ];
+    // Every pair defines its own query name, because two definitions of one name in a
+    // module is an overloading error rather than a second query.
+    let src = format!(
+        "{TABLES}{}\n",
+        PAIRS
+            .iter()
+            .map(|(name, def, _, _)| format!("{name} ={}", def.trim_start_matches("q =")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let ws = Workspace::from_source(&src);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let rels = root_queries(&ws);
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    for (name, _, native, emulated) in PAIRS {
+        let (_, rel) = rels
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no query `{name}`"));
+        let rel = rel
+            .as_ref()
+            .unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
+        let native_sql = compile(
+            rel,
+            Options {
+                dialect: Dialect::from_str(native).expect("native dialect"),
+                ..Options::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("`{name}` / {native}: {e}"));
+        let emulated_sql = compile(
+            rel,
+            Options {
+                dialect: Dialect::from_str(emulated).expect("emulated dialect"),
+                ..Options::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("`{name}` / {emulated}: {e}"));
+        // The two must actually differ, or this test proves nothing: an "emulation"
+        // that emitted the same SQL would be a target that has the construct.
+        assert_ne!(
+            native_sql, emulated_sql,
+            "`{name}`: the emulated dialect emitted the native SQL, so nothing was rewritten"
+        );
+        // The engine is the one that *has* the native construct: it is the reference,
+        // and running the emulated SQL there is what makes the comparison meaningful.
+        // Running the native SQL on an engine without the construct would only prove
+        // that engine lacks it.
+        let Some(engine) = engines.iter().find(|e| e.dialect == *native) else {
+            panic!("`{name}`: no harness for the native dialect `{native}`");
+        };
+        if !engine_enabled(engine_name(engine)) {
+            continue;
+        }
+        let reference = match run(engine, &native_sql) {
+            Some(Ok(rows)) => rows,
+            Some(Err(m)) => {
+                failures.push(format!("`{name}` reference on {}: {m}", engine.shell));
+                continue;
+            }
+            None if must_run(engine_name(engine)) => {
+                panic!(
+                    "`{}` is not installed (CAGARA_REQUIRE_ENGINES is set)",
+                    engine.shell
+                )
+            }
+            None => continue,
+        };
+        match run(engine, &emulated_sql) {
+            Some(Ok(rows)) => {
+                ran += 1;
+                if rows != reference {
+                    failures.push(format!(
+                        "`{name}`: {emulated} (emulated) answered {rows:?} but {native} \
+                         (native) answered {reference:?}\n  emulated: {emulated_sql}\n  \
+                         native:   {native_sql}"
+                    ));
+                }
+            }
+            Some(Err(m)) => failures.push(format!("`{name}` emulated on {}: {m}", engine.shell)),
+            None => {}
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    // Not vacuous: every pair compared on its native engine. The number is pinned to
+    // the table's length so a pair that silently stopped running fails here.
+    assert_eq!(ran, PAIRS.len(), "only {ran} of {} pairs ran", PAIRS.len());
+    eprintln!("{ran} emulation pairs agreed on a real engine");
+}
+
+/// The emulated `fullJoin` does not double-count a matched row with a NULL column.
+///
+/// This is the case that makes an anti-join the right second branch rather than
+/// `RIGHT JOIN … WHERE <some left column> IS NULL`. That spelling has to name a column
+/// to test, and it is only correct when the column is non-NULL on every matched row —
+/// which no general predicate promises. Here the matched row is `l(1, NULL)` and the
+/// `IS NULL` test finds it, so it appears twice: once from the left join, once from the
+/// "unmatched" half. The anti-join asks whether a *match exists*, which is a property
+/// of the pair and not of any value in it, so it cannot make that mistake.
+///
+/// Pinned on a real engine because it is a rewrite-correctness claim, and a rewrite
+/// that returns a duplicated row is the kind of bug text assertions cannot see.
+#[test]
+fn an_emulated_full_join_does_not_duplicate_a_null_valued_match() {
+    if !engine_enabled("sqlite") {
+        eprintln!("skipping: this test's engine is not in CAGARA_ENGINES");
+        return;
+    }
+    // A matched pair whose left `name` is NULL, and an unmatched right row. The left
+    // and right keys are `maybe` because `fullJoin` makes both sides nullable.
+    // The join *keys* are non-nullable — a predicate compares them directly, and the
+    // checker refuses to compare two `maybe` columns with `==`. `name` is the `maybe`
+    // column this test is about, and it is what makes the matched row's left side look
+    // "absent" to an `IS NULL` test.
+    const DEFS: &str = "\
+l : query { id = int, name = maybe string } = table \"main\" \"l\"\n\
+r : query { uid = int, w = string } = table \"main\" \"r\"\n\
+q = l & fullJoin r (.<id == .>uid) & select { id = .id, name = .name, uid = .uid, w = .w }\n\
+& order [asc (coalesce 2147483647 .id), asc (coalesce 2147483647 .uid)]\n";
+    // `l.name` is NULL on the matched row; `r.uid = 2` has no match.
+    const SETUP: &str = "\
+CREATE TABLE main.l (id INTEGER, name TEXT);\n\
+CREATE TABLE main.r (uid INTEGER, w TEXT);\n\
+INSERT INTO main.l VALUES (1, NULL);\n\
+INSERT INTO main.r VALUES (1, 'x'), (2, 'u');\n";
+    let ws = Workspace::from_source(DEFS);
+    assert!(ws.diags.is_empty(), "{:?}", ws.diags);
+    let (_, rel) = root_queries(&ws)
+        .into_iter()
+        .find(|(n, _)| n == "q")
+        .expect("q");
+    let rel = rel.unwrap_or_else(|d| panic!("q: {}", d.message));
+    let sqlite = Engine {
+        shell: "sqlite3",
+        args: &[
+            "-batch",
+            "-list",
+            "-noheader",
+            "-nullvalue",
+            "NULL",
+            ":memory:",
+        ],
+        dialect: "sqlite",
+    };
+    // The native construct is the reference, and SQLite has it.
+    let native = compile(
+        &rel,
+        Options {
+            dialect: Dialect::Sqlite,
+            ..Options::default()
+        },
+    )
+    .expect("sqlite has FULL JOIN");
+    assert!(native.contains("FULL JOIN"), "{native}");
+    let want = ["1|NULL|1|x", "NULL|NULL|2|u"];
+    // `run` reads the shared `SETUP`; this case needs its own, so the args are
+    // converted the way `run_script` expects them.
+    let args: Vec<&std::ffi::OsStr> = sqlite.args.iter().map(std::ffi::OsStr::new).collect();
+    match run_script(sqlite.shell, &args, SETUP, &native) {
+        Some(Ok(rows)) => assert_eq!(rows, want, "{native}"),
+        Some(Err(m)) => panic!("sqlite: {m}\n  {native}"),
+        None if must_run("sqlite") => {
+            panic!("`sqlite3` is not installed (CAGARA_REQUIRE_ENGINES is set)")
+        }
+        None => return,
+    }
+    // And the emulation, run on the same engine, is the same two rows — in the same
+    // order, with the same count. A duplicate would make it three.
+    let emulated = compile(
+        &rel,
+        Options {
+            dialect: Dialect::Mysql,
+            ..Options::default()
+        },
+    )
+    .expect("MySQL emulates FULL JOIN");
+    assert!(!emulated.contains("FULL JOIN"), "{emulated}");
+    match run_script(sqlite.shell, &args, SETUP, &emulated) {
+        Some(Ok(rows)) => assert_eq!(rows, want, "{emulated}"),
+        Some(Err(m)) => panic!("sqlite: {m}\n  {emulated}"),
+        None => {}
+    }
 }

@@ -1,14 +1,18 @@
 //! SQL backend: validated relational IR to SQL text via sqlglot-rust.
 
 pub mod dialect;
+mod emulate;
 pub mod intrinsics;
 pub mod lower;
 pub mod rewrite;
 pub mod stage;
+mod visit;
 
 pub use sqlglot_rust::Dialect;
 
-use cagara_hir::ir::{JoinKind, Rel};
+use cagara_hir::ir::Rel;
+use dialect::{support, Cap, Support};
+use visit::{any_expr, any_rel, locate};
 
 /// Look up a dialect by name (`ansi`, `postgres`, `duckdb`, ...).
 pub fn dialect(name: &str) -> Option<Dialect> {
@@ -35,51 +39,6 @@ impl Default for Options {
     }
 }
 
-/// Validate and compile one query to SQL. The IR and `sql` templates are
-/// ANSI; sqlglot then rewrites them for the target dialect (e.g. `||` →
-/// `CONCAT` for MySQL / T-SQL, `LIMIT` → `TOP` / `FETCH`).
-/// Does any window in this relation use a `RANGE` frame?
-fn has_range_frame(rel: &Rel) -> bool {
-    fn expr(e: &cagara_hir::ir::Expr) -> bool {
-        e.any(&|e| match e {
-            cagara_hir::ir::Expr::Win(_, _, spec) => spec
-                .frame
-                .is_some_and(|f| f.unit == cagara_hir::ir::FrameUnit::Range),
-            _ => false,
-        })
-    }
-    match rel {
-        Rel::Select(_, fields) => fields.iter().any(|(_, e)| expr(e)),
-        _ => rel.children().into_iter().any(has_range_frame),
-    }
-}
-
-/// Does any window in this relation use a `GROUPS` frame?
-///
-/// The frame lives on an expression, not on the relation, so this walks the tree —
-/// the same shape as `has_full_join` and `has_grouping_sets`, and for the same
-/// reason: the rule is about what the statement contains, and only the completed
-/// relation knows that.
-fn has_groups_frame(rel: &Rel) -> bool {
-    fn expr(e: &cagara_hir::ir::Expr) -> bool {
-        e.any(&|e| match e {
-            cagara_hir::ir::Expr::Win(_, _, spec) => spec
-                .frame
-                .is_some_and(|f| f.unit == cagara_hir::ir::FrameUnit::Groups),
-            _ => false,
-        })
-    }
-    match rel {
-        Rel::Select(_, fields) => fields.iter().any(|(_, e)| expr(e)),
-        _ => rel.children().into_iter().any(has_groups_frame),
-    }
-}
-
-/// Does this relation unnest anywhere?
-fn has_unnest(rel: &Rel) -> bool {
-    matches!(rel, Rel::Unnest(..)) || rel.children().into_iter().any(has_unnest)
-}
-
 /// Compile `rel` for `opts.dialect`, with the message only.
 ///
 /// A caller that has somewhere to put a position — `cagara check`, the CLI's error
@@ -96,94 +55,55 @@ pub fn compile(rel: &Rel, opts: Options) -> Result<String, String> {
 /// failed, or the node that a dialect check found. It is `None` when nothing in the
 /// relation carries a span — an IR built by hand in a test, for instance — and a
 /// caller has to say `0:0` then rather than inventing a line.
+///
+/// # The capability checks
+///
+/// Each check asks the internal capability table (`dialect::support`) what this target
+/// can do with one construct, and the answer has three consequences:
+///
+/// * *native* or *unverified* — nothing to do; the lowerer writes the construct.
+/// * *emulated* — the internal `emulate` pass rewrites it into equivalent SQL before
+///   lowering, so the target is handed something it has and the query still means
+///   what it says.
+/// * *unsupported* — refuse, with a message that names the construct and what to
+///   write instead.
+///
+/// `docs/SQL-DIALECTS.md` is the reader-facing version of that table.
+///
+/// Every check scans the **whole relation** through the internal `visit` walk, not just the stage
+/// the construct happens to be written at. That is not a detail: the first version
+/// of these checks inspected a `Select`'s or an `Agg`'s own expressions and stopped,
+/// so `… & agg { k = rollup .k, n = count } & agg { total = count }` compiled for
+/// SQLite and then failed at the server with `no such function: ROLLUP`. See
+/// `visit`'s module documentation.
 pub fn compile_located(
     rel: &Rel,
     opts: Options,
 ) -> Result<String, (Option<cagara_hir::ir::Loc>, String)> {
     cagara_hir::schema::schema(rel).map_err(|m| (None, m))?;
-    if !dialect::supports_full_join(opts.dialect) && has_full_join(rel) {
-        return Err((
-            locate(rel, &|r| {
-                matches!(
-                    r.bare(),
-                    Rel::Join {
-                        kind: JoinKind::Full,
-                        ..
-                    }
-                )
-            }),
-            "`fullJoin` is not supported by the MySQL dialect family; rewrite it with \
-             `leftJoin`/`rightJoin` and `unionAll`"
-                .into(),
-        ));
-    }
-    if !dialect::supports_grouping_sets(opts.dialect) && has_grouping_sets(rel) {
-        let at = locate(rel, &|r| match r.bare() {
-            Rel::Agg(_, fs) => fs
-                .iter()
-                .any(|(_, e)| e.any(&|x| matches!(x, cagara_hir::ir::Expr::Grouping(..)))),
-            _ => false,
-        });
-        return Err((
-            at,
-            if dialect::fam(opts.dialect) == dialect::Fam::Mysql {
-                "`rollup` and `cube` are not supported by the MySQL dialect family: its \
-             `GROUP BY … WITH ROLLUP` rolls up the whole key list and cannot be \
-             combined with `ORDER BY`, so it is not the same operation. Compute the \
-             subtotals with a separate `agg` and `union` them in"
-                    .into()
-            } else {
-                "`rollup` and `cube` are not supported by the SQLite dialect, which has \
-             no grouping sets"
-                    .into()
-            },
-        ));
-    }
-    // A `RANGE` frame needs exactly one sort key, and the MySQL family's `NULLS
-    // LAST` emulation adds a second. So `range` and the emulation cannot both
-    // happen: MariaDB answers `RANGE-type frame requires ORDER BY clause with single
-    // sort key` (4019), measured. Refusing says which of the two to give up; writing
-    // both would be SQL that runs nowhere.
-    //
-    // This is a narrower rule than "MySQL has no `RANGE`": it does, and it works with
-    // a single key. What it cannot have is a *null-ordered* `range` frame, which is
-    // every `range` frame this compiler writes, because a window's sort key is always
-    // spelled `NULLS LAST`.
-    if !dialect::supports_range_frame(opts.dialect) && has_range_frame(rel) {
-        return Err((
-            locate(rel, &|r| {
-                frame_of(r) == Some(cagara_hir::ir::FrameUnit::Range)
-            }),
-            "a `range` window frame needs a single sort key, and this target's \
-             `NULLS LAST` is emulated with a second one — MariaDB answers `RANGE-type \
-             frame requires ORDER BY clause with single sort key`, and T-SQL's \
-             equivalent refuses it too. Use `rows` for a row count, or `groups` on a \
-             target that has it"
-                .into(),
-        ));
-    }
-    if !dialect::supports_groups_frame(opts.dialect) && has_groups_frame(rel) {
-        return Err((
-            locate(rel, &|r| {
-                frame_of(r) == Some(cagara_hir::ir::FrameUnit::Groups)
-            }),
-            "a `groups` window frame is not supported by the MySQL dialect family: it \
-             reads `ROWS` and `RANGE` and rejects `GROUPS`. Use `rows` for a row \
-             count, or `range` when a distance in the order key is what is meant"
-                .into(),
-        ));
-    }
-    // `unnest` is a relational node, so its refusal is here rather than in the
-    // intrinsic pass: the lowerer has no dialect, and the wording belongs with
-    // the other `list` refusals.
-    if has_unnest(rel) {
-        if let Some(msg) = intrinsics::unnest_refusal(dialect::fam(opts.dialect)) {
-            return Err((locate(rel, &|r| matches!(r.bare(), Rel::Unnest(..))), msg));
+
+    // The window-frame refusals come first: they are about a clause the target's
+    // grammar does not have, and the reader has to change the `frame` record.
+    refuse_frame(rel, opts.dialect, Cap::GroupsFrame)?;
+    refuse_frame(rel, opts.dialect, Cap::RangeFrame)?;
+    // `unnest` and `list` values are refused by the intrinsic pass, which is where
+    // their wording lives; the relational half of `unnest` is checked here because
+    // it is a node rather than an expression.
+    if any_rel(rel, &|r| matches!(r, Rel::Unnest(..))) {
+        if let Some(msg) = intrinsics::unnest_refusal(opts.dialect) {
+            return Err((locate(rel, &|r| matches!(r, Rel::Unnest(..))), msg));
         }
     }
-    // The `Rel -> Rel` pass, after validation (so diagnostics name the query as
-    // written) and before lowering (so the lowerer only ever sees stages it can
-    // decide one at a time). `rewrite` has no dialect in it; see its module doc.
+
+    // The two constructs a target may lack but can still mean: rewrite them into
+    // SQL every target reads, rather than refusing or emitting what the engine
+    // rejects. This runs after validation (so a diagnostic names the query as
+    // written) and before `rewrite` (so the rules that remove a derived table see
+    // the shapes emulation produced).
+    let emulated = emulate::emulate(rel, opts.dialect);
+    let rel = &emulated;
+
+    // The `Rel -> Rel` pass. `rewrite` has no dialect in it; see its module doc.
     let rewritten = rewrite::rewrite(rel);
     let rel = &rewritten;
     let mut lowerer = lower::Lowerer::for_rel(rel, dialect::supports_qualify(opts.dialect));
@@ -208,79 +128,67 @@ pub fn compile_located(
     Ok(dialect::finalize(sql, opts.dialect))
 }
 
-/// The location of the innermost node `p` accepts, or of the innermost node at all.
+/// Refuse a window frame the target cannot read, naming the frame unit.
 ///
-/// The dialect refusals in `compile_located` are about a *construct* — a `fullJoin`,
-/// a rolled-up key, a `GROUPS` frame — and the reader needs to be sent to where that
-/// construct was written. `Rel::At` is the only carrier of a span, so this descends
-/// the tree keeping the deepest one it has seen and, when the predicate matches,
-/// reports the location in force at that node: the same "innermost enclosing stage"
-/// rule `cagara_hir::schema` uses.
-///
-/// Returns `None` for a relation with no `At` anywhere, which is what an IR built by
-/// hand in a test looks like. A caller then prints no position rather than a wrong one.
-fn locate(rel: &Rel, p: &dyn Fn(&Rel) -> bool) -> Option<cagara_hir::ir::Loc> {
-    fn walk<'a>(
-        rel: &'a Rel,
-        p: &dyn Fn(&Rel) -> bool,
-        here: Option<cagara_hir::ir::Loc>,
-        best: &mut Option<cagara_hir::ir::Loc>,
-    ) {
-        let here = match rel {
-            Rel::At(l, _) => Some(*l),
-            _ => here,
-        };
-        if p(rel) && best.is_none() {
-            *best = here;
-        }
-        for child in rel.children() {
-            walk(child, p, here, best);
-        }
+/// Both frame refusals are the same shape — "this target has no such unit" — and
+/// both are about a *frame*, so the message is about what to write instead. A
+/// frame has no equivalent spelling: `RANGE` answers the same as `GROUPS` only
+/// when the order key has no peers within the offset, which is the case `groups`
+/// exists to handle, and `ROWS` answers a different question in both.
+fn refuse_frame(
+    rel: &Rel,
+    d: Dialect,
+    cap: Cap,
+) -> Result<(), (Option<cagara_hir::ir::Loc>, String)> {
+    if support(cap, d).emits() {
+        return Ok(());
     }
-    let mut best = None;
-    walk(rel, p, None, &mut best);
-    best
-}
-
-/// The frame unit of the first window expression in `r`, if it has one.
-///
-/// Used by the dialect refusals for `range` and `groups`: the message is about a
-/// *frame unit*, so the reader has to be sent to the window that chose it.
-fn frame_of(r: &Rel) -> Option<cagara_hir::ir::FrameUnit> {
-    let Rel::Select(_, fs) = r.bare() else {
-        return None;
+    let (unit, what) = match cap {
+        Cap::GroupsFrame => (
+            cagara_hir::ir::FrameUnit::Groups,
+            "a `groups` window frame counts *peer groups*, and this target reads only \
+             `ROWS` and `RANGE`. Use `rows` for a row count, or `range` when a distance \
+             in the order key is what is meant",
+        ),
+        Cap::RangeFrame => (
+            cagara_hir::ir::FrameUnit::Range,
+            "a `range` window frame needs a single sort key, and this target's \
+             `NULLS LAST` is emulated with a second one — MariaDB answers `RANGE-type \
+             frame requires ORDER BY clause with single sort key`, and T-SQL's \
+             equivalent refuses it too. Use `rows` for a row count, or `groups` on a \
+             target that has it",
+        ),
+        _ => return Ok(()),
     };
-    fs.iter().find_map(|(_, e)| unit_of(e))
-}
-
-/// The frame unit of the first window expression in `e` that has a frame.
-fn unit_of(e: &cagara_hir::ir::Expr) -> Option<cagara_hir::ir::FrameUnit> {
-    if let cagara_hir::ir::Expr::Win(_, _, spec) = e {
-        if let Some(f) = spec.frame {
-            return Some(f.unit);
-        }
+    // A frame with no expression carrying it cannot be reported against a stage.
+    if !any_expr(rel, &|e| frame_unit(e) == Some(unit)) {
+        return Ok(());
     }
-    e.children().into_iter().find_map(unit_of)
+    // The location is the innermost stage the *frame* was written in — the node
+    // whose own expressions carry it — rather than the root, which contains every
+    // stage and so would match every time.
+    let at = locate(rel, &|r| {
+        visit::node_has_expr(r, &|e| frame_unit(e) == Some(unit))
+    });
+    Err((
+        at,
+        format!(
+            "{what} — the target is `{}`, which {} this frame unit",
+            dialect::name(d),
+            if support(cap, d) == Support::Unsupported {
+                "does not have"
+            } else {
+                "has not been checked for"
+            }
+        ),
+    ))
 }
 
-/// Whether a relation asks for subtotal rows, anywhere in the tree.
-fn has_grouping_sets(rel: &Rel) -> bool {
-    match rel.bare() {
-        Rel::Agg(_, fs) => fs
-            .iter()
-            .any(|(_, e)| e.any(&|x| matches!(x, cagara_hir::ir::Expr::Grouping(..)))),
-        rel => rel.children().into_iter().any(has_grouping_sets),
-    }
-}
-
-/// Whether a relation contains a `fullJoin`, including under `At` wrappers.
-fn has_full_join(rel: &Rel) -> bool {
-    match rel.bare() {
-        Rel::Join {
-            kind: JoinKind::Full,
-            ..
-        } => true,
-        rel => rel.children().into_iter().any(has_full_join),
+/// The frame unit of a window expression, if it has a frame.
+fn frame_unit(e: &cagara_hir::ir::Expr) -> Option<cagara_hir::ir::FrameUnit> {
+    match e {
+        cagara_hir::ir::Expr::Win(_, _, spec) => spec.frame.map(|f| f.unit),
+        _ => None,
     }
 }
 

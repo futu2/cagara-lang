@@ -20,12 +20,18 @@ a full local run does. [`docs/ENGINE-TESTS.md`](docs/ENGINE-TESTS.md) has the
 command and the setup for each engine — SQLite, DuckDB, PostgreSQL through
 PGlite, Trino and MariaDB — and for the sqlglot emulation of the rest.
 
-CI does not run these: it installs no engines and sets `CAGARA_NO_ENGINES=1`, so
-every execution test skips while the SQL-text checks (and the rest of the suite)
-still run. That is deliberate — the comparison needs three downloads and two
-servers on every push, and the runner's own `sqlite3` is older than the 3.46 that
-`floor` needs, so omitting the engine would fail rather than skip. See "CI does
-not run these" in `docs/ENGINE-TESTS.md`.
+CI runs the SQLite and DuckDB half of these on every push, at versions the workflow
+pins itself and checks against a SHA-256 (`SQLITE_VERSION` / `DUCKDB_VERSION` in
+`.github/workflows/ci.yml`). That job installs the two engines and runs
+
+```sh
+CAGARA_ENGINES=sqlite,duckdb CAGARA_REQUIRE_ENGINES=1 \
+  cargo test -p cagara-sql --test engines --locked
+```
+
+The other three engines still need downloads and servers, so the `rust` job stays
+engine-free and sets `CAGARA_NO_ENGINES=1`; the full five-engine matrix is the local
+run above. See "What CI runs" in `docs/ENGINE-TESTS.md`.
 
 The pipeline snapshot is updated deliberately:
 

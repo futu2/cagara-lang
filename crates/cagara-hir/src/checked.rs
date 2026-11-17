@@ -315,7 +315,9 @@ impl CheckedExpr {
     ) -> Result<Self, Error> {
         let mut phase = value.phase;
         for e in &list {
-            phase = rules::mix(phase, e.phase).map_err(|m| Error::new(m).at(e.origin))?;
+            phase = rules::mix(phase, e.phase)
+                .map_err(|m| Error::kinded(crate::workspace::DiagKind::AggregatePlacement, m))
+                .map_err(|err| err.at(e.origin))?;
         }
         let elem = value.ty.clone();
         Ok(CheckedExpr {
@@ -482,7 +484,8 @@ pub fn frame(unit: crate::ir::FrameUnit, start: Bound, end: Bound) -> Result<Fra
 fn mix_of(args: &[CheckedExpr], origin: Origin) -> Result<Phase, Error> {
     args.iter().try_fold(Phase::Const, |acc, a| {
         rules::mix(acc, a.phase)
-            .map_err(|m| Error::new(m).at(a.origin))
+            .map_err(|m| Error::kinded(crate::workspace::DiagKind::AggregatePlacement, m))
+            .map_err(|err| err.at(a.origin))
             .map_err(|e| e.at(origin))
     })
 }
@@ -490,14 +493,16 @@ fn mix_of(args: &[CheckedExpr], origin: Origin) -> Result<Phase, Error> {
 /// The existing placement rule, pointed at the offending expression.
 pub(crate) fn place(place: Place, e: &CheckedExpr, origin: Origin) -> Result<(), Error> {
     rules::place(place, e.phase)
-        .map_err(|m| Error::new(m).at(e.origin))
+        .map_err(|m| Error::kinded(crate::workspace::DiagKind::AggregatePlacement, m))
+        .map_err(|err| err.at(e.origin))
         .map_err(|err| err.at(origin))
 }
 
 /// The existing depth-1 rule, pointed at the offending expression.
 fn row_phase(what: &str, e: &CheckedExpr, origin: Origin) -> Result<(), Error> {
     rules::nested(what, e.phase)
-        .map_err(|m| Error::new(m).at(e.origin))
+        .map_err(|m| Error::kinded(crate::workspace::DiagKind::AggregatePlacement, m))
+        .map_err(|err| err.at(e.origin))
         .map_err(|err| err.at(origin))
 }
 
@@ -530,12 +535,18 @@ pub(crate) fn refs_columns(
                 } else {
                     origin
                 };
-                return Err(Error::new(format!(
-                    "no column `{n}` in the input of `{ctx}`; available: {avail}{hint}"
-                ))
+                return Err(Error::kinded(
+                    crate::workspace::DiagKind::UnknownColumn,
+                    format!("no column `{n}` in the input of `{ctx}`; available: {avail}{hint}"),
+                )
                 .at(at));
             }
-            Side::Left | Side::Right => return Err(Error::new(rules::JOIN_ONLY).at(origin)),
+            Side::Left | Side::Right => {
+                return Err(
+                    Error::kinded(crate::workspace::DiagKind::JoinSide, rules::JOIN_ONLY)
+                        .at(origin),
+                )
+            }
             _ => {}
         }
     }
@@ -569,10 +580,21 @@ pub(crate) fn project_row(
     }
     let mut out = Vec::with_capacity(fields.len());
     for (n, e) in fields {
-        refs_columns(e, input, stage, origin)
-            .map_err(|err| Error::new(format!("field `{n}`: {}", err.message)).at(e.origin))?;
+        refs_columns(e, input, stage, origin).map_err(|err| {
+            Error {
+                message: format!("field `{n}`: {}", err.message),
+                ..err
+            }
+            .at(e.origin)
+        })?;
         rules::place(at, e.phase)
-            .map_err(|m| Error::new(format!("field `{n}` {m}")).at(e.origin))?;
+            .map_err(|m| {
+                Error::kinded(
+                    crate::workspace::DiagKind::AggregatePlacement,
+                    format!("field `{n}` {m}"),
+                )
+            })
+            .map_err(|err| err.at(e.origin))?;
         out.push((n.clone(), e.ty.clone()));
     }
     Ok(RowType::project(&out))

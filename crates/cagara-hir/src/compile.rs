@@ -36,12 +36,22 @@ impl<'a> CompilerInput<'a> {
         &self.workspace.diags
     }
 
-    pub fn diagnostic(&self, origin: Option<Origin>, message: impl Into<String>) -> Diag {
+    /// A diagnostic for a failure of the checked layer, at `origin`.
+    ///
+    /// The kind comes from the [`Error`] that produced it: the checked layer's
+    /// errors are program errors (an unknown column, an aggregate in the wrong
+    /// place) and carry the same kind the checker would have reported for the
+    /// same program.
+    pub fn diagnostic(&self, origin: Option<Origin>, error: &Error) -> Diag {
+        let kind = error.kind;
         match origin {
-            Some(origin) => self
+            Some(origin) => {
+                self.workspace
+                    .diag_span(origin.module, origin.span, error.message.clone(), kind)
+            }
+            None => self
                 .workspace
-                .diag_span(origin.module, origin.span, message),
-            None => self.workspace.diag(self.workspace.root, 0, message),
+                .diag(self.workspace.root, 0, error.message.clone(), kind),
         }
     }
 
@@ -259,7 +269,7 @@ fn compile_definition(
         Err(error) => {
             let fault = error.fault;
             let diag = match fault {
-                Fault::Program => input.diagnostic(error.origin, error.message),
+                Fault::Program => input.diagnostic(error.origin, &error),
                 Fault::Compiler => internal_error(input, name, &error),
                 Fault::NotAQuery => unreachable!("handled above"),
             };
@@ -275,14 +285,17 @@ fn compile_definition(
             Ok(rel) => match crate::schema::schema_located(&rel) {
                 Ok(_) => (Ok(rel), None),
                 Err((location, message)) => (
-                    Err(input.diagnostic(location.map(|l| Origin::new(l.module, l.span)), message)),
+                    Err(input.diagnostic(
+                        location.map(|l| Origin::new(l.module, l.span)),
+                        &Error::new(message),
+                    )),
                     Some(Fault::Compiler),
                 ),
             },
             Err(error) => {
                 let fault = error.fault;
                 let diag = match fault {
-                    Fault::Program => input.diagnostic(error.origin, error.message),
+                    Fault::Program => input.diagnostic(error.origin, &error),
                     Fault::Compiler => internal_error(input, name, &error),
                     Fault::NotAQuery => unreachable!("the query shape was checked above"),
                 };
@@ -341,7 +354,7 @@ fn push_unique(diags: &mut Vec<Diag>, seen: &mut HashSet<Diag>, diag: Diag) {
 fn internal_error(input: CompilerInput<'_>, name: &str, error: &Error) -> Diag {
     let detail = error.message.clone();
     let message = format!("internal error in `{name}`: {detail}");
-    input.diagnostic(error.origin, message)
+    input.diagnostic(error.origin, &Error::new(message))
 }
 
 /// Whether a compilation failed: an error-severity diagnostic is what fails a

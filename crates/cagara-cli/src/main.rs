@@ -740,7 +740,12 @@ fn report_sql(
             match loc {
                 Some(l) => format!(
                     "{}",
-                    ws.diag_span(l.module, l.span, format!("error in `{name}`: {m}"))
+                    ws.diag_span(
+                        l.module,
+                        l.span,
+                        format!("error in `{name}`: {m}"),
+                        cagara_hir::workspace::DiagKind::Lowering,
+                    )
                 ),
                 None => format!("{shown}: error in `{name}`: {m}"),
             }

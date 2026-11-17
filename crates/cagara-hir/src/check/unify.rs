@@ -221,10 +221,10 @@ impl<'w> Checker<'w> {
             return Ok(());
         }
         if self.occurs(v, &t) {
-            return Err(format!(
+            return Err(Fail::from(format!(
                 "infinite type: a type would contain itself ({})",
                 self.show(&t)
-            ));
+            )));
         }
         self.trail.push((v, self.vars[v as usize].clone()));
         if self.vars[v as usize].row_or_win {
@@ -238,11 +238,16 @@ impl<'w> Checker<'w> {
                     }
                 }
                 Ty::Con("row" | "win", _) => {}
-                Ty::Con("agg", _) => return Err(UNGROUPED.into()),
+                Ty::Con("agg", _) => {
+                    return Err(Fail::kinded(
+                        crate::workspace::DiagKind::AggregatePlacement,
+                        UNGROUPED,
+                    ))
+                }
                 o => {
-                    return Err(format!(
-                        "a column expression cannot have phase {}",
-                        self.show(o)
+                    return Err(Fail::kinded(
+                        crate::workspace::DiagKind::AggregatePlacement,
+                        format!("a column expression cannot have phase {}", self.show(o)),
                     ))
                 }
             }
@@ -358,9 +363,10 @@ impl<'w> Checker<'w> {
         // that no real term reaches it.
         const MAX_UNIFY_DEPTH: usize = 512;
         if self.unify_depth >= MAX_UNIFY_DEPTH {
-            return Err("type is too deeply nested to unify; a `keyMap` term may \
-                        reduce in a cycle"
-                .into());
+            return Err(Fail::from(
+                "type is too deeply nested to unify; a `keyMap` term may \
+                 reduce in a cycle",
+            ));
         }
         self.unify_depth += 1;
         let r = self.unify_inner(actual, expected);
@@ -421,19 +427,22 @@ impl<'w> Checker<'w> {
                         // message names the spelling without naming the column.
                         _ => "x",
                     };
-                    return Err(crate::rules::needs_side(n));
+                    return Err(Fail::kinded(
+                        crate::workspace::DiagKind::JoinSide,
+                        crate::rules::needs_side(n),
+                    ));
                 }
                 (Ty::Con("join", _), _) if kind_e == Kind::Row => {
-                    return Err(
-                        "cannot mix join-side columns (`.<x`, `.>x`) with plain columns (`.x`)"
-                            .into(),
-                    );
+                    return Err(Fail::kinded(
+                        crate::workspace::DiagKind::JoinSide,
+                        "cannot mix join-side columns (`.<x`, `.>x`) with plain columns (`.x`)",
+                    ));
                 }
                 _ => {
-                    return Err(format!(
+                    return Err(Fail::from(format!(
                         "kind mismatch: cannot unify {:?} with {:?}",
                         kind_a, kind_e
-                    ))
+                    )))
                 }
             }
         }
@@ -596,7 +605,7 @@ impl<'w> Checker<'w> {
                 // Checked here because this arm still has both *whole* function types.
                 // By the time the inner unification fails, only one parameter is left.
                 if let Some(msg) = self.unsaturated_stage(&a, &a2, &e) {
-                    return Err(msg);
+                    return Err(Fail::kinded(crate::workspace::DiagKind::TypeMismatch, msg));
                 }
                 self.unify(&a1, &a2)?;
                 self.unify(&r1, &r2)
@@ -733,7 +742,7 @@ impl<'w> Checker<'w> {
             (true, false) if absorb(&ta) => self.unify(&ta, &row(only_e, te)),
             (false, false) if absorb(&ta) && absorb(&te) => {
                 if ta == te {
-                    return Err("incompatible row types".into());
+                    return Err(Fail::from("incompatible row types"));
                 }
                 let tail = self.fresh_row();
                 self.unify(&ta, &row(only_e, tail.clone()))?;
@@ -743,29 +752,35 @@ impl<'w> Checker<'w> {
         }
     }
 
-    pub(crate) fn mismatch(&self, a: &Ty, e: &Ty) -> String {
+    pub(crate) fn mismatch(&self, a: &Ty, e: &Ty) -> Fail {
         // A precision or a scale is only ever the parameter of a `decimal`, so a
         // pair of them that differ is a decimal mismatch however deep the
         // unification got — and saying so is what makes the rule usable: two
         // decimals of different parameters do not mix, and a cast is how one of
         // them moves.
         if let (Ty::Nat(x), Ty::Nat(y)) = (a, e) {
-            return format!(
-                "`decimal` parameters differ (expected {y}, found {x}); two decimals combine \
+            return Fail::kinded(
+                crate::workspace::DiagKind::TypeMismatch,
+                format!(
+                    "`decimal` parameters differ (expected {y}, found {x}); two decimals combine \
                  only when they are the same `(precision, scale)`, so bring them to one type \
                  with `toDecimal` first"
+                ),
             );
         }
         if let (Some(x), Some(y)) = (phase_of(a), phase_of(e)) {
             // An `agg` / `win` where a row expression is expected is an
             // argument that nests one (a plain `expr` parameter, or the
             // argument of an aggregate or window function).
-            return match (y, x) {
-                (Phase::Row, Phase::Agg | Phase::Win) => {
-                    rules::nested("this argument", x).unwrap_err()
-                }
-                _ => rules::clash(x, y),
-            };
+            return Fail::kinded(
+                crate::workspace::DiagKind::AggregatePlacement,
+                match (y, x) {
+                    (Phase::Row, Phase::Agg | Phase::Win) => {
+                        rules::nested("this argument", x).unwrap_err()
+                    }
+                    _ => rules::clash(x, y),
+                },
+            );
         }
         let join = |t: &Ty| matches!(t, Ty::Con("join", _));
         let plain = |t: &Ty| matches!(t, Ty::Row(..) | Ty::Empty);
@@ -775,7 +790,10 @@ impl<'w> Checker<'w> {
             // `.x` names neither, and mixing the two spellings in one predicate is
             // always a slip — the message names both so the fix is visible. (The
             // side-less case has its own message; see `rules::needs_side`.)
-            return "cannot mix join-side columns (`.<x`, `.>x`) with plain columns (`.x`)".into();
+            return Fail::kinded(
+                crate::workspace::DiagKind::JoinSide,
+                "cannot mix join-side columns (`.<x`, `.>x`) with plain columns (`.x`)",
+            );
         }
         let maybe = |t: &Ty| matches!(t, Ty::Con("maybe", _));
         let hint = if maybe(a) != maybe(e) {
@@ -783,10 +801,13 @@ impl<'w> Checker<'w> {
         } else {
             ""
         };
-        format!(
-            "type mismatch: expected {}, found {}{hint}",
-            self.show(e),
-            self.show(a)
+        Fail::kinded(
+            crate::workspace::DiagKind::TypeMismatch,
+            format!(
+                "type mismatch: expected {}, found {}{hint}",
+                self.show(e),
+                self.show(a)
+            ),
         )
     }
 }

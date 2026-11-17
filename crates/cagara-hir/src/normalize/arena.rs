@@ -182,9 +182,11 @@ impl Builder {
         let schema = schema.into();
         let name = name.into();
         let Some(row) = columns else {
-            return Err(
-                Error::new(crate::schema::unknown_table_columns(&schema, &name)).at(origin),
-            );
+            return Err(Error::kinded(
+                crate::workspace::DiagKind::UnknownColumn,
+                crate::schema::unknown_table_columns(&schema, &name),
+            )
+            .at(origin));
         };
         let row = RowType::new(row);
         let names = row.names();
@@ -228,9 +230,11 @@ impl Builder {
             Rewrite::Omit(key) => {
                 if !input_row.has(&key) {
                     let avail = input_row.names().join(", ");
-                    return Err(
-                        Error::new(format!("no column `{key}`; available: {avail}")).at(origin)
-                    );
+                    return Err(Error::kinded(
+                        crate::workspace::DiagKind::UnknownColumn,
+                        format!("no column `{key}`; available: {avail}"),
+                    )
+                    .at(origin));
                 }
                 let row = input_row.omit(&key);
                 (QueryNodeKind::Omit, Payload::Key(key), row)
@@ -293,10 +297,13 @@ impl Builder {
             Kept::Filter(pred) => {
                 crate::checked::place(Place::Where, &pred, origin)?;
                 if !pred.ty().is_condition() {
-                    return Err(Error::new(format!(
-                        "a `where` predicate must be bool or maybe bool, found {}",
-                        pred.ty()
-                    ))
+                    return Err(Error::kinded(
+                        crate::workspace::DiagKind::NotACondition,
+                        format!(
+                            "a `where` predicate must be bool or maybe bool, found {}",
+                            pred.ty()
+                        ),
+                    )
                     .at(origin));
                 }
                 crate::checked::refs_columns(&pred, &row, "where", origin)?;
@@ -431,9 +438,11 @@ impl Builder {
     ) -> Result<NodeId, Error> {
         crate::checked::place(Place::JoinOn, &on, origin)?;
         if !on.ty().is_bool() {
-            return Err(
-                Error::new(format!("a join predicate must be bool, found {}", on.ty())).at(origin),
-            );
+            return Err(Error::kinded(
+                crate::workspace::DiagKind::NotACondition,
+                format!("a join predicate must be bool, found {}", on.ty()),
+            )
+            .at(origin));
         }
         let left_row = self.node(left).row.clone();
         let right_row = self.node(right).row.clone();
@@ -442,7 +451,11 @@ impl Builder {
                 cagara_syntax::ast::Side::Left => (&left_row, "left"),
                 cagara_syntax::ast::Side::Right => (&right_row, "right"),
                 cagara_syntax::ast::Side::Single => {
-                    return Err(Error::new(crate::rules::needs_side(&name)).at(origin))
+                    return Err(Error::kinded(
+                        crate::workspace::DiagKind::JoinSide,
+                        crate::rules::needs_side(&name),
+                    )
+                    .at(origin))
                 }
             };
             if !columns.has(&name) {
@@ -480,10 +493,10 @@ impl Builder {
     ) -> Result<NodeId, Error> {
         crate::checked::place(Place::JoinOn, &on, origin)?;
         if !on.ty().is_bool() {
-            return Err(Error::new(format!(
-                "a `markExists` predicate must be bool, found {}",
-                on.ty()
-            ))
+            return Err(Error::kinded(
+                crate::workspace::DiagKind::NotACondition,
+                format!("a `markExists` predicate must be bool, found {}", on.ty()),
+            )
             .at(origin));
         }
         let input_row = self.node(input).row.clone();
@@ -493,7 +506,11 @@ impl Builder {
                 cagara_syntax::ast::Side::Left => (&input_row, "input"),
                 cagara_syntax::ast::Side::Right => (&right_row, "joined"),
                 cagara_syntax::ast::Side::Single => {
-                    return Err(Error::new(crate::rules::needs_side(&name)).at(origin))
+                    return Err(Error::kinded(
+                        crate::workspace::DiagKind::JoinSide,
+                        crate::rules::needs_side(&name),
+                    )
+                    .at(origin))
                 }
             };
             if !columns.has(&name) {

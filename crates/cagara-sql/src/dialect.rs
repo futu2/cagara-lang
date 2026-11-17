@@ -35,27 +35,301 @@ pub(crate) enum Fam {
     Spark,
 }
 
-/// Does this dialect have the aggregate `FILTER (WHERE …)` clause?
+/// One thing a target may or may not be able to say.
+///
+/// This is the *vocabulary* of the capability table below; each variant is a
+/// construct Cagara can emit and a target may lack. Every question of the form
+/// "does this dialect have X" is asked through [`support`] rather than through a
+/// family test, because a family is a *grammar* grouping and capabilities do not
+/// follow grammar: T-SQL shares no family with MySQL, yet neither has a `GROUPS`
+/// frame, and Doris shares MySQL's family yet has `FULL JOIN`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Cap {
+    /// `FULL [OUTER] JOIN`.
+    FullJoin,
+    /// `GROUP BY ROLLUP(…)` / `CUBE(…)`.
+    GroupingSets,
+    /// A `GROUPS` window frame.
+    GroupsFrame,
+    /// A `RANGE` window frame **with the ORDER BY this compiler writes**.
+    RangeFrame,
+    /// A `QUALIFY` clause — a filter that runs after the window functions.
+    Qualify,
+    /// An aggregate's `FILTER (WHERE …)` clause.
+    Filter,
+    /// A `list` value, which needs an array type.
+    Arrays,
+    /// An exact `DECIMAL(p, s)`.
+    ExactDecimal,
+}
+
+/// What a target can do with one construct.
+///
+/// The four answers are kept distinct on purpose. Collapsing `Unverified` into
+/// `Native` is how a dialect gets a claim nobody checked; collapsing `Emulated`
+/// into `Unsupported` is how a language loses a construct for no reason.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Support {
+    /// The target has the construct and Cagara emits it.
+    Native,
+    /// The target lacks it and Cagara rewrites it into equivalent SQL. The
+    /// rewrite lives in [`crate::emulate`]; the result runs anywhere the
+    /// original would have, which is the point.
+    Emulated,
+    /// Cagara emits the construct and no run has shown this target accepts it.
+    /// It is not a claim of support — it is the honest name for "untested", and
+    /// the dialect documentation lists these separately.
+    Unverified,
+    /// The target lacks the construct and no equivalent spelling exists, so the
+    /// query is refused with a message naming what to write instead.
+    Unsupported,
+}
+
+impl Support {
+    /// Whether Cagara writes the construct out for this target.
+    ///
+    /// `Unverified` does: the alternative is refusing a construct on a target
+    /// that may well have it, and the refusal would be indistinguishable from a
+    /// real one. What it is *not* is a promise that the target reads it.
+    pub(crate) fn emits(self) -> bool {
+        matches!(self, Support::Native | Support::Unverified)
+    }
+}
+
+/// The capability table: what `d` can do with `cap`.
+///
+/// Every function below matches on `Dialect` **exhaustively**, with no `_` arm.
+/// That is deliberate and is the whole difference from the family tests this
+/// replaced: `sqlglot-rust` adding a dialect is then a compile error here rather
+/// than a new target that silently inherits whichever family happened to claim
+/// it. The entries are grouped by answer, so each variant appears exactly once
+/// per capability and the answer is readable as a list.
+pub(crate) fn support(cap: Cap, d: Dialect) -> Support {
+    match cap {
+        Cap::FullJoin => full_join(d),
+        Cap::GroupingSets => grouping_sets(d),
+        Cap::GroupsFrame => groups_frame(d),
+        Cap::RangeFrame => range_frame(d),
+        Cap::Qualify => qualify(d),
+        Cap::Filter => filter(d),
+        Cap::Arrays => arrays(d),
+        Cap::ExactDecimal => exact_decimal(d),
+    }
+}
+
+/// The dialect's own name, for a message that has to name the target.
+///
+/// `sqlglot-rust`'s `Dialect` has no `Display` or `name()`, so this is the one
+/// place the spelling lives. Exhaustive for the same reason the table is.
+pub fn name(d: Dialect) -> &'static str {
+    use Dialect::*;
+    match d {
+        Ansi => "ansi",
+        Athena => "athena",
+        BigQuery => "bigquery",
+        ClickHouse => "clickhouse",
+        Databricks => "databricks",
+        Doris => "doris",
+        Dremio => "dremio",
+        Drill => "drill",
+        Druid => "druid",
+        DuckDb => "duckdb",
+        Exasol => "exasol",
+        Fabric => "fabric",
+        Hive => "hive",
+        Materialize => "materialize",
+        Mysql => "mysql",
+        Oracle => "oracle",
+        Postgres => "postgres",
+        Presto => "presto",
+        Prql => "prql",
+        Redshift => "redshift",
+        RisingWave => "risingwave",
+        SingleStore => "singlestore",
+        Snowflake => "snowflake",
+        Spark => "spark",
+        Sqlite => "sqlite",
+        StarRocks => "starrocks",
+        Tableau => "tableau",
+        Teradata => "teradata",
+        Trino => "trino",
+        Tsql => "tsql",
+    }
+}
+
+/// `FULL [OUTER] JOIN`.
+///
+/// MySQL has only `LEFT`/`RIGHT` joins, and so do the engines that keep its
+/// grammar. They are listed as a group because the group is what shares the
+/// *join grammar* — and the emulation is correct on any target, so a member that
+/// has since gained `FULL JOIN` loses nothing but a little brevity.
+fn full_join(d: Dialect) -> Support {
+    use Dialect::*;
+    match d {
+        Mysql | Doris | SingleStore | StarRocks => Support::Emulated,
+        // Not SQL targets in any checkable sense.
+        Prql | Tableau => Support::Unverified,
+        Ansi | Athena | BigQuery | ClickHouse | Databricks | Dremio | Drill | Druid | DuckDb
+        | Exasol | Fabric | Hive | Materialize | Oracle | Postgres | Presto | Redshift
+        | RisingWave | Snowflake | Spark | Sqlite | Teradata | Trino | Tsql => Support::Native,
+    }
+}
+
+/// `GROUP BY ROLLUP(…)` / `CUBE(…)`.
+///
+/// Two targets lack grouping sets, for different reasons, and both get the same
+/// emulation — one `agg` per grouping set, `UNION ALL`ed together, which is
+/// exactly what the refusals used to tell the reader to write by hand:
+///
+/// * SQLite has no grouping sets at all.
+/// * MySQL has `GROUP BY … WITH ROLLUP`, which is *not* the same operation: it
+///   rolls up the whole key list (so a plain key beside the rolled-up ones would
+///   gain a grand total it did not ask for) and cannot be combined with `ORDER
+///   BY`. Measured on MariaDB 11.4: `Incorrect usage of CUBE/ROLLUP and ORDER BY`.
+fn grouping_sets(d: Dialect) -> Support {
+    use Dialect::*;
+    match d {
+        Sqlite | Mysql | Doris | SingleStore | StarRocks => Support::Emulated,
+        Drill | Druid | Prql | Tableau => Support::Unverified,
+        Ansi | Athena | BigQuery | ClickHouse | Databricks | Dremio | DuckDb | Exasol | Fabric
+        | Hive | Materialize | Oracle | Postgres | Presto | Redshift | RisingWave | Snowflake
+        | Spark | Teradata | Trino | Tsql => Support::Native,
+    }
+}
+
+/// A `GROUPS` window frame.
+///
+/// The units are one word apart in the clause, which is exactly the shape that
+/// gets assumed wrong: `ROWS` and `RANGE` are near-universal and `GROUPS` is
+/// not. Two lists, both from documentation rather than from a family rule:
+///
+/// * measured on a server — MariaDB 11.4 rejects `GROUPS BETWEEN 1 PRECEDING AND
+///   CURRENT ROW` with `ERROR 1064 … near 'GROUPS BETWEEN …'`;
+/// * documented as `{ ROWS | RANGE }` — T-SQL, BigQuery, Hive, Redshift,
+///   Snowflake and Teradata.
+///
+/// There is no rewrite: `RANGE` would answer the same only when the order key
+/// has no peers within the offset, which is the case `groups` exists to handle.
+fn groups_frame(d: Dialect) -> Support {
+    use Dialect::*;
+    match d {
+        Mysql | Doris | SingleStore | StarRocks => Support::Unsupported,
+        Tsql | Fabric | BigQuery | Hive | Redshift | Snowflake | Teradata => Support::Unsupported,
+        // Standard SQL:2011, and measured on the servers this repository runs.
+        Ansi | Postgres | DuckDb | Sqlite | Trino | Presto | Athena | Oracle | Spark
+        | Databricks | Materialize | RisingWave => Support::Native,
+        ClickHouse | Dremio | Drill | Druid | Exasol | Prql | Tableau => Support::Unverified,
+    }
+}
+
+/// A `RANGE` window frame, **with the ORDER BY this compiler writes**.
+///
+/// Every target accepts one with a single sort key. The question is whether it
+/// accepts the two this compiler writes on the dialects whose `NULLS LAST` is
+/// emulated with a leading `CASE WHEN x IS NULL` key — and three of them do not:
+///
+/// * MariaDB: `RANGE-type frame requires ORDER BY clause with single sort key` (4019).
+/// * T-SQL: the emulation's own output, run through DuckDB, says `RANGE frames must
+///   have only one ORDER BY expression` — so the translated statement would be
+///   refused there too.
+///
+/// So the answer is derived from [`null_order`] rather than from a second list: a
+/// dialect needs the emulation exactly when its entry says there is no `NULLS LAST`
+/// syntax. A second list would be a place for the two to disagree.
+fn range_frame(d: Dialect) -> Support {
+    match null_order(d) {
+        Some((_, _, true)) => Support::Native,
+        Some((_, _, false)) => Support::Unsupported,
+        None => Support::Unverified,
+    }
+}
+
+/// A `QUALIFY` clause.
+///
+/// Four targets have it. Everywhere else the filter becomes a derived table,
+/// which is what `lower.rs` does: the clause is not rewritten per dialect by
+/// sqlglot (it passes `QUALIFY` through to every target, which would be a syntax
+/// error on the rest), so the decision has to be made before the statement exists.
+/// The derived table is correct on every target, so this is `Emulated` rather than
+/// `Unsupported` wherever the clause is missing.
+fn qualify(d: Dialect) -> Support {
+    use Dialect::*;
+    match d {
+        DuckDb | Snowflake | BigQuery | Teradata => Support::Native,
+        Ansi | Athena | ClickHouse | Databricks | Dremio | Drill | Druid | Doris | Exasol
+        | Fabric | Hive | Materialize | Mysql | Oracle | Postgres | Presto | Prql | Redshift
+        | RisingWave | SingleStore | Spark | Sqlite | StarRocks | Tableau | Trino | Tsql => {
+            Support::Emulated
+        }
+    }
+}
+
+/// An aggregate's `FILTER (WHERE …)` clause.
 ///
 /// Standard SQL since 2003, and every engine here that has it treats it as a
 /// suffix of the aggregate call. The ones that do not get the portable spelling
 /// instead, applied by [`rewrite`] — `SUM(CASE WHEN p THEN x END)`.
-/// Does this target have a `QUALIFY` clause — a filter that runs after the window
-/// functions, so it can read their output in the same `SELECT`?
 ///
-/// Four do. Everywhere else the filter becomes a derived table, which is what
-/// `lower.rs` does when this is false: the clause is not rewritten per dialect by
-/// sqlglot (it passes `QUALIFY` through to every target, which would be a syntax
-/// error on the rest), so the decision has to be made before the statement exists.
-pub(crate) fn supports_qualify(d: Dialect) -> bool {
-    matches!(
-        d,
-        Dialect::DuckDb | Dialect::Snowflake | Dialect::BigQuery | Dialect::Teradata
-    )
+/// `CASE` is readable everywhere, so this is `Emulated` and never `Unsupported`.
+/// That is also why the `Native` list is short: an engine that *does* have the
+/// clause but whose support nobody checked loses nothing but the shorter
+/// spelling, and the alternative — emitting `FILTER` on a target that rejects it
+/// — is a query that fails at the server.
+fn filter(d: Dialect) -> Support {
+    use Dialect::*;
+    match d {
+        Ansi | Postgres | DuckDb | Sqlite | Trino | Presto | Athena | Snowflake | Redshift
+        | Materialize | RisingWave => Support::Native,
+        BigQuery | ClickHouse | Databricks | Dremio | Drill | Druid | Doris | Exasol | Fabric
+        | Hive | Mysql | Oracle | Prql | SingleStore | Spark | StarRocks | Tableau | Teradata
+        | Tsql => Support::Emulated,
+    }
 }
 
-pub(crate) fn supports_filter(d: Dialect) -> bool {
-    !matches!(fam(d), Fam::Mysql | Fam::Tsql | Fam::BigQuery | Fam::Spark)
+/// A `list` value, which needs an array type.
+///
+/// `arrayAgg`, a list literal, `<>`, `listLength`, `listContains` and `unnest`
+/// are spelled for PostgreSQL and DuckDB. Every other dialect refuses the query
+/// rather than writing JSON text, which would change the column's type without
+/// saying so — so this is the one capability whose non-`Native` answer is
+/// `Unsupported` almost everywhere.
+///
+/// The list is short and explicit because the spelling is: a target whose
+/// intrinsic spelling was never written cannot be handed `ARRAY_AGG` on the
+/// strength of "its family has arrays".
+fn arrays(d: Dialect) -> Support {
+    use Dialect::*;
+    match d {
+        Ansi | Postgres | DuckDb | Materialize | RisingWave => Support::Native,
+        Athena | BigQuery | ClickHouse | Databricks | Dremio | Drill | Druid | Doris | Exasol
+        | Fabric | Hive | Mysql | Oracle | Presto | Prql | Redshift | SingleStore | Snowflake
+        | Spark | Sqlite | StarRocks | Tableau | Teradata | Trino | Tsql => Support::Unsupported,
+    }
+}
+
+/// An exact `DECIMAL(p, s)`.
+///
+/// SQLite's `NUMERIC` affinity stores what it is given as INTEGER or REAL, so a
+/// value cast to `DECIMAL(10, 2)` there is a binary float wearing the type's
+/// name — the one thing this type exists to prevent. Every other target here has
+/// a fixed-point type.
+fn exact_decimal(d: Dialect) -> Support {
+    use Dialect::*;
+    match d {
+        Sqlite => Support::Unsupported,
+        Ansi | Athena | BigQuery | ClickHouse | Databricks | Dremio | Drill | Druid | Doris
+        | DuckDb | Exasol | Fabric | Hive | Materialize | Mysql | Oracle | Postgres | Presto
+        | Prql | Redshift | RisingWave | SingleStore | Snowflake | Spark | StarRocks | Tableau
+        | Teradata | Trino | Tsql => Support::Native,
+    }
+}
+
+/// Does this target have a `QUALIFY` clause it can read?
+///
+/// The shorthand `lower.rs` asks for, so a call site does not have to spell out
+/// "and not `Unverified`" every time.
+pub(crate) fn supports_qualify(d: Dialect) -> bool {
+    support(Cap::Qualify, d).emits()
 }
 
 pub(crate) fn fam(d: Dialect) -> Fam {
@@ -78,67 +352,6 @@ pub fn rewrite(stmt: Statement, to: Dialect) -> Result<Statement, String> {
     };
     block(&mut sel, to)?;
     Ok(Statement::Select(sel))
-}
-
-/// Whether the target engine has a `FULL [OUTER] JOIN` spelling.
-///
-/// MySQL has only `LEFT`/`RIGHT` joins; emitting `FULL JOIN` there produces
-/// SQL the engine rejects. The Cagara query stays expressible as a union of the
-/// two outer joins, but rewriting it here would have to know which predicate
-/// null-extends which side, so the backend refuses it instead.
-pub(crate) fn supports_full_join(d: Dialect) -> bool {
-    fam(d) != Fam::Mysql
-}
-
-/// Does the target accept a `RANGE` window frame *with the ORDER BY we write*?
-///
-/// Every target accepts one with a single sort key. The question is whether it
-/// accepts the two this compiler writes on the dialects whose `NULLS LAST` is
-/// emulated with a leading `CASE WHEN x IS NULL` key — and three of them do not:
-///
-/// * MariaDB: `RANGE-type frame requires ORDER BY clause with single sort key` (4019).
-/// * T-SQL: the emulation's own output, run through DuckDB, says `RANGE frames must
-///   have only one ORDER BY expression` — so the translated statement would be
-///   refused there too.
-///
-/// So the answer here is "with the ORDER BY we write", not "in principle", and it is
-/// derived from `null_order` rather than from a second list: a dialect needs the
-/// emulation exactly when its entry says there is no `NULLS LAST` syntax. A second
-/// list would be a place for the two to disagree.
-pub(crate) fn supports_range_frame(d: Dialect) -> bool {
-    !matches!(null_order(d), Some((_, _, false)))
-}
-
-/// Does the target have a `GROUPS` window frame?
-///
-/// The MySQL family does not: MariaDB 11.4 rejects `GROUPS BETWEEN 1 PRECEDING AND
-/// CURRENT ROW` with `ERROR 1064 … near 'GROUPS BETWEEN …'`, while `ROWS` and
-/// `RANGE` both run there. Measured, not assumed — the three units are one word apart
-/// in the clause and two of them work, which is exactly the shape that gets assumed
-/// wrong.
-///
-/// So a `groups` frame is refused for MySQL rather than rewritten. Rewriting it as
-/// `RANGE` would be right only when the order key has no peers within the offset,
-/// which is the case the author wrote `groups` to handle.
-pub(crate) fn supports_groups_frame(d: Dialect) -> bool {
-    fam(d) != Fam::Mysql
-}
-
-/// Does the target have `GROUP BY ROLLUP(…)` / `CUBE(…)`?
-///
-/// Two do not, and for different reasons, so they get different messages:
-///
-/// * SQLite has no grouping sets at all.
-/// * MySQL has `GROUP BY … WITH ROLLUP`, which is *not* the same operation: it
-///   rolls up the whole key list (so a plain key beside the rolled-up ones would
-///   gain a grand total it did not ask for) and cannot be combined with `ORDER
-///   BY`. Measured on MariaDB 11.4: `Incorrect usage of CUBE/ROLLUP and ORDER BY`
-///   for the second, and `GROUP BY ROLLUP(a, b)` is a syntax error for the first.
-///
-/// Refusing is what keeps the subtotal rows honest: silently emitting plain
-/// `GROUP BY` would drop them, which is a wrong answer rather than a refusal.
-pub(crate) fn supports_grouping_sets(d: Dialect) -> bool {
-    !matches!(d, Dialect::Sqlite) && !mysql(d)
 }
 
 /// Is this the Trino grammar family (`OFFSET` before `LIMIT`)?
@@ -199,15 +412,23 @@ fn block(sel: &mut SelectStatement, to: Dialect) -> Result<(), String> {
     //     syntactic unit — and additionally requires an ORDER BY. Setting the
     //     limit here is what makes sqlglot emit
     //     `OFFSET n ROWS FETCH NEXT m ROWS ONLY`.
+    //
+    // The ORDER BY requirement is a *syntax* requirement, not a semantic one, so it
+    // is met the way the target spells it rather than by refusing the query: sqlglot
+    // writes `ORDER BY (SELECT NULL)`, which is the documented T-SQL idiom for paging
+    // with no meaningful order. Refusing instead made acceptance depend on the target
+    // — `offset 5` was an error on T-SQL and fine everywhere else — and it was not
+    // even consistent within T-SQL: the refusal only fired when there was no limit,
+    // so `offset 5 & limit 3` emitted the dummy order and compiled while `offset 5`
+    // alone did not. Paging without an `order` is nondeterministic on every engine;
+    // that is what `limit` without `order` has always meant here, and T-SQL is not
+    // special in needing to be told so.
     if sel.offset.is_some() && sel.limit.is_none() {
         if mysql(to) {
             sel.limit = Some(Expr::Number("18446744073709551615".into()));
         } else if matches!(to, Dialect::Sqlite) {
             sel.limit = Some(Expr::Number("-1".into()));
         } else if tsql(to) {
-            if sel.order_by.is_empty() {
-                return Err("T-SQL needs an `order` before `offset`".into());
-            }
             // `FETCH NEXT` needs a row count; mimic sqlglot's own choice for
             // "all remaining rows" on this dialect.
             sel.limit = Some(Expr::Number("9223372036854775807".into()));
@@ -606,7 +827,7 @@ fn expr(e: Expr, to: Dialect) -> Result<Expr, String> {
     let e = subqueries(e, to)?;
     // A filtered aggregate is `FILTER (WHERE …)` where the target has the
     // clause, and the portable `SUM(CASE WHEN … THEN x END)` where it does not.
-    let e = if supports_filter(to) {
+    let e = if support(Cap::Filter, to).emits() {
         e
     } else {
         transform_deep(e, &fold_filter)
@@ -863,5 +1084,163 @@ fn empty() -> SelectStatement {
         qualify: None,
         window_definitions: vec![],
         query_options: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every dialect `sqlglot-rust` knows is classified, for every capability.
+    ///
+    /// The point of the table is that a new dialect cannot silently inherit an
+    /// answer, and that is only true if the table is total. `Dialect::all()` is the
+    /// crate's own list, so a variant added there and not here fails this test
+    /// rather than defaulting to whatever `fam` would have guessed.
+    #[test]
+    fn every_dialect_is_classified_for_every_capability() {
+        let caps = [
+            Cap::FullJoin,
+            Cap::GroupingSets,
+            Cap::GroupsFrame,
+            Cap::RangeFrame,
+            Cap::Qualify,
+            Cap::Filter,
+            Cap::Arrays,
+            Cap::ExactDecimal,
+        ];
+        for d in Dialect::all() {
+            for cap in caps {
+                // `support` matches exhaustively, so reaching here at all is the
+                // test; naming the answer keeps the assertion honest.
+                let s = support(cap, *d);
+                assert!(
+                    matches!(
+                        s,
+                        Support::Native
+                            | Support::Emulated
+                            | Support::Unverified
+                            | Support::Unsupported
+                    ),
+                    "{d:?} / {cap:?}: {s:?}"
+                );
+                // Every dialect has a name, and it is the one a message would print.
+                assert!(!name(*d).is_empty(), "{d:?}");
+            }
+        }
+    }
+
+    /// T-SQL is not the MySQL family, and it has no `GROUPS` frame either.
+    ///
+    /// The bug this pins: `supports_groups_frame` was `fam(d) != Fam::Mysql`, so it
+    /// accepted T-SQL and the compiler emitted `GROUPS BETWEEN 1 PRECEDING AND
+    /// CURRENT ROW` for a server whose frame syntax is `{ ROWS | RANGE }`. A family
+    /// test cannot answer this, because the two dialects are in different families
+    /// for a reason that has nothing to do with window frames.
+    #[test]
+    fn tsql_has_no_groups_frame_and_that_is_not_a_family_question() {
+        assert_eq!(
+            support(Cap::GroupsFrame, Dialect::Tsql),
+            Support::Unsupported
+        );
+        assert_eq!(
+            support(Cap::GroupsFrame, Dialect::Fabric),
+            Support::Unsupported
+        );
+        assert_eq!(
+            support(Cap::GroupsFrame, Dialect::Mysql),
+            Support::Unsupported
+        );
+        // And the ones that do have it are not "everything else": DuckDB, PostgreSQL,
+        // SQLite and Trino were measured to accept it.
+        for d in [
+            Dialect::DuckDb,
+            Dialect::Postgres,
+            Dialect::Sqlite,
+            Dialect::Trino,
+            Dialect::Ansi,
+        ] {
+            assert_eq!(support(Cap::GroupsFrame, d), Support::Native, "{d:?}");
+        }
+    }
+
+    /// The two constructs a target can lack and still mean are `Emulated`, not
+    /// `Unsupported`: that is the difference between rewriting and refusing.
+    #[test]
+    fn the_emulated_capabilities_are_emulated_and_not_refused() {
+        for d in [
+            Dialect::Mysql,
+            Dialect::Doris,
+            Dialect::SingleStore,
+            Dialect::StarRocks,
+        ] {
+            assert_eq!(support(Cap::FullJoin, d), Support::Emulated, "{d:?}");
+        }
+        for d in [
+            Dialect::Sqlite,
+            Dialect::Mysql,
+            Dialect::Doris,
+            Dialect::SingleStore,
+            Dialect::StarRocks,
+        ] {
+            assert_eq!(support(Cap::GroupingSets, d), Support::Emulated, "{d:?}");
+        }
+        // A target that has them keeps them: emulation is a fallback, not a policy.
+        assert_eq!(support(Cap::FullJoin, Dialect::Postgres), Support::Native);
+        assert_eq!(
+            support(Cap::GroupingSets, Dialect::Postgres),
+            Support::Native
+        );
+    }
+
+    /// `emits` is the one place "do we write this out" is decided.
+    ///
+    /// `Unverified` emits: refusing a construct on a target that may well have it
+    /// would be indistinguishable from a real refusal, and the documentation says
+    /// which targets are unverified instead.
+    #[test]
+    fn unverified_emits_and_unsupported_does_not() {
+        assert!(Support::Native.emits());
+        assert!(Support::Unverified.emits());
+        assert!(!Support::Emulated.emits());
+        assert!(!Support::Unsupported.emits());
+    }
+
+    /// `QUALIFY` is the one capability whose fallback is a derived table, so the
+    /// answer for a target without it is `Emulated` and the lowerer still wraps.
+    #[test]
+    fn qualify_is_native_on_four_targets_and_emulated_elsewhere() {
+        for d in [
+            Dialect::DuckDb,
+            Dialect::Snowflake,
+            Dialect::BigQuery,
+            Dialect::Teradata,
+        ] {
+            assert_eq!(support(Cap::Qualify, d), Support::Native, "{d:?}");
+            assert!(supports_qualify(d), "{d:?}");
+        }
+        for d in [Dialect::Mysql, Dialect::Tsql, Dialect::Sqlite] {
+            assert_eq!(support(Cap::Qualify, d), Support::Emulated, "{d:?}");
+            // `lower.rs` asks this to decide between `QUALIFY` and a derived table,
+            // so `Emulated` has to answer false here.
+            assert!(!supports_qualify(d), "{d:?}");
+        }
+    }
+
+    /// The `RANGE` answer is derived from the `NULLS LAST` answer, not from a
+    /// second list that could disagree with it.
+    #[test]
+    fn range_frames_follow_the_null_ordering() {
+        for d in Dialect::all() {
+            let expects_second_key = matches!(null_order(*d), Some((_, _, false)));
+            let s = support(Cap::RangeFrame, *d);
+            if expects_second_key {
+                assert_eq!(s, Support::Unsupported, "{d:?} writes a second key");
+            } else if null_order(*d).is_some() {
+                assert_eq!(s, Support::Native, "{d:?}");
+            } else {
+                assert_eq!(s, Support::Unverified, "{d:?}");
+            }
+        }
     }
 }

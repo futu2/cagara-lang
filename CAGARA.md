@@ -1572,12 +1572,16 @@ cagara lsp                       # language server over stdio
 cagara --version                 # also -V; exit 0
 ```
 
-- `--dialect` changes only the SQL that is emitted, with one exception: `fullJoin` is a compile
-  error for the MySQL family (`mysql`, `doris`, `singlestore`, `starrocks`), which has no
-  `FULL [OUTER] JOIN` — write `leftJoin`/`rightJoin` plus `unionAll` instead. Default `ansi`;
-  common targets include `postgres`, `mysql`, `sqlite`, `duckdb`, `tsql`, `bigquery`, `snowflake`,
-  `trino`, `spark`. SQLite and DuckDB are executed in CI; other dialects use the ANSI/Postgres
-  fallback for some intrinsics.
+- `--dialect` changes the SQL that is emitted, never whether a program compiles. A construct the
+  target cannot spell is either rewritten into equivalent SQL — `fullJoin` becomes a `LEFT JOIN`
+  unioned with the right rows that have no match on the MySQL family, `rollup`/`cube` become one
+  `agg` per grouping set on SQLite and MySQL — or refused with a message naming what to write
+  instead, which only happens where no equivalent exists (a `groups` window frame on MySQL and
+  T-SQL, a `list` on a dialect with no array type, `parseDate` on SQLite and T-SQL). Default
+  `ansi`; common targets include `postgres`, `mysql`, `sqlite`, `duckdb`, `tsql`, `bigquery`,
+  `snowflake`, `trino`, `spark`. SQLite and DuckDB run in CI; other dialects use the
+  ANSI/Postgres fallback for some intrinsics, and [`docs/SQL-DIALECTS.md`](docs/SQL-DIALECTS.md)
+  says which target was checked by which means.
 - `--only DEF` compiles one definition instead of `main`. `--only alias.DEF` reads a definition
   out of an imported module, e.g. `--only s.users` after `import "s.cagara" as s`.
 - `--arg VALUE` (repeatable) supplies a definition's arguments, applied in order, so a report can be

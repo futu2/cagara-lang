@@ -76,9 +76,16 @@ fn a_refusal_names_the_stage_it_is_about() {
 }
 
 /// A dialect refusal names the construct, not the query.
+///
+/// `fullJoin` used to be the example here. It is emulated now, so the example is a
+/// construct that genuinely has no equivalent: a `groups` frame, whose unit no
+/// rewrite can stand in for.
 #[test]
 fn a_dialect_refusal_names_the_construct() {
-    let full = format!("{USERS}q = users & fullJoin users (.<id == .>id)\n");
+    let full = format!(
+        "{USERS}q = users & select {{ s = over {{ order = [asc .id], \
+         frame = groups (preceding 1) currentRow }} (count) }}\n"
+    );
     let ws = Workspace::from_source(&full);
     let (_, r) = root_queries(&ws)
         .into_iter()
@@ -92,13 +99,13 @@ fn a_dialect_refusal_names_the_construct() {
             ..Options::default()
         },
     )
-    .expect_err("MySQL has no FULL JOIN");
-    assert!(message.contains("`fullJoin` is not supported"), "{message}");
+    .expect_err("MySQL has no GROUPS frame");
+    assert!(message.contains("`groups` window frame"), "{message}");
     let loc = loc.expect("the refusal carries a location");
     let text = &full[loc.span.start as usize..loc.span.end as usize];
     assert!(
-        text.contains("fullJoin"),
-        "the span covers the join that refused: {text:?}"
+        text.contains("frame = groups"),
+        "the span covers the window that refused: {text:?}"
     );
     assert!(loc.span.start > 0, "not the top of the file");
 }
@@ -513,12 +520,31 @@ fn nothing_is_sql_null() {
     assert!(s.contains("COALESCE(NULL, 0) AS y"), "{s}");
 }
 
+/// `fullJoin` on the MySQL family: the two outer halves, unioned.
+///
+/// MySQL has no `FULL [OUTER] JOIN`, and refusing the query used to be the answer —
+/// with a message telling the reader to write `leftJoin`/`rightJoin` and
+/// `unionAll` themselves. That is exactly what the compiler can write for them, so
+/// it does, and the language stops depending on the target.
+///
+/// The second branch is the right rows with no match, and it is an anti-join rather
+/// than `RIGHT JOIN … WHERE <left> IS NULL`: a matched row whose every column is
+/// NULL would be kept twice by the latter.
 #[test]
-fn full_join_is_rejected_for_mysql_family() {
+fn full_join_is_emulated_for_the_mysql_family() {
     let src = "q = orders & fullJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id)\n";
-    let e = dialect(src, "q", "mysql").unwrap_err();
-    assert!(e.contains("`fullJoin`"), "{e}");
-    assert!(dialect(src, "q", "postgres").is_ok());
+    let m = dialect(src, "q", "mysql").expect("MySQL can express a full join as a union");
+    assert!(m.contains("LEFT JOIN"), "{m}");
+    assert!(m.contains("UNION ALL"), "{m}");
+    assert!(!m.contains("FULL JOIN"), "{m}");
+    assert!(m.contains("NOT EXISTS"), "{m}");
+    // The predicate is the same one with the sides exchanged, because the anti-join
+    // reads the right input as its left.
+    assert!(m.contains("t4.user_id = t3.id"), "{m}");
+    // And a target that has the join keeps it.
+    let p = dialect(src, "q", "postgres").expect("postgres");
+    assert!(p.contains("FULL JOIN"), "{p}");
+    assert!(!p.contains("UNION ALL"), "{p}");
 }
 
 #[test]
@@ -1164,9 +1190,18 @@ fn dialects_rewrite_every_block() {
         ts.contains("OFFSET 5 ROWS FETCH NEXT 5 ROWS ONLY") && !ts.contains("TOP"),
         "{ts}"
     );
-    assert!(dialect("q = users & offset 5\n", "q", "tsql")
-        .unwrap_err()
-        .contains("needs an `order` before `offset`"));
+    // A lone `offset` with no `order` is *accepted* now, spelled the way T-SQL
+    // requires: `ORDER BY (SELECT NULL)` is the documented idiom for paging with no
+    // meaningful order. Refusing it made acceptance depend on the target and was not
+    // even self-consistent — `offset 5 & limit 3` already emitted the dummy order, so
+    // only the bare form was an error.
+    let bare = dialect("q = users & offset 5\n", "q", "tsql")
+        .expect("T-SQL pages without an `order` by ordering on a constant");
+    assert!(bare.contains("ORDER BY (SELECT NULL)"), "{bare}");
+    assert!(
+        bare.contains("OFFSET 5 ROWS FETCH NEXT 9223372036854775807 ROWS ONLY"),
+        "{bare}"
+    );
     // A lone `offset` is not valid everywhere, so the "no limit" is spelled
     // per dialect: MySQL's max BIGINT, SQLite's `LIMIT -1`, and for T-SQL a
     // FETCH count, since `OFFSET .. ROWS` is not a statement on its own.
@@ -1789,15 +1824,33 @@ fn a_plain_key_precedes_a_rolled_up_one() {
     assert!(out.contains("CUBE(c)"), "{out}");
 }
 
-/// The targets without grouping sets refuse them, and the two refusals say why.
+/// The targets without grouping sets get the subtotals as a union of aggregates.
+///
+/// SQLite has no grouping sets and MySQL's `WITH ROLLUP` is a different operation,
+/// so both used to be refused — with a message telling the reader to compute the
+/// subtotals with a separate `agg` and union them in. The compiler writes exactly
+/// that: one `agg` per grouping set, `UNION ALL`ed, with the rolled-up keys NULL in
+/// the rows that do not group by them.
+///
+/// `ROLLUP(a)` is `{(a), ()}`, so the emulation is two stages: the per-`a` rows and
+/// the grand total. Dropping either would be a wrong answer, not a simplification.
 #[test]
-fn grouping_sets_are_refused_where_they_do_not_exist() {
+fn grouping_sets_are_emulated_where_they_do_not_exist() {
     let src = "g : query { a = int, n = int } = table \"main\" \"g\"\n\
                q = g & agg { a = rollup .a, s = sum .n }\n";
     for d in ["sqlite", "mysql"] {
-        let e = dialect(src, "q", d).expect_err(d);
-        assert!(e.contains("rollup"), "{d}: {e}");
+        let s = dialect(src, "q", d).unwrap_or_else(|e| panic!("{d}: {e}"));
+        assert!(s.contains("UNION ALL"), "{d}: {s}");
+        assert!(!s.contains("ROLLUP"), "{d}: {s}");
+        assert!(!s.contains("WITH ROLLUP"), "{d}: {s}");
+        // One branch per grouping set: the keyed rows, and the grand total.
+        assert_eq!(s.matches("UNION ALL").count(), 1, "{d}: {s}");
+        assert_eq!(s.matches("FROM main.g").count(), 2, "{d}: {s}");
+        assert!(s.contains("GROUP BY a"), "{d}: {s}");
+        // The grand total's key is NULL rather than absent, so the branches line up.
+        assert!(s.contains("NULL AS a"), "{d}: {s}");
     }
+    // The targets that have the clause keep it: emulation is not applied blindly.
     for d in [
         "duckdb",
         "postgres",
@@ -1808,6 +1861,7 @@ fn grouping_sets_are_refused_where_they_do_not_exist() {
     ] {
         let s = dialect(src, "q", d).unwrap_or_else(|e| panic!("{d}: {e}"));
         assert!(s.contains("ROLLUP(a)"), "{d}: {s}");
+        assert!(!s.contains("UNION ALL"), "{d}: {s}");
     }
 }
 

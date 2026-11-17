@@ -80,18 +80,19 @@ impl<'w> Checker<'w> {
     /// same route to the editor and the command line as an error does, and
     /// kept in its own list so nothing that asks "did this definition check"
     /// has to learn about severity.
-    pub(crate) fn warn(&mut self, span: Span, message: String) {
-        self.warnings.push((span, message, Vec::new()));
+    pub(crate) fn warn(&mut self, span: Span, kind: crate::workspace::DiagKind, message: String) {
+        self.warnings.push((span, message, kind, Vec::new()));
     }
 
     /// A warning that comes with fixes the reader can apply.
     pub(crate) fn warn_with(
         &mut self,
         span: Span,
+        kind: crate::workspace::DiagKind,
         message: String,
         suggestions: Vec<crate::workspace::Suggestion>,
     ) {
-        self.warnings.push((span, message, suggestions));
+        self.warnings.push((span, message, kind, suggestions));
     }
 
     // ── definitions and schemes ────────────────────────────────────────────
@@ -143,6 +144,7 @@ impl<'w> Checker<'w> {
                     def: i,
                     span: self.defs.get(i).span,
                     message: format!("`{name}` refers to itself; recursion is not supported"),
+                    diag_kind: crate::workspace::DiagKind::Recursion,
                     kind: RawErrorKind::Def,
                     severity: crate::workspace::Severity::Error,
                     suggestions: Vec::new(),
@@ -176,6 +178,7 @@ impl<'w> Checker<'w> {
                          definitions; define a name before the definitions that use it",
                         current.name
                     ),
+                    diag_kind: crate::workspace::DiagKind::Recursion,
                     kind: RawErrorKind::Chain,
                     severity: crate::workspace::Severity::Error,
                     suggestions: Vec::new(),
@@ -304,6 +307,7 @@ impl<'w> Checker<'w> {
                     def: i,
                     span: e.span,
                     message,
+                    diag_kind: e.kind,
                     kind: RawErrorKind::Def,
                     severity: crate::workspace::Severity::Error,
                     suggestions: e.suggestions,
@@ -493,7 +497,10 @@ impl<'w> Checker<'w> {
                         self.span = def.body.span;
                         self.coerce(&internal, &t)
                             .map_err(|msg| {
-                                format!("`{}` does not match its signature: {msg}", def.name)
+                                msg.prefixed(&format!(
+                                    "`{}` does not match its signature: ",
+                                    def.name
+                                ))
                             })
                             .map_err(at(def.body.span))?;
                         return Ok(t);
@@ -514,7 +521,9 @@ impl<'w> Checker<'w> {
                 return Err(at(def.body.span)(msg));
             }
             self.coerce(&t, a)
-                .map_err(|msg| format!("`{}` does not match its signature: {msg}", def.name))
+                .map_err(|msg| {
+                    msg.prefixed(&format!("`{}` does not match its signature: ", def.name))
+                })
                 .map_err(at(def.body.span))?;
             // A literal body keeps the default kind `infer` recorded for it.
             // `coerce` accepts `"x"` against `date` because a string literal
@@ -577,7 +586,8 @@ impl<'w> Checker<'w> {
                 let msg = self.no_overload_at(module, &name, &cands, &target, sp);
                 return Err(TyErr {
                     span: sp,
-                    msg,
+                    kind: msg.kind,
+                    msg: msg.message,
                     suggestions: Vec::new(),
                 });
             }
@@ -599,9 +609,10 @@ impl<'w> Checker<'w> {
                     let ranked = self.prefer(module, &fits, &target, false);
                     if ranked.len() == 1 {
                         self.choose(module, ranked[0], &target, &origin, &name, sp)
-                            .map_err(|msg| TyErr {
+                            .map_err(|fail| TyErr {
                                 span: sp,
-                                msg,
+                                kind: fail.kind,
+                                msg: fail.message,
                                 suggestions: Vec::new(),
                             })?;
                     }
@@ -638,9 +649,10 @@ impl<'w> Checker<'w> {
             let ranked = self.prefer(module, &fits, &target, false);
             if let [winner] = ranked.as_slice() {
                 self.choose(module, *winner, &target, &origin, &name, sp)
-                    .map_err(|msg| TyErr {
+                    .map_err(|fail| TyErr {
                         span: sp,
-                        msg,
+                        kind: fail.kind,
+                        msg: fail.message,
                         suggestions: Vec::new(),
                     })?;
                 continue;
@@ -657,6 +669,7 @@ impl<'w> Checker<'w> {
             );
             return Err(TyErr {
                 span: sp,
+                kind: crate::workspace::DiagKind::Overload,
                 msg,
                 suggestions: Vec::new(),
             });
@@ -716,7 +729,7 @@ impl<'w> Checker<'w> {
 
     /// Convert a signature. Its type variables are rigid; its phase variable
     /// is flexible (a plain `expr` may be used at any phase).
-    pub(crate) fn annotation(&mut self, t: &TypeExpr) -> Result<Ty, String> {
+    pub(crate) fn annotation(&mut self, t: &TypeExpr) -> Result<Ty, Fail> {
         let mut res = t;
         while let TypeExpr::Fun(_, r) = res {
             res = r;
@@ -743,7 +756,7 @@ impl<'w> Checker<'w> {
                 [] => self.fresh(),
                 ["agg"] => con("agg"),
                 ["win"] => con("win"),
-                _ => return Err(rules::clash(Phase::Agg, Phase::Win)),
+                _ => return Err(Fail::from(rules::clash(Phase::Agg, Phase::Win))),
             },
         };
         let mut names = HashMap::new();
@@ -755,11 +768,12 @@ impl<'w> Checker<'w> {
         t: &TypeExpr,
         phase: &Ty,
         names: &mut HashMap<String, Ty>,
-    ) -> Result<Ty, String> {
+    ) -> Result<Ty, Fail> {
         match t {
-            TypeExpr::Nat(..) => Err("a number is not a type on its own; `decimal p s` is the \
-                                      constructor that takes one"
-                .into()),
+            TypeExpr::Nat(..) => Err(Fail::from(
+                "a number is not a type on its own; `decimal p s` is the \
+                                      constructor that takes one",
+            )),
             TypeExpr::App { head, args, .. } => {
                 let Some(&(name, arity)) = CONS.iter().find(|(n, _)| *n == head.as_str()) else {
                     // `row s` marks a *record of columns* in expression
@@ -772,7 +786,7 @@ impl<'w> Checker<'w> {
                     // registering it as a constructor would shadow that.
                     if head == "row" {
                         if args.len() != 1 {
-                            return Err("`row` takes one type argument".into());
+                            return Err(Fail::from("`row` takes one type argument"));
                         }
                         return self.conv_with_kind(&args[0], phase, names, Kind::Row);
                     }
@@ -788,15 +802,18 @@ impl<'w> Checker<'w> {
                         if is_type_variable(head) {
                             return Ok(self.rigid(head, names));
                         }
-                        return Err(unknown_type_name(head));
+                        return Err(Fail::kinded(
+                            crate::workspace::DiagKind::UnknownName,
+                            unknown_type_name(head),
+                        ));
                     }
-                    return Err(format!("unknown type constructor `{head}`"));
+                    return Err(Fail::from(format!("unknown type constructor `{head}`")));
                 };
                 if args.len() != arity {
-                    return Err(format!(
+                    return Err(Fail::from(format!(
                         "`{name}` takes {arity} type argument(s), got {}",
                         args.len()
-                    ));
+                    )));
                 }
                 match name {
                     "decimal" => {
@@ -813,11 +830,12 @@ impl<'w> Checker<'w> {
                                     params.push(self.rigid(head, names))
                                 }
                                 _ => {
-                                    return Err("`decimal` takes two numbers — `decimal 10 2` \
+                                    return Err(Fail::from(
+                                        "`decimal` takes two numbers — `decimal 10 2` \
                                                 is ten digits with two after the point; a \
                                                 signature may also write `decimal p s` and let \
-                                                the use site decide"
-                                        .into())
+                                                the use site decide",
+                                    ))
                                 }
                             }
                         }
@@ -825,18 +843,18 @@ impl<'w> Checker<'w> {
                         // parameter is not, because its value comes from the use.
                         if let (Ty::Nat(p), Ty::Nat(s_)) = (&params[0], &params[1]) {
                             if s_ > p {
-                                return Err(format!(
+                                return Err(Fail::from(format!(
                                     "`decimal {p} {s_}` has more digits after the point than \
                                      it has digits; write `decimal {s_} {s_}` or widen the \
                                      precision"
-                                ));
+                                )));
                             }
                             if *p == 0 || *p > 38 {
-                                return Err(format!(
+                                return Err(Fail::from(format!(
                                     "`decimal` precision must be between 1 and 38, and this is \
                                      {p}; 38 is what every engine in the portable family \
                                      supports"
-                                ));
+                                )));
                             }
                         }
                         Ok(Ty::Con("decimal", params))
@@ -858,7 +876,7 @@ impl<'w> Checker<'w> {
                         {
                             if head == "row" {
                                 if row_args.len() != 1 {
-                                    return Err("`row` takes one type argument".into());
+                                    return Err(Fail::from("`row` takes one type argument"));
                                 }
                                 let output =
                                     self.conv_with_kind(&row_args[0], phase, names, Kind::Row)?;
@@ -874,9 +892,9 @@ impl<'w> Checker<'w> {
                     "keyMap" => {
                         let m = self.conv_keymap(&args[0], names)?;
                         if kind_of(&m, &self.vars) != Kind::KeyMap {
-                            return Err(
-                                "kind mismatch: `keyMap` expects a mapper of kind `KeyMap`".into(),
-                            );
+                            return Err(Fail::from(
+                                "kind mismatch: `keyMap` expects a mapper of kind `KeyMap`",
+                            ));
                         }
                         let r = self.conv_with_kind(&args[1], phase, names, Kind::Row)?;
                         // R-KeyMap-Closed applies here too: a `keyMap` written
@@ -922,10 +940,10 @@ impl<'w> Checker<'w> {
                     //   keyMap : keymapper m -> query r -> query (keyMap m r)
                     "keymapper" | "valuemapper" => {
                         let TypeExpr::App { head, args, .. } = &args[0] else {
-                            return Err(format!("`{name}` needs a type variable"));
+                            return Err(Fail::from(format!("`{name}` needs a type variable")));
                         };
                         if !args.is_empty() {
-                            return Err(format!("`{name}` needs a bare type variable"));
+                            return Err(Fail::from(format!("`{name}` needs a bare type variable")));
                         }
                         let kind = if name == "keymapper" {
                             Kind::KeyMap
@@ -941,10 +959,10 @@ impl<'w> Checker<'w> {
                     // `Sym`.
                     "symbol" => {
                         let TypeExpr::App { head, args, .. } = &args[0] else {
-                            return Err("`symbol` needs a type variable".into());
+                            return Err(Fail::from("`symbol` needs a type variable"));
                         };
                         if !args.is_empty() {
-                            return Err("`symbol` needs a bare type variable".into());
+                            return Err(Fail::from("`symbol` needs a bare type variable"));
                         }
                         let k = self.rigid(head, names);
                         Ok(Ty::Con("keyLabel", vec![k]))
@@ -967,7 +985,9 @@ impl<'w> Checker<'w> {
                                 {
                                     if row_head == "row" {
                                         if row_args.len() != 1 {
-                                            return Err("`row` takes one type argument".into());
+                                            return Err(Fail::from(
+                                                "`row` takes one type argument",
+                                            ));
                                         }
                                         let output = self.conv_with_kind(
                                             &row_args[0],
@@ -987,9 +1007,9 @@ impl<'w> Checker<'w> {
                             let a = self.conv(&inner[1], phase, names)?;
                             Ok(expr(con(name), r, a))
                         }
-                        _ => Err(format!(
+                        _ => Err(Fail::from(format!(
                             "`{name}` wraps an expression type, e.g. `{name} (expr r int)`"
-                        )),
+                        ))),
                     },
                     _ => {
                         let expected_kinds = expected_arg_kinds(name);
@@ -1010,7 +1030,9 @@ impl<'w> Checker<'w> {
                 for f in fields {
                     let (k, v) = (&f.name, &f.ty);
                     if fs.iter().any(|(o, _)| o == k) {
-                        return Err(format!("field `{k}` appears twice in a record type"));
+                        return Err(Fail::from(format!(
+                            "field `{k}` appears twice in a record type"
+                        )));
                     }
                     let v = self.conv(v, phase, names)?;
                     fs.push((k.clone(), v));
@@ -1028,11 +1050,11 @@ impl<'w> Checker<'w> {
             // A string is only meaningful as a key mapper's affix, which
             // `conv_keymap` handles; anywhere else it is a type-position
             // mistake rather than something to accept silently.
-            TypeExpr::Str(_, sp) => Err(format!(
+            TypeExpr::Str(_, sp) => Err(Fail::from(format!(
                 "a string is not a type here; it is only used as a key mapper's affix, \
                  as in `keyMap (prefix \"u_\") r` (at byte {})",
                 sp.start
-            )),
+            ))),
             TypeExpr::Error(_) => Ok(self.fresh()),
         }
     }
@@ -1043,7 +1065,7 @@ impl<'w> Checker<'w> {
         phase: &Ty,
         names: &mut HashMap<String, Ty>,
         expected_kind: Kind,
-    ) -> Result<Ty, String> {
+    ) -> Result<Ty, Fail> {
         // Mapper arguments use their own surface grammar (`id`, `prefix
         // "..."`, `suffix "..."`, `prependSym k`, `compose ...`), rather than
         // ordinary type constructors, so they are converted by their own
@@ -1052,16 +1074,16 @@ impl<'w> Checker<'w> {
             return self.conv_keymap(t, names);
         }
         match t {
-            TypeExpr::Nat(..) => {
-                Err("a number is not a type; `decimal p s` is the type that takes one".into())
-            }
+            TypeExpr::Nat(..) => Err(Fail::from(
+                "a number is not a type; `decimal p s` is the type that takes one",
+            )),
             TypeExpr::App { head, args, .. } => {
                 // `row s` is the record-in-expression-position marker; its
                 // argument is a Row regardless of the kind expected here. See
                 // the same case in `conv`.
                 if head == "row" {
                     if args.len() != 1 {
-                        return Err("`row` takes one type argument".into());
+                        return Err(Fail::from("`row` takes one type argument"));
                     }
                     return self.conv_with_kind(&args[0], phase, names, Kind::Row);
                 }
@@ -1069,7 +1091,7 @@ impl<'w> Checker<'w> {
                     if args.is_empty() {
                         return Ok(self.rigid_with_kind(head, names, expected_kind));
                     }
-                    return Err(format!("unknown type constructor `{head}`"));
+                    return Err(Fail::from(format!("unknown type constructor `{head}`")));
                 };
                 // If it's a known constructor, use regular conv
                 self.conv(t, phase, names)
@@ -1080,7 +1102,9 @@ impl<'w> Checker<'w> {
                 for f in fields {
                     let (k, v) = (&f.name, &f.ty);
                     if fs.iter().any(|(o, _)| o == k) {
-                        return Err(format!("field `{k}` appears twice in a record type"));
+                        return Err(Fail::from(format!(
+                            "field `{k}` appears twice in a record type"
+                        )));
                     }
                     let v = self.conv(v, phase, names)?;
                     fs.push((k.clone(), v));
@@ -1107,7 +1131,7 @@ impl<'w> Checker<'w> {
         &mut self,
         t: &TypeExpr,
         names: &mut HashMap<String, Ty>,
-    ) -> Result<Ty, String> {
+    ) -> Result<Ty, Fail> {
         match t {
             TypeExpr::App { head, args, .. } if args.is_empty() => match head.as_str() {
                 "AsNullable" => Ok(Ty::Sym("nullable".to_string())),
@@ -1115,10 +1139,9 @@ impl<'w> Checker<'w> {
                 "Id" => Ok(Ty::Sym("id".to_string())),
                 _ => Ok(self.rigid(head, names)),
             },
-            _ => Err(
-                "expected a value wrapper, such as `(AsNullable)`, or a `valueLabel` variable"
-                    .into(),
-            ),
+            _ => Err(Fail::from(
+                "expected a value wrapper, such as `(AsNullable)`, or a `valueLabel` variable",
+            )),
         }
     }
 
@@ -1142,20 +1165,24 @@ impl<'w> Checker<'w> {
         &mut self,
         t: &TypeExpr,
         names: &mut HashMap<String, Ty>,
-    ) -> Result<Ty, String> {
+    ) -> Result<Ty, Fail> {
         let TypeExpr::App { head, args, .. } = t else {
-            return Err("expected a key mapper, such as `(prefix \"u_\")`".into());
+            return Err(Fail::from(
+                "expected a key mapper, such as `(prefix \"u_\")`",
+            ));
         };
         match head.as_str() {
             "id" => {
                 if !args.is_empty() {
-                    return Err("`id` takes no type argument".into());
+                    return Err(Fail::from("`id` takes no type argument"));
                 }
                 Ok(KeyMap::Id.to_ty())
             }
             "prefix" | "suffix" => {
                 let [arg] = args.as_slice() else {
-                    return Err(format!("`{head}` takes one type argument, the affix"));
+                    return Err(Fail::from(format!(
+                        "`{head}` takes one type argument, the affix"
+                    )));
                 };
                 // A variable affix cannot be a witness: the affix decides the
                 // output labels, so it must be known here.
@@ -1179,16 +1206,16 @@ impl<'w> Checker<'w> {
             // concrete `KeyAffix`. Unlike `prefix "x"`, no literal is needed.
             "prependSym" | "appendSym" => {
                 let [label] = args.as_slice() else {
-                    return Err(format!("`{head}` takes one symbol argument"));
+                    return Err(Fail::from(format!("`{head}` takes one symbol argument")));
                 };
                 let TypeExpr::App {
                     head: lh, args: la, ..
                 } = label
                 else {
-                    return Err(format!("`{head}` needs a symbol variable"));
+                    return Err(Fail::from(format!("`{head}` needs a symbol variable")));
                 };
                 if !la.is_empty() {
-                    return Err(format!("`{head}` needs a bare symbol variable"));
+                    return Err(Fail::from(format!("`{head}` needs a bare symbol variable")));
                 }
                 let k = self.rigid(lh, names);
                 let tag = if head == "prependSym" {
@@ -1200,7 +1227,7 @@ impl<'w> Checker<'w> {
             }
             "compose" => {
                 let [f, g] = args.as_slice() else {
-                    return Err("`compose` takes two key mappers".into());
+                    return Err(Fail::from("`compose` takes two key mappers"));
                 };
                 // Fusing two *concrete* mappers is sound and cheap; if either is
                 // a variable the composition stays symbolic.
@@ -1217,10 +1244,10 @@ impl<'w> Checker<'w> {
                 // fallback for bare mapper variables, so they cannot quietly
                 // act as aliases (especially `Id`, which has no arguments).
                 if matches!(other, "Id" | "Prefix" | "Suffix" | "Compose") {
-                    return Err(format!(
+                    return Err(Fail::from(format!(
                         "unknown key mapper `{other}`; expected `id`, `(prefix \"s\")`, \
                          `(suffix \"s\")`, `(compose f g)`, or a mapper variable"
-                    ));
+                    )));
                 }
                 if args.is_empty() {
                     // Known type/value constructors are not mapper variables.
@@ -1232,17 +1259,19 @@ impl<'w> Checker<'w> {
                         .any(|(name, arity)| *name == other && *arity == 0)
                         || matches!(other, "AsNullable" | "AsList")
                     {
-                        return Err(format!("kind mismatch: `{other}` is not a key mapper"));
+                        return Err(Fail::from(format!(
+                            "kind mismatch: `{other}` is not a key mapper"
+                        )));
                     }
                     // A bare variable of kind KeyMap, bound by `keymapper` in a
                     // signature or inferred at a use. This is the deferred case:
                     // it carries no transformation yet.
                     return Ok(self.rigid_with_kind(other, names, Kind::KeyMap));
                 }
-                Err(format!(
+                Err(Fail::from(format!(
                     "unknown key mapper `{other}`; expected `id`, `(prefix \"s\")`, \
                      `(suffix \"s\")`, `(compose f g)`, or a mapper variable"
-                ))
+                )))
             }
         }
     }
@@ -1275,7 +1304,7 @@ impl<'w> Checker<'w> {
         s: &Scheme,
         span: Span,
         site: Option<u32>,
-    ) -> Result<Ty, String> {
+    ) -> Result<Ty, Fail> {
         let mut map = HashMap::new();
         let t = self.inst(&s.ty, &mut map, &s.gens);
         for c in &s.cons {
@@ -1579,6 +1608,7 @@ impl<'w> Checker<'w> {
                 return Err(TyErr {
                     suggestions: Vec::new(),
                     span: e.span,
+                    kind: crate::workspace::DiagKind::Other,
                     msg: format!("field `{name}` appears twice"),
                 });
             }
@@ -1765,6 +1795,7 @@ impl<'w> Checker<'w> {
                         _ => {
                             return Err(TyErr {
                                 span: sp,
+                                kind: crate::workspace::DiagKind::Other,
                                 msg: format!("module `{n}` has no definition `{f}`"),
                                 suggestions: Vec::new(),
                             })
@@ -1929,6 +1960,7 @@ impl<'w> Checker<'w> {
                     return Err(TyErr {
                         suggestions: Vec::new(),
                         span: arg.span,
+                        kind: crate::workspace::DiagKind::Other,
                         msg: key_argument_message(f),
                     });
                 }
@@ -2064,6 +2096,7 @@ impl<'w> Checker<'w> {
                                 return Err(TyErr {
                                     suggestions: Vec::new(),
                                     span: arg.span,
+                                    kind: crate::workspace::DiagKind::Other,
                                     msg: format!("`{unknown}` is not this language's name: {what}"),
                                 });
                             }
@@ -2076,6 +2109,7 @@ impl<'w> Checker<'w> {
                     return Err(TyErr {
                         suggestions: Vec::new(),
                         span: arg.span,
+                        kind: crate::workspace::DiagKind::Other,
                         msg,
                     });
                 }
@@ -2210,7 +2244,7 @@ impl<'w> Checker<'w> {
     /// than universals the lambda must work for (see `Checker::par_ann`), since
     /// a parameter is monomorphic and its annotation describes the one argument
     /// it received.
-    fn param_ty(&mut self, p: &ast::LambdaParam) -> Result<Option<Ty>, String> {
+    fn param_ty(&mut self, p: &ast::LambdaParam) -> Result<Option<Ty>, Fail> {
         let Some(t) = p.ty.as_deref() else {
             return Ok(None);
         };
@@ -2231,6 +2265,7 @@ impl<'w> Checker<'w> {
                 return Err(TyErr {
                     suggestions: Vec::new(),
                     span: sp,
+                    kind: crate::workspace::DiagKind::Other,
                     msg: format!("field `{k}` appears twice"),
                 });
             }
@@ -2288,6 +2323,7 @@ impl<'w> Checker<'w> {
         };
         Err(TyErr {
             span: sp,
+            kind: crate::workspace::DiagKind::Other,
             msg: "`sql \"...\"` must be the whole body of a definition with a type signature"
                 .into(),
             suggestions: Vec::new(),
@@ -2315,6 +2351,7 @@ impl<'w> Checker<'w> {
         if arms.is_empty() {
             return Err(TyErr {
                 span: sp,
+                kind: crate::workspace::DiagKind::Other,
                 msg: "`case` needs at least one arm: write `cond => value`, and end with \
                       `true => ...` for a default"
                     .into(),
@@ -2332,6 +2369,7 @@ impl<'w> Checker<'w> {
             _ => {
                 return Err(TyErr {
                     span: sp,
+                    kind: crate::workspace::DiagKind::Other,
                     msg: "a `case` must end with a default arm, written `true => value`, so \
                           that it always produces a value"
                         .into(),
@@ -2374,6 +2412,7 @@ impl<'w> Checker<'w> {
         };
         Err(TyErr {
             span: sp,
+            kind: crate::workspace::DiagKind::Other,
             msg: "`primitive \"...\"` must be the whole body of a definition with a type signature"
                 .into(),
             suggestions: Vec::new(),
@@ -2387,7 +2426,7 @@ impl<'w> Checker<'w> {
         Ok(self.fresh())
     }
 
-    pub(crate) fn lookup(&mut self, n: &str, site: u32, sp: Span) -> Result<Ty, String> {
+    pub(crate) fn lookup(&mut self, n: &str, site: u32, sp: Span) -> Result<Ty, Fail> {
         let binding = self.env.scope.get(n).cloned();
         // Record **what this occurrence resolved to**, keyed by its `ExprId`.
         //
@@ -2409,8 +2448,9 @@ impl<'w> Checker<'w> {
         match binding {
             Some(Binding::Def(dm, di)) => self.def_type(dm, di, site, sp),
             Some(Binding::Overloads(om, is)) => Ok(self.overload_type(n, om, &is, site, sp)),
-            Some(Binding::Module(_)) => Err(format!(
-                "`{n}` is a module; refer to a definition as `{n}.name`"
+            Some(Binding::Module(_)) => Err(Fail::kinded(
+                crate::workspace::DiagKind::UnknownName,
+                format!("`{n}` is a module; refer to a definition as `{n}.name`"),
             )),
             None => {
                 // A name from another language first: it is the common case for a
@@ -2418,22 +2458,22 @@ impl<'w> Checker<'w> {
                 // misleads there — `null` is six edits from `nothing`, and three
                 // from `fullJoin`, so the near-miss would name something unrelated.
                 if let Some(what) = crate::suggest::from_another_language(n) {
-                    return Err(format!("`{n}` is not this language's name: {what}"));
+                    return Err(Fail::kinded(
+                        crate::workspace::DiagKind::UnknownName,
+                        format!("`{n}` is not this language's name: {what}"),
+                    ));
                 }
                 let hint =
                     crate::suggest::did_you_mean(n, self.env.scope.keys().map(String::as_str));
-                Err(format!("unknown name `{n}`{hint}"))
+                Err(Fail::kinded(
+                    crate::workspace::DiagKind::UnknownName,
+                    format!("unknown name `{n}`{hint}"),
+                ))
             }
         }
     }
 
-    pub(crate) fn def_type(
-        &mut self,
-        m: usize,
-        i: usize,
-        site: u32,
-        sp: Span,
-    ) -> Result<Ty, String> {
+    pub(crate) fn def_type(&mut self, m: usize, i: usize, site: u32, sp: Span) -> Result<Ty, Fail> {
         match self.def_scheme(m, i) {
             Some(s) if s.failed => Err(self.failed_use(m, i)),
             Some(s) => self.instantiate(&s, sp, Some(site)),
@@ -2441,7 +2481,7 @@ impl<'w> Checker<'w> {
         }
     }
 
-    pub(crate) fn failed_use(&self, m: usize, i: usize) -> String {
+    pub(crate) fn failed_use(&self, m: usize, i: usize) -> Fail {
         let name = if m == self.module {
             Some(self.defs.get(i).name.as_str())
         } else {
@@ -2454,11 +2494,11 @@ impl<'w> Checker<'w> {
             })
         };
         match name {
-            Some(n) => format!(
+            Some(n) => Fail::from(format!(
                 "`{}` has a type error, so this use cannot be checked",
                 op_name(n)
-            ),
-            None => "this name has a type error, so this use cannot be checked".into(),
+            )),
+            None => Fail::from("this name has a type error, so this use cannot be checked"),
         }
     }
 
@@ -2535,11 +2575,11 @@ impl<'w> Checker<'w> {
             }
             (Ty::Con("expr", ea), Ty::Con("sortkey", _)) => {
                 self.key_phase(&ea[0].clone())?;
-                Err(
+                Err(Fail::from(
                     "a sort key must say its direction: write `asc <expr>` or `desc <expr>` — \
                      `order [asc .a, desc .b]`"
                         .to_string(),
-                )
+                ))
             }
             (Ty::Row(..) | Ty::Empty, Ty::Con("winspec", w)) => {
                 let r = w[0].clone();
@@ -2645,10 +2685,10 @@ impl<'w> Checker<'w> {
                 rules::winspec::ORDER => list(sortkey(r.clone())),
                 rules::winspec::FRAME => con("frame"),
                 o => {
-                    return Err(format!(
+                    return Err(Fail::from(format!(
                         "unknown window spec field `{o}`; expected {}",
                         rules::winspec::names()
-                    ))
+                    )))
                 }
             };
             self.coerce(&t, &want)
@@ -2892,12 +2932,13 @@ impl<'w> Checker<'w> {
         cands: &[usize],
         target: &Ty,
         sp: Span,
-    ) -> String {
+    ) -> Fail {
         let msg = self.no_overload_message(module, name, cands, target);
-        match self.field_label(sp) {
+        let message = match self.field_label(sp) {
             Some(l) => format!("field `{l}`: {msg}"),
             None => msg,
-        }
+        };
+        Fail::kinded(crate::workspace::DiagKind::Overload, message)
     }
 
     /// The projection field whose expression contains `sp`, if any.
@@ -3326,14 +3367,17 @@ impl<'w> Checker<'w> {
                         // predicate may still be an unfinished name; keep the
                         // probe row so completion can report the side under
                         // the cursor instead of failing on that sibling.
-                        if self.probe.is_some() && msg.contains("no column `") {
+                        if self.probe.is_some()
+                            && msg.kind == crate::workspace::DiagKind::UnknownColumn
+                        {
                             progress = true;
                             continue;
                         }
                         self.pending = keep;
                         return Err(TyErr {
                             span: sp,
-                            msg,
+                            kind: msg.kind,
+                            msg: msg.message,
                             suggestions: self.suggested.take().into_iter().collect(),
                         });
                     }
@@ -3349,7 +3393,7 @@ impl<'w> Checker<'w> {
     }
 
     /// `Ok(true)` when solved, `Ok(false)` when it must wait.
-    pub(crate) fn step(&mut self, c: &Cons, sp: Span) -> Result<bool, String> {
+    pub(crate) fn step(&mut self, c: &Cons, sp: Span) -> Result<bool, Fail> {
         match c {
             Cons::Overload { .. } => self.step_overload(c, sp),
             Cons::Filter { .. } => self.step_filter(c, sp),
@@ -3366,7 +3410,7 @@ impl<'w> Checker<'w> {
         }
     }
 
-    fn step_overload(&mut self, c: &Cons, sp: Span) -> Result<bool, String> {
+    fn step_overload(&mut self, c: &Cons, sp: Span) -> Result<bool, Fail> {
         let Cons::Overload {
             name,
             module,
@@ -3410,7 +3454,7 @@ impl<'w> Checker<'w> {
         origin: &Origin,
         name: &str,
         sp: Span,
-    ) -> Result<(), String> {
+    ) -> U {
         let s = self.cand_scheme(module, i);
         if s.failed {
             return Err(self.failed_use(module, i));
@@ -3418,10 +3462,10 @@ impl<'w> Checker<'w> {
         let t = self.instantiate(&s, sp, None)?;
         self.unify(&t, target)?;
         let Origin::Site(site) = *origin else {
-            return Err(format!(
+            return Err(Fail::from(format!(
                 "internal error: unresolved hole of `{}`",
                 op_name(name)
-            ));
+            )));
         };
         let (use_site, k) = decode(site);
         let key = *self.active.last().expect("solving inside a definition");
@@ -3481,7 +3525,7 @@ impl<'w> Checker<'w> {
         }
     }
 
-    fn step_filter(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+    fn step_filter(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
         let Cons::Filter { pred, row } = c else {
             unreachable!("dispatched on Cons::Filter")
         };
@@ -3491,7 +3535,7 @@ impl<'w> Checker<'w> {
             Ty::Con("expr", a) => {
                 let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
                 if is_join(&self.resolve(&r)) {
-                    return Err(rules::JOIN_ONLY.into());
+                    return Err(Fail::from(rules::JOIN_ONLY));
                 }
                 self.place(Place::Where, &p)?;
                 if self.row_open(row) {
@@ -3514,22 +3558,22 @@ impl<'w> Checker<'w> {
                     Ty::Con("bool", _) => {}
                     Ty::Con("maybe", a) if matches!(self.resolve(&a[0]), Ty::Con("bool", _)) => {}
                     _ => {
-                        return Err(format!(
+                        return Err(Fail::from(format!(
                             "`where` needs a bool or maybe bool condition, found {}",
                             self.show(&v)
-                        ))
+                        )))
                     }
                 }
                 Ok(true)
             }
-            o => Err(format!(
+            o => Err(Fail::from(format!(
                 "`where` needs a bool condition, found {}",
                 self.show(&o)
-            )),
+            ))),
         }
     }
 
-    fn step_project(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+    fn step_project(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
         let Cons::Project {
             fields,
             input,
@@ -3556,11 +3600,11 @@ impl<'w> Checker<'w> {
                     "`{stage}` expects a record of column expressions, found {}",
                     self.show(fields)
                 );
-                return Err(msg);
+                return Err(Fail::from(msg));
             }
         }
         if fs.is_empty() {
-            return Err(format!("`{stage}` needs at least one field"));
+            return Err(Fail::from(format!("`{stage}` needs at least one field")));
         }
         if fs
             .iter()
@@ -3581,10 +3625,13 @@ impl<'w> Checker<'w> {
                     // A projection's field is a `select`/`agg` field, so a
                     // side-qualified name is the join-predicate mistake.
                     if is_join(&self.resolve(&r)) {
-                        return Err(format!("field `{l}`: {}", rules::JOIN_ONLY));
+                        return Err(Fail::kinded(
+                            crate::workspace::DiagKind::JoinSide,
+                            format!("field `{l}`: {}", rules::JOIN_ONLY),
+                        ));
                     }
                     self.stage_phase(&p, *agg)
-                        .map_err(|m| format!("field `{l}` {m}"))?;
+                        .map_err(|m| m.prefixed(&format!("field `{l}` ")))?;
                     if let Err(m) = self.unify(input, &r) {
                         // A nullable mismatch names the whole value, and the
                         // field's own span is what a rewrite must touch — so
@@ -3603,9 +3650,10 @@ impl<'w> Checker<'w> {
                             // prefix is the projection's field, the inner one
                             // is the column the record literal wrote.
                             let column = m
+                                .message
                                 .match_indices("field `")
                                 .filter_map(|(i, _)| {
-                                    let tail = &m[i + 7..];
+                                    let tail = &m.message[i + 7..];
                                     tail.find('`').map(|j| (&tail[..j], i))
                                 })
                                 .last()
@@ -3620,8 +3668,9 @@ impl<'w> Checker<'w> {
                                 .map(|(_, sp)| *sp)
                                 .min_by_key(|sp| sp.end - sp.start)
                                 .unwrap_or(field);
-                            self.suggested =
-                                crate::check::ty::nullable_fix(&m, inner).into_iter().next();
+                            self.suggested = crate::check::ty::nullable_fix(&m.message, inner)
+                                .into_iter()
+                                .next();
                         }
                         // The message may already name a field, and it stays: the
                         // language server reads the *innermost* name to decide what
@@ -3630,13 +3679,13 @@ impl<'w> Checker<'w> {
                         // between the two crates and not just a chain of labels.
                         // It does read as two problems, which is worth fixing — but
                         // only together with the LSP rule, not before it.
-                        return Err(format!("field `{l}`: {m}"));
+                        return Err(m.prefixed(&format!("field `{l}`: ")));
                     }
                     out.push((l, v));
                 }
                 o => {
                     let msg = format!("field `{l}` of `{stage}` must be a column expression or constant, found {}", self.show(&o));
-                    return Err(msg);
+                    return Err(Fail::from(msg));
                 }
             }
         }
@@ -3644,7 +3693,7 @@ impl<'w> Checker<'w> {
         Ok(true)
     }
 
-    fn step_join_on(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+    fn step_join_on(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
         let Cons::JoinOn { pred, left, right } = c else {
             unreachable!("dispatched on Cons::JoinOn")
         };
@@ -3653,9 +3702,12 @@ impl<'w> Checker<'w> {
             Ty::Con("bool", _) => return Ok(true),
             Ty::Con("expr", a) => (a[0].clone(), a[1].clone(), a[2].clone()),
             o => {
-                return Err(format!(
-                    "a join predicate must be a bool expression, found {}",
-                    self.show(&o)
+                return Err(Fail::kinded(
+                    crate::workspace::DiagKind::NotACondition,
+                    format!(
+                        "a join predicate must be a bool expression, found {}",
+                        self.show(&o)
+                    ),
                 ))
             }
         };
@@ -3675,11 +3727,15 @@ impl<'w> Checker<'w> {
             o => {
                 let (fs, _) = self.flatten(&o);
                 let n = fs.first().map_or("x", |(k, _)| k.as_str());
-                return Err(rules::needs_side(n));
+                return Err(Fail::from(rules::needs_side(n)));
             }
         }
-        self.unify(&v, &con("bool"))
-            .map_err(|_| format!("a join predicate must be bool, found {}", self.show(&v)))?;
+        self.unify(&v, &con("bool")).map_err(|_| {
+            Fail::kinded(
+                crate::workspace::DiagKind::NotACondition,
+                format!("a join predicate must be bool, found {}", self.show(&v)),
+            )
+        })?;
         Ok(true)
     }
 
@@ -3699,7 +3755,7 @@ impl<'w> Checker<'w> {
     ///
     /// Each column still has to have the same type on both sides, which is the part
     /// that is about meaning rather than arrangement.
-    fn step_set(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+    fn step_set(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
         let Cons::Set { left, right } = c else {
             unreachable!("dispatched on Cons::Set")
         };
@@ -3714,11 +3770,11 @@ impl<'w> Checker<'w> {
         left_names.sort_unstable();
         right_names.sort_unstable();
         if left_names != right_names {
-            return Err(format!(
+            return Err(Fail::from(format!(
                 "set-operation inputs must have the same columns: left has [{}], right has                  [{}]",
                 lf.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "),
                 rf.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
-            ));
+            )));
         }
         // Each name's type must agree. Matched by name, so the two orders do not have
         // to line up.
@@ -3732,7 +3788,7 @@ impl<'w> Checker<'w> {
         Ok(true)
     }
 
-    fn step_lit(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+    fn step_lit(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
         let Cons::Lit { lit, target } = c else {
             unreachable!("dispatched on Cons::Lit")
         };
@@ -3742,7 +3798,7 @@ impl<'w> Checker<'w> {
         }
     }
 
-    fn step_within(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+    fn step_within(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
         let Cons::Within { req, row } = c else {
             unreachable!("dispatched on Cons::Within")
         };
@@ -3754,7 +3810,7 @@ impl<'w> Checker<'w> {
 
     /// The record of new values must be known, and so must the
     /// input's columns: the output depends on both.
-    fn step_update(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+    fn step_update(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
         let Cons::Update {
             fields,
             input,
@@ -3769,19 +3825,19 @@ impl<'w> Checker<'w> {
             Ty::Empty => {}
             Ty::Var(_) | Ty::Rigid(..) if fs.is_empty() => return Ok(false),
             _ => {
-                return Err(format!(
+                return Err(Fail::from(format!(
                     "`update` expects a record of column expressions, found {}",
                     self.show(fields)
-                ))
+                )))
             }
         }
         if fs.is_empty() {
-            return Err("`update` needs at least one field".into());
+            return Err(Fail::from("`update` needs at least one field"));
         }
         let mut seen: Vec<String> = Vec::new();
         for (n, _) in &fs {
             if seen.contains(n) {
-                return Err(format!("field `{n}` appears twice in `update`"));
+                return Err(Fail::from(format!("field `{n}` appears twice in `update`")));
             }
             seen.push(n.clone());
         }
@@ -3797,7 +3853,10 @@ impl<'w> Checker<'w> {
                 Ty::Con("expr", a) => {
                     let (p, r, v) = (a[0].clone(), a[1].clone(), a[2].clone());
                     if is_join(&self.resolve(&r)) {
-                        return Err(format!("field `{l}`: {}", rules::JOIN_ONLY));
+                        return Err(Fail::kinded(
+                            crate::workspace::DiagKind::JoinSide,
+                            format!("field `{l}`: {}", rules::JOIN_ONLY),
+                        ));
                     }
                     self.stage_phase(&p, false)
                         .map_err(|m| format!("field `{l}` {m}"))?;
@@ -3809,11 +3868,11 @@ impl<'w> Checker<'w> {
                     values.push((l.clone(), Some(v.clone()), v));
                 }
                 o => {
-                    return Err(format!(
+                    return Err(Fail::from(format!(
                         "field `{l}` of `update` must be a column expression or \
                                  constant, found {}",
                         self.show(&o)
-                    ))
+                    )))
                 }
             }
         }
@@ -3856,7 +3915,7 @@ impl<'w> Checker<'w> {
     /// The reducer is what tells "not yet" from "not there", which is the
     /// difference between waiting for the row to close and reporting a missing
     /// column. Only this stage reports it, because only this stage owns it.
-    fn step_omit(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+    fn step_omit(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
         let Cons::Omit { label, output, .. } = c else {
             unreachable!("dispatched on Cons::Omit")
         };
@@ -3880,7 +3939,7 @@ impl<'w> Checker<'w> {
     /// The reducer is what tells "not yet" from "not a wrapper", which is the
     /// difference between waiting for the row to close and reporting an unknown
     /// wrapper. Only this stage reports it, because only this stage owns it.
-    fn step_map_value(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+    fn step_map_value(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
         let Cons::MapValue { label, output } = c else {
             unreachable!("dispatched on Cons::MapValue")
         };
@@ -3901,7 +3960,7 @@ impl<'w> Checker<'w> {
     /// here: the row this constraint produces and the row a `merge` term
     /// reduces to have to be the same rule, or `update`'s signature and a
     /// `merge` in a signature could disagree about a collision.
-    fn step_merge(&mut self, c: &Cons, _sp: Span) -> Result<bool, String> {
+    fn step_merge(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
         let Cons::Merge { left, right, out } = c else {
             unreachable!("dispatched on Cons::Merge")
         };
@@ -3919,7 +3978,7 @@ impl<'w> Checker<'w> {
         }
     }
 
-    fn step_join_out(&mut self, c: &Cons, sp: Span) -> Result<bool, String> {
+    fn step_join_out(&mut self, c: &Cons, sp: Span) -> Result<bool, Fail> {
         let Cons::JoinOut {
             left,
             right,
@@ -4008,9 +4067,13 @@ select {{ right_{first} = .{first} }}) (.<a == .>b)`"
                     edits,
                 )])
             });
+            // A shared column name is `join-overlap`: the same category the
+            // language server published for this message before the kind
+            // existed.
+            let kind = crate::workspace::DiagKind::JoinOverlap;
             match fix {
-                Some(suggestions) => self.warn_with(sp, msg, suggestions),
-                None => self.warn(sp, msg),
+                Some(suggestions) => self.warn_with(sp, kind, msg, suggestions),
+                None => self.warn(sp, kind, msg),
             }
         }
         let wrap = |this: &Self, on: bool, (k, t): (String, Ty)| match this.resolve(&t) {
@@ -4066,8 +4129,8 @@ select {{ right_{first} = .{first} }}) (.<a == .>b)`"
         let at = if agg { Place::Agg } else { Place::Select };
         match self.resolve(p) {
             t @ Ty::Con(..) => match phase_of(&t) {
-                Some(ph) => rules::place(at, ph),
-                None => Err(format!("not a phase: {}", self.show(&t))),
+                Some(ph) => rules::place(at, ph).map_err(placement),
+                None => Err(Fail::from(format!("not a phase: {}", self.show(&t)))),
             },
             // Still open, e.g. a helper's parameter (`e => select { x = e }`):
             // a `select` field may become a row or window expression, never
@@ -4079,7 +4142,9 @@ select {{ right_{first} = .{first} }}) (.<a == .>b)`"
                 }
                 Ok(())
             }
-            Ty::Var(v) if self.vars[v as usize].row_or_win => rules::place(at, Phase::Row),
+            Ty::Var(v) if self.vars[v as usize].row_or_win => {
+                rules::place(at, Phase::Row).map_err(placement)
+            }
             _ => self.unify(p, &con("agg")),
         }
     }
@@ -4088,7 +4153,7 @@ select {{ right_{first} = .{first} }}) (.<a == .>b)`"
     /// constant). An open phase becomes `row`.
     pub(crate) fn place(&mut self, at: Place, p: &Ty) -> U {
         match phase_of(&self.resolve(p)) {
-            Some(ph) => rules::place(at, ph),
+            Some(ph) => rules::place(at, ph).map_err(placement),
             None => self.unify(p, &con("row")),
         }
     }

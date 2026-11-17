@@ -846,7 +846,12 @@ pub(crate) struct Checker<'w> {
     /// Kept apart from `errors` so nothing that asks "did this definition
     /// check" has to know about severity: `warn` is only ever called on a path
     /// that is already known to be well typed.
-    pub(crate) warnings: Vec<(Span, String, Vec<crate::workspace::Suggestion>)>,
+    pub(crate) warnings: Vec<(
+        Span,
+        String,
+        crate::workspace::DiagKind,
+        Vec<crate::workspace::Suggestion>,
+    )>,
     /// Location of the argument being checked (for deferred literals).
     pub(crate) span: Span,
     /// The spans of a join's arguments, keyed by the span of the primitive's
@@ -924,14 +929,15 @@ pub(crate) struct Checker<'w> {
     pub(crate) par_ann: bool,
 }
 
-pub(crate) fn missing(l: &str, have: &[(String, Ty)]) -> String {
+pub(crate) fn missing(l: &str, have: &[(String, Ty)]) -> Fail {
     let avail: Vec<&str> = have.iter().map(|(k, _)| k.as_str()).collect();
     let hint = crate::suggest::did_you_mean(l, avail.iter().copied());
-    if avail.is_empty() {
+    let message = if avail.is_empty() {
         format!("no column `{l}`{hint}")
     } else {
         format!("no column `{l}`; available: {}{hint}", avail.join(", "))
-    }
+    };
+    Fail::kinded(crate::workspace::DiagKind::UnknownColumn, message)
 }
 
 /// A row's column names, for an error that lists what a query produced.
@@ -943,23 +949,100 @@ pub(crate) fn names(fields: &[(String, Ty)]) -> String {
         .join(", ")
 }
 
+/// A failure with a message and the kind of mistake it is.
+///
+/// Most of the checker reports through `Result<_, Fail>` and lets the call site
+/// supply the span (`at`). The kind travels with the message because the kind is
+/// the diagnostic's identity and the message is only its wording: deriving the
+/// identity from the text is what made rewording a message a silent change to
+/// machine-readable behaviour.
+///
+/// `From<String>` and `From<&str>` default to [`DiagKind::Other`], so the
+/// hundreds of call sites that report a one-off message need no change; a site
+/// that knows its category says so with [`Fail::kinded`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Fail {
+    pub(crate) kind: crate::workspace::DiagKind,
+    pub(crate) message: String,
+}
+
+impl Fail {
+    /// A failure whose kind the caller knows.
+    pub(crate) fn kinded(kind: crate::workspace::DiagKind, message: impl Into<String>) -> Self {
+        Fail {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// The same failure with `prefix` written before its message.
+    ///
+    /// A wrapper that labels a message (`field `x` ` before a placement
+    /// message) keeps the *kind*, which is the point: the label is wording, the
+    /// kind is the identity.
+    pub(crate) fn prefixed(mut self, prefix: &str) -> Self {
+        self.message = format!("{prefix}{}", self.message);
+        self
+    }
+}
+
+impl From<String> for Fail {
+    fn from(message: String) -> Self {
+        Fail {
+            kind: crate::workspace::DiagKind::Other,
+            message,
+        }
+    }
+}
+
+impl From<&str> for Fail {
+    fn from(message: &str) -> Self {
+        Fail::from(message.to_string())
+    }
+}
+
+impl std::fmt::Display for Fail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Error type and helpers shared by every `Checker` module. Moved here
 /// verbatim from the single `check.rs`; the split changed no logic.
 pub(crate) struct TyErr {
     pub(crate) span: Span,
     pub(crate) msg: String,
+    /// What kind of mistake this is; the message is only its wording.
+    pub(crate) kind: crate::workspace::DiagKind,
     /// Fixes the reader can apply. A type error is a *place* in the source, and
     /// wherever the right rewrite is known at that place it is recorded here
     /// rather than left for the editor to guess.
     pub(crate) suggestions: Vec<crate::workspace::Suggestion>,
 }
 pub(crate) type R<T> = Result<T, TyErr>;
-pub(crate) type U = Result<(), String>;
-pub(crate) fn at(span: Span) -> impl FnOnce(String) -> TyErr {
-    move |msg| TyErr {
-        span,
-        msg: msg.clone(),
-        suggestions: nullable_fix(&msg, span),
+pub(crate) type U = Result<(), Fail>;
+
+/// Reclassify a phase-placement message from `rules::place`: whichever place it
+/// is about, it says where an aggregate or a window may go.
+pub(crate) fn placement(message: String) -> Fail {
+    Fail::kinded(crate::workspace::DiagKind::AggregatePlacement, message)
+}
+
+/// Turn a failure into a diagnostic at `span`.
+///
+/// Generic in the failure it accepts so both forms read the same at a call
+/// site: `at(sp)` converts a [`Fail`] (the common case, from a `U`-returning
+/// call), and `at(sp)(format!(...))` still works for a message that has no
+/// kind of its own.
+pub(crate) fn at<S: Into<Fail>>(span: Span) -> impl FnOnce(S) -> TyErr {
+    move |fail| {
+        let fail: Fail = fail.into();
+        TyErr {
+            span,
+            suggestions: nullable_fix(&fail.message, span),
+            msg: fail.message,
+            kind: fail.kind,
+        }
     }
 }
 

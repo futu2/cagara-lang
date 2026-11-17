@@ -291,9 +291,11 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitC
                         l.module,
                         l.span,
                         format!("error in `{}`: {message}", query.name),
+                        cagara_hir::workspace::DiagKind::Lowering,
                     ),
                     None => cagara_hir::workspace::Diag {
                         severity: cagara_hir::workspace::Severity::Error,
+                        kind: cagara_hir::workspace::DiagKind::Lowering,
                         path: root_path.clone(),
                         line: 0,
                         col: 0,

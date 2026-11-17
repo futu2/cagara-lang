@@ -374,7 +374,17 @@ fn check_pipeline(src: &str, seed: u64) {
             result.as_ref().err().map(|d| &d.message)
         );
         let Ok(rel) = result else { continue };
-        for d in ["ansi", "postgres", "sqlite", "duckdb", "mysql", "tsql"] {
+        // Every dialect, and for each one the *outcome* is pinned rather than
+        // discarded. Discarding it is what made this fuzzer blind to the bug class
+        // finding #6 named: it detected a panic, but a dialect that wrongly accepted a
+        // construct (SQLite emitting `ROLLUP`) or wrongly refused one looked exactly
+        // like success.
+        //
+        // The outcome cannot be a fixed per-dialect answer — the generator emits
+        // constructs some targets genuinely lack — so what is asserted is that the
+        // answer is *stable and explainable*:
+        let mut outcomes: Vec<(&str, Result<String, String>)> = Vec::new();
+        for d in DIALECTS {
             let dialect =
                 Dialect::from_str(d).unwrap_or_else(|| panic!("seed {seed}: unknown dialect {d}"));
             let opts = Options {
@@ -383,10 +393,61 @@ fn check_pipeline(src: &str, seed: u64) {
                 optimize: false,
             };
             // A lowering error is a legitimate outcome; a panic is not.
-            let _ = compile(&rel, opts);
+            let got = compile(&rel, opts);
+            if let Err(message) = &got {
+                // An `internal:` failure is a compiler gap, never a refusal: the
+                // checker accepted this program and every dialect refusal is written
+                // as advice to the reader.
+                assert!(
+                    !message.starts_with("internal:"),
+                    "seed {seed}: `{name}` / {d} reported an internal error\n{src}\n-> {message}"
+                );
+                // And a refusal has to name the target, so a reader can act on it.
+                // ANSI is exempt: its refusals are about the relation, not the target.
+                if *d != "ansi" {
+                    assert!(
+                        message.contains(d) || message.contains(&format!("`{d}`")),
+                        "seed {seed}: `{name}` / {d} was refused without naming the target\
+                         \n{src}\n-> {message}"
+                    );
+                }
+            }
+            // Determinism: lowering the same relation twice must give one answer.
+            // A dialect pass that depended on iteration order or on a global would
+            // show up here and nowhere else.
+            let again = compile(&rel, opts);
+            assert_eq!(
+                got, again,
+                "seed {seed}: `{name}` / {d} lowered differently on a second call"
+            );
+            outcomes.push((d, got));
+        }
+        // **ANSI is the most permissive target** — it has `FULL JOIN`, grouping sets,
+        // all three frame units, arrays and an exact decimal, so it refuses nothing
+        // about a spelling. A program that ANSI refuses is refused for a reason that
+        // is not about the target, and every other target must refuse it too: a
+        // construct cannot be dialect-independent in one direction only.
+        if let Some((_, Err(why))) = outcomes.iter().find(|(d, r)| *d == "ansi" && r.is_err()) {
+            for (d, got) in &outcomes {
+                if *d == "ansi" {
+                    continue;
+                }
+                assert!(
+                    got.is_err(),
+                    "seed {seed}: `{name}` was refused for ANSI ({why}) but accepted for {d}\
+                     \n{src}"
+                );
+            }
         }
     }
 }
+
+/// The dialects a generated program is lowered for.
+///
+/// The six the project actually targets, including the two that emulate the most
+/// (MySQL and SQLite) — a rewrite that only breaks on an emulating target would be
+/// missed by a list of permissive ones.
+const DIALECTS: &[&str] = &["ansi", "postgres", "sqlite", "duckdb", "mysql", "tsql"];
 
 /// Compile the generated query to ANSI SQL, if it type-checks and normalizes.
 /// The generator names its definitions `q0`, `q1`, ...; take the first.

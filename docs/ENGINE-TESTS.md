@@ -15,29 +15,69 @@ them.
 | T-SQL, BigQuery, Snowflake, ANSI | `tests/emulate.py` → DuckDB, via Python sqlglot | `uv pip install sqlglot` |
 
 Every test skips when its engine is missing, unless `CAGARA_REQUIRE_ENGINES` is set,
-in which case a missing engine fails the run. That is what a full local run does:
+in which case a missing engine fails the run. `CAGARA_ENGINES` narrows the run to a
+comma-separated allow-list. The tokens are engine *names*, not shells:
+
+| token | what it runs |
+|---|---|
+| `sqlite` | the `sqlite3` shell (3.46 or newer) |
+| `duckdb` | the `duckdb` shell |
+| `postgres` | PGlite, through `node` |
+| `trino` | a Trino server at `$TRINO_URL` |
+| `mysql` | the MariaDB the MySQL family runs on |
+| `emulated` | the Python-sqlglot translation to DuckDB |
+
+Engines you do not name skip even when their shells are installed; with both variables
+set, the engines named in the list must be present. An unknown token fails the run with
+the list above, so a workflow typo cannot quietly execute less than it says — that is
+worth the check, because a misspelled name would otherwise match nothing and the job
+would pass having run fewer engines. `CAGARA_NO_ENGINES` still wins over both and skips
+everything. That is what a full local run does:
 
 ```sh
 CAGARA_REQUIRE_ENGINES=1 MYSQL_SOCKET=… MYSQL=… CAGARA_PYTHON=… \
   cargo test --workspace
 ```
 
-## CI does not run these
+## What CI runs
 
-CI sets `CAGARA_NO_ENGINES=1`, which turns every test that executes SQL on an engine into
-an explicit skip. The reason is weight, not doubt: the comparison needs three downloads
-and two servers on every push.
+Every push executes the two engines that need no server, at versions the workflow pins
+itself:
 
-Leaving the engines out is *not* enough, and that is why the switch exists. The runner
-ships its own `sqlite3`, older than the 3.46 that the `floor` date modifier needs, so the
-engine is present and wrong rather than absent — it would fail instead of skipping.
-`CAGARA_NO_ENGINES` makes the omission a decision.
+| engine | pinned version | where the pin lives |
+|---|---|---|
+| SQLite | 3.54.1 | `.github/workflows/ci.yml`, with its SHA-256 |
+| DuckDB | v1.5.6 | `.github/workflows/ci.yml`, with its SHA-256 |
 
-What still runs in CI is every test that compares the generated SQL *text*
-(`each_dialect_uses_the_spelling_it_has`, `each_dialect_avoids_what_it_cannot_read`,
-`every_statement_is_well_formed_sql`, and the rest), which catches a wrong dialect
-spelling without a server. What CI cannot catch is a dialect that is spelled correctly and
-still means something else; that is what this document is for.
+The `engines` job downloads exactly those two, verifies the digests, fails if
+`sqlite3 --version` or `duckdb --version` is not the pinned one, and then runs:
+
+```sh
+CAGARA_ENGINES=sqlite,duckdb CAGARA_REQUIRE_ENGINES=1 \
+  cargo test -p cagara-sql --test engines --locked
+```
+
+`CAGARA_ENGINES` is an allow-list: only the engines it names run, and the rest skip even
+when their shells happen to be installed. `CAGARA_REQUIRE_ENGINES=1` then means "the
+engines in the list must be present", so a failed install fails the job instead of
+silently turning the whole suite into skips.
+
+Pinning is not decoration. The runner ships its own `sqlite3`, older than the 3.46 that
+the `floor` date modifier needs, so the engine is present and wrong rather than absent —
+it would fail instead of skipping. That is also why the `rust` job sets
+`CAGARA_NO_ENGINES=1`: it stays engine-free and runs every test that compares the
+generated SQL *text* (`each_dialect_uses_the_spelling_it_has`,
+`each_dialect_avoids_what_it_cannot_read`, `every_statement_is_well_formed_sql`, and the
+rest), which catches a wrong dialect spelling without a server.
+
+The other three engines — PostgreSQL through PGlite, Trino and MariaDB — still need
+downloads and servers that a push should not pay for. The full five-engine matrix is
+therefore a local run: the command above with `CAGARA_ENGINES` left unset, plus the setup
+in the sections below. Nothing schedules it.
+
+What CI still cannot catch is a dialect that is spelled correctly and still means
+something else on an engine it does not run; that is what the rest of this document is
+for.
 
 ## Trino
 

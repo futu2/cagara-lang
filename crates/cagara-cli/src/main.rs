@@ -618,6 +618,19 @@ fn report_types(
     opts: &Options,
     mut failed: bool,
 ) -> std::io::Result<ExitCode> {
+    // `--types` is a *report*, not a validation shortcut: a program that types
+    // but cannot be erased is still broken, and printing its types with exit 0
+    // said otherwise. The erasure pass is where a construct the checker allows
+    // and the normalizer refuses is caught — `unnest` over a row that already has
+    // `value` is one — so it runs here and its diagnostics are reported.
+    //
+    // The types are printed either way: they are correct, and a reader fixing the
+    // erasure error still wants to see them.
+    let erasure_errors: HashSet<String> = compile_checked(ws, tc)
+        .queries
+        .iter()
+        .filter_map(|q| q.result.as_ref().err().map(|d| format!("{d}")))
+        .collect();
     let mut selected = false;
     for (i, d) in ws.modules[ws.root].module.defs.iter().enumerate() {
         if opts.only.as_deref().is_some_and(|o| o != d.name) {
@@ -638,6 +651,10 @@ fn report_types(
                 out(&format!("{name} : ?"))?
             }
         }
+    }
+    for e in &erasure_errors {
+        eprintln!("{e}");
+        failed = true;
     }
     if opts.only.is_some() && !selected {
         eprintln!(
@@ -770,8 +787,29 @@ fn report_sql(
             }
         }
     }
-    // A file without a `main` is a library and says nothing. Asking for a
-    // definition by name is a request that can be missed, so that is reported.
+    // `--only name` on a definition that is *not* a query: the manual says
+    // "another definition of any type", so a scalar is a legitimate request and
+    // the answer is its type. `x : int = 42` has no SQL to print, and refusing
+    // the request contradicted the one place the behaviour is documented.
+    if let (Some(o), false, false) = (&opts.only, printed, failed) {
+        if let Some((i, d)) = ws.modules[ws.root]
+            .module
+            .defs
+            .iter()
+            .enumerate()
+            .find(|(_, d)| &d.name == o)
+        {
+            if let Some(t) = tc.type_of(ws.root, i) {
+                // A definition with arguments is not printable this way; the
+                // query path below says so with the arity in the message.
+                if !t.contains("->") {
+                    let label = opts.label.clone().unwrap_or_else(|| d.name.clone());
+                    out(&format!("{label} : {t}"))?;
+                    printed = true;
+                }
+            }
+        }
+    }
     if let (Some(o), false, false) = (&opts.only, printed, failed) {
         if o == ARG_ENTRY {
             // The wrapper exists but is not a query: either the definition

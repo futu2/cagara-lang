@@ -5,6 +5,46 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+/// `--types` is a report, not a validation shortcut.
+///
+/// A program that type-checks but cannot be erased used to print its types and
+/// exit 0, so a CI job running `cagara --types` passed files that `cagara`
+/// rejects. The erasure pass runs here too, and its diagnostics are reported.
+#[test]
+fn types_reports_what_the_erasure_pass_refuses() {
+    let dir = TempDir::new("types-erasure");
+    // `unnest` adds a column called `value`, and this row already has one.
+    let f = dir.write(
+        "q.cagara",
+        "v : query { id = int, xs = list int } = table \"p\" \"v\"\n\
+         main = v & update { value = \"s\" } & unnest .xs\n",
+    );
+    let out = cagara([f.as_os_str(), OsStr::new("--types")]);
+    assert!(!out.status.success(), "--types must not pass a broken file");
+    assert!(
+        stderr(&out).contains("`unnest` adds a column"),
+        "{}",
+        stderr(&out)
+    );
+    // The types are still printed: they are right, and a reader fixing the
+    // erasure error wants them.
+    assert!(stdout(&out).contains("main : "), "{}", stdout(&out));
+}
+
+/// `--only` on a scalar definition answers with its type.
+///
+/// The manual says `--only name` compiles "another definition of any type", and a
+/// scalar has no SQL to print — so the answer is the type, which is what the
+/// definition is.
+#[test]
+fn only_accepts_a_definition_that_is_not_a_query() {
+    let dir = TempDir::new("only-scalar");
+    let f = dir.write("q.cagara", "x : int = 42\n");
+    let out = cagara([f.as_os_str(), OsStr::new("--only"), OsStr::new("x")]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "x : int");
+}
+
 /// A scratch directory that removes itself, so tests do not collide.
 struct TempDir(tempfile::TempDir);
 

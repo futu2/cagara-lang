@@ -308,11 +308,23 @@ impl<'a> Parser<'a> {
     fn expect(&mut self, t: Token, what: &str) -> bool {
         if self.at(t) {
             self.bump();
-            true
-        } else {
-            self.error(format!("expected {what}"));
-            false
+            return true;
         }
+        // A single `=` where a value is expected is the one habit every SQL user
+        // has, and the generic "expected `)`" says nothing about it: the `=` *is*
+        // there, and it is the wrong operator. The message names the operator the
+        // language has.
+        if matches!(t, Token::RParen | Token::RBracket | Token::RBrace | Token::Comma)
+            && self.at(Token::Eq)
+        {
+            self.error(
+                "`=` is not equality here: a comparison is `==` (a single `=` only introduces \
+                 a definition or a record field)",
+            );
+            return false;
+        }
+        self.error(format!("expected {what}"));
+        false
     }
 
     /// Consume tokens up to the next item boundary into an error node.

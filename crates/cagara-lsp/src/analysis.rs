@@ -435,7 +435,7 @@ fn declared_field_hover(ws: &Workspace, offset: usize) -> Option<String> {
 /// a column is read from is the input row of the stage it sits in, and that
 /// input is the query the stage is piped from — so this walks that chain down
 /// through the steps that keep their columns and stops at the expression whose
-/// row a signature fixed. That definition's declared record type is where the
+/// row ?a signature fixed. That definition's declared record type is where the
 /// column's `##` block is.
 ///
 /// Nothing is shown when the walk reaches no declaration: a column a `select`
@@ -559,7 +559,7 @@ impl Descent<'_> {
     ///
     /// A name that declares a record type is the answer. A name that does not —
     /// an alias with no signature (`t = aam.tbl`), or one narrowed to an opaque
-    /// `query r` — is a *step*, not a declaration: it says nothing about the
+    /// `query ?r` — is a *step*, not a declaration: it says nothing about the
     /// columns, so the walk follows its body instead. The depth bound is what
     /// keeps a file with a cycle (`a = b`, `b = a`, which the checker rejects)
     /// from spinning here.
@@ -849,9 +849,9 @@ enum Atom {
 
 /// Hover for a column reference (`.age`, `.<id`) or a literal under the cursor.
 ///
-/// A column is spelled as the expression type it has — `expr r string`, or
+/// A column is spelled as the expression type it has — `expr ?r string`, or
 /// `expr (join r s) int` for a side-qualified one — because a column is not a
-/// bare value: it is row-phase, it is what every `expr r a` parameter accepts,
+/// bare value: it is row-phase, it is what every `expr ?r a` parameter accepts,
 /// and the bare value type hides both. `r` is the input row of the enclosing
 /// stage, the same name a signature gives it; printing the concrete row instead
 /// would repeat the whole table for every column and put the column first,
@@ -859,7 +859,7 @@ enum Atom {
 ///
 /// A literal keeps the type it was lifted to (`18` against a `float` column is
 /// `float`) and is not wrapped: a literal may be a *label* rather than an
-/// expression (`limit 2`, `prefix "u_"`), where `expr r …` would be wrong.
+/// expression (`limit 2`, `prefix "u_"`), where `expr ?r …` would be wrong.
 ///
 /// A column also carries its own documentation, when [`column_doc`] can follow
 /// the row back to the declaration that named it: the type says what the column
@@ -983,17 +983,19 @@ fn app_at<'a>(e: &'a Expr, offset: usize, best: &mut Option<(&'a Expr, usize)>) 
     }
 }
 
-/// The row a column reference is an expression over: the input row, or the
+/// The row ?a column reference is an expression over: the input row, or the
 /// joined row for the side-qualified form.
 fn row_of(side: Side) -> &'static str {
+    // The row is a type variable, so it carries the `?` sigil like every other
+    // one: the hover is meant to read as something a signature could contain.
     match side {
-        Side::Single => "r",
-        Side::Left | Side::Right => "(join r s)",
+        Side::Single => "?r",
+        Side::Left | Side::Right => "(join ?r ?s)",
     }
 }
 
 /// `expr`'s value argument, parenthesised when it is compound — the same
-/// parenthesisation the checker's printer applies, so `expr r (maybe float)`
+/// parenthesisation the checker's printer applies, so `expr ?r (maybe float)`
 /// parses as the type it means.
 fn value_arg(ty: &str) -> String {
     if ty.contains(' ') {
@@ -2331,7 +2333,7 @@ mod tests {
         let ws = ws();
         // `adult` in `where adult` (line 2, column 18).
         let h = hover(&ws, at("where adult", 7)).unwrap();
-        assert!(h.contains("adult : expr { age = a | b } bool"), "{h}");
+        assert!(h.contains("adult : expr { age = ?a | ?b } bool"), "{h}");
         // `sum` is an overload set in the prelude.
         let h = one_line(hover(&ws, at("sum .age", 1)).unwrap());
         let (here, general) = h.split_once("defined as").unwrap();
@@ -2343,7 +2345,7 @@ mod tests {
         // pair (which is why `sum` over a `maybe` column needs no `sumMaybe`),
         // and the decimal pair, whose width is stated as the portable 38.
         assert_eq!(general.matches("sum : ").count(), 6, "{h}");
-        assert!(general.contains("(decimal 38 s)"), "{h}");
+        assert!(general.contains("(decimal 38 ?s)"), "{h}");
         assert!(general.contains("(maybe int) -> agg"), "{h}");
         // Operators hover at their symbol, under their definition name.
         let h = hover(&ws, at("x + x", 2)).unwrap();
@@ -2490,7 +2492,7 @@ mod tests {
         assert_eq!(column_hover(&ws, "where (.a >", 9), "");
         // The type is still there, which is what the hover is for.
         let h = hover(&ws, at_in(COLUMNS, "where (.a >", 9)).unwrap();
-        assert!(h.contains(".a : expr r int"), "{h}");
+        assert!(h.contains(".a : expr ?r int"), "{h}");
     }
 
     /// A column that `prefix` renamed is no longer the declared one: the doc
@@ -2520,7 +2522,7 @@ mod tests {
             "{h}"
         );
         assert!(
-            general.contains("select : expr r (row s) -> query r -> query s"),
+            general.contains("select : expr ?r (row ?s) -> query ?r -> query ?s"),
             "{h}"
         );
         // A monomorphic use shows its type once.
@@ -2546,14 +2548,14 @@ mod tests {
             hover(&ws, at_in(src, needle, within)).unwrap_or_default()
         };
         // `.score` as the expression type it has: a column is row-phase, so it
-        // is `expr r float`, not the bare value type.
+        // is `expr ?r float`, not the bare value type.
         let h = at("where (.score", 8);
-        assert!(h.contains(".score : expr r float"), "{h}");
+        assert!(h.contains(".score : expr ?r float"), "{h}");
         // `18` lifted to the column's type.
         let h = at(">= 18", 3);
         assert!(h.contains("18 : float"), "{h}");
         let h = at("&& .name", 3);
-        assert!(h.contains(".name : expr r string"), "{h}");
+        assert!(h.contains(".name : expr ?r string"), "{h}");
         let h = at("== \"a\"", 3);
         assert!(h.contains("\"a\" : string"), "{h}");
         // A literal in a record keeps its own type.
@@ -2564,7 +2566,7 @@ mod tests {
     /// A column hovers as the expression type it has, not as its value type.
     ///
     /// A column is not a bare value: it is row-phase, which is what every
-    /// `expr r a` parameter accepts, and writing `string` for it hides both the
+    /// `expr ?r a` parameter accepts, and writing `string` for it hides both the
     /// phase and the row — a reader copying the hover into a helper's signature
     /// wrote `string -> string`, which the checker then refused. `r` is the row
     /// variable a signature would name, so the hover is the shape the reader has
@@ -2573,7 +2575,7 @@ mod tests {
     /// which is not the row's order.
     ///
     /// A literal is *not* wrapped: it may be a label rather than an expression
-    /// (`limit 2`, `prefix "u_"`), where `expr r …` would be wrong.
+    /// (`limit 2`, `prefix "u_"`), where `expr ?r …` would be wrong.
     #[test]
     fn a_column_hovers_as_an_expression_over_the_row() {
         let src = "users : query { id = int, name = string, score = maybe float } = table \"p\" \"users\"\n\
@@ -2592,15 +2594,15 @@ mod tests {
                 .to_string()
         };
 
-        assert_eq!(at("upper .name", 8), ".name : expr r string");
+        assert_eq!(at("upper .name", 8), ".name : expr ?r string");
         // A compound value type is parenthesised, as the printer spells it, so
         // the hover parses as the type it means.
         assert_eq!(
             at("coalesce 0.0 .score", 15),
-            ".score : expr r (maybe float)"
+            ".score : expr ?r (maybe float)"
         );
         // A side-qualified column is an expression over the joined row.
-        assert_eq!(at(".<id + 1", 2), ".<id : expr (join r s) int");
+        assert_eq!(at(".<id + 1", 2), ".<id : expr (join ?r ?s) int");
         // A literal stays the type it was lifted to, and so does a label: the
         // `2` here is `limit`'s count, not an expression over the row.
         assert_eq!(at("limit 2", 6), "2 : int");
@@ -2646,7 +2648,7 @@ mod tests {
         assert_eq!(d.len(), 1, "{d:?}");
         // The value half is an expression over the row, so its column hovers.
         let h = hover(&ws, at_in(src, "=> .score", 4)).unwrap_or_default();
-        assert!(h.contains(".score : expr r float"), "{h}");
+        assert!(h.contains(".score : expr ?r float"), "{h}");
         // Both halves are recorded as references to what they name.
         let rs = references(&ws, at_in(src, "adult =>", 2), false);
         assert!(!rs.is_empty(), "the condition is a use of `adult`");
@@ -2713,7 +2715,7 @@ mod tests {
     #[test]
     fn an_annotated_parameter_is_a_name_in_scope() {
         let src = "users : query { id = int, name = string } = table \"p\" \"users\"\n\
-                   twice = (x : expr r int) => x + x\n\
+                   twice = (x : expr ?r int) => x + x\n\
                    q = users & select { n = twice .id }\n";
         let mut ws = Workspace::open_with(Path::new("/nonexistent/main.cagara"), src.to_string());
         // A use jumps to the name inside the parentheses, not to the `(`.
@@ -2726,7 +2728,9 @@ mod tests {
                 .iter()
                 .map(|(r, _)| *r)
                 .collect::<Vec<_>>(),
-            vec![range(1, 9, 10), range(1, 28, 29), range(1, 32, 33)]
+            // `expr ?r int` is one character longer than the old `expr r int`,
+            // so the two uses after the annotation sit one column further on.
+            vec![range(1, 9, 10), range(1, 29, 30), range(1, 33, 34)]
         );
         // Hovering a use shows the type the annotation gave it.
         let h = one_line(hover(&ws, at_in(src, "x + x", 0)).unwrap());
@@ -3186,7 +3190,7 @@ mod tests {
     /// works on both halves of an arm.
     ///
     /// The two halves can report the row's columns in different *orders*: the
-    /// row a `case` sees is built in the order its arms first mention columns
+    /// row ?a `case` sees is built in the order its arms first mention columns
     /// (`.age` in the condition, then `.id` in the value), where the table's
     /// own order is `id, age`. Both list the same columns, so the ordering is
     /// pinned here rather than left implicit.

@@ -120,7 +120,7 @@ pub(crate) fn primitive<'a>(
             origin,
         }),
         // `merge` has no relational form in this language: two queries are
-        // combined by a join or a set operation, and `merge r s` is a row
+        // combined by a join or a set operation, and `merge ?r ?s` is a row
         // *type* former rather than an operation.
         other => Err(Control::unsupported(
             origin,

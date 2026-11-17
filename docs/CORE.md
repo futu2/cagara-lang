@@ -127,7 +127,7 @@ arguments, a join or set accumulating its operands, a template accumulating its
 expressions. When the last argument arrives, `apply` calls the arena
 constructor, and that is the only place a relational node is made.
 
-**Identity.** `id : a -> a = x => x` needs no rule of its own. Where it is
+**Identity.** `id : ?a -> ?a = x => x` needs no rule of its own. Where it is
 applied, β-reduction removes it. Where it is a *value* — the right operand of a
 composition — the composition is itself an ordinary lambda: `_>>>_` is
 `f => g => x => g (f x)` (`prelude/core.cagara`), so `trim >>> id` reduces to a
@@ -155,7 +155,7 @@ The constructors are the single statement of relational validity:
 | `Builder::set` | both inputs expose the same columns, with the same types — matched by name, so the orders may differ, and the right input is projected into the left's order | the left input's row |
 
 These are every constructor there is. A primitive with no rule — `primitive "__merge"`, which no
-prelude name spells — reaches `apply` and is refused as `Control::Unsupported`, because `merge r s`
+prelude name spells — reaches `apply` and is refused as `Control::Unsupported`, because `merge ?r ?s`
 is a row *type* former and two queries are combined by a join or a set operation.
 
 Row formers are `core.rs::RowType` (`rename_all`, `omit`,
@@ -193,7 +193,7 @@ parameter: `a & union b` answers in `a`'s order.
 
 **Nullability.** `maybe a` is a value that may be `NULL` (see
 [`NULLABILITY.md`](NULLABILITY.md)). Type variables in signatures mean non-null,
-so `expr r a` does not accept `expr r (maybe a)`. Where nullability arises:
+so `expr ?r a` does not accept `expr ?r (maybe a)`. Where nullability arises:
 
 - a column declared `maybe`; the nullable side of a left/right/full join, whose
   types the checker writes as `mapValue (AsNullable) s` and the arena as
@@ -240,7 +240,7 @@ order keys spell `ASC NULLS LAST` / `DESC NULLS LAST` in
 `limit`/`offset` do not themselves order: a paged query is deterministic only if
 it also says what order it is in, which the checker does not enforce.
 
-**Windows.** A window function is a `win (expr r a)` template applied to a
+**Windows.** A window function is a `win (expr ?r a)` template applied to a
 window specification record (`{ partition = [..], order = [..], frame = .. }`) and
 then to its expression arguments; the spec is the first argument and is consumed
 by the template application in `normalize/scalar.rs`. Frames are built by

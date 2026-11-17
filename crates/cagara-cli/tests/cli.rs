@@ -72,7 +72,7 @@ fn a_shared_failure_is_reported_once() {
     let dir = TempDir::new("dup");
     let f = dir.write(
         "dup.cagara",
-        "bad : expr r int -> expr r int = sql \"$0\"\n\
+        "bad : expr ?r int -> expr ?r int = sql \"$0\"\n\
          t : query { a = int } = table \"s\" \"t\"\n\
          q = t & select { x = bad .a }\n",
     );
@@ -109,7 +109,7 @@ fn an_unused_failing_definition_is_reported_once() {
     let dir = TempDir::new("unused");
     let f = dir.write(
         "unused.cagara",
-        "bad : expr r int -> expr r int = sql \"$0\"\n",
+        "bad : expr ?r int -> expr ?r int = sql \"$0\"\n",
     );
     let out = run(&f);
     let err = stderr(&out);
@@ -890,7 +890,7 @@ fn check_reports_a_lowering_error() {
 ///
 /// `-` binds tighter than `&`, so `limit -1` is `limit - 1` — subtracting from the
 /// `limit` *function*. The diagnostic used to be
-/// `type mismatch: expected expr a b, found expr a int -> query a -> query a`, which
+/// `type mismatch: expected expr ?a b, found expr ?a int -> query ?a -> query ?a`, which
 /// names neither the operator nor the fix.
 #[test]
 fn a_negative_stage_argument_explains_the_precedence() {
@@ -915,7 +915,7 @@ fn a_negative_stage_argument_explains_the_precedence() {
             err.contains(&format!("Write `{stage} (-1)`")),
             "{stage} names the fix: {err}"
         );
-        assert!(!err.contains("expr a b"), "{stage}: no leaked type: {err}");
+        assert!(!err.contains("expr ?a b"), "{stage}: no leaked type: {err}");
     }
     // The parenthesised spelling gets the stage's own refusal, which is about the
     // value rather than about parsing.

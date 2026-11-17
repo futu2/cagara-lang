@@ -1321,7 +1321,7 @@ fn a_definition_that_expands_past_the_budget_is_reported() {
     }
     let ws = Workspace::from_source(&format!(
         "users : query {{ id = int }} = table \"s\" \"users\"\n\
-         dup : expr r int -> expr r int = x => ifThenElse true x x\n\
+         dup : expr ?r int -> expr ?r int = x => ifThenElse true x x\n\
          q = users & select {{ y = {expr} }}\n"
     ));
     let diags: Vec<Diag> = compile(&ws)

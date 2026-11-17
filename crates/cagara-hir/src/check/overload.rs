@@ -104,7 +104,7 @@ impl<'w> Checker<'w> {
     ///
     /// ```text
     /// addDays (-7) .d        -- `.d` is a row expression, not a value
-    /// coalesce 0.0 .revenue  -- `.revenue` is `expr r _`
+    /// coalesce 0.0 .revenue  -- `.revenue` is `expr ?r _`
     /// ```
     ///
     /// So a candidate scores for matching the argument's phase (`expr` for a row
@@ -226,7 +226,7 @@ impl<'w> Checker<'w> {
 
     /// How well one parameter matches one argument.
     ///
-    /// A row-indexed parameter (`expr r T`) is compared by its phase first, and
+    /// A row-indexed parameter (`expr ?r T`) is compared by its phase first, and
     /// then by the shape of `T`: a `maybe T` argument wants a `maybe T`
     /// parameter, and an argument that is *not* known to be nullable wants the
     /// non-null parameter — the language's default, so an open type is never
@@ -235,7 +235,7 @@ impl<'w> Checker<'w> {
         let cand = self.resolve(cand);
         let arg = self.resolve(arg);
         // A row expression wants a row-indexed parameter. Comparing `T` inside
-        // decides between `expr r T` and `expr r (maybe T)`.
+        // decides between `expr ?r T` and `expr ?r (maybe T)`.
         if let (Ty::Con("expr", c), Ty::Con("expr", a)) = (&cand, &arg) {
             if c.len() == 3 && a.len() == 3 {
                 return 4 + self.value_score(&c[2], &a[2]);

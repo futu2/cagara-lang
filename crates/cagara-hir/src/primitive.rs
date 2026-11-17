@@ -9,7 +9,7 @@ use crate::ir::{JoinKind, SetKind};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Prim {
     Table,
-    /// No stage spells this: `merge r s` is a row *type* former, and two queries
+    /// No stage spells this: `merge ?r ?s` is a row *type* former, and two queries
     /// are combined by a join or a set operation. The name stays in the table
     /// because `primitive "__merge"` is writable in a definition body, and the
     /// normalizer's answer to it is a compiler fault rather than silence.
@@ -135,7 +135,7 @@ impl Prim {
     /// Does this primitive's signature differ from its internal type?
     ///
     /// A projection takes a `row` of field expressions, which the checker
-    /// carries separately from the surface `expr r (row s)` so the constraint
+    /// carries separately from the surface `expr ?r (row ?s)` so the constraint
     /// solver can validate and lower the stage. Its signature therefore
     /// *describes* the internal type rather than being it, and the checker has
     /// to reconcile the two. Every other primitive's signature is its type.
@@ -154,7 +154,7 @@ impl Prim {
     /// field expressions the stage constraint consumes — so `check_def`
     /// reconciles the two. A key stage's signature *is* its type, and the row
     /// rule that ties its input row to its output row is stated there
-    /// (`removeKey k r` for `omit`, `keyMap m r` for the renames). Registering
+    /// (`removeKey ?k ?r` for `omit`, `keyMap ?m ?r` for the renames). Registering
     /// that rule once, for the definition, is what lets every use instantiate it
     /// with fresh variables instead of rebuilding it from the callee's result
     /// type. See `docs/CORE.md` for the reduction and row rules.

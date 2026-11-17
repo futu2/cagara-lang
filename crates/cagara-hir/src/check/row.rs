@@ -173,7 +173,7 @@ pub(crate) enum RowError {
         label: String,
         fields: Vec<(String, Ty)>,
     },
-    /// `mapValue w` where `w` names no wrapper the compiler knows.
+    /// `mapValue ?w` where `w` names no wrapper the compiler knows.
     UnknownWrapper { name: String },
 }
 

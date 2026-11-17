@@ -228,7 +228,12 @@ kind_table! {
         /// `{a=.b}` have to keep lexing as a sign, a product and a field, and
         /// maximal munch would otherwise swallow them into one spelling nobody
         /// declared.
-        Op OP #[regex(r"[=!<>*/%|?$^~]+", priority = 1)],
+        // `?` is deliberately *not* in this class. Every operator that
+        // contains one — `?`, `<?`, `?>`, `<?>`, `??`, `&?` — has its own token
+        // above, so all the class could do with it is swallow the `?` of a type
+        // variable: `{ id = int |?r }` lexed as `|?` then `r`, and the row tail
+        // was lost. Leaving it out makes `|` a `Bar` and `?r` a `TyVar`.
+        Op OP #[regex(r"[=!<>*/%|$^~]+", priority = 1)],
 
         QuestionQuestion OP #[token("??")],
         /// `right ? on` — `inner right on`
@@ -282,6 +287,16 @@ kind_table! {
         /// by those classes and the fixed operator table.
         Ident #[regex(r"[\p{XID_Start}_][\p{XID_Continue}]*")] #[regex(r"_[^a-zA-Z0-9_\s]+_")],
 
+        /// A type variable: `?` then a name, as in `expr ?r int -> expr ?r int`.
+        ///
+        /// One token, so the parser never has to decide between this and the `?`
+        /// join operator: in type position only this can appear, and in
+        /// expression position only `?` can. Before the sigil, a type variable
+        /// was *any* single lowercase letter — a rule that made a one-letter
+        /// typo in a `table` annotation silently unconstrained, because `m`
+        /// meant "some type" rather than "no such type".
+        TyVar #[regex(r"\?[\p{XID_Start}_][\p{XID_Continue}]*")],
+
         Int #[regex(r"[0-9]+")],
         Float #[regex(r"[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?")],
         /// A string literal. Both this and [`SyntaxKind::UnterminatedString`]
@@ -319,9 +334,9 @@ kind_table! {
         /// A definition: `name = body` or `name : ty = body`.
         Definition,
         TypeAnn,
-        /// `name arg arg` in a type (`query r`, `expr r bool`, `int`)
+        /// `name arg arg` in a type (`query ?r`, `expr ?r bool`, `int`)
         TyApp,
-        /// `{ a = int, b = string | r }`
+        /// `{ a = int, b = string | ?r }`
         TyRecord,
         TyField,
         /// `a -> b`
@@ -408,7 +423,7 @@ mod tests {
             AndAnd OrOr EqEq NotEq Diamond LtEq GtEq Lt Gt PlusPlus Plus Minus Star Slash Percent AmpOp Op \
             QuestionQuestion Question LtQuestion QuestionGt LtQuestionGt Dollar Bar LParen RParen \
             LBrace RBrace LBracket RBracket Comma Eq Colon Semicolon Field LeftField RightField \
-            Ident Int Float String UnterminatedString Error LetKw SourceFile ImportDecl \
+            Ident TyVar Int Float String UnterminatedString Error LetKw SourceFile ImportDecl \
             Definition TypeAnn TyApp TyRecord TyField TyFun TyParen TyStr TyNat Lambda BinExpr App \
             NegExpr ParenExpr RecordExpr RecordField ListExpr NameRef Literal FieldExpr ProjExpr \
             SqlExpr PrimitiveExpr CaseExpr CaseArm ErrorNode LetExpr CatalogDecl CatalogEntry";

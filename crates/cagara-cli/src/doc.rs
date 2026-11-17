@@ -450,7 +450,7 @@ mod tests {
     fn def(name: &str, doc: Option<&str>) -> DocumentedDef {
         DocumentedDef {
             name: name.into(),
-            ty: Some("query r".into()),
+            ty: Some("query ?r".into()),
             doc: doc.map(String::from),
             fields: Vec::new(),
             line: 1,
@@ -473,7 +473,7 @@ mod tests {
              ## `main`\n\
              \n\
              ```text\n\
-             main : query r\n\
+             main : query ?r\n\
              ```\n\
              \n\
              The answer.\n\
@@ -481,7 +481,7 @@ mod tests {
              ## `helper`\n\
              \n\
              ```text\n\
-             helper : query r\n\
+             helper : query ?r\n\
              ```\n"
         );
     }
@@ -505,7 +505,7 @@ mod tests {
             defs,
         }]);
         assert_eq!(text.matches("## `sum`").count(), 1, "{text}");
-        assert!(text.contains("sum : query r\nsum : query r\n"), "{text}");
+        assert!(text.contains("sum : query ?r\nsum : query ?r\n"), "{text}");
         // One doc for the set is enough, and it is printed once.
         assert_eq!(text.matches("Adds a column up.").count(), 1, "{text}");
     }
@@ -558,9 +558,9 @@ mod tests {
     #[test]
     fn an_overload_set_is_one_object() {
         let mut a = def("sum", Some("Adds them up."));
-        a.ty = Some("expr r int -> agg (expr r (maybe int))".into());
+        a.ty = Some("expr ?r int -> agg (expr ?r (maybe int))".into());
         let mut b = def("sum", None);
-        b.ty = Some("expr r float -> agg (expr r (maybe float))".into());
+        b.ty = Some("expr ?r float -> agg (expr ?r (maybe float))".into());
         b.line = 9;
         let mut c = def("other", None);
         c.line = 12;

@@ -31,6 +31,18 @@ struct Printer {
 }
 
 impl Printer {
+    /// The name of a scheme's quantified variable `k`, without the sigil.
+    fn gen(&mut self, k: u32) -> String {
+        if let Some(n) = self.gens.get(k as usize).cloned().flatten() {
+            return n.trim_start_matches('?').to_string();
+        }
+        let n = self.names.len() + self.gen_names.len();
+        self.gen_names
+            .entry(k)
+            .or_insert_with(|| var_name(n))
+            .clone()
+    }
+
     pub(crate) fn var(&mut self, v: u32) -> String {
         let n = self.names.len() + self.gen_names.len();
         self.names.entry(v).or_insert_with(|| var_name(n)).clone()
@@ -40,23 +52,21 @@ impl Printer {
     pub(crate) fn ty(&mut self, t: &Ty, prec: u8) -> String {
         let paren = |s: String, need: bool| if need { format!("({s})") } else { s };
         match t {
-            Ty::Var(v) => self.var(*v),
-            Ty::Rigid(_, n) => n.clone(),
+            // A type variable is printed with the `?` sigil, so a type the
+            // compiler shows can be pasted back into a signature: `maybe ?a`
+            // parses, `maybe a` does not (a bare name is a constructor).
+            Ty::Var(v) => format!("?{}", self.var(*v)),
+            Ty::Rigid(_, n) => format!("?{n}"),
             Ty::Sym(s) => format!("{s:?}"),
             Ty::Nat(n) => n.to_string(),
-            Ty::Gen(k) => match self.gens.get(*k as usize).cloned().flatten() {
-                Some(n) => n,
-                None => {
-                    let n = self.names.len() + self.gen_names.len();
-                    self.gen_names
-                        .entry(*k)
-                        .or_insert_with(|| var_name(n))
-                        .clone()
-                }
-            },
-            // A `symbol k` parameter: print the surface form, not the internal
+            // A scheme's quantified variable carries the `?` too, for the same
+            // reason: the printed signature is meant to be paste-able. The name
+            // is stored without the sigil so the two sources of a name — a
+            // signature's own `?r` and a generated one — agree.
+            Ty::Gen(k) => format!("?{}", self.gen(*k)),
+            // A `symbol ?k` parameter: print the surface form, not the internal
             // marker, so a helper's signature reads the way it is written. A
-            // `valueLabel w` is the same kind of position for `mapValue`.
+            // `valueLabel ?w` is the same kind of position for `mapValue`.
             Ty::Con(n @ ("keyLabel" | "valueLabel"), args) if args.len() == 1 => {
                 let surface = if *n == "valueLabel" {
                     "valueLabel"

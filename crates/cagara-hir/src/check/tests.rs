@@ -58,7 +58,7 @@ fn ty(src: &str, name: &str) -> String {
     r.unwrap_or_else(|e| panic!("`{name}` failed: {e}"))
 }
 
-/// The row a query definition produces, as a set of `name = type` pairs.
+/// The row ?a query definition produces, as a set of `name = type` pairs.
 ///
 /// A key stage's stored type may still carry its `keyMap (prefix "u_") …` term
 /// wrapper: the *row inside* is already the renamed one, and the wrapper is the
@@ -239,7 +239,7 @@ fn a_decimal_cast_names_its_parameters() {
     // Two different precisions are two different types.
     let e = err(
         "m : query { total = decimal 10 2 } = table \"s\" \"m\"\n\
-         f : expr r (decimal 12 2) -> expr r string = sql \"CAGARA_TO_STRING($1)\"\n\
+         f : expr ?r (decimal 12 2) -> expr ?r string = sql \"CAGARA_TO_STRING($1)\"\n\
          q = m & select { x = f .total }\n",
         "q",
     );
@@ -252,7 +252,7 @@ fn a_decimal_cast_names_its_parameters() {
 /// `sum`/`avg`/`min`/`max` had a `maybe` overload and `countOf`/`countDistinct` did
 /// not, which is backwards: `COUNT(x)` is the aggregate whose *whole point* is that
 /// it skips NULLs, and a nullable column is exactly where you count non-null values.
-/// The signature said `expr r a`, and a bare type variable in a signature is non-null.
+/// The signature said `expr ?r a`, and a bare type variable in a signature is non-null.
 #[test]
 fn every_null_skipping_aggregate_takes_a_maybe() {
     let prelude = "m : query { v = maybe int } = table \"s\" \"m\"\n";
@@ -433,11 +433,11 @@ fn row_polymorphic_predicate() {
     // The literal stays polymorphic until the column type is known.
     assert_eq!(
         ty("adult = .age >= 18\n", "adult"),
-        "expr { age = a | b } bool"
+        "expr { age = ?a | ?b } bool"
     );
     assert_eq!(
         ty("named = .name == \"x\"\n", "named"),
-        "expr { name = a | b } bool"
+        "expr { name = ?a | ?b } bool"
     );
 }
 
@@ -529,10 +529,10 @@ fn query_output_rows() {
 
 /// A window function wrapped in `over` says so, instead of reporting the overload.
 ///
-/// `over : winspec r -> agg (expr r a) -> win (expr r a)` turns an *aggregate* into a
-/// window. `rowNumber` and its relatives are already `winspec r -> win (…)`, so
+/// `over : winspec ?r -> agg (expr ?r a) -> win (expr ?r a)` turns an *aggregate* into a
+/// window. `rowNumber` and its relatives are already `winspec ?r -> win (…)`, so
 /// `over spec (rowNumber)` cannot type-check — and the mismatch that surfaced said
-/// `expected agg (…), found winspec a -> win (expr a int)`, which is true but never
+/// `expected agg (…), found winspec ?a -> win (expr ?a int)`, which is true but never
 /// says the function takes the spec itself.
 #[test]
 fn over_applied_to_a_window_function_explains_itself() {
@@ -575,7 +575,7 @@ fn a_negative_aggregate_argument_explains_the_precedence() {
     let e = err("q = users & agg { x = sum -1 }\n", "q");
     assert!(e.contains("`sum -1` reads as `sum - 1`"), "{e}");
     assert!(e.contains("Write `sum (-1)`"), "{e}");
-    assert!(!e.contains("agg (expr a"), "no leaked type: {e}");
+    assert!(!e.contains("agg (expr ?a"), "no leaked type: {e}");
     // The parenthesised form compiles, and an ordinary subtraction is untouched.
     assert_eq!(
         ty("q = users & agg { x = sum (-1) }\n", "q"),
@@ -595,11 +595,11 @@ fn a_negative_aggregate_argument_explains_the_precedence() {
 ///
 /// `q = users & where` is `_&_ users where`, so the stage is the *second* argument of
 /// `&` and its slot there is the pipeline's query. The mismatch surfaced as
-/// `expected query {…}, found expr a b` — a shape the reader never wrote, which never
+/// `expected query {…}, found expr ?a b` — a shape the reader never wrote, which never
 /// says the stage is short of an argument.
 ///
 /// Each of the six stages that take one argument gets the sentence that belongs to it:
-/// the parameter's *shape* is what says which it is, because `where`'s is `expr a b` with
+/// the parameter's *shape* is what says which it is, because `where`'s is `expr ?a b` with
 /// `b` still open and `select`'s is a `record_expr` rather than an `expr`.
 #[test]
 fn a_stage_with_no_argument_says_what_it_needs() {
@@ -614,11 +614,11 @@ fn a_stage_with_no_argument_says_what_it_needs() {
         let e = err(src, "q");
         assert!(e.contains(want), "{src:?}: expected {want:?}, got {e}");
         // The internal type is gone, and the fix is named.
-        assert!(!e.contains("expr a b"), "no leaked type: {e}");
+        assert!(!e.contains("expr ?a b"), "no leaked type: {e}");
         assert!(e.contains("`&` supplies the query"), "{e}");
     }
     // A stage that *has* its argument is untouched, and so is a prelude definition that
-    // is itself stage-shaped — `_&|_ : query s -> query r -> query r` is reconciled with
+    // is itself stage-shaped — `_&|_ : query ?s -> query ?r -> query ?r` is reconciled with
     // its own signature on every check, and the arity test is what keeps it out.
     for src in [
         "q = users & where (.age > 1) & select { x = .id } & order [asc .x] & limit 5 & offset 1\n",
@@ -634,7 +634,7 @@ fn a_stage_with_no_argument_says_what_it_needs() {
 ///
 /// `-` is infix at precedence 17 and `&` at 1, so `limit -1` parses as `limit - 1` —
 /// subtracting one from the `limit` *function*. The diagnostic that follows was
-/// `type mismatch: expected expr a b, found expr a int -> query a -> query a`, which
+/// `type mismatch: expected expr ?a b, found expr ?a int -> query ?a -> query ?a`, which
 /// names neither the operator nor the fix, and the fix is one pair of parentheses.
 #[test]
 fn a_negative_stage_argument_explains_the_precedence() {
@@ -652,7 +652,7 @@ fn a_negative_stage_argument_explains_the_precedence() {
             "{stage} names the fix: {e}"
         );
         // The internal type is gone.
-        assert!(!e.contains("expr a b"), "no leaked type: {e}");
+        assert!(!e.contains("expr ?a b"), "no leaked type: {e}");
     }
     // The parenthesised spelling reaches the stage's own check instead. That check
     // is a *lowering* refusal (`limit` rejects a negative count), not a checker one,
@@ -867,7 +867,7 @@ fn mark_exists_appends_one_boolean_column() {
         "query { id = int, name = string, age = int, active = bool, exists = bool }"
     );
     // `.x` without a side is refused, with the same message a join gives: inside
-    // the subquery a bare name would resolve to the subquery's own table, which is
+    // the subquery ?a bare name would resolve to the subquery's own table, which is
     // the wrong one.
     let bad = types("q = users & markExists orders (.id == .user_id)\n");
     let e = bad
@@ -1043,7 +1043,7 @@ fn case_rejects_mismatched_arms() {
 /// Cagara decline to define which one it would pick.
 ///
 /// `case` gets this from the ordinary machinery — the condition is compared
-/// against `expr r bool` like any other argument, and a `maybe` is refused
+/// against `expr ?r bool` like any other argument, and a `maybe` is refused
 /// there. The message is the one `where` gives, which is the point: there is
 /// one rule and one way of stating it, not a rule per conditional form.
 #[test]
@@ -1145,16 +1145,16 @@ fn a_parameter_annotation_meets_the_expected_type() {
 }
 
 /// An annotation's type variables relate the rows it mentions: `r` in
-/// `expr r bool` is one unknown throughout the annotation, so the parameter
+/// `expr ?r bool` is one unknown throughout the annotation, so the parameter
 /// and the result are over the same row. They are *not* the rigid universals
 /// a signature's variables are — the row is whatever the argument turns out
 /// to be — which is why `where (p && .active)` type-checks.
 #[test]
 fn a_parameter_annotation_can_relate_rows() {
-    let src = "keep = (p : expr r bool) => where p\n\
+    let src = "keep = (p : expr ?r bool) => where p\n\
                    a = users & keep .active\n\
                    b = orders & keep (.amount > 1.0)\n";
-    assert_eq!(ty(src, "keep"), "expr a bool -> query a -> query a");
+    assert_eq!(ty(src, "keep"), "expr ?a bool -> query ?a -> query ?a");
     assert_eq!(
         ty(src, "a"),
         "query { active = bool, id = int, name = string, age = int }"
@@ -1168,20 +1168,20 @@ fn a_parameter_annotation_can_relate_rows() {
     // is a universal and could not.
     assert_eq!(
             ty(
-                "keep2 = (p : expr r bool) => q => where (p && .active) q\n",
+                "keep2 = (p : expr ?r bool) => q => where (p && .active) q\n",
                 "keep2"
             ),
-            "expr { active = bool | a } bool -> query { active = bool | a } -> query { active = bool | a }"
+            "expr { active = bool | ?a } bool -> query { active = bool | ?a } -> query { active = bool | ?a }"
         );
 }
 
 #[test]
 fn signatures_are_checked() {
     assert!(err("f : int -> string = x => x + 1\n", "f").contains("does not match its signature"));
-    assert!(err("g : a -> int = x => x\n", "g").contains("signature"));
-    ty("h : a -> a = x => x\n", "h");
+    assert!(err("g : ?a -> int = x => x\n", "g").contains("signature"));
+    ty("h : ?a -> ?a = x => x\n", "h");
     ty(
-        "a : agg (expr r (row s)) -> query r -> query s = agg\n",
+        "a : agg (expr ?r (row ?s)) -> query ?r -> query ?s = agg\n",
         "a",
     );
     assert!(err("bad : agg (int) = count\n", "bad").contains("wraps an expression type"));
@@ -1256,7 +1256,7 @@ fn join_errors() {
 fn update_merges_over_the_input_row() {
     assert_eq!(
         ty("u = update\n", "u"),
-        "expr a (row b) -> query a -> query merge(a, b)"
+        "expr ?a (row ?b) -> query ?a -> query merge(?a, ?b)"
     );
     // An overwritten field keeps its position; the rest pass through.
     assert_eq!(
@@ -1403,7 +1403,7 @@ fn overloads_resolve_by_type() {
 /// A type position named with something that is not a built-in constructor is a
 /// **type parameter**, not an unknown type.
 ///
-/// Signatures carry their parameters implicitly, so `id : a -> a` works; the
+/// Signatures carry their parameters implicitly, so `id : ?a -> a` works; the
 /// An overload that fails on a `maybe` says which one, and how to fix it.
 ///
 /// The mismatch path has carried this advice since the `??` fix landed; overload
@@ -1468,8 +1468,8 @@ fn a_diagnostic_carries_the_fix_it_knows() {
     assert_eq!(slice(pred.expect("a predicate span")), ".<id == .>id");
 }
 
-/// Type names are closed: an unknown name is an error, and only a single
-/// lowercase letter is a type variable.
+/// Type names are closed: an unknown name is an error, and a type variable is
+/// written with a `?` sigil.
 ///
 /// This used to be the opposite — any bare name became a type parameter, so
 /// `amount = decimal` made the column polymorphic and two definitions could read
@@ -1482,8 +1482,8 @@ fn a_type_name_must_be_known() {
     let e = err(src, "money");
     assert!(e.contains("unknown type `uuid`"), "{e}");
     assert!(
-        e.contains("single lowercase letter"),
-        "the diagnostic must say what a bare name is: {e}"
+        e.contains("written with a `?`"),
+        "the diagnostic must say how a type variable is written: {e}"
     );
 
     // A near miss names the constructor it was reaching for.
@@ -1492,11 +1492,10 @@ fn a_type_name_must_be_known() {
     let e = err(typo, "money");
     assert!(e.contains("did you mean `string`"), "{e}");
 
-    // A single lowercase letter is still a type variable, in a signature as
-    // well as in a row tail.
+    // `?x` is a type variable, in a signature as well as in a row tail.
     let poly = concat!(
-        "keep : expr r int -> expr r int = x => x\n",
-        "byId : expr { id = int | t } int -> query { id = int | t } -> query { id = int | t } =\n",
+        "keep : expr ?r int -> expr ?r int = x => x\n",
+        "byId : expr { id = int | ?t } int -> query { id = int | ?t } -> query { id = int | ?t } =\n",
         "  i => q => where (.id == i) q\n",
         "q = users & byId (keep 3)\n"
     );
@@ -1508,12 +1507,12 @@ fn a_type_name_must_be_known() {
 
 #[test]
 fn user_overloads() {
-    let src = "describe : expr r int -> expr r string = sql \"CAST($1 AS TEXT)\"\n\
-               describe : expr r bool -> expr r string = sql \"CASE WHEN $1 THEN 'yes' ELSE 'no' END\"\n\
+    let src = "describe : expr ?r int -> expr ?r string = sql \"CAST($1 AS TEXT)\"\n\
+               describe : expr ?r bool -> expr ?r string = sql \"CASE WHEN $1 THEN 'yes' ELSE 'no' END\"\n\
                q = users & select { a = describe .age, b = describe .active }\n";
     assert_eq!(ty(src, "q"), "query { a = string, b = string }");
-    let amb = "pick2 : expr r int -> expr r int = sql \"$1\"\n\
-               pick2 : expr r int -> expr r float = sql \"$1\"\n\
+    let amb = "pick2 : expr ?r int -> expr ?r int = sql \"$1\"\n\
+               pick2 : expr ?r int -> expr ?r float = sql \"$1\"\n\
                q = users & select { a = pick2 .age }\n";
     assert!(err(amb, "q").contains("ambiguous use of `pick2`"));
 }
@@ -1539,8 +1538,8 @@ fn overloads_need_signatures() {
 #[test]
 fn overloads_share_one_parameter_count() {
     let ws = Workspace::from_source(
-        "f : expr r int -> expr r int = sql \"($1)\"\n\
-         f : expr r int -> expr r int -> expr r int = sql \"($1 + $2)\"\n",
+        "f : expr ?r int -> expr ?r int = sql \"($1)\"\n\
+         f : expr ?r int -> expr ?r int -> expr ?r int = sql \"($1 + $2)\"\n",
     );
     assert!(
         ws.diags
@@ -1551,8 +1550,8 @@ fn overloads_share_one_parameter_count() {
     );
     // Same arity, different types, is the shape overloading is for.
     let ok = Workspace::from_source(
-        "g : expr r int -> expr r int = sql \"ABS($1)\"\n\
-         g : expr r (maybe int) -> expr r (maybe int) = sql \"ABS($1)\"\n",
+        "g : expr ?r int -> expr ?r int = sql \"ABS($1)\"\n\
+         g : expr ?r (maybe int) -> expr ?r (maybe int) = sql \"ABS($1)\"\n",
     );
     assert!(ok.diags.is_empty(), "{:?}", ok.diags);
 }
@@ -1737,7 +1736,7 @@ fn aggregate_nullability_is_explicit() {
     // Explicit nullable aggregates are the escape hatch: the signature says
     // `maybe`, so the template is the place that decides what NULL means.
     let t = ty(
-        "sumMaybeCustom : expr r (maybe a) -> agg (expr r (maybe a)) = sql \"SUM($1)\"\n",
+        "sumMaybeCustom : expr ?r (maybe a) -> agg (expr ?r (maybe a)) = sql \"SUM($1)\"\n",
         "sumMaybeCustom",
     );
     assert!(t.contains("agg"), "{t}");
@@ -1981,7 +1980,7 @@ fn unused_definitions_still_report_impossible_overloads() {
     // A helper that *can* be instantiated keeps its open overloads, and stays
     // usable at more than one type.
     let poly = "twice = x => x + x\n";
-    assert_eq!(ty(poly, "twice"), "expr a b -> expr a b");
+    assert_eq!(ty(poly, "twice"), "expr ?a ?b -> expr ?a ?b");
     ty(
         &format!("{poly}q = users & select {{ a = twice .age }}\n"),
         "q",
@@ -2002,7 +2001,7 @@ fn constants_keep_their_polymorphic_type_when_unused() {
     // `.age >= 18` may be int or float; checking it must not narrow the
     // literal, so the definition stays usable at both widths.
     let src = "adult = .age >= 18\n";
-    assert_eq!(ty(src, "adult"), "expr { age = a | b } bool");
+    assert_eq!(ty(src, "adult"), "expr { age = ?a | ?b } bool");
     // Used on an int column.
     ty(
         &format!("{src}q = users & where (adult) & select {{ a = .age }}\n"),
@@ -2025,8 +2024,8 @@ fn overload_candidates_resolve_their_own_overloads() {
     // literals) instead of leaving a hole no use can fill. This used to hit
     // an `unreachable!` in the checker.
     let src = "k = x => y => x\n\
-               f : expr r int -> expr r int = x => k x (1 + 2)\n\
-               f : expr r float -> expr r float = x => x\n\
+               f : expr ?r int -> expr ?r int = x => k x (1 + 2)\n\
+               f : expr ?r float -> expr ?r float = x => x\n\
                q = users & select { v = f .age, w = f 1.5 }\n";
     assert_eq!(ty(src, "q"), "query { v = int, w = float }");
     let ws = Workspace::from_source(&format!("{TABLES}{src}"));
@@ -2223,10 +2222,10 @@ fn windows_compose_in_an_expression() {
 #[test]
 fn a_scalar_template_over_an_aggregate_is_an_aggregate() {
     let rs = consistent_src(
-        "inc : agg (expr r int) -> expr r int = sql \"$1 + 1\"\n\
+        "inc : agg (expr ?r int) -> expr ?r int = sql \"$1 + 1\"\n\
          bad = users & select { v = inc count, id = .id }\n\
          good = users & agg { v = inc count }\n\
-         both : agg (expr r int) -> win (expr r int) -> expr r int = sql \"$1 + $2\"\n",
+         both : agg (expr ?r int) -> win (expr ?r int) -> expr ?r int = sql \"$1 + $2\"\n",
     );
     assert!(
         result(&rs, "bad")
@@ -2841,7 +2840,7 @@ fn key_map_is_a_type_level_row_former() {
         ),
         "query { id_v2 = int, name_v2 = string, age_v2 = int, active_v2 = bool }"
     );
-    // The signature's row names the rename's **input** row — `keyMap m r`
+    // The signature's row names the rename's **input** row — `keyMap ?m ?r`
     // denotes `m` applied to `r` — so a one-column signature describes a
     // one-column *input*, not a one-column result. The pipeline here is handed
     // all four of `users`' columns, so the composed rename produces four
@@ -2886,15 +2885,20 @@ fn directional_affix_witness_is_shared_with_result_mapper() {
     // unrelated mapping witness.
     //
     // The witness is a label now, so the mismatch is between two label
-    // variables: `symbol k` is the parameter's, while the result names
+    // variables: `symbol ?k` is the parameter's, while the result names
     // `prependSym m`. Tying them is what the `keyLabel` path does, so this
     // asserts on the specific disagreement rather than on any error at all.
     let e = err(
-        "bad : symbol k -> query r -> query (keyMap (prependSym m) r) = prefix\n",
+        "bad : symbol ?k -> query ?r -> query (keyMap (prependSym m) ?r) = prefix\n",
         "bad",
     );
     assert!(e.contains("type mismatch"), "{e}");
-    assert!(e.contains("expected m") && e.contains("found k"), "{e}");
+    // The printer spells a type variable with its sigil, so the message names
+    // `?m` and `?k` — the same spelling the source would use.
+    assert!(
+        e.contains("expected ?m") && e.contains("found ?k"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -3133,11 +3137,11 @@ fn a_stage_sees_the_column_the_previous_stage_added() {
         // ... by a `where`, and by an `order`.
         (
             "h = q => q & update { up1 = .id } & where (.up1 > 0)\n",
-            "query { up1 = int | a }",
+            "query { up1 = int | ?a }",
         ),
         (
             "h = q => q & update { up1 = .id } & order [asc .up1]\n",
-            "query { up1 = a | b }",
+            "query { up1 = ?a | ?b }",
         ),
         // ... and as a join's left key.
         (
@@ -3177,7 +3181,7 @@ fn a_stage_sees_the_column_the_previous_stage_added() {
             "h = q => q & suffix \"_a\" & where (.id_a > 0)\nq = users & h\n",
             "q"
         ),
-        "query { id_a = int | a }"
+        "query { id_a = int | ?a }"
     );
 }
 
@@ -3270,7 +3274,7 @@ mod bidirectional {
 
     /// A lambda's parameter type comes from the expected function type.
     ///
-    /// `>>>` is `(a -> b) -> (b -> c) -> a -> c`, so both operands are checked
+    /// `>>>` is `(?a -> ?b) -> (?b -> c) -> ?a -> c`, so both operands are checked
     /// against a *known* function type. Before checking mode, `infer_lambda`
     /// bound the parameter to a fresh variable and the body decided the type:
     /// sound, but it meant the expectation contributed nothing, and an
@@ -3278,7 +3282,7 @@ mod bidirectional {
     /// the parameter on its own.
     #[test]
     fn a_lambda_parameter_comes_from_the_expected_type() {
-        // The inline lambda is checked against `expr r string -> expr r string`
+        // The inline lambda is checked against `expr ?r string -> expr ?r string`
         // from `>>>`'s signature, so `.name` is known to be a string column and
         // the whole expression is a string — not an unsolved variable.
         assert_eq!(
@@ -3300,7 +3304,7 @@ mod bidirectional {
     /// than against the whole record.
     #[test]
     fn a_record_field_is_checked_against_the_expected_row() {
-        // `ifThenElse` takes `expr r a` in both branches, so both are checked
+        // `ifThenElse` takes `expr ?r a` in both branches, so both are checked
         // at one type. A mismatched branch is a type error, not an unsolved
         // variable that later becomes one.
         assert_eq!(
@@ -3341,7 +3345,7 @@ mod bidirectional {
 
     /// A list literal's element type comes from the expected `list t`.
     ///
-    /// `inList : list a -> expr r a -> expr r bool`, so once the second
+    /// `inList : list a -> expr ?r a -> expr ?r bool`, so once the second
     /// argument fixes `a` the first is checked against a *known* `list a`.
     /// Checking the list downwards is what lets the literal be typed by that
     /// element type rather than by a fresh variable the second argument later
@@ -3379,7 +3383,7 @@ mod bidirectional {
         // Two different fields with the same name in one record literal.
         assert!(
             ty_err(
-                "h : expr r (row { a = string }) -> expr r string = sql \"$1\"\n\
+                "h : expr ?r (row { a = string }) -> expr ?r string = sql \"$1\"\n\
                  q = users & select { x = h { a = \"1\", a = \"2\" } }\n",
                 "q"
             )
@@ -3395,7 +3399,7 @@ mod bidirectional {
 /// `None` for a query: it filters to `Scalar`/`Open` and drops everything else.
 /// The checker does record the whole type per `ExprId`, but it stored
 /// `self.resolve(&t)` — a *shallow* resolve that chases a top-level variable and
-/// stops. `query r` therefore came back with `r` still a variable, so the row
+/// stops. `query ?r` therefore came back with `r` still a variable, so the row
 /// was recorded and unreachable at the same time: the printed form said
 /// `query { id = int }` while the structured read said `None`.
 ///
@@ -3819,7 +3823,7 @@ fn an_application_records_its_own_type() {
     // The walk collects every application, including the outer pipeline
     // (`users & select {…}`), whose type is a `query` and therefore not a
     // scalar. What must have a recorded type is the *inside* one — the
-    // `upper .name` whose type is `expr r string`. Asserting on any
+    // `upper .name` whose type is `expr ?r string`. Asserting on any
     // application at all would pass for the wrong reason.
     let scalars: Vec<(u32, crate::core::ScalarType)> = apps
         .iter()
@@ -4064,7 +4068,7 @@ fn unannotated_recursion_is_rejected() {
 
 /// The time constants are **values**, so a date can name one without a row.
 ///
-/// `currentDate : date` (not `expr r date`) is what makes
+/// `currentDate : date` (not `expr ?r date`) is what makes
 /// `start : date = currentDate` a definition, and a value still works
 /// everywhere an expression is expected — `addDays 1 currentDate` and
 /// `(.d >= start)` both take it. `nothing` stays row-indexed: it is a column
@@ -4143,7 +4147,7 @@ fn reshaping_a_join_operand_is_what_names_the_output_columns() {
         "query { id = int, name = string, age = int, active = bool, user_id = int, order_id = int }"
     );
     // A name both sides still have is *allowed*: the merge keeps the left one,
-    // which is what `merge r s` says, and forcing a `select` on every join
+    // which is what `merge ?r ?s` says, and forcing a `select` on every join
     // whose tables share an `id` was the more expensive mistake. The join still
     // checks, and a warning says the right column cannot be read afterwards.
     assert_eq!(
@@ -4195,10 +4199,10 @@ fn an_aggregate_cannot_be_a_sort_key_even_when_wrapped() {
 
 /// An expression that reads no row is a value.
 ///
-/// The date family returns row expressions — `year : expr r int` — because the
+/// The date family returns row expressions — `year : expr ?r int` — because the
 /// same call reads a column (`year .d`) and a constant (`year currentDate`).
 /// One signature covers both: a column reference puts the column into the
-/// expression's row, and a call built from constants leaves that row a
+/// expression's row, and a call built from constants leaves that row ?a
 /// variable, so the value position can read it as the scalar it is. Before
 /// this, a second `date -> int` overload was needed beside the row one, and the
 /// two tied whenever a column's type was not yet known.

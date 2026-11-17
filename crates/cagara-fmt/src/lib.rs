@@ -937,7 +937,7 @@ impl Fmt<'_> {
         })
     }
 
-    /// `{ a, b | r }` / `[a, b]`: flat if it fits, else one element per line.
+    /// `{ a, b | ?r }` / `[a, b]`: flat if it fits, else one element per line.
     /// Commas are kept exactly as written (including a trailing one).
     ///
     /// An element laid out over several lines breaks the list around it, the
@@ -991,10 +991,12 @@ impl Fmt<'_> {
                             inner.push(Doc::Line);
                         }
                     }
-                    // `{ | r }` has no field before the bar to break after.
+                    // `{ | ?r }` has no field before the bar to break after.
                     K::Bar if i == 0 => inner.extend([self.tok(t), text(" ")]),
                     K::Bar => inner.extend([Doc::Line, self.tok(t), text(" ")]),
-                    K::Ident => inner.push(self.tok(t)),
+                    // The record's tail is a type variable (`| ?r`) or, in a
+                    // hand-written old file, a bare name. Both are one token.
+                    K::Ident | K::TyVar => inner.push(self.tok(t)),
                     _ => return Err(Bail),
                 },
             }
@@ -1116,7 +1118,13 @@ impl Fmt<'_> {
                         parts.push(text(" "));
                     }
                     parts.push(match e {
-                        NodeOrToken::Token(t) if i == 0 && t.kind() == K::Ident => self.tok(t),
+                        // The head is a constructor name or a `?a` variable;
+                        // both are one token, and both print as written.
+                        NodeOrToken::Token(t)
+                            if i == 0 && matches!(t.kind(), K::Ident | K::TyVar) =>
+                        {
+                            self.tok(t)
+                        }
                         NodeOrToken::Node(c) if i > 0 => self.ty(c)?,
                         _ => return Err(Bail),
                     });
@@ -1136,7 +1144,7 @@ impl Fmt<'_> {
             K::TyParen => self.paren(n, |inner| self.ty(inner)),
             K::TyRecord => self.delimited(n, K::LBrace, K::RBrace, Doc::Line),
             K::TyFun => {
-                // `a -> b -> c` is right-nested; print the chain as a unit.
+                // `a -> ?b -> c` is right-nested; print the chain as a unit.
                 let (mut operands, mut arrows) = (Vec::new(), Vec::new());
                 let mut cur = n.clone();
                 while cur.kind() == K::TyFun {

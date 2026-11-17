@@ -1,8 +1,8 @@
 # Nullability in Cagara
 
 `maybe a` means a value of type `a` may be SQL `NULL`. A type variable in a
-function signature means a non-null type, so `expr r a` does not accept
-`expr r (maybe a)` unless the function explicitly asks for `maybe a`.
+function signature means a non-null type, so `expr ?r a` does not accept
+`expr ?r (maybe a)` unless the function explicitly asks for `maybe a`.
 
 | Source | Type behavior |
 |---|---|

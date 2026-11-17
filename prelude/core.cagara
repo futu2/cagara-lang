@@ -29,26 +29,26 @@
 ## This is also the query pipeline. A stage is an operator at this same level
 ## (see the stage shorthands below), so `q & where p & select {.a}` is ordinary
 ## application written left to right: the query first, then what to do with it.
-_&_ : a -> (a -> b) -> b = x => f => f x
+_&_ : ?a -> (?a -> ?b) -> ?b = x => f => f x
 
 ## Forward composition: `f >>> g` is `g` after `f`.
 ##
 ## The natural spelling in a left-to-right pipeline — `.name & trim >>> lower` —
 ## and it binds tighter than every other operator, so `f >>> g $ x` parses as
 ## `(f >>> g) $ x`.
-_>>>_ : (a -> b) -> (b -> c) -> a -> c = f => g => x => g (f x)
+_>>>_ : (?a -> ?b) -> (?b -> ?c) -> ?a -> ?c = f => g => x => g (f x)
 
 ## Reverse composition: `f <<< g` is `x => f (g x)`.
 ##
 ## The mirror of `>>>`, for reading a pipeline right to left:
 ## `upper <<< trim` is `trim` then `upper`.
-_<<<_ : (b -> c) -> (a -> b) -> a -> c = f => g => x => f (g x)
+_<<<_ : (?b -> ?c) -> (?a -> ?b) -> ?a -> ?c = f => g => x => f (g x)
 
 ## Application, loosest of all operators: `f $ x` is `f x`.
 ##
 ## It exists so a trailing argument can be written without a closing run of
 ## parentheses — `q & where $ .age > 18` is `q & where (.age > 18)`.
-_$_ : (a -> b) -> a -> b = f => x => f x
+_$_ : (?a -> ?b) -> ?a -> ?b = f => x => f x
 
 # One shorthand per stage. Each is a one-line wrapper around the named stage,
 # which is what keeps a shorthand honest: the SQL, the phases and the nullability
@@ -67,39 +67,39 @@ _$_ : (a -> b) -> a -> b = f => x => f x
 
 ## `q &? p` — `q & where p`. A `maybe bool` predicate is the stage's own
 ## nullable signature, not a second meaning.
-_&?_ : query r -> expr r bool -> query r = q => p => where p q
-_&?_ : query r -> expr r (maybe bool) -> query r = q => p => where p q
+_&?_ : query ?r -> expr ?r bool -> query ?r = q => p => where p q
+_&?_ : query ?r -> expr ?r (maybe bool) -> query ?r = q => p => where p q
 
 ## `q &= f` — `q & select f`.
-_&=_ : query r -> expr r (row s) -> query s = q => f => select f q
+_&=_ : query ?r -> expr ?r (row ?s) -> query ?s = q => f => select f q
 
 ## `q &+ f` — `q & update f`.
-_&+_ : query r -> expr r (row s) -> query (merge r s) = q => f => update f q
+_&+_ : query ?r -> expr ?r (row ?s) -> query (merge ?r ?s) = q => f => update f q
 
 ## `q &* f` — `q & agg f`.
-_&*_ : query r -> agg (expr r (row s)) -> query s = q => f => agg f q
+_&*_ : query ?r -> agg (expr ?r (row ?s)) -> query ?s = q => f => agg f q
 
 ## `q &. keys` — `q & order keys`.
-_&._ : query r -> list (sortkey r) -> query r = q => ks => order ks q
+_&._ : query ?r -> list (sortkey ?r) -> query ?r = q => ks => order ks q
 
 ## `q &- n` — `q & limit n`.
-_&-_ : query r -> expr r int -> query r = q => n => limit n q
+_&-_ : query ?r -> expr ?r int -> query ?r = q => n => limit n q
 
 ## `q &| r` — `q & union r`.
-_&|_ : query r -> query r -> query r = q => r => union r q
+_&|_ : query ?r -> query ?r -> query ?r = q => r => union r q
 
 ## `q &! r` — `q & unionAll r`.
-_&!_ : query r -> query r -> query r = q => r => unionAll r q
+_&!_ : query ?r -> query ?r -> query ?r = q => r => unionAll r q
 
 ## `q &^ r` — `q & intersect r`.
-_&^_ : query r -> query r -> query r = q => r => intersect r q
+_&^_ : query ?r -> query ?r -> query ?r = q => r => intersect r q
 
 ## `q &~ r` — `q & except r`.
-_&~_ : query r -> query r -> query r = q => r => except r q
+_&~_ : query ?r -> query ?r -> query ?r = q => r => except r q
 
 ## The identity function: `id x` is `x`. Useful where a function is expected
 ## and there is nothing to do, such as a fold's initial value.
-id : a -> a = x => x
+id : ?a -> ?a = x => x
 
 # Explicit casts are deliberately named by their result type. There is no
 # implicit conversion between ordinary expressions.
@@ -129,22 +129,22 @@ id : a -> a = x => x
 ## The columns are a record type, and a `##` block above an entry documents that
 ## table. `catalog` is not a keyword, so a definition may still be called
 ## `catalog`.
-table : string -> string -> query r = primitive "__table"
+table : string -> string -> query ?r = primitive "__table"
 
 ## Filter rows: `where (.age >= 18)`. The predicate is non-null `bool`; a
 ## nullable condition goes through `whereTrue` or `isTrue`.
-where : expr r bool -> query r -> query r = primitive "__where"
-where : expr r (maybe bool) -> query r -> query r = primitive "__where"
+where : expr ?r bool -> query ?r -> query ?r = primitive "__where"
+where : expr ?r (maybe bool) -> query ?r -> query ?r = primitive "__where"
 
 ## Project a result row: `select { id = .id, label = upper .name }`, or
 ## `select {.a, .b}` for the plain projection. Columns not listed are dropped;
 ## `update` keeps them.
-select : expr r (row s) -> query r -> query s = primitive "__select"
+select : expr ?r (row ?s) -> query ?r -> query ?s = primitive "__select"
 
 ## `update {..}` is `select` merged over the input row: a name the input
 ## already has keeps its position and takes the new expression, and a name it
 ## does not have is appended. Columns not listed are passed through.
-update : expr r (row s) -> query r -> query (merge r s) = primitive "__update"
+update : expr ?r (row ?s) -> query ?r -> query (merge ?r ?s) = primitive "__update"
 
 ## `omit "k"` drops one column: the row equation `input ~ { k : t | output }`,
 ## solved by the unifier's generic leftover rule rather than by a rule of its
@@ -165,17 +165,17 @@ update : expr r (row s) -> query r -> query (merge r s) = primitive "__update"
 ## primitive's internal type: `omit` is not a projection, so the annotation is
 ## descriptive. The constraint above is what actually types the stage, which is
 ## why writing something weaker here (or even wrong) changes no result.
-omit : symbol k -> query r -> query (removeKey k r) = primitive "__omit"
+omit : symbol ?k -> query ?r -> query (removeKey ?k ?r) = primitive "__omit"
 
 ## `mapValue "w"` transforms all field types using a wrapper:
 ## `"nullable"` wraps each in `maybe`, `"list"` wraps each in `list`.
 ##
 ## The wrapper is a label, like `omit`'s column name: `valueLabel w` is the
 ## parameter, the literal at the application binds `w`, and the result names the
-## type-level term `mapValue w r` — the same binding on both sides, so the
+## type-level term `mapValue ?w ?r` — the same binding on both sides, so the
 ## operation travels in the type and a stage's output row cannot come from an
 ## unrelated wrapper.
-mapValue : valueLabel w -> query r -> query (mapValue w r) = primitive "__mapValue"
+mapValue : valueLabel ?w -> query ?r -> query (mapValue ?w ?r) = primitive "__mapValue"
 
 ## `prefix "s"` prepends a literal string to every column name.
 ##
@@ -194,16 +194,16 @@ mapValue : valueLabel w -> query r -> query (mapValue w r) = primitive "__mapVal
 ## open — or the affix is a lambda parameter, as in `addPrefix = p => q => q &
 ## prefix p` — the term is *retained* rather than rejected, and reduces once the
 ## row and the label are known.
-prefix : symbol k -> query r -> query (keyMap (prependSym k) r) = primitive "__prefix"
+prefix : symbol ?k -> query ?r -> query (keyMap (prependSym ?k) ?r) = primitive "__prefix"
 
 ## `suffix "s"` appends a literal string to every column name. It shares the
 ## label-driven witness with its result in the same way as `prefix`.
-suffix : symbol k -> query r -> query (keyMap (appendSym k) r) = primitive "__suffix"
+suffix : symbol ?k -> query ?r -> query (keyMap (appendSym ?k) ?r) = primitive "__suffix"
 
 ## Group and aggregate: `agg { n = count, total = sum .amount }`. Inside an
 ## `agg` the argument is at depth 1 — a row expression, not a scalar — which is
 ## where the aggregate functions in this file apply.
-agg : agg (expr r (row s)) -> query r -> query s = primitive "__agg"
+agg : agg (expr ?r (row ?s)) -> query ?r -> query ?s = primitive "__agg"
 
 ## `filtered p a`: the aggregate `a` over only the rows `p` keeps.
 ##
@@ -212,52 +212,53 @@ agg : agg (expr r (row s)) -> query r -> query s = primitive "__agg"
 ## name per aggregate: `sumFilter`, `avgFilter`, `countFilter` and their
 ## siblings were seven spellings of one idea, and they could not compose —
 ## `filtered p (distinctAgg (sum .x))` has no name and needs none.
-filtered : expr r bool -> agg (expr r a) -> agg (expr r a) = primitive "__filtered"
-filtered : expr r bool -> agg (expr r (maybe a)) -> agg (expr r (maybe a)) = primitive "__filtered"
+filtered : expr ?r bool -> agg (expr ?r ?a) -> agg (expr ?r ?a) = primitive "__filtered"
+filtered : expr ?r bool -> agg (expr ?r (maybe ?a)) -> agg (expr ?r (maybe ?a)) =
+  primitive "__filtered"
 
 ## `distinctAgg a`: the aggregate over distinct arguments —
 ## `distinctAgg (sum .x)` is `SUM(DISTINCT x)`, and `distinctAgg (countOf .x)`
 ## is `COUNT(DISTINCT x)`. Applying it twice is the same as applying it once.
-distinctAgg : agg (expr r a) -> agg (expr r a) = primitive "__distinctAgg"
-distinctAgg : agg (expr r (maybe a)) -> agg (expr r (maybe a)) = primitive "__distinctAgg"
+distinctAgg : agg (expr ?r ?a) -> agg (expr ?r ?a) = primitive "__distinctAgg"
+distinctAgg : agg (expr ?r (maybe ?a)) -> agg (expr ?r (maybe ?a)) = primitive "__distinctAgg"
 
 ## `over spec a`: the aggregate as a window function, over `spec`'s partition,
 ## order and frame. `over { partition = [.user_id] } (sum .amount)` is a
 ## per-user total on every row, where the same aggregate inside `agg` would
 ## collapse the rows.
-over : winspec r -> agg (expr r a) -> win (expr r a) = primitive "__over"
-over : winspec r -> agg (expr r (maybe a)) -> win (expr r (maybe a)) = primitive "__over"
+over : winspec ?r -> agg (expr ?r ?a) -> win (expr ?r ?a) = primitive "__over"
+over : winspec ?r -> agg (expr ?r (maybe ?a)) -> win (expr ?r (maybe ?a)) = primitive "__over"
 
 ## Sort: `order [asc .x, desc .y]`. NULLs sort last in either direction.
 ## Ties on the listed keys keep no particular order, since SQL does not promise
 ## one.
-order : list (sortkey r) -> query r -> query r = primitive "__order"
+order : list (sortkey ?r) -> query ?r -> query ?r = primitive "__order"
 
 ## Keep the first `n` rows: `limit 10`. Applied to an unordered query the rows
 ## are whichever the engine returns first; order first if it matters.
-limit : expr r int -> query r -> query r = primitive "__limit"
+limit : expr ?r int -> query ?r -> query ?r = primitive "__limit"
 
 ## Skip the first `n` rows: `q & offset 20 & limit 10`.
-offset : expr r int -> query r -> query r = primitive "__offset"
+offset : expr ?r int -> query ?r -> query ?r = primitive "__offset"
 
 ## Drop duplicate rows: `SELECT DISTINCT`.
-distinct : query r -> query r = primitive "__distinct"
+distinct : query ?r -> query ?r = primitive "__distinct"
 
 ## Membership: `inList [1, 2, 3] .id` is `id IN (1, 2, 3)`. The list comes
 ## first and the subject last, like every other predicate here.
-inList : list a -> expr r a -> expr r bool = primitive "__in"
+inList : list ?a -> expr ?r ?a -> expr ?r bool = primitive "__in"
 
 ## `in` is `inList`, under the name a use site reads better with:
 ## `in [1, 2, 3] .status`.
-in : list a -> expr r a -> expr r bool = inList
+in : list ?a -> expr ?r ?a -> expr ?r bool = inList
 
 ## Sort key, ascending — `asc .name` inside an `order` list.
-asc : expr r a -> sortkey r = primitive "__asc"
-asc : expr r (maybe a) -> sortkey r = primitive "__asc"
+asc : expr ?r ?a -> sortkey ?r = primitive "__asc"
+asc : expr ?r (maybe ?a) -> sortkey ?r = primitive "__asc"
 
 ## Sort key, descending — `desc .created_at` inside an `order` list.
-desc : expr r a -> sortkey r = primitive "__desc"
-desc : expr r (maybe a) -> sortkey r = primitive "__desc"
+desc : expr ?r ?a -> sortkey ?r = primitive "__desc"
+desc : expr ?r (maybe ?a) -> sortkey ?r = primitive "__desc"
 
 ## `arrayAgg e` — the values of `e` in one list, one per row of the group.
 ## `agg { k = group .user_id, amounts = arrayAgg .amount }` is
@@ -267,15 +268,15 @@ desc : expr r (maybe a) -> sortkey r = primitive "__desc"
 ## combined with `<>`. Only a dialect with an array type can hold one
 ## (PostgreSQL, DuckDB); one without refuses the query rather than writing
 ## something else.
-arrayAgg : expr r a -> agg (expr r (list a)) = sql "CAGARA_ARRAY_AGG($1)"
+arrayAgg : expr ?r ?a -> agg (expr ?r (list ?a)) = sql "CAGARA_ARRAY_AGG($1)"
 ## `listLength xs` — how many elements a list has. `CAGARA_LIST_LENGTH` is
 ## `cardinality` on PostgreSQL and `len` on DuckDB.
-listLength : expr r (list a) -> expr r int = sql "CAGARA_LIST_LENGTH($1)"
+listLength : expr ?r (list ?a) -> expr ?r int = sql "CAGARA_LIST_LENGTH($1)"
 
 ## `listContains xs x` — whether the list holds `x`. `CAGARA_LIST_CONTAINS` is
 ## `x = ANY(xs)` on PostgreSQL and `list_contains(xs, x)` on DuckDB, and it takes
 ## a list *value*: the literal membership operator is `in`.
-listContains : expr r (list a) -> expr r a -> expr r bool = sql "CAGARA_LIST_CONTAINS($1, $2)"
+listContains : expr ?r (list ?a) -> expr ?r ?a -> expr ?r bool = sql "CAGARA_LIST_CONTAINS($1, $2)"
 
 ## `listAt i xs` — the element at 1-based position `i`, NULL when the list is shorter.
 ##
@@ -284,7 +285,7 @@ listContains : expr r (list a) -> expr r a -> expr r bool = sql "CAGARA_LIST_CON
 ## would mean the compiler had to add one to every call. Out of range is NULL rather
 ## than an error, which is what `element_at` does and what a query can handle; an
 ## engine that raises instead is one whose own semantics say so.
-listAt : expr r int -> expr r (list a) -> expr r (maybe a) = sql "CAGARA_LIST_AT($2, $1)"
+listAt : expr ?r int -> expr ?r (list ?a) -> expr ?r (maybe ?a) = sql "CAGARA_LIST_AT($2, $1)"
 
 ## `lift f x` — apply a function to the value inside a `maybe`: `nothing` stays
 ## `nothing`, `just v` becomes `just (f v)`. The result is a `maybe`, so a
@@ -295,23 +296,23 @@ listAt : expr r int -> expr r (list a) -> expr r (maybe a) = sql "CAGARA_LIST_AT
 ##
 ## The function comes first, as it does in `map` and `fmap`, so a lifted
 ## function is reusable on its own: `lift (parseDate "%Y%m%d")` is
-## `expr r (maybe string) -> expr r (maybe date)`.
+## `expr ?r (maybe string) -> expr ?r (maybe date)`.
 ##
 ## The SQL is `CASE WHEN x IS NULL THEN NULL ELSE f(x) END`, so the function is
 ## never handed the NULL. `x` appears twice, so an expensive expression is
 ## evaluated twice — bind it with `let` first if that matters.
-lift : (expr r a -> expr r b) -> expr r (maybe a) -> expr r (maybe b) = primitive "__lift"
+lift : (expr ?r ?a -> expr ?r ?b) -> expr ?r (maybe ?a) -> expr ?r (maybe ?b) = primitive "__lift"
 
 ## `unnest xs` — every input row once per element of the list, the element
 ## under `value`: `agg { k = group .id, ids = arrayAgg .id } & unnest .ids`
 ## gives the rows back. The SQL is a LATERAL join over the array, so the other
 ## columns repeat. Needs a dialect with an array type (PostgreSQL, DuckDB).
-unnest : expr r (list a) -> query r -> query (merge r { value = a }) = primitive "__unnest"
+unnest : expr ?r (list ?a) -> query ?r -> query (merge ?r { value = ?a }) = primitive "__unnest"
 
 ## The grouping key: `agg { user_id = group .user_id, n = count }`. Every
 ## non-aggregate expression in the same `agg` is grouped by it.
-group : expr r a -> agg (expr r a) = primitive "__group"
-group : expr r (maybe a) -> agg (expr r (maybe a)) = primitive "__group"
+group : expr ?r ?a -> agg (expr ?r ?a) = primitive "__group"
+group : expr ?r (maybe ?a) -> agg (expr ?r (maybe ?a)) = primitive "__group"
 
 ## `rollup e` — a grouping key that also gets subtotal rows.
 ##
@@ -329,16 +330,16 @@ group : expr r (maybe a) -> agg (expr r (maybe a)) = primitive "__group"
 ## MySQL's `WITH ROLLUP` rolls up its *whole* key list and cannot combine with
 ## `ORDER BY`, which is not the same operation. Both refuse it rather than
 ## silently dropping subtotals.
-rollup : expr r a -> agg (expr r (maybe a)) = primitive "__rollup"
-rollup : expr r (maybe a) -> agg (expr r (maybe a)) = primitive "__rollup"
+rollup : expr ?r ?a -> agg (expr ?r (maybe ?a)) = primitive "__rollup"
+rollup : expr ?r (maybe ?a) -> agg (expr ?r (maybe ?a)) = primitive "__rollup"
 
 ## `cube e` — like `rollup`, but every subset of the marked keys is grouped.
 ##
 ## `cube .a, cube .b` is `CUBE(a, b)`: `(a, b)`, `(a)`, `(b)`, and `()`. Use it
 ## when the subtotals are wanted per key rather than nested; `rollup` is the
 ## cheaper of the two and the usual one.
-cube : expr r a -> agg (expr r (maybe a)) = primitive "__cube"
-cube : expr r (maybe a) -> agg (expr r (maybe a)) = primitive "__cube"
+cube : expr ?r ?a -> agg (expr ?r (maybe ?a)) = primitive "__cube"
+cube : expr ?r (maybe ?a) -> agg (expr ?r (maybe ?a)) = primitive "__cube"
 
 # Set-operation stages: `union`, `unionAll`, `intersect`, `except`. Every stage
 # takes its subject **last**, and for a set operation the subject is the left
@@ -353,17 +354,17 @@ cube : expr r (maybe a) -> agg (expr r (maybe a)) = primitive "__cube"
 ##
 ## The output has the left input's columns, then the right input's that the
 ## left does not have. A name both sides have keeps the **left** value and drops
-## the right one — that is what `merge r s` says, and it is what makes a join
+## the right one — that is what `merge ?r ?s` says, and it is what makes a join
 ## between two tables that both have an `id` writable without a projection. The
 ## compiler warns, because the right column cannot be read afterwards
 ## (`.<x`/`.>x` name the inputs only inside the predicate): rename it on the
 ## operand (`orders & select { user_id, order_id = .id }`) if you need it.
-innerJoin : query s -> expr (join r s) bool -> query r -> query (merge r s) =
+innerJoin : query ?s -> expr (join ?r ?s) bool -> query ?r -> query (merge ?r ?s) =
   primitive "__innerJoin"
 
 ## `join` is `innerJoin` under the name SQL uses: `JOIN` and `INNER JOIN` are the
 ## same operator, so a query written from SQL should not have to spell it out.
-join : query s -> expr (join r s) bool -> query r -> query (merge r s) = innerJoin
+join : query ?s -> expr (join ?r ?s) bool -> query ?r -> query (merge ?r ?s) = innerJoin
 
 ## Every pair of rows, one from each side — a cross join.
 ##
@@ -372,7 +373,7 @@ join : query s -> expr (join r s) bool -> query r -> query (merge r s) = innerJo
 ## cartesian product (measured on PostgreSQL, DuckDB, MariaDB, SQLite and Trino,
 ## which agree row for row, and SQLite gives both forms the same query plan). The
 ## generated SQL therefore reads `INNER JOIN … ON TRUE`.
-crossJoin : query s -> query r -> query (merge r s) = s => innerJoin s true
+crossJoin : query ?s -> query ?r -> query (merge ?r ?s) = s => innerJoin s true
 
 ## Left outer join: every left row survives, and the right side's columns
 ## become `maybe` — they are NULL for the unmatched rows.
@@ -380,30 +381,32 @@ crossJoin : query s -> query r -> query (merge r s) = s => innerJoin s true
 ## The predicate is a join condition, not a `where`: a condition on the right
 ## side written after the join would drop the unmatched rows and turn the outer
 ## join back into an inner one.
-leftJoin : query s -> expr (join r s) bool -> query r -> query (merge r (mapValue (AsNullable) s)) =
-  primitive "__leftJoin"
+leftJoin : query ?s
+    -> expr (join ?r ?s) bool
+    -> query ?r
+    -> query (merge ?r (mapValue (AsNullable) ?s)) = primitive "__leftJoin"
 
 ## Right outer join: the mirror of `leftJoin`, with the left side's columns
 ## nullable instead.
-rightJoin : query s
-    -> expr (join r s) bool
-    -> query r
-    -> query (merge (mapValue (AsNullable) r) s) = primitive "__rightJoin"
+rightJoin : query ?s
+    -> expr (join ?r ?s) bool
+    -> query ?r
+    -> query (merge (mapValue (AsNullable) ?r) ?s) = primitive "__rightJoin"
 
 ## Full outer join: both sides survive, so both sides' columns become `maybe`.
-fullJoin : query s
-    -> expr (join r s) bool
-    -> query r
-    -> query (merge (mapValue (AsNullable) r) (mapValue (AsNullable) s)) = primitive "__fullJoin"
+fullJoin : query ?s
+    -> expr (join ?r ?s) bool
+    -> query ?r
+    -> query (merge (mapValue (AsNullable) ?r) (mapValue (AsNullable) ?s)) = primitive "__fullJoin"
 
 ## Semi join: the left rows that have a match on the right, with the left row
 ## unchanged. `EXISTS` rather than a join, so a right row can never duplicate a
 ## left one.
-semiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__semiJoin"
+semiJoin : query ?s -> expr (join ?r ?s) bool -> query ?r -> query ?r = primitive "__semiJoin"
 
 ## Anti join: the left rows that have *no* match on the right — `semiJoin`
 ## negated, and the idiomatic "rows without children".
-antiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__antiJoin"
+antiJoin : query ?s -> expr (join ?r ?s) bool -> query ?r -> query ?r = primitive "__antiJoin"
 
 ## `markExists q on` — the row plus an `exists` column: does this row have a
 ## match in `q`?
@@ -431,7 +434,7 @@ antiJoin : query s -> expr (join r s) bool -> query r -> query r = primitive "__
 ##
 ## asks a question and then throws the answer away, which reads as "filter by
 ## existence" and is not. Use `semiJoin` for that, or keep the column.
-markExists : query s -> expr (join r s) bool -> query r -> query (merge r { exists = bool }) =
+markExists : query ?s -> expr (join ?r ?s) bool -> query ?r -> query (merge ?r { exists = bool }) =
   primitive "__markExists"
 
 # The join shorthands: one operator per join kind, each an alias of the named
@@ -445,38 +448,42 @@ markExists : query s -> expr (join r s) bool -> query r -> query (merge r { exis
 # did not.
 
 ## `orders ? on` — `innerJoin orders on`, awaiting the piped query.
-_?_ : query s -> expr (join r s) bool -> query r -> query (merge r s) = innerJoin
+_?_ : query ?s -> expr (join ?r ?s) bool -> query ?r -> query (merge ?r ?s) = innerJoin
 
 ## `orders <? on` — `leftJoin orders on`: every left row survives.
-_<?_ : query s -> expr (join r s) bool -> query r -> query (merge r (mapValue (AsNullable) s)) =
-  leftJoin
+_<?_ : query ?s
+    -> expr (join ?r ?s) bool
+    -> query ?r
+    -> query (merge ?r (mapValue (AsNullable) ?s)) = leftJoin
 
 ## `orders ?> on` — `rightJoin orders on`: every right row survives.
-_?>_ : query s -> expr (join r s) bool -> query r -> query (merge (mapValue (AsNullable) r) s) =
-  rightJoin
+_?>_ : query ?s
+    -> expr (join ?r ?s) bool
+    -> query ?r
+    -> query (merge (mapValue (AsNullable) ?r) ?s) = rightJoin
 
 ## `orders <?> on` — `fullJoin orders on`: both sides survive.
-_<?>_ : query s
-    -> expr (join r s) bool
-    -> query r
-    -> query (merge (mapValue (AsNullable) r) (mapValue (AsNullable) s)) = fullJoin
+_<?>_ : query ?s
+    -> expr (join ?r ?s) bool
+    -> query ?r
+    -> query (merge (mapValue (AsNullable) ?r) (mapValue (AsNullable) ?s)) = fullJoin
 
 ## Union, deduplicated: `users & union vips`, or `union vips users`. Both
 ## queries must have the same row; the columns and their order come from the
 ## subject — the last argument, which is the query the pipeline supplies.
-union : query r -> query r -> query r = primitive "__union"
+union : query ?r -> query ?r -> query ?r = primitive "__union"
 
 ## Union keeping duplicates: `users &! vips`, SQL `UNION ALL`.
-unionAll : query r -> query r -> query r = primitive "__unionAll"
+unionAll : query ?r -> query ?r -> query ?r = primitive "__unionAll"
 
 ## Rows in both queries: `users &^ vips`, SQL `INTERSECT`.
-intersect : query r -> query r -> query r = primitive "__intersect"
+intersect : query ?r -> query ?r -> query ?r = primitive "__intersect"
 
 ## The rows of the subject that the argument does not have: `users & except
 ## vips` is `except vips users`, SQL `EXCEPT`, and it means `users EXCEPT vips`
 ## — the subject is the left operand, so the piped form reads in the order it
 ## runs. Not commutative.
-except : query r -> query r -> query r = primitive "__except"
+except : query ?r -> query ?r -> query ?r = primitive "__except"
 
 # Join operators, between `&` and every expression operator:
 # `users & teachers ? .<user_name == .>teacher_name`. The `<` / `>` mark the
@@ -509,91 +516,91 @@ except : query r -> query r -> query r = primitive "__except"
 
 ## `count` counts the rows of the group, NULLs included (`COUNT(*)`). A count
 ## is never NULL: an empty group counts 0.
-count : agg (expr r int) = sql "COUNT(*)"
+count : agg (expr ?r int) = sql "COUNT(*)"
 
 ## `countOf .x` counts the rows where `x` is not NULL (`COUNT(x)`) — the
 ## difference from `count` is exactly the NULLs, which is why a nullable column
 ## needs no special spelling: `COUNT` already skips them.
-countOf : expr r a -> agg (expr r int) = sql "COUNT($1)"
-countOf : expr r (maybe a) -> agg (expr r int) = sql "COUNT($1)"
+countOf : expr ?r ?a -> agg (expr ?r int) = sql "COUNT($1)"
+countOf : expr ?r (maybe ?a) -> agg (expr ?r int) = sql "COUNT($1)"
 
 ## `countDistinct .x` counts the distinct non-NULL values of `x`, nullable column
 ## or not: `COUNT(DISTINCT x)` skips NULLs by definition.
-countDistinct : expr r a -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
-countDistinct : expr r (maybe a) -> agg (expr r int) = sql "COUNT(DISTINCT $1)"
+countDistinct : expr ?r ?a -> agg (expr ?r int) = sql "COUNT(DISTINCT $1)"
+countDistinct : expr ?r (maybe ?a) -> agg (expr ?r int) = sql "COUNT(DISTINCT $1)"
 
 ## Sum of a column, overloading `int` and `float`. NULL for an all-NULL or
 ## empty group, so the result is `maybe`: `coalesce 0 (sum .amount)`.
-sum : expr r int -> agg (expr r (maybe int)) = sql "SUM($1)"
-sum : expr r float -> agg (expr r (maybe float)) = sql "SUM($1)"
-sum : expr r (maybe int) -> agg (expr r (maybe int)) = sql "SUM($1)"
-sum : expr r (maybe float) -> agg (expr r (maybe float)) = sql "SUM($1)"
+sum : expr ?r int -> agg (expr ?r (maybe int)) = sql "SUM($1)"
+sum : expr ?r float -> agg (expr ?r (maybe float)) = sql "SUM($1)"
+sum : expr ?r (maybe int) -> agg (expr ?r (maybe int)) = sql "SUM($1)"
+sum : expr ?r (maybe float) -> agg (expr ?r (maybe float)) = sql "SUM($1)"
 ## Money: the sum of a `decimal p s` is 38 digits wide with the same scale, the
 ## widest the portable family supports.
-sum : expr r (decimal p s) -> agg (expr r (maybe (decimal 38 s))) = sql "SUM($1)"
-sum : expr r (maybe (decimal p s)) -> agg (expr r (maybe (decimal 38 s))) = sql "SUM($1)"
+sum : expr ?r (decimal ?p ?s) -> agg (expr ?r (maybe (decimal 38 ?s))) = sql "SUM($1)"
+sum : expr ?r (maybe (decimal ?p ?s)) -> agg (expr ?r (maybe (decimal 38 ?s))) = sql "SUM($1)"
 
 ## Arithmetic mean, overloading `int` and `float`; always a `float`, NULL for
 ## an empty group.
-avg : expr r int -> agg (expr r (maybe float)) = sql "AVG($1)"
-avg : expr r float -> agg (expr r (maybe float)) = sql "AVG($1)"
-avg : expr r (maybe int) -> agg (expr r (maybe float)) = sql "AVG($1)"
-avg : expr r (maybe float) -> agg (expr r (maybe float)) = sql "AVG($1)"
-avg : expr r (decimal p s) -> agg (expr r (maybe (decimal 38 s))) = sql "AVG($1)"
-avg : expr r (maybe (decimal p s)) -> agg (expr r (maybe (decimal 38 s))) = sql "AVG($1)"
+avg : expr ?r int -> agg (expr ?r (maybe float)) = sql "AVG($1)"
+avg : expr ?r float -> agg (expr ?r (maybe float)) = sql "AVG($1)"
+avg : expr ?r (maybe int) -> agg (expr ?r (maybe float)) = sql "AVG($1)"
+avg : expr ?r (maybe float) -> agg (expr ?r (maybe float)) = sql "AVG($1)"
+avg : expr ?r (decimal ?p ?s) -> agg (expr ?r (maybe (decimal 38 ?s))) = sql "AVG($1)"
+avg : expr ?r (maybe (decimal ?p ?s)) -> agg (expr ?r (maybe (decimal 38 ?s))) = sql "AVG($1)"
 
 ## Smallest value in the group; NULL for an empty group.
-min : expr r a -> agg (expr r (maybe a)) = sql "MIN($1)"
-min : expr r (maybe a) -> agg (expr r (maybe a)) = sql "MIN($1)"
+min : expr ?r ?a -> agg (expr ?r (maybe ?a)) = sql "MIN($1)"
+min : expr ?r (maybe ?a) -> agg (expr ?r (maybe ?a)) = sql "MIN($1)"
 
 ## Largest value in the group; NULL for an empty group.
-max : expr r a -> agg (expr r (maybe a)) = sql "MAX($1)"
-max : expr r (maybe a) -> agg (expr r (maybe a)) = sql "MAX($1)"
+max : expr ?r ?a -> agg (expr ?r (maybe ?a)) = sql "MAX($1)"
+max : expr ?r (maybe ?a) -> agg (expr ?r (maybe ?a)) = sql "MAX($1)"
 
 # ── window functions (depth 1) ────────────────────────────────────────────
 # spec = { partition = [..], order = [asc .x, desc .y], frame = .. }
 
 ## Row number within the partition, 1-based, in the `order` the spec gives.
 ## Distinct rows get distinct numbers even when the sort keys tie.
-rowNumber : winspec r -> win (expr r int) = sql "ROW_NUMBER()"
+rowNumber : winspec ?r -> win (expr ?r int) = sql "ROW_NUMBER()"
 
 ## Rank within the partition: tied rows share a rank, and the next rank skips
 ## the tie (1, 2, 2, 4).
-rank : winspec r -> win (expr r int) = sql "RANK()"
+rank : winspec ?r -> win (expr ?r int) = sql "RANK()"
 
 ## Dense rank: tied rows share a rank and the next rank does not skip
 ## (1, 2, 2, 3).
-denseRank : winspec r -> win (expr r int) = sql "DENSE_RANK()"
+denseRank : winspec ?r -> win (expr ?r int) = sql "DENSE_RANK()"
 
 ## The value of `x` on the row `n` rows before this one in the partition —
 ## `lag spec 1 .x` for the previous row. NULL at the partition edge.
-lag : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LAG($1)"
+lag : winspec ?r -> expr ?r ?a -> win (expr ?r (maybe ?a)) = sql "LAG($1)"
 
 ## The value of `x` on the row `n` rows after this one. NULL at the partition
 ## edge.
-lead : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LEAD($1)"
+lead : winspec ?r -> expr ?r ?a -> win (expr ?r (maybe ?a)) = sql "LEAD($1)"
 
 ## The first value of `x` in the window's frame. With the default frame this is
 ## the partition's first row; with a moving frame it is the frame's first row —
 ## which is why a `lastValue` of a running frame is not the partition's last
 ## value unless the frame is `wholePartition`.
-firstValue : winspec r -> expr r a -> win (expr r (maybe a)) = sql "FIRST_VALUE($1)"
+firstValue : winspec ?r -> expr ?r ?a -> win (expr ?r (maybe ?a)) = sql "FIRST_VALUE($1)"
 
 ## The last value of `x` in the window's frame; NULL when the frame is empty.
 ## See `firstValue` about the frame's effect.
-lastValue : winspec r -> expr r a -> win (expr r (maybe a)) = sql "LAST_VALUE($1)"
+lastValue : winspec ?r -> expr ?r ?a -> win (expr ?r (maybe ?a)) = sql "LAST_VALUE($1)"
 
 ## `ntile spec 4` numbers the partition's rows 1..4, as evenly as the row count
 ## allows — a quartile bucket per row.
-ntile : winspec r -> expr r int -> win (expr r int) = sql "NTILE($1)"
+ntile : winspec ?r -> expr ?r int -> win (expr ?r int) = sql "NTILE($1)"
 
 ## The relative rank of the row as a fraction strictly below 1: 0 for the first
 ## row.
-percentRank : winspec r -> win (expr r float) = sql "PERCENT_RANK()"
+percentRank : winspec ?r -> win (expr ?r float) = sql "PERCENT_RANK()"
 
 ## The cumulative distribution: the proportion of the partition's rows at or
 ## before this one, in (0, 1].
-cumeDist : winspec r -> win (expr r float) = sql "CUME_DIST()"
+cumeDist : winspec ?r -> win (expr ?r float) = sql "CUME_DIST()"
 
 # ── window frames ─────────────────────────────────────────────────────────
 
@@ -634,10 +641,10 @@ currentRow : bound = primitive "__currentRow"
 
 ## Frame bound `n` rows before the current row: `rows (preceding 7) currentRow`
 ## is a seven-row trailing window.
-preceding : expr r int -> bound = primitive "__preceding"
+preceding : expr ?r int -> bound = primitive "__preceding"
 
 ## Frame bound `n` rows after the current row, for a centred window.
-following : expr r int -> bound = primitive "__following"
+following : expr ?r int -> bound = primitive "__following"
 
 ## The whole partition as a frame. Needed when a window aggregate should cover
 ## the partition rather than accumulate over it.
@@ -651,36 +658,36 @@ runningFrame : frame = rows unboundedPreceding currentRow
 
 ## `a == b`, SQL `=`. NULL if either side is NULL: a comparison with NULL is
 ## never true, which is what `isNull` and `eqMaybe` are for.
-_==_ : expr r a -> expr r a -> expr r bool = sql "$1 = $2"
-_==_ : expr r (maybe a) -> expr r (maybe a) -> expr r (maybe bool) = sql "$1 = $2"
+_==_ : expr ?r ?a -> expr ?r ?a -> expr ?r bool = sql "$1 = $2"
+_==_ : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r (maybe bool) = sql "$1 = $2"
 
 ## `a != b`, SQL `<>`.
-_!=_ : expr r a -> expr r a -> expr r bool = sql "$1 <> $2"
-_!=_ : expr r (maybe a) -> expr r (maybe a) -> expr r (maybe bool) = sql "$1 <> $2"
+_!=_ : expr ?r ?a -> expr ?r ?a -> expr ?r bool = sql "$1 <> $2"
+_!=_ : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r (maybe bool) = sql "$1 <> $2"
 
 ## `a < b`. NULL if either side is NULL.
-_<_ : expr r a -> expr r a -> expr r bool = sql "$1 < $2"
-_<_ : expr r (maybe a) -> expr r (maybe a) -> expr r (maybe bool) = sql "$1 < $2"
+_<_ : expr ?r ?a -> expr ?r ?a -> expr ?r bool = sql "$1 < $2"
+_<_ : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r (maybe bool) = sql "$1 < $2"
 
 ## `a <= b`. NULL if either side is NULL.
-_<=_ : expr r a -> expr r a -> expr r bool = sql "$1 <= $2"
-_<=_ : expr r (maybe a) -> expr r (maybe a) -> expr r (maybe bool) = sql "$1 <= $2"
+_<=_ : expr ?r ?a -> expr ?r ?a -> expr ?r bool = sql "$1 <= $2"
+_<=_ : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r (maybe bool) = sql "$1 <= $2"
 
 ## `a > b`. NULL if either side is NULL.
-_>_ : expr r a -> expr r a -> expr r bool = sql "$1 > $2"
-_>_ : expr r (maybe a) -> expr r (maybe a) -> expr r (maybe bool) = sql "$1 > $2"
+_>_ : expr ?r ?a -> expr ?r ?a -> expr ?r bool = sql "$1 > $2"
+_>_ : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r (maybe bool) = sql "$1 > $2"
 
 ## `a >= b`. NULL if either side is NULL.
-_>=_ : expr r a -> expr r a -> expr r bool = sql "$1 >= $2"
-_>=_ : expr r (maybe a) -> expr r (maybe a) -> expr r (maybe bool) = sql "$1 >= $2"
+_>=_ : expr ?r ?a -> expr ?r ?a -> expr ?r bool = sql "$1 >= $2"
+_>=_ : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r (maybe bool) = sql "$1 >= $2"
 
 ## Boolean AND. Both sides are non-null `bool`, so SQL's three-valued logic
 ## does not apply here; a nullable predicate is made non-null first
 ## (`isTrue`, `coalesce`).
-_&&_ : expr r bool -> expr r bool -> expr r bool = sql "$1 AND $2"
+_&&_ : expr ?r bool -> expr ?r bool -> expr ?r bool = sql "$1 AND $2"
 
 ## Boolean OR. Non-null `bool` on both sides, like `&&`.
-_||_ : expr r bool -> expr r bool -> expr r bool = sql "$1 OR $2"
+_||_ : expr ?r bool -> expr ?r bool -> expr ?r bool = sql "$1 OR $2"
 
 # Arithmetic is overloaded on int and float (no implicit conversions). On
 # ints, `/` truncates toward zero and `%` keeps the dividend's sign, in every
@@ -693,15 +700,15 @@ _||_ : expr r bool -> expr r bool -> expr r bool = sql "$1 OR $2"
 ## is the declaration's promise about how large a value can be. A product is absent
 ## on purpose: its scale is the sum of the operands', which a signature cannot
 ## state (see `docs/PLAN.md`).
-_+_ : expr r (decimal p s) -> expr r (decimal p s) -> expr r (decimal p s) = sql "$1 + $2"
-_+_ : expr r int -> expr r int -> expr r int = sql "$1 + $2"
-_+_ : expr r float -> expr r float -> expr r float = sql "$1 + $2"
+_+_ : expr ?r (decimal ?p ?s) -> expr ?r (decimal ?p ?s) -> expr ?r (decimal ?p ?s) = sql "$1 + $2"
+_+_ : expr ?r int -> expr ?r int -> expr ?r int = sql "$1 + $2"
+_+_ : expr ?r float -> expr ?r float -> expr ?r float = sql "$1 + $2"
 
 ## Subtraction, overloaded on `int`, `float` and `decimal p s`. Money subtracts
 ## under the same rule as addition.
-_-_ : expr r (decimal p s) -> expr r (decimal p s) -> expr r (decimal p s) = sql "$1 - $2"
-_-_ : expr r int -> expr r int -> expr r int = sql "$1 - $2"
-_-_ : expr r float -> expr r float -> expr r float = sql "$1 - $2"
+_-_ : expr ?r (decimal ?p ?s) -> expr ?r (decimal ?p ?s) -> expr ?r (decimal ?p ?s) = sql "$1 - $2"
+_-_ : expr ?r int -> expr ?r int -> expr ?r int = sql "$1 - $2"
+_-_ : expr ?r float -> expr ?r float -> expr ?r float = sql "$1 - $2"
 
 ## Multiplication, overloaded on `int`, `float` and `decimal p s`.
 ##
@@ -712,21 +719,21 @@ _-_ : expr r float -> expr r float -> expr r float = sql "$1 - $2"
 ## declared scale. Division is absent: DuckDB promotes a decimal quotient to
 ## `DOUBLE` (measured), so there is no same-type rule that stays exact on every
 ## target.
-_*_ : expr r (decimal p s) -> expr r (decimal p s) -> expr r (decimal p s) = sql "$1 * $2"
-_*_ : expr r int -> expr r int -> expr r int = sql "$1 * $2"
-_*_ : expr r float -> expr r float -> expr r float = sql "$1 * $2"
+_*_ : expr ?r (decimal ?p ?s) -> expr ?r (decimal ?p ?s) -> expr ?r (decimal ?p ?s) = sql "$1 * $2"
+_*_ : expr ?r int -> expr ?r int -> expr ?r int = sql "$1 * $2"
+_*_ : expr ?r float -> expr ?r float -> expr ?r float = sql "$1 * $2"
 
 ## Division, overloaded on `int` and `float`.
 ##
 ## Integer division truncates toward zero in every dialect — `7 / 2` is 3 and
 ## `-7 / 2` is -3. The `CAGARA_IDIV` rewrite is what makes that uniform: SQL
 ## engines disagree about integer division, and SQLite returns a float.
-_/_ : expr r int -> expr r int -> expr r int = sql "CAGARA_IDIV($1, $2)"
-_/_ : expr r float -> expr r float -> expr r float = sql "$1 / $2"
+_/_ : expr ?r int -> expr ?r int -> expr ?r int = sql "CAGARA_IDIV($1, $2)"
+_/_ : expr ?r float -> expr ?r float -> expr ?r float = sql "$1 / $2"
 
 ## Remainder, `int` only. The result keeps the dividend's sign — `-7 % 2` is
 ## -1 — in every dialect, which `CAGARA_MOD` guarantees.
-_%_ : expr r int -> expr r int -> expr r int = sql "CAGARA_MOD($1, $2)"
+_%_ : expr ?r int -> expr ?r int -> expr ?r int = sql "CAGARA_MOD($1, $2)"
 
 # ── nulls: operators need non-null arguments, so nulls are handled here ────
 
@@ -736,30 +743,30 @@ _%_ : expr r int -> expr r int -> expr r int = sql "CAGARA_MOD($1, $2)"
 ##
 ## The infix form is `x ?? default` (right-associative, tighter than arithmetic:
 ## `.a ?? .b ?? 0`, `.n ?? 0 + 1`).
-coalesce : expr r a -> expr r (maybe a) -> expr r a = sql "COALESCE($2, $1)"
-coalesce : expr r (maybe a) -> expr r (maybe a) -> expr r a = sql "COALESCE($2, $1)"
+coalesce : expr ?r ?a -> expr ?r (maybe ?a) -> expr ?r ?a = sql "COALESCE($2, $1)"
+coalesce : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r ?a = sql "COALESCE($2, $1)"
 
 ## `x ?? default` is `coalesce default x`, written with the nullable value
 ## first. Right-associative, so `.a ?? .b ?? 0` chains.
-_??_ : expr r (maybe a) -> expr r a -> expr r a = sql "COALESCE($1, $2)"
+_??_ : expr ?r (maybe ?a) -> expr ?r ?a -> expr ?r ?a = sql "COALESCE($1, $2)"
 
 ## Lift a non-null value into `maybe`. It does not create NULL — that is
 ## `nothing` — so `just x` is the "this one is present" spelling in a record of
 ## optional fields.
-just : expr r a -> expr r (maybe a) = sql "$1"
+just : expr ?r ?a -> expr ?r (maybe ?a) = sql "$1"
 
 ## A SQL NULL at any nullable type, in any phase. The only way to write NULL:
 ## every other expression is non-null by its signature.
-nothing : expr r (maybe a) = sql "NULL"
+nothing : expr ?r (maybe ?a) = sql "NULL"
 
 ## Whether a nullable value is NULL. The result is non-null `bool`, which is
 ## what makes it usable in `where`.
-isNull : expr r (maybe a) -> expr r bool = sql "$1 IS NULL"
+isNull : expr ?r (maybe ?a) -> expr ?r bool = sql "$1 IS NULL"
 
 ## Whether a nullable value is not NULL; non-null `bool`.
-isNotNull : expr r (maybe a) -> expr r bool = sql "$1 IS NOT NULL"
+isNotNull : expr ?r (maybe ?a) -> expr ?r bool = sql "$1 IS NOT NULL"
 
 ## A nullable `bool` as a plain one, with NULL read as false — the same choice
 ## `where` makes, stated where the value is used rather than where it is
 ## filtered.
-isTrue : expr r (maybe bool) -> expr r bool = sql "COALESCE($1, FALSE)"
+isTrue : expr ?r (maybe bool) -> expr ?r bool = sql "COALESCE($1, FALSE)"

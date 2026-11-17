@@ -1031,8 +1031,8 @@ fn overloads_dispatch_to_sql() {
     assert!(s.contains("AS a"), "{s}");
     assert!(s.contains("amount + amount AS b"), "{s}");
     let s = sql(
-        "describe : expr r int -> expr r string = sql \"CAST($1 AS TEXT)\"\n\
-         describe : expr r bool -> expr r string = sql \"CASE WHEN $1 THEN 'yes' ELSE 'no' END\"\n\
+        "describe : expr ?r int -> expr ?r string = sql \"CAST($1 AS TEXT)\"\n\
+         describe : expr ?r bool -> expr ?r string = sql \"CASE WHEN $1 THEN 'yes' ELSE 'no' END\"\n\
          q = users & select { a = describe .age, b = describe .active }\n",
         "q",
     );
@@ -1525,7 +1525,7 @@ fn date_functions_compose_and_type_check() {
 fn unknown_intrinsic_is_an_error() {
     // A `sql` template naming a `CAGARA_*` function the backend does not
     // know must be a diagnostic, not invalid SQL passed through verbatim.
-    let q = "nope : expr r int -> expr r int = sql \"CAGARA_NOPE($1)\"\n\
+    let q = "nope : expr ?r int -> expr ?r int = sql \"CAGARA_NOPE($1)\"\n\
              q = users & select { v = nope .id }\n";
     let e = dialect(q, "q", "ansi").unwrap_err();
     assert!(e.contains("CAGARA_NOPE"), "{e}");
@@ -2210,16 +2210,16 @@ fn hidden_order_alias_does_not_collide_with_a_user_column() {
 fn template_placeholders_must_stand_alone() {
     let bad = [
         (
-            "f : expr r int -> expr r int = sql \"x$1\"",
+            "f : expr ?r int -> expr ?r int = sql \"x$1\"",
             "must stand alone",
         ),
         (
-            "f : expr r int -> expr r string = sql \"'$1'\"",
+            "f : expr ?r int -> expr ?r string = sql \"'$1'\"",
             "must stand alone",
         ),
         // Caught at the definition already.
         (
-            "f : expr r int -> expr r int = sql \"$2 + 1\"",
+            "f : expr ?r int -> expr ?r int = sql \"$2 + 1\"",
             "placeholders up to $2",
         ),
     ];
@@ -2433,7 +2433,7 @@ fn an_alias_calls_like_its_target() {
         sql("q = users & where (in [1, 2] .age)\n", "q")
     );
     // A user's own template, and an alias of an alias of a lambda.
-    let user = "myUp : expr r string -> expr r string = sql \"UPPER($1)\"\n";
+    let user = "myUp : expr ?r string -> expr ?r string = sql \"UPPER($1)\"\n";
     assert_eq!(
         sql(
             &format!("{user}q = users & select {{ x = myUp .name }}\n"),
@@ -2940,17 +2940,17 @@ fn a_try_cast_yields_a_maybe() {
 fn a_template_placeholder_must_be_an_expression() {
     for (src, want) in [
         (
-            "bad : expr r int -> expr r string = sql \"CAST(id AS $1)\"\n\
+            "bad : expr ?r int -> expr ?r string = sql \"CAST(id AS $1)\"\n\
              q = users & select { x = bad .id }\n",
             "not in an expression position",
         ),
         (
-            "bad : expr r int -> expr r int = sql \"$1 +\"\n\
+            "bad : expr ?r int -> expr ?r int = sql \"$1 +\"\n\
              q = users & select { x = bad .id }\n",
             "ends with `+`",
         ),
         (
-            "bad : expr r int -> expr r int = sql \"$1,\"\n\
+            "bad : expr ?r int -> expr ?r int = sql \"$1,\"\n\
              q = users & select { x = bad .id }\n",
             "ends with `,`",
         ),
@@ -2964,7 +2964,7 @@ fn a_template_placeholder_must_be_an_expression() {
 
     // A well-formed template still lowers.
     let s = sql(
-        "abs1 : expr r int -> expr r int = sql \"ABS($1)\"\n\
+        "abs1 : expr ?r int -> expr ?r int = sql \"ABS($1)\"\n\
          q = users & select { x = abs1 .id }\n",
         "q",
     );
@@ -3420,8 +3420,8 @@ fn a_format_conversion_is_spelled_by_the_target() {
     let src = concat!(
         "t : query { s = string, d = date } = table \"s\" \"t\"\n",
         "q = t & select { ts = parseFmt .s, out = formatFmt .d }\n",
-        "parseFmt : expr r string -> expr r timestamp = sql \"STR_TO_DATE($1, '%Y%m%d')\"\n",
-        "formatFmt : expr r date -> expr r string = sql \"DATE_FORMAT($1, '%Y-%m-%d')\"\n",
+        "parseFmt : expr ?r string -> expr ?r timestamp = sql \"STR_TO_DATE($1, '%Y%m%d')\"\n",
+        "formatFmt : expr ?r date -> expr ?r string = sql \"DATE_FORMAT($1, '%Y-%m-%d')\"\n",
     );
     let trino = dialect(src, "q", "trino").expect("trino");
     assert!(trino.contains("date_parse(s, '%Y%m%d')"), "{trino}");
@@ -3454,8 +3454,8 @@ fn the_padding_helpers_pass_their_arguments_in_sql_order() {
 /// A one-argument function works over a value as well as over a column, and the
 /// two uses emit the same SQL.
 ///
-/// There is one signature and no second overload: `truncYear` is `expr r date ->
-/// expr r date`, and an expression that reads no row *is* its value (see the
+/// There is one signature and no second overload: `truncYear` is `expr ?r date ->
+/// expr ?r date`, and an expression that reads no row *is* its value (see the
 /// checker's coercion). So `truncYear currentDate` is a `date` and `truncYear
 /// .d` reads the column, both through the same template.
 #[test]
@@ -3616,14 +3616,14 @@ fn the_six_wrong_number_bugs_stay_fixed() {
     // 6. A template placeholder has to be an expression on its own: `"$1 +"`
     //    silently truncated the SQL, and `CAST(id AS $1)` produced broken SQL.
     let e = error(
-        &format!("{schema}f : expr r int -> expr r int = sql \"$1 +\"\nq = users & select {{ x = f .id }}\n"),
+        &format!("{schema}f : expr ?r int -> expr ?r int = sql \"$1 +\"\nq = users & select {{ x = f .id }}\n"),
         "q",
     );
     assert!(e.contains("ends with `+`"), "{e}");
     // A placeholder may not stand where a *type* belongs: `CAST(id AS $1)`
     // produced SQL the engine rejects, and the checker used to accept it.
     let e = error(
-        &format!("{schema}f : expr r int -> expr r int = sql \"CAST($1 AS $2)\"\nq = users & select {{ x = f .id }}\n"),
+        &format!("{schema}f : expr ?r int -> expr ?r int = sql \"CAST($1 AS $2)\"\nq = users & select {{ x = f .id }}\n"),
         "q",
     );
     assert!(e.contains("placeholder") || e.contains("signature"), "{e}");

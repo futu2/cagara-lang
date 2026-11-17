@@ -112,8 +112,8 @@ fn every_construct_is_actually_reformatted() {
             "t : query { x = decimal 10 2, y = int } = table \"s\" \"t\"\n",
         ),
         (
-            "f : expr r (decimal 10 2) -> expr r (decimal 38 0)  =  primitive \"x\"\n",
-            "f : expr r (decimal 10 2) -> expr r (decimal 38 0) = primitive \"x\"\n",
+            "f : expr ?r (decimal 10 2) -> expr ?r (decimal 38 0)  =  primitive \"x\"\n",
+            "f : expr ?r (decimal 10 2) -> expr ?r (decimal 38 0) = primitive \"x\"\n",
         ),
     ] {
         assert_eq!(fmt(src), want, "input: {src:?}");
@@ -379,10 +379,10 @@ fn a_lambda_body_stays_on_the_arrow_line_while_it_fits() {
     // With a signature the definition stays one line, as §1.1's `addOne`
     // does, whether the source moved the body or not.
     for src in [
-        "f : expr r int -> expr r int = a => a + 1\n",
-        "f : expr r int -> expr r int = a =>\n  a + 1\n",
+        "f : expr ?r int -> expr ?r int = a => a + 1\n",
+        "f : expr ?r int -> expr ?r int = a =>\n  a + 1\n",
     ] {
-        check(src, "f : expr r int -> expr r int = a => a + 1\n");
+        check(src, "f : expr ?r int -> expr ?r int = a => a + 1\n");
     }
     // A record body is hugged to the arrow; it folds like any record that
     // fits and breaks on its own when it does not (see the long-lambda test).
@@ -600,12 +600,12 @@ fn spacing_is_normalized() {
     check("x={a=1,b=[1,2]}\n", "x = { a = 1, b = [1, 2] }\n");
     check("f   =  x=>y   =>  x+y\n", "f = x => y => x + y\n");
     check(
-        "t : expr r int->agg (expr  r int) = sql   \"SUM($1)\"\n",
-        "t : expr r int -> agg (expr r int) = sql \"SUM($1)\"\n",
+        "t : expr ?r int->agg (expr ?r int) = sql   \"SUM($1)\"\n",
+        "t : expr ?r int -> agg (expr ?r int) = sql \"SUM($1)\"\n",
     );
     check(
-        "r : query {id=int|r} = table \"t\"\n",
-        "r : query { id = int | r } = table \"t\"\n",
+        "r : query {id=int|?r} = table \"t\"\n",
+        "r : query { id = int | ?r } = table \"t\"\n",
     );
     check("e = {}\nl = []\n", "e = {}\nl = []\n");
 }
@@ -765,8 +765,8 @@ fn types_break_at_the_width() {
     );
     // Operator names are kept; what does not parse stays on one line.
     assert!(
-        format_type("_+_", "expr r int -> expr r int -> expr r int", 20)
-            .starts_with("_+_ : expr r int\n")
+        format_type("_+_", "expr ?r int -> expr ?r int -> expr ?r int", 20)
+            .starts_with("_+_ : expr ?r int\n")
     );
     assert_eq!(format_type("x", "(type error)", 80), "x : (type error)");
 }
@@ -923,11 +923,11 @@ impl Gen {
     fn ty(&mut self, depth: usize) {
         match if depth == 0 { 0 } else { self.rng.below(4) } {
             0 => {
-                let t = self.rng.pick(&["int", "r", "string"]);
+                let t = self.rng.pick(&["int", "?r", "string"]);
                 self.tok(t)
             }
             1 => {
-                let head = self.rng.pick(&["query", "expr r", "maybe", "list"]);
+                let head = self.rng.pick(&["query", "expr ?r", "maybe", "list"]);
                 self.tok(head);
                 self.ty_atom(depth - 1);
             }
@@ -965,7 +965,7 @@ impl Gen {
                 }
                 if self.rng.chance(40) {
                     self.tok("|");
-                    self.tok("r");
+                    self.tok("?r");
                 }
                 self.tok("}");
             }

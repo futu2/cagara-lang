@@ -152,7 +152,7 @@ pub(crate) enum Value<'a> {
     /// A primitive body is never reached through a *use*, so the parser leaves
     /// the spelling's id zero and the checker records no resolution for it.
     /// The definition that spells the primitive is still the answer: `_&_ : a
-    /// -> (a -> b) -> b = x => f => f x` is a lambda, and applying it is what
+    /// -> (?a -> ?b) -> b = x => f => f x` is a lambda, and applying it is what
     /// replaces it. This keeps the name so the operation can be found.
     Name(String),
 
@@ -358,7 +358,7 @@ pub(crate) struct TemplateFn {
 
 /// An aggregate modifier awaiting its arguments.
 ///
-/// The aggregate is a *value* (`agg (expr r a)` is a type), so modifying one is
+/// The aggregate is a *value* (`agg (expr ?r a)` is a type), so modifying one is
 /// ordinary application: the arguments arrive one at a time and the rewrite
 /// happens when the last one does. Storing them as `Value`s rather than as
 /// finished expressions is what lets `over`'s first argument be a window spec.
@@ -616,7 +616,7 @@ impl<'i, 'a> Normalizer<'i, 'a> {
     /// The checker's resolutions are what the reduction normally reads, and
     /// they are recorded for every name a *use* reaches. A primitive
     /// definition's own body is not such a place — nothing applies
-    /// `_&_ : a -> (a -> b) -> b = x => f => f x` from inside it, and its
+    /// `_&_ : ?a -> (?a -> ?b) -> b = x => f => f x` from inside it, and its
     /// spelling has no resolution — so this is the fallback: the scope the body
     /// was written in says what the name means.
     ///

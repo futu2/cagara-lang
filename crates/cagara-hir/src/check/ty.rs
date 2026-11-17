@@ -45,16 +45,16 @@ pub(crate) enum Ty {
     /// Value mapping over a row: every field type wrapped by the witness the
     /// label names. The witness is a *label* (`Ty::Sym("nullable")`, say) rather
     /// than a closed `ValueMap`, so it can still be a signature's variable —
-    /// `mapValue w r` with `valueLabel w` — and travel in the type exactly as a
+    /// `mapValue ?w ?r` with `valueLabel ?w` — and travel in the type exactly as a
     /// `keyMap`'s mapper does.
     MapValue(Box<Ty>, Box<Ty>),
-    /// Remove one named field from a row: `removeKey k r`. The label is a type
+    /// Remove one named field from a row: `removeKey ?k ?r`. The label is a type
     /// (normally `Sym`), so a signature's `k` links to the result. It reduces
     /// once the label is a `Sym`, `r` is closed, and `r` contains the label;
     /// the missing-column error is reported by the stage that registered it.
     RemoveKey(Box<Ty>, Box<Ty>),
-    /// A string literal used as a type: the type of `"k"` in `symbol k`. It
-    /// unifies only with the identical literal, so `symbol k` is an ordinary
+    /// A string literal used as a type: the type of `"k"` in `symbol ?k`. It
+    /// unifies only with the identical literal, so `symbol ?k` is an ordinary
     /// `Type` variable that the call site binds to `Sym("k")`.
     Sym(String),
 }
@@ -236,8 +236,8 @@ pub(crate) fn expr(p: Ty, r: Ty, a: Ty) -> Ty {
 
 /// The type of a projection/update record argument.
 ///
-/// Surface signatures spell this as `expr r (row s)` (or
-/// `agg (expr r (row s))` for the aggregate stage), but a record literal is
+/// Surface signatures spell this as `expr ?r (row ?s)` (or
+/// `agg (expr ?r (row ?s))` for the aggregate stage), but a record literal is
 /// not itself a scalar expression. The extra `fields` slot retains the record
 /// of column expressions that the stage constraint consumes, while `output` is
 /// the row of resulting column values exposed by the signature.
@@ -311,20 +311,20 @@ pub(crate) enum Cons {
         input: Ty,
         /// Row of the updated fields (`s` in the public signature).
         output: Ty,
-        /// Final row after merging the updates over the input (`merge r s`).
+        /// Final row after merging the updates over the input (`merge ?r ?s`).
         result: Ty,
     },
     /// `omit "k"`: the row equation `input ~ { k : t | output }`. The unifier
     /// solves this with its own leftover rule — there is no bespoke column
     /// computation here.
     /// `omit "k"`: the stage's own rule, `input ~ { k : t | output }`. The
-    /// label is a type (`symbol k`, bound to the literal's `Sym` at the use),
+    /// label is a type (`symbol ?k`, bound to the literal's `Sym` at the use),
     /// so the equation travels in the definition's scheme and every use
     /// instantiates it with fresh variables. The missing-column error is
     /// reported by this constraint, which is the operation that owns it.
     Omit { label: Ty, input: Ty, output: Ty },
-    /// `mapValue "w"`: the stage's own rule, `output ~ mapValue w input`. The
-    /// witness is a type (`valueLabel w`, bound to the literal's `Sym` at the
+    /// `mapValue "w"`: the stage's own rule, `output ~ mapValue ?w input`. The
+    /// witness is a type (`valueLabel ?w`, bound to the literal's `Sym` at the
     /// use), so the equation travels in the definition's scheme and every use
     /// instantiates it with fresh variables. An unknown wrapper is reported by
     /// this constraint, which is the operation that owns it.
@@ -401,7 +401,7 @@ pub(crate) fn ty_to_scalar(t: &Ty) -> ScalarType {
     }
 }
 
-/// Fields of a row type, or of the row inside `query r`.
+/// Fields of a row type, or of the row inside `query ?r`.
 ///
 /// The row terms a definition's scheme may still carry (`merge`, `mapValue`)
 /// are reduced here rather than in the checked layer, so the checked layer
@@ -446,14 +446,14 @@ pub(crate) fn ty_fields(t: &Ty) -> Vec<(String, ScalarType)> {
 /// only thing the checked layer should branch on.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SchemeView {
-    /// `query r`: a query over `r`. `fields` is `None` when `r` is still open,
+    /// `query ?r`: a query over `r`. `fields` is `None` when `r` is still open,
     /// which is different from a query with no fields.
     Query {
         fields: Option<Vec<(String, ScalarType)>>,
     },
     /// A scalar type (`int`, `maybe string`, `list a`, …).
     Scalar(ScalarType),
-    /// A function, however many arguments: `a -> b`, `query r -> query r`.
+    /// A function, however many arguments: `a -> b`, `query ?r -> query ?r`.
     Function,
     /// A row that is not behind `query` (a bare `{ a = int }`).
     Row { fields: Vec<(String, ScalarType)> },
@@ -491,14 +491,14 @@ pub(crate) fn scheme_view(t: &Ty) -> SchemeView {
             }
         }
         Ty::Var(_) | Ty::Rigid(..) | Ty::Gen(_) | Ty::Empty => SchemeView::Open,
-        // `expr r a` is the *scalar* `a` together with a phase and a row. A
+        // `expr ?r a` is the *scalar* `a` together with a phase and a row. A
         // consumer asking for the type of an expression wants `a`: the row is
         // what the column is read from and the phase is where it may be used,
         // and both are query-level facts carried elsewhere.
         //
         // Unwrapping here rather than at each call site matters because
         // `use_ty` is one of several readers. Without it, `upper .name` had the
-        // recorded type `expr r string` and every reader saw `Unknown`, since
+        // recorded type `expr ?r string` and every reader saw `Unknown`, since
         // `ty_to_scalar` has no `expr` case — the type was present and
         // unreadable, which is worse than absent because it looks recorded.
         Ty::Con("expr", args) if args.len() == 3 => scheme_view(&args[2]),
@@ -508,13 +508,13 @@ pub(crate) fn scheme_view(t: &Ty) -> SchemeView {
 
 /// The phase a scheme's result sits in, and the scalar inside it.
 ///
-/// `sum : expr r int -> agg (expr r (maybe int))` returns an *aggregate*
+/// `sum : expr ?r int -> agg (expr ?r (maybe int))` returns an *aggregate*
 /// expression, so a call to it is `CheckedExpr::agg_template`, not a scalar
 /// template.
 ///
 /// The phase is the **first argument of the `expr` constructor**, not an outer
 /// head: the checker writes `expr(con("agg"), r, a)` (`infer.rs:1658`), which
-/// prints as `agg (expr r a)`. Reading it as `Ty::Con("agg", ..)` finds nothing
+/// prints as `agg (expr ?r a)`. Reading it as `Ty::Con("agg", ..)` finds nothing
 /// and silently reports every aggregate as row-phase, which is what an earlier
 /// version of this function did.
 ///
@@ -547,12 +547,12 @@ pub(crate) fn scheme_result_expr(t: &Ty) -> Option<(Phase, ScalarType)> {
     }
 }
 
-/// A definition's result type, with the arguments stripped and any `expr r a`
+/// A definition's result type, with the arguments stripped and any `expr ?r a`
 /// wrapper unwrapped to `a`.
 ///
 /// A call site needs the type the callee *returns*, and a definition's scheme
 /// is where that is declared: `_>_` is
-/// `expr r a -> expr r a -> expr r bool`, and the call's type is the `bool`
+/// `expr ?r a -> expr ?r a -> expr ?r bool`, and the call's type is the `bool`
 /// inside the final `expr`.
 ///
 /// `None` when the scheme's result is not a scalar (a query, a function
@@ -591,7 +591,7 @@ fn closed_fields(t: &Ty) -> Option<Vec<(String, ScalarType)>> {
                 Some(fields)
             }
         }
-        // `query r` in a signature, or a row term still waiting on a variable:
+        // `query ?r` in a signature, or a row term still waiting on a variable:
         // the columns are not statically known.
         _ => None,
     }
@@ -918,13 +918,13 @@ pub(crate) struct Checker<'w> {
     pub(crate) unify_depth: usize,
     /// Set while a lambda parameter's annotation is being converted.
     ///
-    /// A signature's type variables are rigid: `f : a -> a` promises to work at
+    /// A signature's type variables are rigid: `f : ?a -> a` promises to work at
     /// every type, and `f = x => x + 1` is rejected because `a` is a string
     /// there too. A *parameter's* annotation makes no such promise — it says
     /// what this argument is — so its names are ordinary unification
-    /// variables, and `(p : expr r bool) => ...` lets the row of the argument
+    /// variables, and `(p : expr ?r bool) => ...` lets the row of the argument
     /// fill in `r` instead of demanding a universal row. Without this, the most
-    /// useful annotation in this language (`expr r a`) could not be used
+    /// useful annotation in this language (`expr ?r a`) could not be used
     /// anywhere a column is read: `r` would clash with the row of that column.
     pub(crate) par_ann: bool,
 }

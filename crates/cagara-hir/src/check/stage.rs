@@ -2,7 +2,7 @@
 //! produced.
 //!
 //! A query stage is a *function value* in this language — `prefix "u_"` has the
-//! type `query r -> query (keyMap m r)` and the pipeline operator applies it —
+//! type `query ?r -> query (keyMap ?m ?r)` and the pipeline operator applies it —
 //! so the stage's input row is not an argument the application can see. It is
 //! the signature's own parameter, bound by the surrounding inference. That is
 //! what makes the boundary explicit and checkable: **the stage value's type

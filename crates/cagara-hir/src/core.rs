@@ -220,7 +220,7 @@ impl RowType {
         RowType::new(out)
     }
 
-    /// The **overwrite** row former used by `update` and by the `merge r s`
+    /// The **overwrite** row former used by `update` and by the `merge ?r ?s`
     /// row term: the left row's field *positions* are kept, a collision takes
     /// the **right** type, and right-only fields are appended.
     ///
@@ -262,7 +262,7 @@ impl RowType {
         )
     }
 
-    /// The row a query exposes after a `select`/`agg`: exactly the listed
+    /// The row ?a query exposes after a `select`/`agg`: exactly the listed
     /// fields, in the order they were written.
     ///
     /// This does not validate: it is the row *former*. Duplicate field names

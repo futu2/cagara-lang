@@ -96,7 +96,7 @@ type (`self.zonk(&t)` in `check/infer.rs`, where the tree's facts are recorded)
 where it previously chased one variable chain and stopped (`self.resolve(&t)`).
 That is the whole diff in
 `check/infer.rs` — `git diff a2b1773 70eb285` shows it as one line. It is not an
-oversight: with a shallow resolve, an application's `query r` kept `r` as a
+oversight: with a shallow resolve, an application's `query ?r` kept `r` as a
 variable, so a `table`'s columns were recorded and then unreachable, and every
 consumer had to recover them from the declaring definition's signature — which is
 wrong when one definition inlines two tables. The deep type is what makes a node

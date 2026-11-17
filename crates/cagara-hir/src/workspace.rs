@@ -1312,9 +1312,9 @@ fn line_of(text: &str, offset: usize) -> usize {
 
 /// Two signatures that are the same up to the names of their type variables.
 ///
-/// This is the *duplicate* case, not every overlap. `sum : expr r int -> …`
-/// next to `sum : expr r float -> …` is two different types; `asc : expr r a ->
-/// sortkey r` next to `asc : expr r (maybe a) -> sortkey r` differs by a
+/// This is the *duplicate* case, not every overlap. `sum : expr ?r int -> …`
+/// next to `sum : expr ?r float -> …` is two different types; `asc : expr ?r a ->
+/// sortkey ?r` next to `asc : expr ?r (maybe a) -> sortkey ?r` differs by a
 /// constructor. Both are intended. Two definitions whose signatures normalize
 /// to the same string are not: the second can never be chosen, because every
 /// use that fits it fits the first, so the only thing it adds is a call site
@@ -1908,7 +1908,7 @@ mod tests {
         // rather than a name.
         let errors = msgs(
             "# no prelude\n\
-             table : string -> string -> query r = primitive \"__table\"\n\
+             table : string -> string -> query ?r = primitive \"__table\"\n\
              t : query { a = int } = table \"s\" \"t\"\n",
         );
         assert!(errors.is_empty(), "{errors:?}");
@@ -1954,7 +1954,7 @@ mod tests {
             // `upper` is the prelude's, so it resolving proves the prelude is
             // still there.
             let ws = Workspace::from_source(&format!(
-                "{src}r : expr r string -> expr r string = upper\n"
+                "{src}r : expr ?r string -> expr ?r string = upper\n"
             ));
             let tc = crate::check::check(&ws);
             assert!(

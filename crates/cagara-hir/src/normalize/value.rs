@@ -946,7 +946,7 @@ impl<'a> Normalizer<'a, 'a> {
         );
         match combine {
             CombineFn::Exists { .. } => {
-                // `markExists` is `query s -> expr (join r s) bool -> query r`,
+                // `markExists` is `query ?s -> expr (join r s) bool -> query ?r`,
                 // the same shape as a join: the joined query first, the predicate
                 // second, the piped input last.
                 let Some(Value::Query(joined)) = args.first() else {
@@ -971,7 +971,7 @@ impl<'a> Normalizer<'a, 'a> {
                     .map_err(Control::Program)
             }
             CombineFn::Join { kind, .. } => {
-                // `innerJoin` is `query s -> expr (join r s) bool -> query r`,
+                // `innerJoin` is `query ?s -> expr (join r s) bool -> query ?r`,
                 // so the joined input arrives first, the predicate second, and
                 // the piped input last.
                 let Some(Value::Query(joined)) = args.first() else {

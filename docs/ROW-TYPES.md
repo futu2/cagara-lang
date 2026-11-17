@@ -1,7 +1,7 @@
 # Row types
 
 Cagara keeps query schemas in the type system. Rows are ordered fields with an
-optional open tail, and `query r` carries a row `r`. The checker reduces row
+optional open tail, and `query ?r` carries a row `r`. The checker reduces row
 operations when their inputs are known and retains them until an open row is
 resolved.
 
@@ -10,13 +10,13 @@ resolved.
 A row type may name the fields a helper needs and leave the rest open:
 
 ```haskell
-byId : expr { id = int | r } int -> query { id = int | r } -> query { id = int | r } =
+byId : expr { id = int | ?r } int -> query { id = int | ?r } -> query { id = int | ?r } =
   i => q => where (.id == i) q
 ```
 
 `{ id = int | r }` means “a row with an `int` column `id`, plus whatever `r`
 turns out to be”; a call with a wider row instantiates `r` with the remaining
-columns. The bare `query r` form says nothing about the row's fields, so a
+columns. The bare `query ?r` form says nothing about the row's fields, so a
 helper that reads `.id` cannot be annotated with it — the checker reports “no
 column `id`” because `r` is unconstrained. Name the field instead.
 
@@ -25,13 +25,13 @@ column `id`” because `r` is unconstrained. Name the field instead.
 | Type term | Meaning |
 |---|---|
 | `keyMap m r` | Apply a key mapper to every field name in `r` |
-| `removeKey k r` | Drop the field named `k` from `r`; `k` is a label type (`symbol k`) |
+| `removeKey ?k ?r` | Drop the field named `k` from `r`; `k` is a label type (`symbol ?k`) |
 | `mapValue w r` | Apply a value wrapper to every field type in `r` |
-| `merge r s` | Overlay `s` on `r`; right-hand fields replace same-name fields |
+| `merge ?r ?s` | Overlay `s` on `r`; right-hand fields replace same-name fields |
 
-`removeKey` takes its label as a type. A signature names it with `symbol k`,
+`removeKey` takes its label as a type. A signature names it with `symbol ?k`,
 which the call site binds to the literal: `omit "name"` binds `k` to `"name"`,
-so `omit : symbol k -> query r -> query (removeKey k r)` gives the output row
+so `omit : symbol ?k -> query ?r -> query (removeKey ?k ?r)` gives the output row
 with that column removed. A missing column is still reported by the `omit`
 stage's constraint (`Cons::Omit`), not by the reducer.
 
@@ -76,7 +76,7 @@ addPrefix = p => q => q & prefix p
 ```
 
 `mapValue` supports three wrappers. The wrapper is a label in the type — the
-signature is `mapValue : valueLabel w -> query r -> query (mapValue w r)`, so
+signature is `mapValue : valueLabel ?w -> query ?r -> query (mapValue ?w r)`, so
 the literal binds `w` on both sides exactly as `prefix`'s affix does. The names
 are decoded by one table (`check/reduce.rs`, `value_map_of`):
 
@@ -98,7 +98,7 @@ These are *type-level* row operations: the checker reduces them during
 inference, and the row they build is what the enclosing stage's own constructors
 read.
 
-`keyMap` and `merge` have no stage spelling at all. `merge r s` is the row former
+`keyMap` and `merge` have no stage spelling at all. `merge ?r ?s` is the row former
 that `update` and the joins use in their signatures; two *queries* are combined
 with a join or a set operation, which is why `primitive "__merge"`
 (`Prim::Merge`) has no constructor and is refused as a compiler fault.

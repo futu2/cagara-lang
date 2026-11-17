@@ -1,9 +1,9 @@
 //! Type checker: Hindley–Milner inference with extensible (Rémy-style) rows,
 //! run over the source AST.
 //!
-//! - Surface types: `expr r a` (row expression), `agg (expr r a)` and
-//!   `win (expr r a)`. Internally one `expr` constructor carries a phase slot
-//!   (`row`, `agg`, `win`, or a variable), so `agg (expr r a)` is `expr` at
+//! - Surface types: `expr ?r a` (row expression), `agg (expr ?r a)` and
+//!   `win (expr ?r a)`. Internally one `expr` constructor carries a phase slot
+//!   (`row`, `agg`, `win`, or a variable), so `agg (expr ?r a)` is `expr` at
 //!   phase `agg`. A plain `expr` in a signature is phase-polymorphic, shared
 //!   across the signature (so `_+_` also works on aggregates and windows),
 //!   except when the result is `agg`/`win`: then its `expr` arguments must be
@@ -33,8 +33,8 @@
 //!   their own type before overloads are forced.
 //!
 //! - Nullability is explicit: `maybe a` is a type, and type variables in
-//!   signatures stand for non-null types, so `expr r a` and
-//!   `expr r (maybe a)` are disjoint. Operators and aggregate/window inputs
+//!   signatures stand for non-null types, so `expr ?r a` and
+//!   `expr ?r (maybe a)` are disjoint. Operators and aggregate/window inputs
 //!   need non-null arguments (`coalesce` handles nulls); outer
 //!   joins make the far side's columns `maybe`; aggregate/window results may
 //!   still return `maybe`.
@@ -436,7 +436,7 @@ impl TypeCheck {
     }
 
     /// The scalar type a definition *returns*, with arguments stripped and any
-    /// `expr r a` unwrapped to `a`.
+    /// `expr ?r a` unwrapped to `a`.
     ///
     /// This is what a call site needs: a definition's scheme is where its
     /// result is declared.
@@ -844,7 +844,7 @@ struct DefCheck {
         crate::workspace::DiagKind,
         Vec<crate::workspace::Suggestion>,
     )>,
-    /// The row a `PROBE_FIELD` column saw here, if this is the definition that
+    /// The row ?a `PROBE_FIELD` column saw here, if this is the definition that
     /// referenced it.
     probe_fields: Option<Vec<(String, String)>>,
 }

@@ -47,11 +47,16 @@ pub struct RecordField {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeExpr {
-    /// `head arg...`; a lowercase head that is not a known constructor is a
-    /// type variable (decided by the checker, not the parser).
+    /// `head arg...`. `var` says the head was written with the `?` sigil
+    /// (`?a`), which is the *only* way to write a type variable — a bare name
+    /// is always a type constructor, and a name the language does not have is
+    /// an error. Before the sigil the rule was "one lowercase letter", so a
+    /// one-letter typo in a `table` annotation was silently a fresh variable
+    /// per use and the schema stopped constraining anything.
     App {
         head: String,
         args: Vec<TypeExpr>,
+        var: bool,
         span: Span,
     },
     Record {
@@ -296,10 +301,11 @@ impl Lower<'_> {
                 .find(|c| c.kind() == K::TyRecord)
                 .map(|r| self.ty(&r))
                 .unwrap_or(TypeExpr::Error(span));
-            // `query { … }` — the row a table definition is declared as.
+            // `query { … }` — the row ?a table definition is declared as.
             let ty = TypeExpr::App {
                 head: "query".to_string(),
                 args: vec![columns],
+                var: false,
                 span,
             };
             // `table "schema" "name"`, applied one argument at a time: the
@@ -344,12 +350,24 @@ impl Lower<'_> {
 
     fn ty(&mut self, n: &SyntaxNode) -> TypeExpr {
         match n.kind() {
-            K::TyApp => match token(n, K::Ident) {
-                Some(head) => TypeExpr::App {
-                    head: head.text().to_string(),
-                    args: n.children().map(|c| self.ty(&c)).collect(),
-                    span: span(n),
-                },
+            K::TyApp => match token(n, K::Ident).or_else(|| token(n, K::TyVar)) {
+                Some(head) => {
+                    // `?a` keeps its `?` in the token, so the sigil is stripped
+                    // here and remembered as a flag: the checker has to tell
+                    // "a variable the writer named" from "a type name the
+                    // language does not have".
+                    let text = head.text();
+                    let (head, var) = match text.strip_prefix('?') {
+                        Some(rest) => (rest.to_string(), true),
+                        None => (text.to_string(), false),
+                    };
+                    TypeExpr::App {
+                        head,
+                        args: n.children().map(|c| self.ty(&c)).collect(),
+                        var,
+                        span: span(n),
+                    }
+                }
                 None => TypeExpr::Error(span(n)),
             },
             K::TyNat => match token(n, K::Int) {
@@ -379,8 +397,15 @@ impl Lower<'_> {
                         })
                     })
                     .collect();
-                // a direct Ident token child of the record is the `| tail`
-                let tail = token(n, K::Ident).map(|t| t.text().to_string());
+                // A direct Ident or TyVar token child of the record is the
+                // `| tail`. It is a TyVar (`?r`) now — the tail is a type
+                // variable — so both are read and the sigil is stripped. Missing
+                // the TyVar case is what closed the row: the tail became `None`,
+                // and `{ id = int | ?r }` stopped accepting the caller's other
+                // columns.
+                let tail = token(n, K::TyVar)
+                    .or_else(|| token(n, K::Ident))
+                    .map(|t| t.text().trim_start_matches('?').to_string());
                 TypeExpr::Record {
                     fields,
                     tail,
@@ -722,7 +747,7 @@ mod tests {
     #[test]
     fn imports_types_literals() {
         let (m, errs) = lower_source(
-            "import \"schema.cagara\" as s\nu : query { id = int | r } = s.users\nt = true\nn = -3\n",
+            "import \"schema.cagara\" as s\nu : query { id = int | ?r } = s.users\nt = true\nn = -3\n",
         );
         assert!(errs.is_empty(), "{errs:?}");
         assert_eq!(m.imports[0].path, "schema.cagara");
@@ -744,7 +769,7 @@ mod tests {
     #[test]
     fn records_lambdas_sql() {
         let (m, errs) = lower_source(
-            "p = { id = .id, label = upper .name }\nf = x => x\nup : expr r string -> expr r string = sql \"UPPER($1)\"\n",
+            "p = { id = .id, label = upper .name }\nf = x => x\nup : expr ?r string -> expr ?r string = sql \"UPPER($1)\"\n",
         );
         assert!(errs.is_empty(), "{errs:?}");
         let ExprKind::Record(fs) = &m.defs[0].body.kind else {
@@ -848,7 +873,7 @@ mod tests {
         // The same unescaping serves `sql` templates, so a literal backslash
         // reaches the backend as one rather than vanishing.
         let (m, _) =
-            lower_source("f : expr r string -> expr r string = sql \"REPLACE($1, '\\')\"\n");
+            lower_source("f : expr ?r string -> expr ?r string = sql \"REPLACE($1, '\\')\"\n");
         assert_eq!(
             m.defs[0].body.kind,
             ExprKind::Sql(r"REPLACE($1, '\')".into())
@@ -880,7 +905,7 @@ mod catalog_tests {
         assert_eq!(m.defs.len(), 2, "{:?}", m.defs);
         assert_eq!(m.defs[0].name, "users");
         assert_eq!(m.defs[1].name, "orders");
-        // The declared type is `query { … }`, the row a table is declared as.
+        // The declared type is `query { … }`, the row ?a table is declared as.
         let TypeExpr::App { head, args, .. } = m.defs[0].ty.as_ref().expect("a type") else {
             panic!("expected a type application: {:?}", m.defs[0].ty);
         };

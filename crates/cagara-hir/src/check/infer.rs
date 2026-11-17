@@ -9,7 +9,7 @@ use crate::rules::{self, Place};
 
 /// Is this a key parameter — the position a stage reads its key from?
 ///
-/// `omit` / `prefix` / `suffix` take a `symbol k`, which `conv` carries as a
+/// `omit` / `prefix` / `suffix` take a `symbol ?k`, which `conv` carries as a
 /// `keyLabel` around a type variable; the call site binds that variable to the
 /// literal's `Sym`. The bare marker constructors are the older spelling of the
 /// same position and are recognised so a hand-written signature using one still
@@ -222,7 +222,7 @@ impl<'w> Checker<'w> {
             // the printed form above cannot answer that — it is a string.
             //
             // **Deeply** resolved, not just at the top. `resolve` chases a
-            // variable chain and stops, so `query r` came back with `r` still a
+            // variable chain and stops, so `query ?r` came back with `r` still a
             // variable while the printed form showed `query { id = int }` — the
             // row was recorded and then unreachable, which is how a `table`'s
             // columns became something a consumer had to recover from the
@@ -443,7 +443,7 @@ impl<'w> Checker<'w> {
                 Some(t) => Ok(t),
                 None => Err(at(def.span)(format!(
                     "`{}` needs a type signature: a `sql` template takes its arity and phase \
-                     from it, e.g. `{} : expr r string -> expr r string = sql \"UPPER($1)\"`",
+                     from it, e.g. `{} : expr ?r string -> expr ?r string = sql \"UPPER($1)\"`",
                     def.name, def.name
                 ))),
             };
@@ -453,8 +453,8 @@ impl<'w> Checker<'w> {
             // and describes the primitive's behavior.
             return match ann {
                 Some(t) => {
-                    // A **projection** primitive exposes `expr r (row s)` (or,
-                    // for the aggregate stage, `agg (expr r (row s))`) at the
+                    // A **projection** primitive exposes `expr ?r (row ?s)` (or,
+                    // for the aggregate stage, `agg (expr ?r (row ?s))`) at the
                     // surface, while its internal type carries the row of field
                     // expressions separately so the constraint solver can
                     // validate and lower the stage. Every other primitive's
@@ -471,7 +471,7 @@ impl<'w> Checker<'w> {
                         // These primitives' *internal* type is their real signature,
                         // and it says something the surface annotation cannot: a join
                         // merges two rows, and a set operation answers with its left
-                        // operand's row. `query r -> query r -> query r` is true of a
+                        // operand's row. `query ?r -> query ?r -> query ?r` is true of a
                         // set operation and loses which `r` the answer is — so the
                         // internal rule wins here rather than being reconciled with the
                         // declaration.
@@ -509,7 +509,7 @@ impl<'w> Checker<'w> {
                 }
                 None => Err(at(def.span)(format!(
                     "`{}` needs a type signature: a `primitive` takes its type \
-                     from it, e.g. `{} : query r -> query r' = primitive \"__prefix\"`",
+                     from it, e.g. `{} : query ?r -> query ?r' = primitive \"__prefix\"`",
                     def.name, def.name
                 ))),
             };
@@ -593,7 +593,7 @@ impl<'w> Checker<'w> {
             }
             // What is still open is a choice the definition leaves to its
             // users. Ranking it now keeps the *signature* honest — `adult =
-            // .age >= 18` is `expr { age = a | b } bool`, not a result type
+            // .age >= 18` is `expr { age = a | ?b } bool`, not a result type
             // nobody can name — while the argument types stay as open as they
             // were.
             for (c, sp) in self.pending.clone() {
@@ -774,13 +774,26 @@ impl<'w> Checker<'w> {
                 "a number is not a type on its own; `decimal p s` is the \
                                       constructor that takes one",
             )),
-            TypeExpr::App { head, args, .. } => {
+            TypeExpr::App {
+                head, args, var, ..
+            } => {
+                // A `?a` head is a type variable by construction. It is checked
+                // first, because the name after the sigil is arbitrary: `?int`
+                // is a variable called `int`, not the constructor.
+                if *var {
+                    if !args.is_empty() {
+                        return Err(Fail::from(format!(
+                            "`?{head}` is a type variable and takes no arguments"
+                        )));
+                    }
+                    return Ok(self.rigid(head, names));
+                }
                 let Some(&(name, arity)) = CONS.iter().find(|(n, _)| *n == head.as_str()) else {
-                    // `row s` marks a *record of columns* in expression
-                    // position, as in `select : expr r (row s) -> ...`. It is a
+                    // `row ?s` marks a *record of columns* in expression
+                    // position, as in `select : expr ?r (row ?s) -> ...`. It is a
                     // one-argument wrapper whose argument is a Row, and it is
-                    // erased on conversion — `row s` becomes the row `s`, so the
-                    // same variable can also appear in `query s`. It is handled
+                    // erased on conversion — `row ?s` becomes the row `s`, so the
+                    // same variable can also appear in `query ?s`. It is handled
                     // here rather than in `CONS` because `row` is also a
                     // zero-argument internal phase marker (`con("row")`), and
                     // registering it as a constructor would shadow that.
@@ -791,17 +804,13 @@ impl<'w> Checker<'w> {
                         return self.conv_with_kind(&args[0], phase, names, Kind::Row);
                     }
                     if args.is_empty() {
-                        // A bare name in a type position is a *type variable*
-                        // only when it cannot be mistaken for a type name: one
-                        // lowercase letter, which is how every signature here
-                        // spells `r`, `s`, `a`, `k`. Anything longer is a type
-                        // name, and type names are closed. Accepting any bare
-                        // name made `amount = decimal` a fresh variable per
-                        // use, so one column was an `int` in one definition and
-                        // a `string` in another — checked, and wrong.
-                        if is_type_variable(head) {
-                            return Ok(self.rigid(head, names));
-                        }
+                        // A bare name is a type *constructor*, and type names
+                        // are closed. It is never a variable: variables are
+                        // written `?a`. The old rule was "one lowercase letter",
+                        // which made `amount = decimal` — and `x = m`, where `m`
+                        // was a one-letter typo — a fresh variable per use, so
+                        // one column was an `int` in one definition and a
+                        // `string` in another. Checked, and wrong.
                         return Err(Fail::kinded(
                             crate::workspace::DiagKind::UnknownName,
                             unknown_type_name(head),
@@ -824,11 +833,12 @@ impl<'w> Checker<'w> {
                         for arg in &args[..2] {
                             match arg {
                                 TypeExpr::Nat(n, _) => params.push(Ty::Nat(*n)),
-                                TypeExpr::App { head, args, .. }
-                                    if args.is_empty() && is_type_variable(head) =>
-                                {
-                                    params.push(self.rigid(head, names))
-                                }
+                                TypeExpr::App {
+                                    head,
+                                    args,
+                                    var: true,
+                                    ..
+                                } if args.is_empty() => params.push(self.rigid(head, names)),
                                 _ => {
                                     return Err(Fail::from(
                                         "`decimal` takes two numbers — `decimal 10 2` \
@@ -861,7 +871,7 @@ impl<'w> Checker<'w> {
                     }
                     "expr" => {
                         let r = self.conv(&args[0], phase, names)?;
-                        // `expr r (row s)` is the public spelling for a
+                        // `expr ?r (row ?s)` is the public spelling for a
                         // record of column expressions used by select/update.
                         // The aggregate stage wraps this expression in
                         // `agg`, handled below. Keep the field-expression row
@@ -886,7 +896,7 @@ impl<'w> Checker<'w> {
                         let a = self.conv(&args[1], phase, names)?;
                         Ok(expr(phase.clone(), r, a))
                     }
-                    // `keyMap m r` is the row term for applying mapper `m` to
+                    // `keyMap ?m ?r` is the row term for applying mapper `m` to
                     // row `r`. Both arguments are kinded: `m` is `KeyMap`, `r`
                     // is `Row`, and the result is a `Row`.
                     "keyMap" => {
@@ -906,15 +916,15 @@ impl<'w> Checker<'w> {
                             None => Ok(Ty::MapKey(Box::new(m), Box::new(r))),
                         }
                     }
-                    // `merge r s` — right wins on a name collision, and names
+                    // `merge ?r ?s` — right wins on a name collision, and names
                     // only in `s` are appended. A row former, like `Ty::Merge`.
                     "merge" => {
                         let l = self.conv_with_kind(&args[0], phase, names, Kind::Row)?;
                         let r = self.conv_with_kind(&args[1], phase, names, Kind::Row)?;
                         Ok(Ty::Merge(Box::new(l), Box::new(r)))
                     }
-                    // `removeKey k r` — drop the column named by the label `k`
-                    // from row `r`. The label is a type (a `symbol k` variable
+                    // `removeKey ?k ?r` — drop the column named by the label `k`
+                    // from row `r`. The label is a type (a `symbol ?k` variable
                     // or a `Sym` literal), so the signature links `k` to the
                     // result. It reduces at once when both are known.
                     "removeKey" => {
@@ -925,10 +935,10 @@ impl<'w> Checker<'w> {
                             None => Ok(Ty::RemoveKey(Box::new(k), Box::new(r))),
                         }
                     }
-                    // `mapValue w r` — wrap every field type of `r` with the
+                    // `mapValue ?w ?r` — wrap every field type of `r` with the
                     // wrapper `w` names. The witness is a *label*: a closed
                     // `(AsNullable)` names one, and a bare variable is the
-                    // `valueLabel w` a signature declared, so the operation
+                    // `valueLabel ?w` a signature declared, so the operation
                     // travels in the type exactly as `keyMap`'s mapper does.
                     "mapValue" => {
                         let w = self.conv_valuemap_label(&args[0], names)?;
@@ -937,7 +947,7 @@ impl<'w> Checker<'w> {
                     }
                     // `keymapper m` introduces a `KeyMap`-kinded variable `m`,
                     // for a signature that takes a mapper as an argument:
-                    //   keyMap : keymapper m -> query r -> query (keyMap m r)
+                    //   keyMap : keymapper m -> query ?r -> query (keyMap ?m ?r)
                     "keymapper" | "valuemapper" => {
                         let TypeExpr::App { head, args, .. } = &args[0] else {
                             return Err(Fail::from(format!("`{name}` needs a type variable")));
@@ -952,7 +962,7 @@ impl<'w> Checker<'w> {
                         };
                         Ok(self.rigid_with_kind(head, names, kind))
                     }
-                    // `symbol k` — a column label. It is carried as a `keyLabel`
+                    // `symbol ?k` — a column label. It is carried as a `keyLabel`
                     // marker around a `Type` variable, so `infer_app` can
                     // recognise a key parameter and read the stage off the
                     // result. The call site binds the variable to the literal's
@@ -973,7 +983,7 @@ impl<'w> Checker<'w> {
                         } if head == "expr" && inner.len() == 2 => {
                             let r = self.conv(&inner[0], phase, names)?;
                             // The aggregate stage takes a record of aggregate
-                            // expressions, so `agg (expr r (row s))` must keep
+                            // expressions, so `agg (expr ?r (row ?s))` must keep
                             // the record representation used by the stage
                             // constraint while carrying the aggregate phase.
                             if name == "agg" {
@@ -1008,7 +1018,7 @@ impl<'w> Checker<'w> {
                             Ok(expr(con(name), r, a))
                         }
                         _ => Err(Fail::from(format!(
-                            "`{name}` wraps an expression type, e.g. `{name} (expr r int)`"
+                            "`{name}` wraps an expression type, e.g. `{name} (expr ?r int)`"
                         ))),
                     },
                     _ => {
@@ -1078,7 +1088,7 @@ impl<'w> Checker<'w> {
                 "a number is not a type; `decimal p s` is the type that takes one",
             )),
             TypeExpr::App { head, args, .. } => {
-                // `row s` is the record-in-expression-position marker; its
+                // `row ?s` is the record-in-expression-position marker; its
                 // argument is a Row regardless of the kind expected here. See
                 // the same case in `conv`.
                 if head == "row" {
@@ -1124,7 +1134,7 @@ impl<'w> Checker<'w> {
     /// Convert a `mapValue` witness to the label the row term carries.
     ///
     /// A closed wrapper names its label (`(AsNullable)` is `"nullable"`), and a
-    /// bare type variable is the `valueLabel w` a signature declared — the same
+    /// bare type variable is the `valueLabel ?w` a signature declared — the same
     /// variable in the parameter and in the result row, which is what lets the
     /// operation travel in the type instead of being read at each application.
     pub(crate) fn conv_valuemap_label(
@@ -1153,7 +1163,7 @@ impl<'w> Checker<'w> {
     /// `(compose f g)`, `id`, or a bare *variable* of kind `KeyMap`.
     ///
     /// The result is a `Ty`, not a closed `KeyMap`, because a signature may be
-    /// polymorphic in the mapping: `keyMap m r` with `m` a variable is how a
+    /// polymorphic in the mapping: `keyMap ?m ?r` with `m` a variable is how a
     /// helper such as `addPrefix = p => q => q & prefix p` is typed. The term
     /// is retained with the variable in place and reduces once that variable is
     /// bound to a constructor.
@@ -1201,7 +1211,7 @@ impl<'w> Checker<'w> {
                 Ok(km.to_ty())
             }
             // `prependSym k` / `appendSym k` — a prefix or suffix mapper whose
-            // label is a `symbol k` variable. It stays open until the call site
+            // label is a `symbol ?k` variable. It stays open until the call site
             // binds `k` to a literal, then `resolve_mapper` turns it into the
             // concrete `KeyAffix`. Unlike `prefix "x"`, no literal is needed.
             "prependSym" | "appendSym" => {
@@ -1515,7 +1525,7 @@ impl<'w> Checker<'w> {
     ) -> R<Ty> {
         match &e.kind {
             // A record literal is the surface argument of a `row`-typed
-            // position: `expr r (row s)`, `agg (expr r (row s))`, a `winspec`.
+            // position: `expr ?r (row ?s)`, `agg (expr ?r (row ?s))`, a `winspec`.
             // Its fields are named, so the expected row supplies each field's
             // type rather than each field being unified against a fresh
             // variable.
@@ -1525,7 +1535,7 @@ impl<'w> Checker<'w> {
             ExprKind::Lambda(..) => self.check_lambda(env, e, expected),
             // A list literal's element type comes from the expected `list t`.
             ExprKind::List(..) => self.check_list(env, e, expected),
-            // A string literal checked against a `symbol k` label parameter
+            // A string literal checked against a `symbol ?k` label parameter
             // binds `k` to the literal's `Sym`. Only a `keyLabel` expectation
             // takes this path; every other string keeps its `string` type.
             ExprKind::Lit(ast::Lit::Str(s))
@@ -1869,7 +1879,7 @@ impl<'w> Checker<'w> {
                 None => return,
             }
         }
-        // The result is `expr r (decimal p s)` — or `expr r (maybe (decimal p s))`
+        // The result is `expr ?r (decimal p s)` — or `expr ?r (maybe (decimal p s))`
         // for `tryDecimal`, and a *function* when the cast is partially applied
         // (`lift (toDecimal 10 2) .d`): the parameters are inside the wrappers,
         // and behind however many arrows one argument left.
@@ -1905,7 +1915,7 @@ impl<'w> Checker<'w> {
         // `over spec (rowNumber)`: a window function wrapped in `over`, which wants an
         // aggregate. Reported here because the argument's own type is still available;
         // by the time the application's unification fails, the two `over` overloads have
-        // been tried and the message only says `expected agg (…), found winspec a ->
+        // been tried and the message only says `expected agg (…), found winspec ?a ->
         // win (…)` — true, but silent about the function never needing `over`.
         if let Some(msg) = self.over_applied_to_a_window(f, args) {
             return Err(at(e.span)(msg));
@@ -2045,8 +2055,8 @@ impl<'w> Checker<'w> {
                     // `&`, so the reader wrote a subtraction from a *function*.
                     //
                     // Reported **before** the argument is checked, not after.
-                    // Checking it raises `expected expr a b, found expr a int ->
-                    // query a -> query a` from a queued constraint inside `solve` — a
+                    // Checking it raises `expected expr ?a b, found expr ?a int ->
+                    // query ?a -> query ?a` from a queued constraint inside `solve` — a
                     // failure one level below the `&` whose parameter is what the
                     // reader actually wrote — so rewriting that error here never sees
                     // it.
@@ -2126,7 +2136,7 @@ impl<'w> Checker<'w> {
         // Record the **application's own** type after solving, not before.
         //
         // `ft` is only partly determined mid-loop: for `.age + 1` the type is
-        // `expr r a` with `a` still an unsolved variable, and it becomes `int`
+        // `expr ?r a` with `a` still an unsolved variable, and it becomes `int`
         // only once `solve` has run the constraints the earlier arguments
         // queued. Recording the pre-solve form put a variable in the map, which
         // a reader sees as `Unknown` — a type that looks recorded and is not
@@ -2333,7 +2343,7 @@ impl<'w> Checker<'w> {
     /// `case { cond => value; ... }`.
     ///
     /// One shared result type and one row, exactly like `ifThenElse`, whose
-    /// type is `expr r bool -> expr r a -> expr r a -> expr r a`: every
+    /// type is `expr ?r bool -> expr ?r a -> expr ?r a -> expr ?r a`: every
     /// condition is a boolean expression over the same row, every value is an
     /// expression over that row, and all the values have one type. The phase
     /// is left free, because an expression type carries its own phase — a case
@@ -2379,7 +2389,7 @@ impl<'w> Checker<'w> {
         }
         // The phase is a plain unconstrained variable, *not*
         // `fresh_col_phase()`: a `case` is phase-polymorphic like
-        // `ifThenElse`, whose signature declares `expr r a -> expr r a` with
+        // `ifThenElse`, whose signature declares `expr ?r a -> expr ?r a` with
         // `r` free. `fresh_col_phase` marks the variable row-or-win, and `bind`
         // refuses to let such a variable become `agg` — which is the rule that
         // keeps a bare column out of an aggregate. Using it here made every
@@ -2511,14 +2521,14 @@ impl<'w> Checker<'w> {
         let (a, e) = (self.resolve(actual), self.resolve(expected));
         match (&a, &e) {
             // A record literal is the surface argument of
-            // `expr r (row s)` / `agg (expr r (row s))`. Its field
+            // `expr ?r (row ?s)` / `agg (expr ?r (row ?s))`. Its field
             // expressions are retained in the third slot of `record_expr`;
             // the stage constraint attached to the primitive computes the
             // output row in the fourth slot.
             (Ty::Row(..) | Ty::Empty, Ty::Con("record_expr", ea)) if ea.len() == 4 => {
                 self.unify(&ea[2], &a)
             }
-            // The other direction: a signature declares `expr r (row s)` and the
+            // The other direction: a signature declares `expr ?r (row ?s)` and the
             // argument is a record literal. Its fourth slot is the row the
             // record produces, which is what `s` names — for a `select` that is
             // also computed by the stage constraint, and for a join's `take` it
@@ -2553,7 +2563,7 @@ impl<'w> Checker<'w> {
             // literals, not about rows).
             (Ty::Con("list", _), Ty::Con("expr", ea)) if ea.len() == 3 => self.unify(&ea[2], &a),
             // A row expression that does not read a row is a value: `year
-            // currentDate` has the type `expr r int` with `r` unconstrained,
+            // currentDate` has the type `expr ?r int` with `r` unconstrained,
             // because nothing in it refers to a column. Reading it where a
             // scalar is expected is what makes the value position work without
             // a second overload per function — and it is *why* `.d` keeps its
@@ -2615,11 +2625,11 @@ impl<'w> Checker<'w> {
         }
     }
 
-    /// Does this expression read a row? `expr p r a` does when `r` is bound to
+    /// Does this expression read a row? `expr ?p r a` does when `r` is bound to
     /// one. A free row means the expression is built from constants, which is
     /// what makes `year currentDate` a value.
     ///
-    /// The phase matters too: an aggregate (`agg (expr row r a)`) has a free
+    /// The phase matters too: an aggregate (`agg (expr row ?r a)`) has a free
     /// inner row in the same way, and it is *not* a value — it is a row
     /// computation, which the phase slot says.
     fn is_row_free(&self, ea: &[Ty]) -> bool {
@@ -2699,7 +2709,7 @@ impl<'w> Checker<'w> {
 
     /// The nullable advice for a failed overload, if one applies.
     ///
-    /// The `maybe` is *inside* a row expression (`expr r (maybe int)`), so the
+    /// The `maybe` is *inside* a row expression (`expr ?r (maybe int)`), so the
     /// comparison is between the candidates' value slots. The sentence names the
     /// *argument's* type rather than a candidate's parameter: the parameter is
     /// written with the signature's variables (`decimal a b`), and what the reader
@@ -2757,8 +2767,8 @@ impl<'w> Checker<'w> {
     /// this use.
     /// Is `over` being given a function that is already a window?
     ///
-    /// `over : winspec r -> agg (expr r a) -> win (expr r a)` turns an *aggregate* into a
-    /// window. `rowNumber` and its relatives are already `winspec r -> win (…)`, so
+    /// `over : winspec ?r -> agg (expr ?r a) -> win (expr ?r a)` turns an *aggregate* into a
+    /// window. `rowNumber` and its relatives are already `winspec ?r -> win (…)`, so
     /// `over { … } (rowNumber)` cannot type-check — and the reader who wrote it most
     /// likely wanted `rowNumber { … }`, which is the same spec without the wrapper.
     ///
@@ -2789,7 +2799,7 @@ impl<'w> Checker<'w> {
         let Ty::Fun(first, rest) = self.resolve(&ty) else {
             return None;
         };
-        // The result is `expr r (win …)` — `win` is the *phase* argument of `expr`, not a
+        // The result is `expr ?r (win …)` — `win` is the *phase* argument of `expr`, not a
         // type of its own — so the second half is checked through it. Measured: the
         // resolved shape is `Con("winspec", [Gen(0)]) -> Con("expr", [Con("win", []), …])`.
         let phase = match self.resolve(&rest) {
@@ -2895,7 +2905,7 @@ impl<'w> Checker<'w> {
             _ => return None,
         };
         // Is the left operand something a number cannot be? A stage is a function;
-        // `sum` is an `expr r a -> agg (expr r a)`, and `sum - 1` is the same slip in
+        // `sum` is an `expr ?r a -> agg (expr ?r a)`, and `sum - 1` is the same slip in
         // a field. A plain number or column is neither, and is left alone — which is
         // why the name's *type* is looked up rather than its spelling.
         let binding = self.env.scope.get(callee).cloned()?;
@@ -2907,7 +2917,7 @@ impl<'w> Checker<'w> {
         let resolved = self.resolve(&ty);
         let not_a_number = match &resolved {
             // A stage: `limit`, `where`, `order` — and `sum`, whose result is an
-            // `agg (expr r a)`.
+            // `agg (expr ?r a)`.
             Ty::Fun(..) => true,
             other => {
                 let shown = self.show(other);
@@ -3013,7 +3023,7 @@ impl<'w> Checker<'w> {
         match p {
             Table => fun(s.clone(), fun(s, query(self.fresh_row()))),
             Unnest => {
-                // `expr r (list a) -> query r -> query (merge r { value = a })`:
+                // `expr ?r (list a) -> query ?r -> query (merge ?r { value = a })`:
                 // the element joins the input row under `value`.
                 let (r, a) = (self.fresh_row(), self.fresh());
                 let xs = expr(con("row"), r.clone(), list(a.clone()));
@@ -3027,7 +3037,7 @@ impl<'w> Checker<'w> {
                 )
             }
             Lift => {
-                // `(expr r a -> expr r b) -> expr r (maybe a) -> expr r (maybe b)`
+                // `(expr ?r a -> expr ?r b) -> expr ?r (maybe a) -> expr ?r (maybe b)`
                 let (a, b, r) = (self.fresh(), self.fresh(), self.fresh_row());
                 let x = expr(con("row"), r.clone(), Ty::Con("maybe", vec![a.clone()]));
                 let f = fun(
@@ -3087,8 +3097,8 @@ impl<'w> Checker<'w> {
                 )
             }
             // `omit "k"` drops one column. The rule is the definition's own:
-            // the label comes from the signature's `symbol k`, the input row
-            // from its `r`, and the output row is `removeKey k r` — the same
+            // the label comes from the signature's `symbol ?k`, the input row
+            // from its `r`, and the output row is `removeKey ?k ?r` — the same
             // term the signature names, which is what makes the equation
             // `input ~ { k : t | output }` an obligation of *this* stage rather
             // than something a later pass recovers from a composed result.
@@ -3107,8 +3117,8 @@ impl<'w> Checker<'w> {
             }
             // `mapValue "w"` wraps every field type. The rule is the
             // definition's own: the wrapper comes from the signature's
-            // `valueLabel w`, the input row from its `r`, and the output row is
-            // the term `mapValue w r` the signature names — so the equation is
+            // `valueLabel ?w`, the input row from its `r`, and the output row is
+            // the term `mapValue ?w ?r` the signature names — so the equation is
             // an obligation of *this* stage rather than something a later pass
             // recovers from a composed result.
             MapValue => {
@@ -3189,7 +3199,7 @@ impl<'w> Checker<'w> {
                     },
                     sp,
                 ));
-                // The output row is `merge l { exists = bool }`; `Cons::JoinOut` is
+                // The output row is `merge ?l { exists = bool }`; `Cons::JoinOut` is
                 // the rule that computes a merge, reused rather than re-derived so
                 // the two cannot disagree.
                 let exists = self.fresh_row();
@@ -3247,7 +3257,7 @@ impl<'w> Checker<'w> {
             Filtered | DistinctAgg | Over => {
                 // `filtered p a`, `distinctAgg a`, `over spec a`: the aggregate
                 // keeps its own result type, so the signature says what it
-                // says and the arena rewrites the SQL. `agg (expr r a)` is the
+                // says and the arena rewrites the SQL. `agg (expr ?r a)` is the
                 // type of an aggregate whose argument is one row expression —
                 // every aggregate here is one.
                 let (r, a) = (self.fresh_row(), self.fresh());
@@ -3425,7 +3435,7 @@ impl<'w> Checker<'w> {
         // While the *result* is still unknown, which form is wanted depends on
         // the context: `just "x"` is the value form in `v : maybe string = …`
         // and the row form inside `(.email == just "x")`, where the comparison
-        // expects `expr r (maybe string)`. Waiting lets the context decide; a
+        // expects `expr ?r (maybe string)`. Waiting lets the context decide; a
         // definition that never pins the result is finalized by `prefer`.
         if self.result_is_open(target) && self.results_disagree(*module, &fits) {
             return Ok(false);
@@ -3896,7 +3906,7 @@ impl<'w> Checker<'w> {
             })
             .collect();
         // `output` is the row of updated fields (`s`), while
-        // `result` is the merged query row (`merge r s`).
+        // `result` is the merged query row (`merge ?r ?s`).
         let updated = values
             .iter()
             .map(|(name, _, value)| (name.clone(), value.clone()))
@@ -3907,7 +3917,7 @@ impl<'w> Checker<'w> {
     }
 
     /// `omit "k"` *is* this equation, and the equation is the stage's own:
-    /// `output` is `removeKey k input`, so it reduces exactly when the column
+    /// `output` is `removeKey ?k input`, so it reduces exactly when the column
     /// is there. The rule belongs to `omit`'s definition and is instantiated
     /// per use, so the label arrives as the signature's `k` bound to the
     /// literal's `Sym` — never recovered from a composed result row.
@@ -3919,7 +3929,7 @@ impl<'w> Checker<'w> {
         let Cons::Omit { label, output, .. } = c else {
             unreachable!("dispatched on Cons::Omit")
         };
-        // The label is a `symbol k` until the use site binds it to a literal.
+        // The label is a `symbol ?k` until the use site binds it to a literal.
         if !matches!(self.resolve(label), Ty::Sym(_)) {
             return Ok(false);
         }
@@ -3931,7 +3941,7 @@ impl<'w> Checker<'w> {
     }
 
     /// `mapValue "w"` *is* this equation, and the equation is the stage's own:
-    /// `output` is `mapValue w input`, so it reduces exactly when the wrapper
+    /// `output` is `mapValue ?w input`, so it reduces exactly when the wrapper
     /// and the row are known. The rule belongs to `mapValue`'s definition and
     /// is instantiated per use, so the wrapper arrives as the signature's `w`
     /// bound to the literal's `Sym` — never recovered from a composed row.
@@ -3943,7 +3953,7 @@ impl<'w> Checker<'w> {
         let Cons::MapValue { label, output } = c else {
             unreachable!("dispatched on Cons::MapValue")
         };
-        // The label is a `valueLabel w` variable until the use site binds it.
+        // The label is a `valueLabel ?w` variable until the use site binds it.
         if !matches!(self.resolve(label), Ty::Sym(_)) {
             return Ok(false);
         }
@@ -3957,7 +3967,7 @@ impl<'w> Checker<'w> {
     /// Merge combines two rows; wait if either is open.
     ///
     /// The rule is the reducer's (`reduce_merge`), not a second spelling of it
-    /// here: the row this constraint produces and the row a `merge` term
+    /// here: the row this constraint produces and the row ?a `merge` term
     /// reduces to have to be the same rule, or `update`'s signature and a
     /// `merge` in a signature could disagree about a collision.
     fn step_merge(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
@@ -4014,7 +4024,7 @@ impl<'w> Checker<'w> {
             return Ok(true);
         }
         // A name both inputs have: the merge keeps the left value and drops the
-        // right, which is the shape `merge r s` describes. That is *allowed* —
+        // right, which is the shape `merge ?r ?s` describes. That is *allowed* —
         // making it an error forced a `select` on every join whose tables share
         // an `id`, which is most of them — but it is worth saying, because the
         // right column cannot be read afterwards (`.<x`/`.>x` name the inputs
@@ -4084,7 +4094,7 @@ select {{ right_{first} = .{first} }}) (.<a == .>b)`"
         let lf: Vec<_> = lf.into_iter().map(|c| wrap(self, nullable.0, c)).collect();
         let rf: Vec<_> = rf.into_iter().map(|c| wrap(self, nullable.1, c)).collect();
         let actual = row(rules::join_columns(&lf, &rf), Ty::Empty);
-        // An annotated join wrapper exposes `merge r s` in its result
+        // An annotated join wrapper exposes `merge ?r ?s` in its result
         // type. Bind those row operands from the actual inputs before
         // comparing the computed output, so fields discovered by the
         // predicate (`.<id`) cannot leave the public merge open.
@@ -4159,14 +4169,6 @@ select {{ right_{first} = .{first} }}) (.<a == .>b)`"
     }
 }
 
-/// A type variable is a single lowercase letter.
-///
-/// The language has no `forall`, so variables are implicit; restricting them to
-/// one letter is what keeps an unknown *type name* from silently becoming one.
-fn is_type_variable(name: &str) -> bool {
-    name.len() == 1 && name.as_bytes()[0].is_ascii_lowercase()
-}
-
 /// The diagnostic for a type name the language does not have.
 fn unknown_type_name(name: &str) -> String {
     const KNOWN: &[&str] = &[
@@ -4189,14 +4191,17 @@ fn unknown_type_name(name: &str) -> String {
         .map(|k| (*k, crate::suggest::edit_distance(name, k)))
         .filter(|(k, d)| *d <= 2 || k.starts_with(name) || name.starts_with(*k))
         .min_by_key(|(_, d)| *d);
+    // The hint names the sigil, because that is the one thing a writer of a
+    // generic signature has to know and the one thing the old rule got wrong: a
+    // bare name is never a variable, so `?a` is how a variable is written.
     match near {
         Some((k, _)) => format!(
-            "unknown type `{name}`: did you mean `{k}`? Type names are closed, and a bare name \
-             is a type variable only when it is a single lowercase letter"
+            "unknown type `{name}`: did you mean `{k}`? Type names are closed; a type \
+             *variable* is written with a `?`, as in `?a`"
         ),
         None => format!(
-            "unknown type `{name}`: type names are closed ({}); a bare name is a type variable \
-             only when it is a single lowercase letter",
+            "unknown type `{name}`: type names are closed ({}); a type *variable* is \
+             written with a `?`, as in `?a`",
             KNOWN.join(", ")
         ),
     }

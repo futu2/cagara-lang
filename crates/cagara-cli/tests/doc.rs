@@ -139,8 +139,8 @@ fn an_overload_set_is_documented_and_reported_once() {
     let f = dir.write(
         "q.cagara",
         "## Adds a column up.\n\
-         total : expr r int -> agg (expr r (maybe int)) = sql \"SUM($1)\"\n\
-         total : expr r float -> agg (expr r (maybe float)) = sql \"SUM($1)\"\n\
+         total : expr ?r int -> agg (expr ?r (maybe int)) = sql \"SUM($1)\"\n\
+         total : expr ?r float -> agg (expr ?r (maybe float)) = sql \"SUM($1)\"\n\
          t : query { a = int } = table \"s\" \"t\"\n\
          main = t & agg { s = total .a }\n",
     );
@@ -157,8 +157,8 @@ fn an_overload_set_is_documented_and_reported_once() {
     let text = stdout(&out);
     assert_eq!(text.matches("## `total`").count(), 1, "{text}");
     assert_eq!(text.matches("Adds a column up.").count(), 1, "{text}");
-    assert!(text.contains("total : expr r int -> agg (expr r (maybe int))"));
-    assert!(text.contains("total : expr r float -> agg (expr r (maybe float))"));
+    assert!(text.contains("total : expr ?r int -> agg (expr ?r (maybe int))"));
+    assert!(text.contains("total : expr ?r float -> agg (expr ?r (maybe float))"));
 }
 
 /// A table's columns are fields of one definition, so a column's documentation

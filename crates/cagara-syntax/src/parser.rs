@@ -511,7 +511,14 @@ impl<'a> Parser<'a> {
         !self.at_boundary()
             && matches!(
                 self.peek(),
-                Some(Token::Ident | Token::LBrace | Token::LParen | Token::String | Token::Int)
+                Some(
+                    Token::Ident
+                        | Token::TyVar
+                        | Token::LBrace
+                        | Token::LParen
+                        | Token::String
+                        | Token::Int
+                )
             )
     }
 
@@ -532,6 +539,14 @@ impl<'a> Parser<'a> {
     fn ty_atom(&mut self) {
         match self.peek().filter(|_| !self.at_boundary()) {
             Some(Token::Ident) => {
+                self.start(K::TyApp);
+                self.bump();
+                self.finish();
+            }
+            // `?a` is a type *variable*, which is an atom and never a head: a
+            // variable takes no arguments, so `?f int` is a syntax error rather
+            // than a constructor application.
+            Some(Token::TyVar) => {
                 self.start(K::TyApp);
                 self.bump();
                 self.finish();
@@ -574,10 +589,19 @@ impl<'a> Parser<'a> {
                 }
                 if self.at(Token::Bar) {
                     self.bump();
-                    if self.at_inner(Token::Ident) {
+                    // The tail is a type variable, so it is written `?r`. A
+                    // bare name here was the old spelling and is now an error
+                    // that says what to write.
+                    if self.at_inner(Token::TyVar) {
+                        self.bump();
+                    } else if self.at_inner(Token::Ident) {
+                        let text = self.peek_lex(0).map(|l| l.text).unwrap_or("?");
+                        self.error(format!(
+                            "a row's tail is a type variable: write `| ?{text}`, not `| {text}`"
+                        ));
                         self.bump();
                     } else {
-                        self.error("expected row variable after `|`");
+                        self.error("expected a row variable after `|`, written `| ?r`");
                     }
                 }
                 self.expect(Token::RBrace, "`}`");
@@ -608,7 +632,7 @@ impl<'a> Parser<'a> {
     /// annotation, as in `(x : string) => body`?
     ///
     /// The whole parameter is scanned to its closing bracket, because the type
-    /// may nest (`(x : query { id = int | r }) => ...`), and only then is the
+    /// may nest (`(x : query { id = int | ?r }) => ...`), and only then is the
     /// arrow checked: without one, the group is an ordinary parenthesised
     /// expression, which `atom` handles. Trivia is skipped, so spacing inside
     /// the parentheses is free. An annotated parameter is only recognised here,
@@ -1432,7 +1456,7 @@ mod tests {
 
     #[test]
     fn types_parse() {
-        let p = parse("u : query { id = int, age = int | r } -> expr r bool = x");
+        let p = parse("u : query { id = int, age = int | ?r } -> expr ?r bool = x");
         assert!(p.errors.is_empty(), "{:?}", p.errors);
         let ann = p
             .syntax()
@@ -1463,7 +1487,7 @@ mod tests {
         }
         // The word still introduces its own form where that form is expected.
         assert!(parse("q = case { true => 1 }\n").errors.is_empty());
-        assert!(parse("q = 1\nr : expr r int = sql \"1\"\n")
+        assert!(parse("q = 1\nr : expr ?r int = sql \"1\"\n")
             .errors
             .is_empty());
     }
@@ -1485,7 +1509,7 @@ mod tests {
 
     #[test]
     fn operator_definition() {
-        let p = parse("_+_ : expr r int -> expr r int -> expr r int = sql \"$1 + $2\"");
+        let p = parse("_+_ : expr ?r int -> expr ?r int -> expr ?r int = sql \"$1 + $2\"");
         assert!(p.errors.is_empty(), "{:?}", p.errors);
         assert!(p.syntax().descendants().any(|n| n.kind() == K::SqlExpr));
     }

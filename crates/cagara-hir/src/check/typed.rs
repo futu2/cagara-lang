@@ -62,7 +62,7 @@ pub struct TypedExpr {
     /// The query stage this node applied, if it is one.
     ///
     /// A stage is a *function value* — `prefix "u_"` has the type
-    /// `query r -> query (keyMap m r)` — so applying one is an ordinary
+    /// `query ?r -> query (keyMap ?m ?r)` — so applying one is an ordinary
     /// application. What makes it a stage is the callee's own scheme, and the
     /// facts recorded here are the checker's: the operation the definition
     /// declared, and the rows that stage's signature instance read and

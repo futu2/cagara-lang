@@ -19,9 +19,9 @@ pub type DefId = (usize, usize);
 /// Which checked constructor a `sql` template lowers to.
 ///
 /// Read from the template's **declared** signature, not from its resolved
-/// scheme: `upper : expr r string -> expr r string` is a scalar template,
-/// `sum : expr r a -> agg (expr r a)` an aggregate, `rowNumber : winspec r a ->
-/// win (expr r a)` a window function. The declared form is the only place that
+/// scheme: `upper : expr ?r string -> expr ?r string` is a scalar template,
+/// `sum : expr ?r a -> agg (expr ?r a)` an aggregate, `rowNumber : winspec ?r a ->
+/// win (expr ?r a)` a window function. The declared form is the only place that
 /// distinction survives, because once a template is applied its scheme says
 /// what it *returned*, not which node built it.
 ///
@@ -32,11 +32,11 @@ pub type DefId = (usize, usize);
 /// answers rather than a compile error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemplateKind {
-    /// A scalar template: `expr r a`.
+    /// A scalar template: `expr ?r a`.
     Scalar,
-    /// An aggregate template: `agg (expr r a)`.
+    /// An aggregate template: `agg (expr ?r a)`.
     Agg,
-    /// A window function: `win (expr r a)`.
+    /// A window function: `win (expr ?r a)`.
     Win,
 }
 
@@ -94,7 +94,7 @@ impl Resolved {
 /// been two silently different answers, not a compile error.
 ///
 /// Read from the type expression rather than the resolved scheme because only
-/// the declared form distinguishes `expr r a` from `agg (expr r a)`; after
+/// the declared form distinguishes `expr ?r a` from `agg (expr ?r a)`; after
 /// resolution both are just the result type.
 pub fn declared_template_kind(d: &ast::Def) -> TemplateKind {
     use ast::TypeExpr;

@@ -150,6 +150,11 @@ const FRAGMENTS: &[(&str, &str)] = &[
         "a fragment of the query above",
     ),
     (
+        "research/DESIGN-REVIEW.md:5",
+        "quotes the prelude's `lpad` signature as it was when the review was written \
+         (bare type variables, before the `?` sigil); it is a dated record, not a program",
+    ),
+    (
         "research/DESIGN-REVIEW.md:6",
         "proposed syntax (`rename`, `extend`) that the language does not have",
     ),

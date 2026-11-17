@@ -13,7 +13,7 @@ use crate::ir::Phase;
 /// *retained*, which is what makes `prefix p` usable for a lambda parameter.
 pub(crate) fn reduce_mapkey(km: &Ty, row: &Ty) -> Option<Ty> {
     // A variable mapper cannot be applied: there is no closed transformation
-    // yet. The caller retains `keyMap m r` and tries again after binding.
+    // yet. The caller retains `keyMap ?m ?r` and tries again after binding.
     let km = KeyMap::of_ty(km)?;
     match row {
         Ty::Empty => Some(Ty::Empty),
@@ -232,12 +232,12 @@ pub(crate) const CONS: &[(&str, usize)] = &[
     ("sortkey", 1),
     ("frame", 0),
     ("bound", 0),
-    // `row s` is the type of a record-of-columns expression, i.e. the argument
+    // `row ?s` is the type of a record-of-columns expression, i.e. the argument
     // of `select`/`update`/`agg`. It is a distinct constructor from `s` itself
     // because a bare row used as a *value* would be a different (and
     // nonsensical) thing: `row` marks a row-phase record in expression
     // position. Its argument is a Row.
-    // `keyMap m r` — the row term for a key mapping. `keymapper m` binds a
+    // `keyMap ?m ?r` — the row term for a key mapping. `keymapper ?m` binds a
     // mapper variable of kind KeyMap.
     ("keyMap", 2),
     ("keymapper", 1),
@@ -245,19 +245,19 @@ pub(crate) const CONS: &[(&str, usize)] = &[
     // application, where the literal still is, so its parameter carries a
     // marker instead of a value type; `key_stage` recognises it and records the
     // literal in the stage's constraint or witness.
-    // `valueLabel w` — the witness `mapValue` takes, carried as a label so the
+    // `valueLabel ?w` — the witness `mapValue` takes, carried as a label so the
     // operation travels in the type.
     ("valueLabel", 1),
-    // `merge r s` — the row former for a join's output row.
+    // `merge ?r ?s` — the row former for a join's output row.
     ("merge", 2),
-    // `mapValue w r` — the row term for a uniform type wrapper. `w` is the
+    // `mapValue ?w r` — the row term for a uniform type wrapper. `w` is the
     // wrapper marker, read at the application like a key.
     ("mapValue", 2),
     ("valuemapper", 1),
-    // `symbol k` — a column label, read at the application like a key. The
+    // `symbol ?k` — a column label, read at the application like a key. The
     // literal name is what `omit`/`prefix`/`suffix` take as their argument.
     ("symbol", 1),
-    // `removeKey k r` — the row former for dropping one column. `k` is a
+    // `removeKey ?k ?r` — the row former for dropping one column. `k` is a
     // label type (`Sym` or a `symbol` variable); see `reduce_removekey`.
     ("removeKey", 2),
     // `prependSym k` / `appendSym k` — label-driven prefix and suffix mappers.
@@ -337,7 +337,7 @@ pub(crate) fn is_join(t: &Ty) -> bool {
     matches!(t, Ty::Con("join", _))
 }
 
-/// Reduce `removeKey k row` when `row` is closed. Removes the field named `k`
+/// Reduce `removeKey ?k row` when `row` is closed. Removes the field named `k`
 /// and keeps the order of the rest. Returns `None` while the row is open, or
 /// when `k` is absent: the caller reports that as a missing column.
 pub(crate) fn reduce_removekey(label: &Ty, row: &Ty) -> Option<Ty> {

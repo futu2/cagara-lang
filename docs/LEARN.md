@@ -140,7 +140,7 @@ There is also `maybe a`, a value that may be SQL `NULL`; see
 
 There are no user-declared types, and a name in a type position that is not one
 of the constructors above is not "an unknown type" — it is a **type parameter**,
-the same mechanism as the `a` in `id : a -> a`. The definition becomes
+the same mechanism as the `a` in `id : ?a -> ?a`. The definition becomes
 polymorphic in it and every use instantiates it afresh, so a column written
 `amount = decimal` can be used as a `string` in one query and as an `int` in
 another, and neither is rejected. A typo in a column type is therefore silent;
@@ -200,7 +200,7 @@ partial application works so well (see [section 12](#12-functions-types-and-the-
 
 A stage can be written by name — `q & where p` — or with its shorthand —
 `q &? p`. They are the same call: the shorthand is a one-line wrapper in the
-prelude (`_&?_ : query r -> expr r bool -> query r = q => p => where p q`), not a
+prelude (`_&?_ : query ?r -> expr ?r bool -> query ?r = q => p => where p q`), not a
 second implementation, so it carries `where`'s signatures (including its `maybe
 bool` one), its phases, and its SQL. Nothing can drift.
 
@@ -648,7 +648,7 @@ column name. Section
 [5](#5-choosing-columns-select-and-update) covers `update` in full.
 
 **Keeping both sides of a join.** Since a shared name resolves to the left
-column — the join's output row is `merge r s` — rename on one side *before*
+column — the join's output row is `merge ?r ?s` — rename on one side *before*
 joining when you need the right column too. `.<x` / `.>x` belong to the join
 predicate only, so `.>id` is **not** available after the join. The compiler warns
 about the name it drops; the warning does not fail the build:
@@ -862,7 +862,7 @@ aggregate: `filtered (.status == "paid") (sum .amount)` keeps the same type.
 
 ### Filtered aggregates
 
-An aggregate is a value — `agg (expr r a)` is a type — so the three ways to
+An aggregate is a value — `agg (expr ?r a)` is a type — so the three ways to
 modify one are *applications of it*, not more names:
 
 | Combinator | Meaning | Example |
@@ -923,8 +923,8 @@ aggregates in one stage need different predicates:
 
 Nullability is a real part of the type system, not an afterthought. `maybe a` is
 the type of a value that may be SQL `NULL`, and — importantly — **a type
-variable in a signature means a non-null type**, so `expr r a` and
-`expr r (maybe a)` are different types. Operators require non-null arguments.
+variable in a signature means a non-null type**, so `expr ?r a` and
+`expr ?r (maybe a)` are different types. Operators require non-null arguments.
 
 Where nullability comes from:
 
@@ -1102,7 +1102,7 @@ All three are optional; `{}` is a valid spec.
 ```haskell
 bad  = users & select {.id, ks = [asc .age]}   # field `ks` of `select` must be a
                                                # column expression or constant, found list
-bad2 = users & where ([1, 2] == [1, 2])        # type mismatch: expected expr a b, found list int
+bad2 = users & where ([1, 2] == [1, 2])        # type mismatch: expected expr ?a b, found list int
 bad3 = users & select {.id, rn = rowNumber [asc .age]}
                                                # expected winspec a, found list (sortkey ...)
 ```
@@ -1156,7 +1156,7 @@ Frames are built from `rows` and the bounds `unboundedPreceding`,
 frames cover the common cases: `wholePartition` and `runningFrame`.
 
 Note that a frame is **not** a spec. `lag wholePartition .amount` is a type
-error (`expected winspec a, found frame`); wrap it:
+error (`expected winspec ?a, found frame`); wrap it:
 `lag {frame = wholePartition} .amount`.
 
 ### Windows may not go where a value cannot
@@ -1276,8 +1276,8 @@ It is built on the `sql "..."` and `primitive "..."` **body forms**, which are
 the whole of what the Rust core provides:
 
 ```haskell
-table : string -> string -> query r = primitive "__table"
-upper : expr r string -> expr r string = sql "UPPER($1)"
+table : string -> string -> query ?r = primitive "__table"
+upper : expr ?r string -> expr ?r string = sql "UPPER($1)"
 ```
 
 A body form is syntax, not a name, so `primitive "__table"` needs no import —
@@ -1290,7 +1290,7 @@ A module that wants none of it puts this on the **first line**:
 
 ```haskell
 # no prelude
-table : string -> string -> query r = primitive "__table"
+table : string -> string -> query ?r = primitive "__table"
 t : query { a = int } = table "s" "t"
 ```
 
@@ -1400,17 +1400,17 @@ users  : query { id = int, name = string, age = int, active = bool }
 adults : query { id = int, label = string }
 ```
 
-Expression types are written `expr r a` — an expression over row `r` producing
-`a` — plus `agg (expr r a)` for an aggregate and `win (expr r a)` for a window.
+Expression types are written `expr ?r a` — an expression over row `r` producing
+`a` — plus `agg (expr ?r a)` for an aggregate and `win (expr ?r a)` for a window.
 You mostly will not write these yourself, but they appear in signatures and in
 error messages.
 
 A helper that reads a named column can still have a signature: name the fields
-it needs and use `| r` for the rest of the row. A bare `query r` says nothing
+it needs and use `| r` for the rest of the row. A bare `query ?r` says nothing
 about the row's fields, so it cannot be used for a column-reading helper:
 
 ```haskell
-byId : expr { id = int | r } int -> query { id = int | r } -> query { id = int | r } =
+byId : expr { id = int | ?r } int -> query { id = int | ?r } -> query { id = int | ?r } =
   i => q => where (.id == i) q
 ```
 
@@ -1850,7 +1850,7 @@ a = users & onlyAdults
 
 The brackets are required — `q : query {...} =>` does not parse. A type
 variable in the annotation is filled in by the argument, so
-`(least : expr r int) => q => where (.age > least) q` is accepted wherever the
+`(least : expr ?r int) => q => where (.age > least) q` is accepted wherever the
 row it is given has a readable `age`: it is the same `r` as the query's, not a
 promise the helper works at every row.
 
@@ -1906,7 +1906,7 @@ When the prelude does not have what you need, a `sql` template drops down to
 SQL text with `$1`, `$2`, ... placeholders:
 
 ```haskell
-myUpper : expr r string -> expr r string = sql "UPPER($1)"
+myUpper : expr ?r string -> expr ?r string = sql "UPPER($1)"
 ```
 
 **The type signature is required.** It gives the template its arity (from the
@@ -1914,7 +1914,7 @@ arrows) and its phase (from the result head, `expr` / `agg` / `win`):
 
 ```
 error: `bad` needs a type signature: a `sql` template takes its arity and phase
-       from it, e.g. `bad : expr r string -> expr r string = sql "UPPER($1)"`
+       from it, e.g. `bad : expr ?r string -> expr ?r string = sql "UPPER($1)"`
 ```
 
 Placeholders are validated at the definition: they must be exactly `$1` through
@@ -2152,8 +2152,8 @@ prelude, and `-` reads stdin.
 The language server, `cagara lsp`, provides diagnostics, hover with inferred
 types, go-to-definition, find-references, document symbols, and completion
 (including column completion after `.`, `.<`, and `.>`). Hovering a column shows
-the expression type it has there — `expr r string`, or `expr (join r s) int` for
-a side-qualified one — because that is the shape a parameter of type `expr r a`
+the expression type it has there — `expr ?r string`, or `expr (join r s) int` for
+a side-qualified one — because that is the shape a parameter of type `expr ?r a`
 accepts; `r` stands for the input row of the enclosing stage. Editor
 integrations are in [`editors/vscode`](../editors/vscode) and
 [`editors/nvim`](../editors/nvim).

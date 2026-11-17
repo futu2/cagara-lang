@@ -40,7 +40,7 @@ notes](#historical-notes); it is history, not a plan.
   T-SQL, BigQuery, Spark) — the IR carries the predicate and `dialect.rs` picks the
   spelling. `distinctAgg` is `SUM(DISTINCT x)` everywhere.
 - A single lowercase letter in a type position is a type *parameter* (that is
-  what makes `id : a -> a` work); anything else must be a constructor the
+  what makes `id : ?a -> ?a` work); anything else must be a constructor the
   language has, and a near miss is reported with a "did you mean". An explicit
   binder for type parameters would let a one-letter typo be reported too, and is
   a language change rather than a check.
@@ -487,7 +487,7 @@ describing a value it cannot hold.
   because the join machinery threads a predicate through every stage and `ON TRUE` is the
   same product — measured on five engines, with SQLite giving both forms one query plan.
 - `over { … } (rowNumber)` says the function already takes the spec. The old message
-  (`expected agg (…), found winspec a -> win (…)`) described the overload set rather than
+  (`expected agg (…), found winspec ?a -> win (…)`) described the overload set rather than
   the mistake. Reported in `infer_app`, where the argument's type is still available.
 - `docs/PERFORMANCE.md` no longer implies `nix develop` is needed for the benchmark.
 
@@ -521,12 +521,12 @@ which the language does not offer and does not need to.
 
 **`listMap` and `listFilter` cannot be built, and this was measured rather than assumed.**
 They need the engine to run a lambda over each element — DuckDB's
-`list_transform(xs, x -> x + 1)`, PostgreSQL's `ARRAY(SELECT f(x) FROM unnest(xs) x)`. A
+`list_transform(xs, x -> ?x + 1)`, PostgreSQL's `ARRAY(SELECT f(x) FROM unnest(xs) x)`. A
 Cagara lambda is a *compile-time* value: it beta-reduces away, and a `sql "…"` template
 receives its argument as an opaque expression, not as something whose parameter can be
-substituted. Measured: a helper `lf : (expr r int -> expr r bool) -> … = p => xs => xs`
+substituted. Measured: a helper `lf : (expr ?r int -> expr ?r bool) -> … = p => xs => xs`
 compiles and the lambda is simply dropped — the generated SQL is `SELECT xs AS v`. There
-is no way to render `x -> x + 1` from it, so both functions would be a lie. Doing it
+is no way to render `x -> ?x + 1` from it, so both functions would be a lie. Doing it
 properly means either a new IR node for a lambda-over-list (and a lowering rule per
 target) or a stage that takes an expression over `value` and a list — a language change,
 not a prelude addition.
@@ -543,10 +543,10 @@ not a prelude addition.
   one prelude function the differential suite cannot check by rows, which its test says.
 
 - A stage given no argument says what it needs. `q = u & where` reported
-  `expected query {…}, found expr a b`; the check had to go in `unify_inner`'s `Fun`/`Fun`
+  `expected query {…}, found expr ?a b`; the check had to go in `unify_inner`'s `Fun`/`Fun`
   arm, where both whole function types still exist — three attempts in `infer_app` and
   `mismatch` never fired, because by then the stage's type is gone. Two measured details
-  decided the wording: the parameter is `expr a b` with `b` still open (so the printed form
+  decided the wording: the parameter is `expr ?a b` with `b` still open (so the printed form
   cannot be matched), and `select`/`agg` have a `record_expr` parameter rather than an
   `expr`. An arity test keeps the prelude's own stage-shaped `_&|_` out.
 

@@ -283,7 +283,7 @@ impl<'w> Checker<'w> {
     ///
     /// The term's stored row is resolved first, because it was captured when
     /// the stage ran, which may have been before the row's tail was bound. That
-    /// resolution is what turns a retained `keyMap m r` into a reducible one.
+    /// resolution is what turns a retained `keyMap ?m ?r` into a reducible one.
     pub(crate) fn reduce_mapkey_pair(&mut self, a: &Ty, e: &Ty) -> Option<(Ty, Ty)> {
         match (a, e) {
             // Two `keyMap` terms unify structurally, not by reduction: their
@@ -333,7 +333,7 @@ impl<'w> Checker<'w> {
             Some(reduced) => reduced,
             None => {
                 // `resolve` follows only a top-level variable, so a row that is
-                // still open *inside* — a chained key stage's `keyMap m r` whose
+                // still open *inside* — a chained key stage's `keyMap ?m ?r` whose
                 // `r` has been bound since, or a narrowed `{ … | tail }` — reads
                 // as open here even though it has become reducible. `flatten`
                 // does follow those, and hands back the term itself as the tail
@@ -446,7 +446,7 @@ impl<'w> Checker<'w> {
                 }
             }
         }
-        // R-MapKey-Closed: `keyMap m row` reduces as soon as `row` is known.
+        // R-MapKey-Closed: `keyMap ?m row` reduces as soon as `row` is known.
         //
         // A key stage is registered while its input may still be an unresolved
         // variable, in which case the term is retained (R-MapKey-Open). The
@@ -504,7 +504,7 @@ impl<'w> Checker<'w> {
             // the same literal — `prefix "u_"` with `prefix "u_"`. Different
             // affixes are a genuine mismatch, reported as such.
             (Ty::KeyAffix(ca, sa), Ty::KeyAffix(cb, sb)) if ca == cb && sa == sb => Ok(()),
-            // A literal type unifies only with the same literal: `symbol k`
+            // A literal type unifies only with the same literal: `symbol ?k`
             // bound to `"k"` and nothing else.
             (Ty::Sym(sa), Ty::Sym(sb)) if sa == sb => Ok(()),
             // A type-level number unifies only with itself: a precision is not a
@@ -565,7 +565,7 @@ impl<'w> Checker<'w> {
             // an empty field list plus the term as their tail, so comparing the
             // tails there would re-enter this unification on the same terms and
             // recurse until the depth bound. It is also the honest reading —
-            // `removeKey k r` is equal to `removeKey k' r'` exactly when the
+            // `removeKey ?k ?r` is equal to `removeKey ?k' r'` exactly when the
             // labels and the rows are.
             (Ty::RemoveKey(ka, ra), Ty::RemoveKey(kb, rb)) => {
                 let (ka, ra, kb, rb) = (ka.clone(), ra.clone(), kb.clone(), rb.clone());
@@ -595,11 +595,11 @@ impl<'w> Checker<'w> {
                 let (a1, r1, a2, r2) = (a1.clone(), r1.clone(), a2.clone(), r2.clone());
                 // A stage handed the query where it wanted its own argument.
                 //
-                // `u & where` is `_&_ u where`, so `where : expr r bool -> query r ->
-                // query r` is unified against `query {…} -> b` — measured, those are the
+                // `u & where` is `_&_ u where`, so `where : expr ?r bool -> query ?r ->
+                // query ?r` is unified against `query {…} -> b` — measured, those are the
                 // two types this arm receives. Unifying the parameters then fails between
-                // `expr r bool` and `query {…}`, which is reported one level up as
-                // `expected query {…}, found expr a b`: a shape the reader never wrote,
+                // `expr ?r bool` and `query {…}`, which is reported one level up as
+                // `expected query {…}, found expr ?a b`: a shape the reader never wrote,
                 // and one that never says the stage is short of an argument.
                 //
                 // Checked here because this arm still has both *whole* function types.
@@ -617,7 +617,7 @@ impl<'w> Checker<'w> {
     /// Is a stage being given the query where it still wants an argument?
     ///
     /// The shape is exact, which is what keeps this from being a guess: a stage of this
-    /// kind is `P -> query r -> query q` — two parameters, the second the query it
+    /// kind is `P -> query ?r -> query ?q` — two parameters, the second the query it
     /// consumes, the result a query. All six of `where`, `select`, `agg`, `order`,
     /// `limit` and `offset` have it; `distinct` has one parameter and `_&_`'s result is
     /// not a query, so neither is confused for one.
@@ -643,7 +643,7 @@ impl<'w> Checker<'w> {
         // parameter slot on the other, and **one parameter fewer** on that side.
         //
         // The arity test is what keeps the prelude's own definitions out. `_&|_` is
-        // `query s -> query r -> query r` — stage-shaped by every other measure — and it
+        // `query ?s -> query ?r -> query ?r` — stage-shaped by every other measure — and it
         // is unified against its own signature whenever a definition is reconciled with
         // the type it declares. Both sides having two parameters means two stages, not a
         // stage handed a pipeline; only `query -> b` is that.
@@ -659,7 +659,7 @@ impl<'w> Checker<'w> {
         // What it still wants, in the reader's words.
         //
         // Read from the *type structure*, not from its printed form: `where`'s parameter
-        // is `expr a b` with `b` still an unbound variable, so a check for the word
+        // is `expr ?a b` with `b` still an unbound variable, so a check for the word
         // `bool` never matches and every stage fell through to the generic message. The
         // third argument of `expr` is the value's type — `bool` for a predicate, `int`
         // for a count, an open variable for a record of fields — and that is what tells
@@ -675,7 +675,7 @@ impl<'w> Checker<'w> {
                 Ty::Con("agg", _) => ("an aggregate", "& agg { n = count }"),
                 _ => ("a record of fields", "& select { x = .id }"),
             },
-            // `expr r a` with the value type still open or known: `where`'s predicate and
+            // `expr ?r a` with the value type still open or known: `where`'s predicate and
             // `limit`/`offset`'s count, which are the two that are not records.
             Ty::Con("expr", ea) if ea.len() == 3 => match self.resolve(&ea[2]) {
                 Ty::Con("bool", _) => ("a predicate", "& where (.id > 1)"),

@@ -13,21 +13,21 @@
 ##
 ## Both branches are checked at the same expression phase, so it also works
 ## after `agg` or `select` when the surrounding stage permits that phase.
-ifThenElse : expr r bool -> expr r a -> expr r a -> expr r a =
+ifThenElse : expr ?r bool -> expr ?r ?a -> expr ?r ?a -> expr ?r ?a =
   sql "CASE WHEN $1 THEN $2 ELSE $3 END"
 
 ## Case-style alias of `ifThenElse`, for reading a chain as if/else. Multi-way
 ## conditionals are written with the `case { p => a; ... }` form instead.
-caseWhen : expr r bool -> expr r a -> expr r a -> expr r a = ifThenElse
+caseWhen : expr ?r bool -> expr ?r ?a -> expr ?r ?a -> expr ?r ?a = ifThenElse
 
 ## `countOf` for a nullable column. `countOf` accepts one directly — `COUNT(x)`
 ## skips NULLs by definition, which is what counting the non-null values of a
 ## nullable column *is* — so this spelling is an alias, kept because queries
 ## written against it should keep working.
-countOfMaybe : expr r (maybe a) -> agg (expr r int) = countOf
+countOfMaybe : expr ?r (maybe ?a) -> agg (expr ?r int) = countOf
 
 ## `countDistinct` for a nullable column; an alias, like `countOfMaybe`.
-countDistinctMaybe : expr r (maybe a) -> agg (expr r int) = countDistinct
+countDistinctMaybe : expr ?r (maybe ?a) -> agg (expr ?r int) = countDistinct
 
 # Filtered aggregates apply a predicate to the aggregate's *input* rows, the
 # portable spelling of SQL's `agg(x) FILTER (WHERE p)`. The predicate is a
@@ -43,10 +43,10 @@ countDistinctMaybe : expr r (maybe a) -> agg (expr r int) = countDistinct
 ## String concatenation, right-associative and looser than arithmetic, so
 ## `"a" <> .b <> "c"` groups as `"a" <> (.b <> "c")` and `x + 1 <> "!"` needs
 ## no parentheses. NULL if either side is NULL.
-_++_ : expr r string -> expr r string -> expr r string = sql "$1 || $2"
+_++_ : expr ?r string -> expr ?r string -> expr ?r string = sql "$1 || $2"
 
 ## `concat a b` is `a ++ b`, for a call site where an operator reads worse.
-concat : expr r string -> expr r string -> expr r string = _++_
+concat : expr ?r string -> expr ?r string -> expr ?r string = _++_
 
 ## `a <> b` — combine, in the sense Haskell's `<>` has: an operation on one
 ## type that is associative. Two instances exist, because two are what SQL can
@@ -57,36 +57,37 @@ concat : expr r string -> expr r string -> expr r string = _++_
 ## concatenation and says so in its type; `<>` is the combining operator, so it
 ## also has a `maybe` instance — and that instance *ignores* a `nothing` rather
 ## than letting it swallow the other side, which is not what `||` does.
-_<>_ : expr r string -> expr r string -> expr r string = sql "$1 || $2"
-_<>_ : expr r (maybe string) -> expr r (maybe string) -> expr r (maybe string) =
+_<>_ : expr ?r string -> expr ?r string -> expr ?r string = sql "$1 || $2"
+_<>_ : expr ?r (maybe string) -> expr ?r (maybe string) -> expr ?r (maybe string) =
   sql "COALESCE($1 || $2, $1, $2)"
 ## `a <> b` on lists: the same combining operation on a third type, and what
 ## makes two `arrayAgg` results compose across a grouping. `CAGARA_LIST_CONCAT`
 ## is `||` on PostgreSQL and `list_concat` on DuckDB; a dialect with no `list`
 ## type refuses the query rather than writing something else.
-_<>_ : expr r (list a) -> expr r (list a) -> expr r (list a) = sql "CAGARA_LIST_CONCAT($1, $2)"
+_<>_ : expr ?r (list ?a) -> expr ?r (list ?a) -> expr ?r (list ?a) =
+  sql "CAGARA_LIST_CONCAT($1, $2)"
 
 ## Boolean negation.
-not : expr r bool -> expr r bool = sql "NOT $1"
+not : expr ?r bool -> expr ?r bool = sql "NOT $1"
 
 ## Arithmetic negation, overloaded on `int` and `float`.
-negate : expr r int -> expr r int = sql "-$1"
-negate : expr r float -> expr r float = sql "-$1"
+negate : expr ?r int -> expr ?r int = sql "-$1"
+negate : expr ?r float -> expr ?r float = sql "-$1"
 
 ## Uppercase a string, in the database's collation.
-upper : expr r string -> expr r string = sql "UPPER($1)"
+upper : expr ?r string -> expr ?r string = sql "UPPER($1)"
 
 ## Lowercase a string, in the database's collation.
-lower : expr r string -> expr r string = sql "LOWER($1)"
+lower : expr ?r string -> expr ?r string = sql "LOWER($1)"
 
 ## Strip leading and trailing whitespace.
-trim : expr r string -> expr r string = sql "TRIM($1)"
+trim : expr ?r string -> expr ?r string = sql "TRIM($1)"
 
 ## Strip leading whitespace.
-ltrim : expr r string -> expr r string = sql "LTRIM($1)"
+ltrim : expr ?r string -> expr ?r string = sql "LTRIM($1)"
 
 ## Strip trailing whitespace.
-rtrim : expr r string -> expr r string = sql "RTRIM($1)"
+rtrim : expr ?r string -> expr ?r string = sql "RTRIM($1)"
 
 ## `lpad 12 "0" s`: `s` padded on the left to width 12 with copies of `"0"`.
 ##
@@ -103,119 +104,120 @@ rtrim : expr r string -> expr r string = sql "RTRIM($1)"
 ## at run time, which is the same gap `try*` has there — emitting the call is
 ## more honest than guessing at a `substr`/`printf` spelling, and the engine
 ## says so loudly.
-lpad : expr r int -> expr r string -> expr r string -> expr r string = sql "LPAD($3, $1, $2)"
+lpad : expr ?r int -> expr ?r string -> expr ?r string -> expr ?r string = sql "LPAD($3, $1, $2)"
 
 ## `rpad 12 "0" s`: `s` padded on the right, the mirror of `lpad`.
-rpad : expr r int -> expr r string -> expr r string -> expr r string = sql "RPAD($3, $1, $2)"
+rpad : expr ?r int -> expr ?r string -> expr ?r string -> expr ?r string = sql "RPAD($3, $1, $2)"
 
 ## The number of characters in a string — characters, not bytes, in every
 ## dialect (`CAGARA_LENGTH`).
-length : expr r string -> expr r int = sql "CAGARA_LENGTH($1)"
+length : expr ?r string -> expr ?r int = sql "CAGARA_LENGTH($1)"
 
 ## `like "%foo%" .name`: SQL `LIKE`, so `%` and `_` are wildcards. The pattern
 ## comes first to keep the subject last; for a plain substring test use
 ## `contains`.
-like : expr r string -> expr r string -> expr r bool = sql "$2 LIKE $1"
+like : expr ?r string -> expr ?r string -> expr ?r bool = sql "$2 LIKE $1"
 
 ## Case-insensitive `like`. Not every engine has `ILIKE`; sqlglot rewrites it
 ## where it can.
-ilike : expr r string -> expr r string -> expr r bool = sql "$2 ILIKE $1"
+ilike : expr ?r string -> expr ?r string -> expr ?r bool = sql "$2 ILIKE $1"
 
 ## `substring start len s`, 1-based as in SQL and `len` characters long.
-substring : expr r int -> expr r int -> expr r string -> expr r string = sql "SUBSTRING($3, $1, $2)"
+substring : expr ?r int -> expr ?r int -> expr ?r string -> expr ?r string =
+  sql "SUBSTRING($3, $1, $2)"
 
 ## `left n s`: the first `n` characters.
-left : expr r int -> expr r string -> expr r string = sql "CAGARA_LEFT($2, $1)"
+left : expr ?r int -> expr ?r string -> expr ?r string = sql "CAGARA_LEFT($2, $1)"
 
 ## `right n s`: the last `n` characters.
-right : expr r int -> expr r string -> expr r string = sql "CAGARA_RIGHT($2, $1)"
+right : expr ?r int -> expr ?r string -> expr ?r string = sql "CAGARA_RIGHT($2, $1)"
 
 ## `replaceAll from to s`: every occurrence of `from` in `s` replaced by `to`.
 ## (SQL's `REPLACE`, not column renaming — use `update` for that.)
-replaceAll : expr r string -> expr r string -> expr r string -> expr r string =
+replaceAll : expr ?r string -> expr ?r string -> expr ?r string -> expr ?r string =
   sql "REPLACE($3, $1, $2)"
 
 ## `strpos sub s`: the 1-based position of the first `sub` in `s`, or 0 when it
 ## is absent.
-strpos : expr r string -> expr r string -> expr r int = sql "CAGARA_STRPOS($2, $1)"
+strpos : expr ?r string -> expr ?r string -> expr ?r int = sql "CAGARA_STRPOS($2, $1)"
 
 ## `contains "@" .email`: whether `s` contains `sub`. A plain substring test —
 ## `%` and `_` are not wildcards here, which is the difference from `like`.
-contains : expr r string -> expr r string -> expr r bool = sql "CAGARA_STRPOS($2, $1) > 0"
+contains : expr ?r string -> expr ?r string -> expr ?r bool = sql "CAGARA_STRPOS($2, $1) > 0"
 
 ## `startsWith "@" .domain`: whether `s` begins with `prefix`.
-startsWith : expr r string -> expr r string -> expr r bool =
+startsWith : expr ?r string -> expr ?r string -> expr ?r bool =
   sql "CAGARA_LEFT($2, CAGARA_LENGTH($1)) = $1"
 
 ## `endsWith ".com" .domain`: whether `s` ends with `suffix`.
-endsWith : expr r string -> expr r string -> expr r bool =
+endsWith : expr ?r string -> expr ?r string -> expr ?r bool =
   sql "CAGARA_RIGHT($2, CAGARA_LENGTH($1)) = $1"
 
 ## `position sub s`: the 1-based position of the first `sub` in `s`, or 0 when it is
 ## absent — the same answer `strpos` gives, under SQL's own name for it. `STRPOS` is
 ## spelled `INSTR` on SQLite and `LOCATE` on MySQL, which `CAGARA_STRPOS` already
 ## handles, so this is an alias rather than a second implementation.
-position : expr r string -> expr r string -> expr r int = strpos
+position : expr ?r string -> expr ?r string -> expr ?r int = strpos
 
 ## `ascii s`: the code point of the first character of `s`, or 0 for an empty string.
 ##
 ## `ASCII` on DuckDB and MySQL, `UNICODE` on SQLite and PostgreSQL — the latter is the
 ## more honest name, since the answer is a code point and not a byte.
-ascii : expr r string -> expr r int = sql "CAGARA_ASCII($1)"
+ascii : expr ?r string -> expr ?r int = sql "CAGARA_ASCII($1)"
 
 ## `chr n`: the character whose code point is `n`.
 ##
 ## `CHR` on DuckDB, MySQL, PostgreSQL and Trino; SQLite spells it `CHAR`. The
 ## `CAGARA_CHR` rewrite covers the two.
-chr : expr r int -> expr r string = sql "CAGARA_CHR($1)"
+chr : expr ?r int -> expr ?r string = sql "CAGARA_CHR($1)"
 
 ## `repeat n s`: `s` repeated `n` times.
 ##
 ## `REPEAT` on DuckDB, MySQL, PostgreSQL and Trino; SQLite has no such function, and
 ## `replace(hex(zeroblob(n)), "00", s)` is the portable spelling — measured on all four.
-repeat : expr r int -> expr r string -> expr r string = sql "CAGARA_REPEAT($2, $1)"
+repeat : expr ?r int -> expr ?r string -> expr ?r string = sql "CAGARA_REPEAT($2, $1)"
 
 ## `reverse s`: the characters of `s` in the opposite order.
 ##
 ## `REVERSE` on DuckDB, MySQL, PostgreSQL and Trino; SQLite has nothing equivalent, so
 ## `CAGARA_REVERSE` is a refusal there rather than an emitted call — there is no
 ## portable spelling that is not a correlated subquery over the string's characters.
-reverse : expr r string -> expr r string = sql "CAGARA_REVERSE($1)"
+reverse : expr ?r string -> expr ?r string = sql "CAGARA_REVERSE($1)"
 
 # Math is scalar and non-null.
 
 ## Absolute value, overloaded on `int` and `float`.
-abs : expr r int -> expr r int = sql "ABS($1)"
-abs : expr r float -> expr r float = sql "ABS($1)"
+abs : expr ?r int -> expr ?r int = sql "ABS($1)"
+abs : expr ?r float -> expr ?r float = sql "ABS($1)"
 
 ## Round to the nearest integer, keeping the `float` type. Engines round ties
 ## differently; this leaves that to the target rather than pretending one rule
 ## is universal.
-round : expr r float -> expr r float = sql "ROUND($1)"
-round : expr r (decimal p s) -> expr r (decimal p s) = sql "ROUND($1)"
+round : expr ?r float -> expr ?r float = sql "ROUND($1)"
+round : expr ?r (decimal ?p ?s) -> expr ?r (decimal ?p ?s) = sql "ROUND($1)"
 
 ## `roundTo 2 .amount`: round to `digits` decimal places. Digits first, subject
 ## last, so `roundTo 2` is a reusable transformation.
-roundTo : expr r int -> expr r float -> expr r float = sql "ROUND($2, $1)"
-roundTo : expr r int -> expr r (decimal p s) -> expr r (decimal p s) = sql "ROUND($2, $1)"
+roundTo : expr ?r int -> expr ?r float -> expr ?r float = sql "ROUND($2, $1)"
+roundTo : expr ?r int -> expr ?r (decimal ?p ?s) -> expr ?r (decimal ?p ?s) = sql "ROUND($2, $1)"
 
 ## Round down to the nearest integer, as a `float`.
-floor : expr r float -> expr r float = sql "FLOOR($1)"
+floor : expr ?r float -> expr ?r float = sql "FLOOR($1)"
 
 ## Round up to the nearest integer, as a `float`.
-ceil : expr r float -> expr r float = sql "CEILING($1)"
+ceil : expr ?r float -> expr ?r float = sql "CEILING($1)"
 
 ## Square root. A negative input is the engine's error or NULL, not a
 ## documented value of this function.
-sqrt : expr r float -> expr r float = sql "SQRT($1)"
+sqrt : expr ?r float -> expr ?r float = sql "SQRT($1)"
 
 ## `power exponent base`: `base` raised to `exponent`. Subject last, so
 ## `power 2` squares its argument.
-power : expr r float -> expr r float -> expr r float = sql "POWER($2, $1)"
+power : expr ?r float -> expr ?r float -> expr ?r float = sql "POWER($2, $1)"
 
 ## Sign of a number: -1, 0 or 1. Overloaded on `int` and `float`.
-sign : expr r int -> expr r int = sql "SIGN($1)"
-sign : expr r float -> expr r float = sql "SIGN($1)"
+sign : expr ?r int -> expr ?r int = sql "SIGN($1)"
+sign : expr ?r float -> expr ?r float = sql "SIGN($1)"
 
 # Exponentials and logarithms. `exp` and `ln` are spelled the same on every target
 # that has them; the logarithms are named for their base, because the bare `log`
@@ -224,20 +226,20 @@ sign : expr r float -> expr r float = sql "SIGN($1)"
 # A name that means three things is not a name, so there is no `log`.
 
 ## `e` raised to a power.
-exp : expr r float -> expr r float = sql "EXP($1)"
+exp : expr ?r float -> expr ?r float = sql "EXP($1)"
 
 ## The natural logarithm — the inverse of `exp`. Named for its base, like the two
 ## below: `log` alone means base 10 on DuckDB and SQLite and base `e` on MariaDB,
 ## so the language does not offer it.
-ln : expr r float -> expr r float = sql "LN($1)"
+ln : expr ?r float -> expr ?r float = sql "LN($1)"
 
 ## The base-10 logarithm. `LOG10` on DuckDB, SQLite, MariaDB, Trino and Snowflake;
 ## the `CAGARA_LOG10` rewrite covers the targets that spell it otherwise.
-log10 : expr r float -> expr r float = sql "CAGARA_LOG10($1)"
+log10 : expr ?r float -> expr ?r float = sql "CAGARA_LOG10($1)"
 
 ## The base-2 logarithm. PostgreSQL has no `LOG2`, so `CAGARA_LOG2` spells it as
 ## `ln x / ln 2` there and as `LOG2` everywhere else.
-log2 : expr r float -> expr r float = sql "CAGARA_LOG2($1)"
+log2 : expr ?r float -> expr ?r float = sql "CAGARA_LOG2($1)"
 
 ## `logBase base x`: the logarithm of `x` to `base`.
 ##
@@ -247,18 +249,18 @@ log2 : expr r float -> expr r float = sql "CAGARA_LOG2($1)"
 ## `LOG($1, $2)` comes back out as `LOG(x, base)`, so `logBase 2.0 8.0` lowered to
 ## `LOG(8.0, 2.0)` and answered `0.333` instead of `3`. The division has no such
 ## ambiguity and is exact on all four.
-logBase : expr r float -> expr r float -> expr r float = base => x => ln x / ln base
+logBase : expr ?r float -> expr ?r float -> expr ?r float = base => x => ln x / ln base
 
 ## Cube root. `CBRT` exists on DuckDB, Trino and MariaDB but not on SQLite, so this
 ## is `exp(ln|x| / 3)` with the sign put back: measured exact on all four, where
 ## `power(abs(x), 1.0/3)` is `1.9999999986` on MariaDB.
-cbrt : expr r float -> expr r float = x => sign x * exp (ln (abs x) / 3)
+cbrt : expr ?r float -> expr ?r float = x => sign x * exp (ln (abs x) / 3)
 
 ## Degrees from radians.
-degrees : expr r float -> expr r float = sql "DEGREES($1)"
+degrees : expr ?r float -> expr ?r float = sql "DEGREES($1)"
 
 ## Radians from degrees.
-radians : expr r float -> expr r float = sql "RADIANS($1)"
+radians : expr ?r float -> expr ?r float = sql "RADIANS($1)"
 
 ## `random` — a float in `[0, 1)`, different on every row.
 ##
@@ -272,26 +274,26 @@ radians : expr r float -> expr r float = sql "RADIANS($1)"
 ## this is the one prelude function the differential suite cannot check by rows. Its
 ## presence is for sampling — `order [asc (random)] & limit 10` — where the *shape* is
 ## what matters.
-random : expr r float = sql "CAGARA_RANDOM()"
+random : expr ?r float = sql "CAGARA_RANDOM()"
 
 ## `greatest a b`: the larger of two non-null values, of any ordered type.
 ## SQLite has no `GREATEST`, so the `CASE` spelling is the portable one; with
 ## non-null arguments no NULL has to be resolved.
-greatest : expr r a -> expr r a -> expr r a = sql "CASE WHEN $1 >= $2 THEN $1 ELSE $2 END"
+greatest : expr ?r ?a -> expr ?r ?a -> expr ?r ?a = sql "CASE WHEN $1 >= $2 THEN $1 ELSE $2 END"
 
 ## `least a b`: the smaller of two non-null values. Portable for the same
 ## reason as `greatest`.
-least : expr r a -> expr r a -> expr r a = sql "CASE WHEN $1 <= $2 THEN $1 ELSE $2 END"
+least : expr ?r ?a -> expr ?r ?a -> expr ?r ?a = sql "CASE WHEN $1 <= $2 THEN $1 ELSE $2 END"
 
 ## Render a value as a string, overloading `int`, `float`, `date`, `timestamp`
 ## and `bool`. The bool form is a `CASE` giving `'true'` / `'false'`, because
 ## engines disagree about how they print a boolean.
-toString : expr r int -> expr r string = sql "CAGARA_TO_STRING($1)"
-toString : expr r float -> expr r string = sql "CAGARA_TO_STRING($1)"
-toString : expr r (decimal p s) -> expr r string = sql "CAGARA_TO_STRING($1)"
-toString : expr r date -> expr r string = sql "CAGARA_TO_STRING($1)"
-toString : expr r timestamp -> expr r string = sql "CAGARA_TO_STRING($1)"
-toString : expr r bool -> expr r string = sql "CASE WHEN $1 THEN 'true' ELSE 'false' END"
+toString : expr ?r int -> expr ?r string = sql "CAGARA_TO_STRING($1)"
+toString : expr ?r float -> expr ?r string = sql "CAGARA_TO_STRING($1)"
+toString : expr ?r (decimal ?p ?s) -> expr ?r string = sql "CAGARA_TO_STRING($1)"
+toString : expr ?r date -> expr ?r string = sql "CAGARA_TO_STRING($1)"
+toString : expr ?r timestamp -> expr ?r string = sql "CAGARA_TO_STRING($1)"
+toString : expr ?r bool -> expr ?r string = sql "CASE WHEN $1 THEN 'true' ELSE 'false' END"
 
 # Casts are named for the type they produce. Overloading picks the one that
 # fits, so `toInt` applied to a `float` is a narrowing and `toInt` applied to a
@@ -300,35 +302,35 @@ toString : expr r bool -> expr r string = sql "CASE WHEN $1 THEN 'true' ELSE 'fa
 ## Convert to `int`: from a `float` it truncates toward zero, in every dialect
 ## (`CAGARA_TRUNC_INT`); from a `string` it parses an integer and fails on a
 ## value that is not one (`tryInt` yields NULL instead).
-toInt : expr r float -> expr r int = sql "CAGARA_TRUNC_INT($1)"
-toInt : expr r (decimal p s) -> expr r int = sql "CAGARA_TRUNC_INT($1)"
-toInt : expr r string -> expr r int = sql "CAGARA_TO_INT($1)"
+toInt : expr ?r float -> expr ?r int = sql "CAGARA_TRUNC_INT($1)"
+toInt : expr ?r (decimal ?p ?s) -> expr ?r int = sql "CAGARA_TRUNC_INT($1)"
+toInt : expr ?r string -> expr ?r int = sql "CAGARA_TO_INT($1)"
 
 ## Convert to `float`, a 64-bit IEEE double: from an `int` exactly, from a
 ## `string` by parsing.
-toFloat : expr r int -> expr r float = sql "CAGARA_TO_FLOAT($1)"
-toFloat : expr r string -> expr r float = sql "CAGARA_TO_FLOAT($1)"
+toFloat : expr ?r int -> expr ?r float = sql "CAGARA_TO_FLOAT($1)"
+toFloat : expr ?r string -> expr ?r float = sql "CAGARA_TO_FLOAT($1)"
 ## The one door out of `decimal`: it is a lossy conversion, so it is written out.
-toFloat : expr r (decimal p s) -> expr r float = sql "CAGARA_TO_FLOAT($1)"
+toFloat : expr ?r (decimal ?p ?s) -> expr ?r float = sql "CAGARA_TO_FLOAT($1)"
 
 ## Convert to `bool` from a number: zero is false, everything else true.
-toBool : expr r int -> expr r bool = sql "CAST($1 AS BOOLEAN)"
-toBool : expr r float -> expr r bool = sql "CAST($1 AS BOOLEAN)"
+toBool : expr ?r int -> expr ?r bool = sql "CAST($1 AS BOOLEAN)"
+toBool : expr ?r float -> expr ?r bool = sql "CAST($1 AS BOOLEAN)"
 
 ## `toDecimal precision scale x` gives a value an exact SQL type. Money is the
 ## reason: plain `FLOAT` is binary floating point, so sums of it drift, while
 ## `DECIMAL(18, 2)` is exact. The *language* type stays `float` — there is no
 ## separate decimal scalar — so this changes the SQL type without adding one.
 ## Usable from `string`, `int` and `float` sources.
-toDecimal : expr r int -> expr r int -> expr r string -> expr r (decimal p s) =
+toDecimal : expr ?r int -> expr ?r int -> expr ?r string -> expr ?r (decimal ?p ?s) =
   sql "CAGARA_TO_DECIMAL($3, $1, $2)"
-toDecimal : expr r int -> expr r int -> expr r int -> expr r (decimal p s) =
+toDecimal : expr ?r int -> expr ?r int -> expr ?r int -> expr ?r (decimal ?p ?s) =
   sql "CAGARA_TO_DECIMAL($3, $1, $2)"
-toDecimal : expr r int -> expr r int -> expr r float -> expr r (decimal p s) =
+toDecimal : expr ?r int -> expr ?r int -> expr ?r float -> expr ?r (decimal ?p ?s) =
   sql "CAGARA_TO_DECIMAL($3, $1, $2)"
 ## Re-scaling an existing decimal is a cast too, and the result's parameters are
 ## its own: the source's `(p,s)` do not constrain where the value is going.
-toDecimal : expr r int -> expr r int -> expr r (decimal p s) -> expr r (decimal q t) =
+toDecimal : expr ?r int -> expr ?r int -> expr ?r (decimal ?p ?s) -> expr ?r (decimal ?q ?t) =
   sql "CAGARA_TO_DECIMAL($3, $1, $2)"
 
 # A `from*` name says where the value came from rather than where it is going,
@@ -338,16 +340,16 @@ toDecimal : expr r int -> expr r int -> expr r (decimal p s) -> expr r (decimal 
 
 ## `fromString` reads a `string` as the type the context asks for — `int`,
 ## `float` or `date`. The `to*` cast with the direction named from the source.
-fromString : expr r string -> expr r int = x => toInt x
-fromString : expr r string -> expr r float = x => toFloat x
-fromString : expr r string -> expr r date = x => toDate x
+fromString : expr ?r string -> expr ?r int = x => toInt x
+fromString : expr ?r string -> expr ?r float = x => toFloat x
+fromString : expr ?r string -> expr ?r date = x => toDate x
 
 ## `fromInt` reads an `int` as a `float`: `toFloat` with the direction named
 ## from the source.
-fromInt : expr r int -> expr r float = x => toFloat x
+fromInt : expr ?r int -> expr ?r float = x => toFloat x
 
 ## `fromFloat` reads a `float` as an `int`, truncating toward zero.
-fromFloat : expr r float -> expr r int = x => toInt x
+fromFloat : expr ?r float -> expr ?r int = x => toInt x
 
 # The casts above fail on a value they cannot convert. For a column typed
 # `string` that holds a code -- and `icbase` has tens of thousands of those --
@@ -357,10 +359,10 @@ fromFloat : expr r float -> expr r int = x => toInt x
 
 ## `tryInt` parses a `string` as an `int`, giving NULL where `toInt` would
 ## fail. Always `maybe`, so the caller decides what a bad row means.
-tryInt : expr r string -> expr r (maybe int) = sql "CAGARA_TRY_INT($1)"
+tryInt : expr ?r string -> expr ?r (maybe int) = sql "CAGARA_TRY_INT($1)"
 
 ## `tryFloat` parses a `string` as a `float`, NULL on failure.
-tryFloat : expr r string -> expr r (maybe float) = sql "CAGARA_TRY_FLOAT($1)"
+tryFloat : expr ?r string -> expr ?r (maybe float) = sql "CAGARA_TRY_FLOAT($1)"
 
 ## `parseDate "%Y-%m-%d" s` — a `date` from a string, by format. One interface
 ## for every target: PostgreSQL spells the format `YYYY-MM-DD` where the string
@@ -373,31 +375,32 @@ tryFloat : expr r string -> expr r (maybe float) = sql "CAGARA_TRY_FLOAT($1)"
 ## must be a literal: it is compiled into the SQL. A bad value raises, exactly
 ## as the target's own parser does; use `toDate` when the shape is fixed and
 ## `tryDate` when the input may not be a date at all.
-parseDate : string -> expr r string -> expr r date = sql "CAGARA_PARSE_DATE($1, $2)"
+parseDate : string -> expr ?r string -> expr ?r date = sql "CAGARA_PARSE_DATE($1, $2)"
 
 ## `parseTimestamp "%Y-%m-%d %H:%M:%S" s` — the same, keeping the time of day.
 ## `parseDate` drops it; this one is what a `%H`, `%M` or `%S` format wants.
-parseTimestamp : string -> expr r string -> expr r timestamp = sql "CAGARA_PARSE_TIMESTAMP($1, $2)"
+parseTimestamp : string -> expr ?r string -> expr ?r timestamp =
+  sql "CAGARA_PARSE_TIMESTAMP($1, $2)"
 
 ## `formatDate "%Y-%m" d` — the inverse: a `date` printed by format, with the
 ## same vocabulary as `parseDate`. `toString` is the fixed ISO spelling and needs
 ## no format.
-formatDate : string -> expr r date -> expr r string = sql "CAGARA_FORMAT_DATE($1, $2)"
+formatDate : string -> expr ?r date -> expr ?r string = sql "CAGARA_FORMAT_DATE($1, $2)"
 
 ## `formatTimestamp "%Y-%m-%d %H:%M" t` — a `timestamp` printed by format, with
 ## the same vocabulary as the rest.
-formatTimestamp : string -> expr r timestamp -> expr r string =
+formatTimestamp : string -> expr ?r timestamp -> expr ?r string =
   sql "CAGARA_FORMAT_TIMESTAMP($1, $2)"
 
 ## `tryDate` parses a `string` as a `date`, NULL on failure.
-tryDate : expr r string -> expr r (maybe date) = sql "CAGARA_TRY_DATE($1)"
+tryDate : expr ?r string -> expr ?r (maybe date) = sql "CAGARA_TRY_DATE($1)"
 
 ## `tryTimestamp` parses a `string` as a `timestamp`, NULL on failure.
-tryTimestamp : expr r string -> expr r (maybe timestamp) = sql "CAGARA_TRY_TIMESTAMP($1)"
+tryTimestamp : expr ?r string -> expr ?r (maybe timestamp) = sql "CAGARA_TRY_TIMESTAMP($1)"
 
 ## `tryDecimal precision scale x`: `toDecimal` for a `string` that may not be a
 ## number, NULL on failure.
-tryDecimal : expr r int -> expr r int -> expr r string -> expr r (maybe (decimal p s)) =
+tryDecimal : expr ?r int -> expr ?r int -> expr ?r string -> expr ?r (maybe (decimal ?p ?s)) =
   sql "CAGARA_TRY_DECIMAL($3, $1, $2)"
 
 # ── dates and timestamps ───────────────────────────────────────────────────
@@ -411,22 +414,22 @@ currentDate : date = sql "CURRENT_DATE"
 currentTimestamp : timestamp = sql "CAGARA_NOW()"
 
 ## Alias of `currentTimestamp`, under the shorter name.
-now : expr r timestamp = currentTimestamp
+now : expr ?r timestamp = currentTimestamp
 
 ## The day before today. The most common partition date there is: a table
 ## partitioned by day is read for the day that has finished, and `yesterday`
 ## says that in one word at a use site where `addDays (-1) currentDate` is a
 ## parenthesised expression in the middle of a pipeline.
-yesterday : expr r date = addDays (-1) currentDate
+yesterday : expr ?r date = addDays (-1) currentDate
 
 ## Convert to `date`: from a `timestamp` it truncates to the day, from a
 ## `string` it parses one.
-toDate : expr r timestamp -> expr r date = sql "CAGARA_TO_DATE($1)"
-toDate : expr r string -> expr r date = sql "CAGARA_TO_DATE($1)"
+toDate : expr ?r timestamp -> expr ?r date = sql "CAGARA_TO_DATE($1)"
+toDate : expr ?r string -> expr ?r date = sql "CAGARA_TO_DATE($1)"
 
 ## Convert to `timestamp`: from a `date` (midnight) or from a `string`.
-toTimestamp : expr r date -> expr r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
-toTimestamp : expr r string -> expr r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
+toTimestamp : expr ?r date -> expr ?r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
+toTimestamp : expr ?r string -> expr ?r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
 
 ## `addDays 7 .created_at`: move a date or timestamp by whole days; negative
 ## counts go back. Overloaded on `date` and `timestamp`, returning the type it
@@ -434,115 +437,116 @@ toTimestamp : expr r string -> expr r timestamp = sql "CAGARA_TO_TIMESTAMP($1)"
 ##
 ## The week, quarter and year shifts below are defined from this one: 7 days,
 ## 3 months, 1 year. So the core needs only `DAY` and `MONTH`.
-addDays : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'DAY', $2, $1)"
-addDays : expr r int -> expr r timestamp -> expr r timestamp =
+addDays : expr ?r int -> expr ?r date -> expr ?r date = sql "CAGARA_ADD('DATE', 'DAY', $2, $1)"
+addDays : expr ?r int -> expr ?r timestamp -> expr ?r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'DAY', $2, $1)"
 
 ## `addWeeks 2 .d`: move by whole weeks, spelled as `addDays` of `n * 7`.
-addWeeks : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'DAY', $2, $1 * 7)"
-addWeeks : expr r int -> expr r timestamp -> expr r timestamp =
+addWeeks : expr ?r int -> expr ?r date -> expr ?r date = sql "CAGARA_ADD('DATE', 'DAY', $2, $1 * 7)"
+addWeeks : expr ?r int -> expr ?r timestamp -> expr ?r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'DAY', $2, $1 * 7)"
 
 ## `addMonths 1 .d`: move by calendar months. The engine decides what the 31st
 ## of a month without a 31st becomes.
-addMonths : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'MONTH', $2, $1)"
-addMonths : expr r int -> expr r timestamp -> expr r timestamp =
+addMonths : expr ?r int -> expr ?r date -> expr ?r date = sql "CAGARA_ADD('DATE', 'MONTH', $2, $1)"
+addMonths : expr ?r int -> expr ?r timestamp -> expr ?r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'MONTH', $2, $1)"
 
 ## `addQuarters 1 .d`: move by quarters, spelled as `addMonths` of `n * 3`.
-addQuarters : expr r int -> expr r date -> expr r date =
+addQuarters : expr ?r int -> expr ?r date -> expr ?r date =
   sql "CAGARA_ADD('DATE', 'MONTH', $2, $1 * 3)"
-addQuarters : expr r int -> expr r timestamp -> expr r timestamp =
+addQuarters : expr ?r int -> expr ?r timestamp -> expr ?r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'MONTH', $2, $1 * 3)"
 
 ## `addYears 1 .d`: move by calendar years.
-addYears : expr r int -> expr r date -> expr r date = sql "CAGARA_ADD('DATE', 'YEAR', $2, $1)"
-addYears : expr r int -> expr r timestamp -> expr r timestamp =
+addYears : expr ?r int -> expr ?r date -> expr ?r date = sql "CAGARA_ADD('DATE', 'YEAR', $2, $1)"
+addYears : expr ?r int -> expr ?r timestamp -> expr ?r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'YEAR', $2, $1)"
 
 ## `addHours 2 .t`: move a timestamp by whole hours. Timestamps only — a `date`
 ## has no hour to move.
-addHours : expr r int -> expr r timestamp -> expr r timestamp =
+addHours : expr ?r int -> expr ?r timestamp -> expr ?r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'HOUR', $2, $1)"
 
 ## `addMinutes 30 .t`: move a timestamp by whole minutes.
-addMinutes : expr r int -> expr r timestamp -> expr r timestamp =
+addMinutes : expr ?r int -> expr ?r timestamp -> expr ?r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'MINUTE', $2, $1)"
 
 ## `addSeconds 30 .t`: move a timestamp by whole seconds.
-addSeconds : expr r int -> expr r timestamp -> expr r timestamp =
+addSeconds : expr ?r int -> expr ?r timestamp -> expr ?r timestamp =
   sql "CAGARA_ADD('TIMESTAMP', 'SECOND', $2, $1)"
 
 # date_trunc: the start of the period containing the value, same type.
 
 ## `truncYear .d`: the first instant of the containing year, in the input's own
 ## type.
-truncYear : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'YEAR', $1)"
-truncYear : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'YEAR', $1)"
+truncYear : expr ?r date -> expr ?r date = sql "CAGARA_TRUNC('DATE', 'YEAR', $1)"
+truncYear : expr ?r timestamp -> expr ?r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'YEAR', $1)"
 
 ## `truncQuarter .d`: the first day of the containing quarter.
-truncQuarter : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'QUARTER', $1)"
-truncQuarter : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'QUARTER', $1)"
+truncQuarter : expr ?r date -> expr ?r date = sql "CAGARA_TRUNC('DATE', 'QUARTER', $1)"
+truncQuarter : expr ?r timestamp -> expr ?r timestamp =
+  sql "CAGARA_TRUNC('TIMESTAMP', 'QUARTER', $1)"
 
 ## `truncMonth .d`: the first day of the containing month — the usual spelling
 ## of a monthly bucket.
-truncMonth : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'MONTH', $1)"
-truncMonth : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'MONTH', $1)"
+truncMonth : expr ?r date -> expr ?r date = sql "CAGARA_TRUNC('DATE', 'MONTH', $1)"
+truncMonth : expr ?r timestamp -> expr ?r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'MONTH', $1)"
 
 ## `truncWeek .d`: the Monday of the containing week.
-truncWeek : expr r date -> expr r date = sql "CAGARA_TRUNC('DATE', 'WEEK', $1)"
-truncWeek : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'WEEK', $1)"
+truncWeek : expr ?r date -> expr ?r date = sql "CAGARA_TRUNC('DATE', 'WEEK', $1)"
+truncWeek : expr ?r timestamp -> expr ?r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'WEEK', $1)"
 
 ## `truncDay .t`: midnight of the containing day, as a timestamp.
-truncDay : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'DAY', $1)"
+truncDay : expr ?r timestamp -> expr ?r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'DAY', $1)"
 
 ## `truncHour .t`: the start of the containing hour.
-truncHour : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'HOUR', $1)"
+truncHour : expr ?r timestamp -> expr ?r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'HOUR', $1)"
 
 ## `truncMinute .t`: the start of the containing minute.
-truncMinute : expr r timestamp -> expr r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'MINUTE', $1)"
+truncMinute : expr ?r timestamp -> expr ?r timestamp = sql "CAGARA_TRUNC('TIMESTAMP', 'MINUTE', $1)"
 
 # Fields as integers.
 
 ## The year of a date or timestamp: `year .created_at`.
-year : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'YEAR', $1)"
-year : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'YEAR', $1)"
+year : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'YEAR', $1)"
+year : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'YEAR', $1)"
 
 ## The quarter, 1–4.
-quarter : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'QUARTER', $1)"
-quarter : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'QUARTER', $1)"
+quarter : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'QUARTER', $1)"
+quarter : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'QUARTER', $1)"
 
 ## The month, 1–12.
-month : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'MONTH', $1)"
-month : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'MONTH', $1)"
+month : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'MONTH', $1)"
+month : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'MONTH', $1)"
 
 ## The day of the month, 1–31.
-day : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'DAY', $1)"
-day : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'DAY', $1)"
+day : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'DAY', $1)"
+day : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'DAY', $1)"
 
 ## The day of the week, 0 for Sunday — the numbering SQL engines use, not
 ## ISO's.
-dayOfWeek : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'DOW', $1)"
-dayOfWeek : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'DOW', $1)"
+dayOfWeek : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'DOW', $1)"
+dayOfWeek : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'DOW', $1)"
 
 ## The day of the year, 1–366.
-dayOfYear : expr r date -> expr r int = sql "CAGARA_PART('DATE', 'DOY', $1)"
-dayOfYear : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'DOY', $1)"
+dayOfYear : expr ?r date -> expr ?r int = sql "CAGARA_PART('DATE', 'DOY', $1)"
+dayOfYear : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'DOY', $1)"
 
 ## The hour, 0–23, of a timestamp.
-hour : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'HOUR', $1)"
+hour : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'HOUR', $1)"
 
 ## The minute, 0–59, of a timestamp.
-minute : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'MINUTE', $1)"
+minute : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'MINUTE', $1)"
 
 ## The second, 0–59, of a timestamp. `CAGARA_PART` already had `SECOND`; the field
 ## was simply not exposed, which made `secondsBetween` unspellable.
-second : expr r timestamp -> expr r int = sql "CAGARA_PART('TIMESTAMP', 'SECOND', $1)"
+second : expr ?r timestamp -> expr ?r int = sql "CAGARA_PART('TIMESTAMP', 'SECOND', $1)"
 
 ## `daysBetween start end`: whole days from `start` to `end`, negative if `end`
 ## is earlier. Subject last, so `daysBetween .created_at` is a function of the
 ## end — an age in days.
-daysBetween : expr r date -> expr r date -> expr r int = sql "CAGARA_DAYS_BETWEEN($1, $2)"
+daysBetween : expr ?r date -> expr ?r date -> expr ?r int = sql "CAGARA_DAYS_BETWEEN($1, $2)"
 
 ## `monthsBetween start end`: whole calendar months from `start` to `end`.
 ##
@@ -555,13 +559,13 @@ daysBetween : expr r date -> expr r date -> expr r int = sql "CAGARA_DAYS_BETWEE
 ##
 ## Measured equal on DuckDB, SQLite, MariaDB and Trino, because it is plain
 ## `year`/`month`/`day` arithmetic and those are already portable.
-monthsBetween : expr r date -> expr r date -> expr r int = a => b =>
+monthsBetween : expr ?r date -> expr ?r date -> expr ?r int = a => b =>
   (year b - year a) * 12 + (month b - month a) - ifThenElse (day b < day a) 1 0
 
 ## `yearsBetween start end`: whole calendar years from `start` to `end`, elapsed in
 ## the same sense as `monthsBetween` — `2020-05-01` to `2024-03-20` is `3`, because
 ## the fourth year is not complete.
-yearsBetween : expr r date -> expr r date -> expr r int = a => b => monthsBetween a b / 12
+yearsBetween : expr ?r date -> expr ?r date -> expr ?r int = a => b => monthsBetween a b / 12
 
 ## `secondsBetween start end`: whole seconds between two timestamps.
 ##
@@ -572,26 +576,26 @@ yearsBetween : expr r date -> expr r date -> expr r int = a => b => monthsBetwee
 ## and the fields wrap independently, so the sum comes out as `2 * 60 - 15`. This
 ## spelling has no such seam: the day part is already a whole number of days, and the
 ## time of day is one signed quantity.
-secondsBetween : expr r timestamp -> expr r timestamp -> expr r int = a => b =>
+secondsBetween : expr ?r timestamp -> expr ?r timestamp -> expr ?r int = a => b =>
   daysBetween (toDate a) (toDate b) * 86400
   + ((hour b * 3600 + minute b * 60 + second b) - (hour a * 3600 + minute a * 60 + second a))
 
 ## `minutesBetween start end`: whole minutes, from `secondsBetween` so the two cannot
 ## disagree. Integer division truncates toward zero, so an interval of `-105` seconds
 ## is `-1` minute rather than `-2`.
-minutesBetween : expr r timestamp -> expr r timestamp -> expr r int = a => b =>
+minutesBetween : expr ?r timestamp -> expr ?r timestamp -> expr ?r int = a => b =>
   secondsBetween a b / 60
 
 ## `hoursBetween start end`: whole hours, from `secondsBetween` for the same reason.
-hoursBetween : expr r timestamp -> expr r timestamp -> expr r int = a => b =>
+hoursBetween : expr ?r timestamp -> expr ?r timestamp -> expr ?r int = a => b =>
   secondsBetween a b / 3600
 
 ## `nullIf a b`: NULL when `a` equals `b`, `a` otherwise — how a sentinel value
 ## is turned into a real NULL.
-nullIf : expr r a -> expr r a -> expr r (maybe a) = sql "NULLIF($1, $2)"
+nullIf : expr ?r ?a -> expr ?r ?a -> expr ?r (maybe ?a) = sql "NULLIF($1, $2)"
 
 ## Equality that treats two NULL values as equal, and never returns NULL — so
 ## it can be used directly in `where` and in join predicates, where a plain
 ## `==` between two nullables would filter everything out.
-eqMaybe : expr r (maybe a) -> expr r (maybe a) -> expr r bool =
+eqMaybe : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r bool =
   sql "COALESCE(($1 = $2) OR ($1 IS NULL AND $2 IS NULL), FALSE)"

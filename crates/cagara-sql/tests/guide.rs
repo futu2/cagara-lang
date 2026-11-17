@@ -106,9 +106,9 @@ fn documented() -> BTreeMap<String, String> {
 /// is the only place it appears:
 ///
 /// ```text
-/// _&-_ : query r -> expr r int -> query r = q => n => limit n q
+/// _&-_ : query ?r -> expr ?r int -> query ?r = q => n => limit n q
 ///                                                      ^^^^^
-/// _&?_ : query r -> expr r bool -> query r = q => pred => where pred q
+/// _&?_ : query ?r -> expr ?r bool -> query ?r = q => pred => where pred q
 ///                                                        ^^^^^
 /// ```
 ///

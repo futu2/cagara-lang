@@ -570,7 +570,7 @@ impl Lowerer {
     /// and the input's own projection may have dropped or renamed it. The join
     /// is a `CROSS JOIN LATERAL UNNEST(…)`, whose column Postgres and DuckDB
     /// both call `unnest`; the output row names it `value`, which is what the
-    /// checker's `merge r { value = a }` promised.
+    /// checker's `merge ?r { value = a }` promised.
     fn lower_unnest(&mut self, r: &Rel, list: &IrExpr) -> Result<Stage, String> {
         let mut st = self.rel(r)?;
         // The lateral reads the list column, so it has to be in scope of the

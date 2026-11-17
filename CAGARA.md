@@ -142,7 +142,7 @@ at top level it is only the optional item terminator.
 ```cagara
 users : query { id = int, age = int } = table "public" "users"
 
-addOne : expr r int -> expr r int =
+addOne : expr ?r int -> expr ?r int =
   x => x + 1
 
 main = users & select { .id, next = addOne .age }
@@ -151,11 +151,11 @@ main = users & select { .id, next = addOne .age }
 - A name defined more than once must have a type signature on **every** definition; that is
   overloading (§4.7). Duplicate unannotated definitions are an error.
 - Definitions without signatures are inferred and may be polymorphic. A helper that reads a named
-  column needs that column in its row annotation. A bare `query r` says nothing about the row's
+  column needs that column in its row annotation. A bare `query ?r` says nothing about the row's
   fields, so it cannot be used; name the fields it needs and let `| r` stand for the rest:
 
 ```text
-byId : expr r int -> query r -> query r = i => q => where (.id == i) q
+byId : expr ?r int -> query ?r -> query ?r = i => q => where (.id == i) q
 # error: `byId` does not match its signature: kind mismatch: cannot unify Row with Type
 ```
 
@@ -164,7 +164,7 @@ Use a field tail instead:
 ```cagara
 users : query { id = int, name = string } = table "public" "users"
 
-byId : expr { id = int | r } int -> query { id = int | r } -> query { id = int | r } =
+byId : expr { id = int | ?r } int -> query { id = int | ?r } -> query { id = int | ?r } =
   i => q => where (.id == i) q
 
 main = users & byId 3
@@ -412,7 +412,7 @@ main = users & byName "ada" & select { .id, x = addOne .id, e = .name & clean }
 
 Annotating a parameter pins the type its body would otherwise leave open, the way a signature does
 for a whole definition. Its type variables relate what the annotation mentions — in
-`(least : expr r int)` one `r` is the row of the parameter and of the query it builds — but they are
+`(least : expr ?r int)` one `r` is the row of the parameter and of the query it builds — but they are
 *filled in* by the argument rather than promised for every type the way a signature's are, because a
 parameter is monomorphic and has exactly one type at each use:
 
@@ -422,7 +422,7 @@ users : query { id = int, name = string, age = int } = table "public" "users"
 onlyAdults = (q : query { id = int, name = string, age = int }) =>
   q & where (.age >= 18)
 
-atLeast = (least : expr r int) => q => where (.age >= least) q
+atLeast = (least : expr ?r int) => q => where (.age >= least) q
 
 main = users & onlyAdults & atLeast 21 & select { .id, .name }
 ```
@@ -571,8 +571,8 @@ A name defined more than once, each definition with a signature, is an overload 
 picks the candidate that fits the use. `+`, `-`, `*`, `/`, `sum`, `toInt`, etc. work this way.
 
 ```cagara
-double : expr r int -> expr r int = x => x + x
-double : expr r float -> expr r float = x => x + x
+double : expr ?r int -> expr ?r int = x => x + x
+double : expr ?r float -> expr ?r float = x => x + x
 
 users : query { age = int, score = float } = table "public" "users"
 main = users & select { a = double .age, b = double .score }
@@ -585,13 +585,13 @@ definition, not at some call site far away:
   however many definitions `f` has);
 - no two definitions have the **same signature**. A repeat is not an overload: every use that fits
   it fits the first, so it can never be chosen. Type-variable names do not make a difference —
-  `a -> a` and `b -> b` are the same signature.
+  `a -> ?a` and `b -> ?b` are the same signature.
 
 The axes that *are* overloads are what the prelude uses: a narrower or wider type (`int`/`float`), a
 nullable one (`a`/`maybe a`), a source type (`string`/`int` into `toInt`), and a phase (`expr`/value).
 
 An expression that reads **no row** is also a value. A function like `year` has one signature —
-`year : expr r int` — and `year .d` puts `d`'s column into the expression's row, while
+`year : expr ?r int` — and `year .d` puts `d`'s column into the expression's row, while
 `year currentDate` leaves that row a variable, because nothing in it refers to a column. A row
 expression whose row is still unknown is read as its value wherever a scalar is expected:
 
@@ -602,7 +602,7 @@ cutoff : date = addDays (-7) currentDate  # so parametric helpers compose
 ```
 
 That is why there is no second `date -> date` overload of `truncYear`. Adding one beside
-`expr r date -> expr r date` makes the two candidates tie whenever a column's type is not yet
+`expr ?r date -> expr ?r date` makes the two candidates tie whenever a column's type is not yet
 known, and the tie is a real ambiguity: only the row says whether `.d` is a `date` or a
 `timestamp`. `x : int = .a` stays an error for the same rule read backwards — a column reference
 *does* put a row into the expression, so it is not a value.
@@ -679,31 +679,31 @@ are expression constructors used *inside* stages, not query stages themselves.
 
 | Stage | Signature | Output row | Key rules |
 |---|---|---|---|
-| `table "s" "t"` | `string -> string -> query r` | declared row | closed annotation mandatory |
-| `where p` | `expr r bool -> query r -> query r` | same as input | `p` row-phase, non-null `bool` |
-| `select f` | `expr r (row s) -> query r -> query s` | exactly `f`'s fields | fields row/win/const; no aggregates |
-| `update f` | `expr r (row s) -> query r -> query (merge r s)` | input overlaid by `f` | right-wins; new names append |
-| `agg f` | `agg (expr r (row s)) -> query r -> query s` | exactly `f`'s fields | each field `group` or aggregate/const |
-| `order ks` | `list (sortkey r) -> query r -> query r` | same as input | row-phase keys; NULLs last |
-| `limit n` | `expr r int -> query r -> query r` | same as input | non-negative literal/constant |
-| `offset n` | `expr r int -> query r -> query r` | same as input | non-negative literal/constant |
-| `distinct` | `query r -> query r` | same as input | deduplicates the whole row |
-| `omit "c"` | `symbol k -> query r -> query (removeKey k r)` | input without `c` | key is a literal |
-| `prefix "p"` | `symbol k -> query r -> query (keyMap ... r)` | every name prefixed | key is a literal |
-| `suffix "s"` | `symbol k -> query r -> query (keyMap ... r)` | every name suffixed | key is a literal |
-| `innerJoin q p` | `query s -> expr (join r s) bool -> query r -> query (merge r s)` | left then right-only | predicate uses `.<`/`.>` |
+| `table "s" "t"` | `string -> string -> query ?r` | declared row | closed annotation mandatory |
+| `where p` | `expr ?r bool -> query ?r -> query ?r` | same as input | `p` row-phase, non-null `bool` |
+| `select f` | `expr ?r (row ?s) -> query ?r -> query ?s` | exactly `f`'s fields | fields row/win/const; no aggregates |
+| `update f` | `expr ?r (row ?s) -> query ?r -> query (merge ?r ?s)` | input overlaid by `f` | right-wins; new names append |
+| `agg ?f` | `agg (expr ?r (row ?s)) -> query ?r -> query ?s` | exactly `f`'s fields | each field `group` or aggregate/const |
+| `order ks` | `list (sortkey ?r) -> query ?r -> query ?r` | same as input | row-phase keys; NULLs last |
+| `limit n` | `expr ?r int -> query ?r -> query ?r` | same as input | non-negative literal/constant |
+| `offset n` | `expr ?r int -> query ?r -> query ?r` | same as input | non-negative literal/constant |
+| `distinct` | `query ?r -> query ?r` | same as input | deduplicates the whole row |
+| `omit "c"` | `symbol ?k -> query ?r -> query (removeKey ?k ?r)` | input without `c` | key is a literal |
+| `prefix "p"` | `symbol ?k -> query ?r -> query (keyMap ... r)` | every name prefixed | key is a literal |
+| `suffix "s"` | `symbol ?k -> query ?r -> query (keyMap ... r)` | every name suffixed | key is a literal |
+| `innerJoin q p` | `query ?s -> expr (join r s) bool -> query ?r -> query (merge ?r ?s)` | left then right-only | predicate uses `.<`/`.>` |
 | `leftJoin q p` | same, result right side nullable | left then right-only | right columns `maybe` |
 | `rightJoin q p` | same, result left side nullable | left then right-only | left columns `maybe` |
 | `fullJoin q p` | same, both sides nullable | left then right-only | both sides `maybe` |
-| `semiJoin q p` | `query s -> expr (join r s) bool -> query r -> query r` | left only | rows with a match |
+| `semiJoin q p` | `query ?s -> expr (join r s) bool -> query ?r -> query ?r` | left only | rows with a match |
 | `antiJoin q p` | same | left only | rows without a match |
-| `union q2` | `query r -> query r -> query r` | left row | deduplicates |
+| `union q2` | `query ?r -> query ?r -> query ?r` | left row | deduplicates |
 | `unionAll q2` | same | left row | keeps duplicates |
 | `intersect q2` | same | left row | deduplicates |
 | `except q2` | same | left row | deduplicates |
-| `inList [..] e` | `list a -> expr r a -> expr r bool` | `bool` | members homogeneous |
-| `asc e`, `desc e` | `expr r a -> sortkey r` | sort key | only inside `order`/spec |
-| `group e` | `expr r a -> agg (expr r a)` | aggregate key | only inside `agg` |
+| `inList [..] e` | `list a -> expr ?r a -> expr ?r bool` | `bool` | members homogeneous |
+| `asc e`, `desc e` | `expr ?r a -> sortkey ?r` | sort key | only inside `order`/spec |
+| `group e` | `expr ?r a -> agg (expr ?r a)` | aggregate key | only inside `agg` |
 
 ### 5.1 `table`
 
@@ -922,7 +922,7 @@ no join spelling of its own for this: reshaping a side is what `select` and `upd
 Output columns: left input's columns, then the right input's columns that the left does not have.
 
 A name **both** sides have keeps the **left** value and drops the right one: that is what the output
-row's `merge r s` says, and it is what lets two tables that both have an `id` be joined without a
+row's `merge ?r ?s` says, and it is what lets two tables that both have an `id` be joined without a
 projection first. The compiler reports a **warning**, because the right column cannot be read
 afterwards — `.<x`/`.>x` name the inputs only inside the predicate. A warning does not fail the
 build; rename on the operand when you need the right column too:
@@ -1057,7 +1057,7 @@ The column still keeps its leading dot (`.name`). A bare `name` would have to be
 a definition — the prelude alone defines 143 lowercase names, and `id`, `count`,
 `order`, `group`, `min`, `max`, `year`, `left` and `right` are all among them, so
 implicit column names would silently mean a function on the tables that matter
-most (`&? id == 1` reports `found a -> a`, which is the identity function).
+most (`&? id == 1` reports `found a -> ?a`, which is the identity function).
 
 Three more expression operators: `$` (application, loosest of all), `<<<`
 (composition backwards), and `<>` (combine — concatenation on `string`, first-present on
@@ -1081,7 +1081,7 @@ fixed nothing that the wrapper does not.
 | `where`, `order`, `limit`, `offset`, `distinct` | input row unchanged |
 | `select f` | exactly the fields of `f`, in order |
 | `update f` | input row with `f` overlaid: existing positions kept, new names appended |
-| `agg f` | exactly the fields of `f` |
+| `agg ?f` | exactly the fields of `f` |
 | `omit "c"` | input row minus `c`, order kept |
 | `prefix "p"` / `suffix "s"` | all names rewritten, order and types kept |
 | `innerJoin` | left columns, then right-only columns |
@@ -1204,14 +1204,14 @@ function is missing, write a `sql` template (§8.4) or report it unavailable. Th
 summary: `cagara doc --prelude` prints the same catalog with each definition's own documentation,
 taken from the `##` blocks in `prelude/core.cagara` (and `prelude/std.cagara`).
 
-Notation: signatures are exact for the shown overloads; `expr r a` means an expression over the
+Notation: signatures are exact for the shown overloads; `expr ?r a` means an expression over the
 current row. A name with several lines is overloaded.
 
 ### 7.1 Combinators and pipeline
 
 ```text
-_&_    : a -> (a -> b) -> b          x & f      = f x
-_$_    : (a -> b) -> a -> b          f $ x      = f x
+_&_    : a -> (?a -> ?b) -> ?b          x & f      = f x
+_$_    : (?a -> ?b) -> ?a -> ?b          f $ x      = f x
 _>>>_  : (a -> b) -> (b -> c) -> a -> c
 _<<<_  : (b -> c) -> (a -> b) -> a -> c
 id     : a -> a
@@ -1220,41 +1220,41 @@ id     : a -> a
 ### 7.2 Comparison, logic, arithmetic, strings
 
 ```text
-==  !=  <  <=  >  >=   : expr r a -> expr r a -> expr r bool
-&&  ||                 : expr r bool -> expr r bool -> expr r bool
+==  !=  <  <=  >  >=   : expr ?r a -> expr ?r a -> expr ?r bool
+&&  ||                 : expr ?r bool -> expr ?r bool -> expr ?r bool
 not                    : expr r bool -> expr r bool
 negate                 : expr r int|float -> same
 
 ifThenElse             : expr r bool -> expr r a -> expr r a -> expr r a  (searched CASE)
 caseWhen               : the same function under an alias
 
-+ - *                  : expr r int -> expr r int -> expr r int        (also float overloads)
-/                      : expr r int -> expr r int -> expr r int        (truncates toward zero)
-/                      : expr r float -> expr r float -> expr r float
-%                      : expr r int -> expr r int -> expr r int        (sign of dividend)
-<>                     : expr r string -> expr r string -> expr r string
-<>                     : expr r (maybe string) -> expr r (maybe string) -> expr r (maybe string)
++ - *                  : expr ?r int -> expr ?r int -> expr ?r int        (also float overloads)
+/                      : expr ?r int -> expr ?r int -> expr ?r int        (truncates toward zero)
+/                      : expr ?r float -> expr ?r float -> expr ?r float
+%                      : expr ?r int -> expr ?r int -> expr ?r int        (sign of dividend)
+<>                     : expr ?r string -> expr ?r string -> expr ?r string
+<>                     : expr ?r (maybe string) -> expr ?r (maybe string) -> expr ?r (maybe string)
 concat                 : expr r string -> expr r string -> expr r string
 
-upper lower trim ltrim rtrim : expr r string -> expr r string
+upper lower trim ltrim rtrim : expr ?r string -> expr ?r string
 length                 : expr r string -> expr r int
 substring              : expr r int -> expr r int -> expr r string -> expr r string
-left right             : expr r int -> expr r string -> expr r string
-lpad rpad              : expr r int -> expr r string -> expr r string -> expr r string
+left right             : expr ?r int -> expr ?r string -> expr ?r string
+lpad rpad              : expr ?r int -> expr ?r string -> expr ?r string -> expr ?r string
 replaceAll             : expr r string -> expr r string -> expr r string -> expr r string
 strpos                 : expr r string -> expr r string -> expr r int
 contains               : expr r string -> expr r string -> expr r bool
-startsWith endsWith    : expr r string -> expr r string -> expr r bool
-like ilike             : expr r string -> expr r string -> expr r bool
+startsWith endsWith    : expr ?r string -> expr ?r string -> expr ?r bool
+like ilike             : expr ?r string -> expr ?r string -> expr ?r bool
 
 abs                    : expr r int|float -> same
 round                  : expr r float -> expr r float
 roundTo                : expr r int -> expr r float -> expr r float
-floor ceil             : expr r float -> expr r float
+floor ceil             : expr ?r float -> expr ?r float
 sqrt                   : expr r float -> expr r float
 power                  : expr r float -> expr r float -> expr r float
 sign                   : expr r int|float -> same
-greatest least         : expr r a -> expr r a -> expr r a     (two arguments)
+greatest least         : expr ?r a -> expr ?r a -> expr ?r a     (two arguments)
 ```
 
 Argument order is subject-last, which is the reverse of the SQL spelling:
@@ -1328,19 +1328,19 @@ formatDate       : string -> expr r date -> expr r string
 formatTimestamp  : string -> expr r timestamp -> expr r string
 
 addDays addWeeks addMonths addQuarters addYears
-                 : expr r int -> expr r date -> expr r date
-                 : expr r int -> expr r timestamp -> expr r timestamp
+                 : expr ?r int -> expr ?r date -> expr ?r date
+                 : expr ?r int -> expr ?r timestamp -> expr ?r timestamp
 addHours addMinutes addSeconds
-                 : expr r int -> expr r timestamp -> expr r timestamp
+                 : expr ?r int -> expr ?r timestamp -> expr ?r timestamp
 
 truncYear truncQuarter truncMonth truncWeek
-                 : expr r date|timestamp -> same
+                 : expr ?r date|timestamp -> same
 truncDay truncHour truncMinute
-                 : expr r timestamp -> expr r timestamp
+                 : expr ?r timestamp -> expr ?r timestamp
 
 year quarter month day dayOfWeek dayOfYear
-                 : expr r date|timestamp -> expr r int
-hour minute      : expr r timestamp -> expr r int
+                 : expr ?r date|timestamp -> expr ?r int
+hour minute      : expr ?r timestamp -> expr ?r int
 daysBetween      : expr r date -> expr r date -> expr r int
 ```
 
@@ -1371,7 +1371,7 @@ main = orders & select {
 
 ```text
 coalesce   : expr r a -> expr r (maybe a) -> expr r a
-??         : expr r (maybe a) -> expr r a -> expr r a
+??         : expr ?r (maybe a) -> expr ?r a -> expr ?r a
 nothing    : expr r (maybe a)
 just       : expr r a -> expr r (maybe a)
 nullIf     : expr r a -> expr r a -> expr r (maybe a)
@@ -1449,17 +1449,17 @@ All fields are optional; `{}` is valid. `partition`/`order` keys are row-phase: 
 such as `truncMonth .ts` are fine, but aggregates and windows are not.
 
 ```text
-rowNumber rank denseRank : winspec r -> win (expr r int)
-lag lead                 : winspec r -> expr r a -> win (expr r (maybe a))
-firstValue lastValue     : winspec r -> expr r a -> win (expr r (maybe a))
+rowNumber rank denseRank : winspec ?r -> win (expr ?r int)
+lag lead                 : winspec ?r -> expr ?r a -> win (expr ?r (maybe a))
+firstValue lastValue     : winspec ?r -> expr ?r a -> win (expr ?r (maybe a))
 ntile                    : winspec r -> expr r int -> win (expr r int)
-percentRank cumeDist     : winspec r -> win (expr r float)
+percentRank cumeDist     : winspec ?r -> win (expr ?r float)
 
 rows                     : bound -> bound -> frame
 unboundedPreceding       : bound
 unboundedFollowing       : bound
 currentRow               : bound
-preceding following      : expr r int -> bound
+preceding following      : expr ?r int -> bound
 wholePartition           : frame
 runningFrame             : frame
 ```
@@ -1530,8 +1530,8 @@ gives the template its arity (number of `->` before the result) and its phase (`
 ```cagara
 users : query { id = int, name = string, amount = float } = table "public" "users"
 
-myUpper : expr r string -> expr r string = sql "UPPER($1)"
-mySum : expr r float -> agg (expr r (maybe float)) = sql "SUM($1)"
+myUpper : expr ?r string -> expr ?r string = sql "UPPER($1)"
+mySum : expr ?r float -> agg (expr ?r (maybe float)) = sql "SUM($1)"
 
 report = users & agg { total = coalesce 0.0 (mySum .amount) }
 
@@ -1549,7 +1549,7 @@ prelude, not in user code.
 
 `primitive "..."` is internal: it names a built-in operation, and it is how the prelude defines its
 own stages. Writing `primitive "__merge"` yourself is an internal error, because there is no
-query-level `merge` — two queries are combined with a join or a set operation, and `merge r s` is
+query-level `merge` — two queries are combined with a join or a set operation, and `merge ?r ?s` is
 only a row *type* former in signatures (`update` and the joins use it). `# no prelude` on the first
 line disables the prelude and requires redefining `table` with `primitive "__table"`; do not use it
 unless the task asks.
@@ -1812,7 +1812,7 @@ orders : query { id = int, user_id = int, amount = float, status = string } =
   table "public" "orders"
 
 paidOnly = q => where (.status == "paid") q
-shout : expr r string -> expr r string = sql "UPPER($1)"
+shout : expr ?r string -> expr ?r string = sql "UPPER($1)"
 
 report =
   orders
@@ -1888,7 +1888,7 @@ The compiler names the column and often the fix. Match the wording, then apply t
 | `a \`case\` must end with a default arm, written \`true => value\`` | no default | append `true => value` |
 | `unknown name \`null\`` | SQL NULL literal | use `nothing` |
 | `integer literal is too large (the limit is 9223372036854775807)` | overflow | use a smaller literal |
-| `needs a type signature: a \`sql\` template...` | template without signature | add `name : expr r a -> expr r b` |
+| `needs a type signature: a \`sql\` template...` | template without signature | add `name : expr ?r a -> expr ?r b` |
 | `template uses placeholders up to $2 but its signature has 1 ...` | placeholder/arity mismatch | number placeholders `$1..$n` exactly |
 | `unknown operator \`&>>\`` | operator not in table | use a listed operator |
 | `the columns of table ... are unknown; give its definition a closed type` | table without annotation | add `query { ... }` |
@@ -1897,7 +1897,7 @@ The compiler names the column and often the fix. Match the wording, then apply t
 | `type mismatch: expected int, found float` | int/float mix | `toInt` / `toFloat` |
 | `cannot apply a value of type int to an argument` | juxtaposition of non-functions (e.g. `1e3`) | use a correct literal/function |
 | `field \`x\` of \`select\` must be a column expression or constant, found list int` | list as a value | lists are only keys/`inList` |
-| `\`byId\` does not match its signature` | bare `query r` annotation on a column-reading helper | name the field: `query { id = int \| r }` |
+| `\`byId\` does not match its signature` | bare `query ?r` annotation on a column-reading helper | name the field: `query { id = int \| r }` |
 | `\`main\` must be a query, found ...` | scalar definition named `main` | make `main` a query, or omit it for a library |
 | `a line starting with an identifier in column 0 begins a new definition` | unindented continuation | indent the line, or terminate the previous item with `;` |
 | `a lambda parameter's type annotation is written \`(x : ty) => body\`` | `x : int => x` | put the parameter and its type in parentheses |

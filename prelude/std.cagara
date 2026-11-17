@@ -723,3 +723,21 @@ tryBoolTrue : expr ?r string -> expr ?r (maybe bool) =
 ## The false half of `tryBool`: `just false`, or NULL.
 tryBoolFalse : expr ?r string -> expr ?r (maybe bool) =
   sql "CASE WHEN LOWER($1) IN ('false','f','no','n','0') THEN FALSE END"
+
+## `monthName d`: the month as its English name — `formatDate "%B" d`. A report
+## axis labelled with a month reads better than one labelled `3`.
+monthName : expr ?r date -> expr ?r string = formatDate "%B"
+monthName : expr ?r timestamp -> expr ?r string = formatTimestamp "%B"
+
+## `monthAbbrev d`: the month as its three-letter name — `formatDate "%b" d`.
+monthAbbrev : expr ?r date -> expr ?r string = formatDate "%b"
+monthAbbrev : expr ?r timestamp -> expr ?r string = formatTimestamp "%b"
+
+## `dayName d`: the weekday as its English name — `formatDate "%A" d`. "Traffic
+## by weekday" is a report that needs this and nothing else.
+dayName : expr ?r date -> expr ?r string = formatDate "%A"
+dayName : expr ?r timestamp -> expr ?r string = formatTimestamp "%A"
+
+## `dayAbbrev d`: the weekday as its three-letter name — `formatDate "%a" d`.
+dayAbbrev : expr ?r date -> expr ?r string = formatDate "%a"
+dayAbbrev : expr ?r timestamp -> expr ?r string = formatTimestamp "%a"

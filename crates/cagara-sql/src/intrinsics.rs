@@ -251,11 +251,35 @@ fn translate_format(fmt: &str, style: FmtStyle) -> Result<String, String> {
             ('S', FmtStyle::Mysql) => "%s",
             ('S', FmtStyle::Pg) => "SS",
             ('S', FmtStyle::Java) => "ss",
+            // Names rather than numbers. `formatDate` only: a month *name* is
+            // what a report axis is labelled with, and no engine parses one back
+            // the same way, so `parseDate` keeps its numeric set.
+            ('b', FmtStyle::Strftime) => "%b",
+            ('b', FmtStyle::Mysql) => "%b",
+            ('b', FmtStyle::Pg) => "Mon",
+            ('b', FmtStyle::Java) => "MMM",
+            ('B', FmtStyle::Strftime) => "%B",
+            ('B', FmtStyle::Mysql) => "%M",
+            ('B', FmtStyle::Pg) => "Month",
+            ('B', FmtStyle::Java) => "MMMM",
+            ('a', FmtStyle::Strftime) => "%a",
+            ('a', FmtStyle::Mysql) => "%a",
+            ('a', FmtStyle::Pg) => "Dy",
+            ('a', FmtStyle::Java) => "EEE",
+            ('A', FmtStyle::Strftime) => "%A",
+            ('A', FmtStyle::Mysql) => "%W",
+            ('A', FmtStyle::Pg) => "Day",
+            ('A', FmtStyle::Java) => "EEEE",
+            ('j', FmtStyle::Strftime) => "%j",
+            ('j', FmtStyle::Mysql) => "%j",
+            ('j', FmtStyle::Pg) => "DDD",
+            ('j', FmtStyle::Java) => "DDD",
             _ => {
                 return Err(format!(
                     "`%{spec}` is not a format specifier this language translates; the \
                      supported ones are `%Y` (year), `%m` (month), `%d` (day), `%H` (hour), \
-                     `%M` (minute), `%S` (second) and `%%` for a literal percent"
+                     `%M` (minute), `%S` (second), `%b`/`%B` (month name), \
+                     `%a`/`%A` (weekday name), `%j` (day of year) and `%%` for a percent"
                 ))
             }
         };

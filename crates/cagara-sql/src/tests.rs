@@ -3483,10 +3483,13 @@ fn a_date_format_is_written_once_and_spelled_per_target() {
                q = t & select { p = parseDate (\"%Y\" ++ \"%m%d\") .s }\n";
     let e = dialect(src, "q", "duckdb").unwrap_err();
     assert!(e.contains("literal format string"), "{e}");
+    // `%q` names nothing: the month and weekday *names* are supported (`%b`,
+    // `%B`, `%a`, `%A`) and so is the day of the year (`%j`), so the unsupported
+    // specifier this test uses has to be one the language really does not have.
     let src = "t : query { s = string } = table \"s\" \"t\"\n\
-               q = t & select { p = parseDate \"%j\" .s }\n";
+               q = t & select { p = parseDate \"%q\" .s }\n";
     let e = dialect(src, "q", "duckdb").unwrap_err();
-    assert!(e.contains("`%j` is not a format specifier"), "{e}");
+    assert!(e.contains("`%q` is not a format specifier"), "{e}");
 }
 
 /// A format conversion is spelled by the target: `SPECIFIC` functions differ

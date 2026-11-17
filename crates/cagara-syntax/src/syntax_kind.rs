@@ -269,18 +269,18 @@ kind_table! {
         /// join-side field is `.` then `<` or `>` then a name, while an
         /// operator name is `.` then `_`. Matching on that keeps them apart
         /// with no lookahead.
-        Field #[regex(r"\.[a-zA-Z_][a-zA-Z0-9_]*")] #[regex(r"\._[^a-zA-Z0-9_\s]+_")],
+        Field #[regex(r"\.[\p{XID_Start}_][\p{XID_Continue}]*")] #[regex(r"\._[^a-zA-Z0-9_\s]+_")],
         /// `.<name` — column of the left join input
-        LeftField #[regex(r"\.<[a-zA-Z_][a-zA-Z0-9_]*")],
+        LeftField #[regex(r"\.<[\p{XID_Start}_][\p{XID_Continue}]*")],
         /// `.>name` — column of the right join input
-        RightField #[regex(r"\.>[a-zA-Z_][a-zA-Z0-9_]*")],
+        RightField #[regex(r"\.>[\p{XID_Start}_][\p{XID_Continue}]*")],
 
         /// Plain identifiers and operator names such as `_+_` or `_&^_`. An
         /// operator name is `_`, a run of punctuation, `_` — deliberately
         /// broader than the operator classes above, because a name only has to
         /// be *definable*: whether a spelling is an operator at all is decided
         /// by those classes and the fixed operator table.
-        Ident #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")] #[regex(r"_[^a-zA-Z0-9_\s]+_")],
+        Ident #[regex(r"[\p{XID_Start}_][\p{XID_Continue}]*")] #[regex(r"_[^a-zA-Z0-9_\s]+_")],
 
         Int #[regex(r"[0-9]+")],
         Float #[regex(r"[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?")],

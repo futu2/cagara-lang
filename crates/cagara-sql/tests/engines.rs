@@ -311,6 +311,12 @@ INSERT INTO main.spans VALUES (1, '2024-01-31', '2024-02-01'), (2, '2024-01-15',
 -- the `hour` fields gives the wrong answer.
 CREATE TABLE main.times (id INTEGER, a TIMESTAMP, b TIMESTAMP);
 INSERT INTO main.times VALUES (1, '2024-01-01 10:00:00', '2024-01-01 15:30:45'), (2, '2024-01-01 23:30:00', '2024-01-02 01:15:30');
+-- Names are Unicode, so a schema can be written in the language it describes.
+-- The two columns are here to prove the *emitted* identifier is quoted for the
+-- target: an unquoted `总金额` would parse as a name in some engines and fail in
+-- others, and a name that needs quoting must round-trip.
+CREATE TABLE main.unicode_names (id INTEGER, \"总金额\" DOUBLE, \"数量\" INTEGER);
+INSERT INTO main.unicode_names VALUES (1, 100.0, 4), (2, 50.0, 5);
 ";
 
 const TABLES: &str = "\
@@ -325,11 +331,19 @@ g : query { a = int, b = int, n = int } = table \"main\" \"g\"
 frames : query { k = int, n = int } = table \"main\" \"frames\"
 spans : query { id = int, a = date, b = date } = table \"main\" \"spans\"
 times : query { id = int, a = timestamp, b = timestamp } = table \"main\" \"times\"
+unicode_names : query { id = int, 总金额 = float, 数量 = int } = table \"main\" \"unicode_names\"
 ";
 
 /// `(definition, expected rows)`; a row is its columns joined by `|`, NULL
 /// as `NULL`, booleans as `1` / `0`.
 const CASES: &[(&str, &[&str])] = &[
+    // A Unicode column is a name like any other: `.总金额` reads the column and
+    // the alias `单价` is emitted quoted for the target.
+    (
+        "u1 = unicode_names & select { id = .id, 单价 = .总金额 / toFloat .数量 } & order [asc .id]",
+        // `toFloat` makes the quotient a float, so the column prints as one.
+        &["1|25.0", "2|10.0"],
+    ),
     // Integer division truncates toward zero; `%` keeps the dividend's sign.
     (
         "div = nums & select { id = .id, d = .a / .b, m = .a % .b } & order [asc .id]",

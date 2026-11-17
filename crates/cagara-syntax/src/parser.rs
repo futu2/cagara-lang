@@ -980,15 +980,16 @@ impl<'a> Parser<'a> {
                     let msg = unknown_op(l.text, self.ops);
                     self.bail(&msg);
                 }
-                // A character no pattern claims: the common case is a
-                // non-ASCII name, because identifiers are ASCII by definition
-                // (`[a-zA-Z_][a-zA-Z0-9_]*`). "expected an expression" at that
-                // byte says nothing about why — the character *is* there — so
-                // the message names the rule and the character.
+                // A character no pattern claims. Names are Unicode XID (see
+                // `Ident`'s pattern), so the interesting case is a character
+                // that cannot *start* one — a symbol, or a digit-like character
+                // such as a superscript. "expected an expression" at that byte
+                // says nothing about why — the character *is* there — so the
+                // message names the rule and the character.
                 Some(l) if l.kind == Token::Error && !l.text.is_ascii() => {
                     let ch = l.text.chars().next().unwrap_or('?');
                     self.error(format!(
-                        "`{ch}` cannot start a name: identifiers are ASCII letters, digits and \
+                        "`{ch}` cannot start a name: a name begins with a Unicode letter or \
                          `_`; a string literal (`\"{ch}\") holds any text"
                     ));
                     self.start(K::ErrorNode);
@@ -1025,7 +1026,7 @@ impl<'a> Parser<'a> {
                 // will never close, so reporting that too would bury the one
                 // message that says what is wrong.
                 self.bail(&format!(
-                    "`{ch}` cannot name a field: identifiers are ASCII letters, digits and `_`"
+                    "`{ch}` cannot name a field: a name begins with a Unicode letter or `_`"
                 ));
             }
         }
@@ -1814,38 +1815,46 @@ mod tests {
         assert_eq!(defs(&p), ["catalog", "q"]);
     }
 
-    /// A non-ASCII name says which rule it broke, not "expected an expression".
+    /// A Unicode name is a name: `名字 = .id` parses.
     ///
-    /// Identifiers are ASCII (`[a-zA-Z_][a-zA-Z0-9_]*`), so `名字 = .id` is a
-    /// lexer `Error` token. The generic messages were `expected an expression` at
-    /// the byte — the character *is* there, so that says nothing — or, inside a
-    /// record, `expected `}``, which points at the wrong thing entirely. Both
-    /// places now name the rule and the character, and the record case bails
-    /// rather than adding an uncloseable-brace error on top.
+    /// Names were ASCII (`[a-zA-Z_][a-zA-Z0-9_]*`), which made a Chinese or
+    /// Cyrillic column unspellable while a *table* name — a string — was fine.
+    /// They are Unicode `XID_Start`/`XID_Continue` now, so a schema can be
+    /// written in the language it is described in.
     #[test]
-    fn a_non_ascii_name_says_what_the_rule_is() {
-        let p = parse("q = 名字\n");
+    fn a_unicode_name_is_a_name() {
+        for src in [
+            "q = 名字\n",
+            "名字 = 1\n",
+            "总金额 : int = 1\n",
+            "q = t & select { 名字 = .id }\n",
+            "q = t & where (.总金额 > 1.0)\n",
+            "q = t & innerJoin u (.<编号 == .>id)\n",
+        ] {
+            let p = parse(src);
+            assert!(p.errors.is_empty(), "{src:?}: {:?}", messages(&p));
+        }
+        // The character class is XID, not "any non-ASCII": a superscript digit
+        // cannot start a name, and the message says so rather than reporting a
+        // missing expression at a byte that visibly holds a character.
+        let p = parse("q = \u{b2}\n");
         let msgs = messages(&p);
         assert!(
-            msgs.iter()
-                .any(|m| m.contains("cannot start a name") && m.contains('名')),
+            msgs.iter().any(|m| m.contains("cannot start a name")),
             "{msgs:?}"
         );
-        assert!(msgs.iter().any(|m| m.contains("ASCII")), "{msgs:?}");
-        // In a record field name: one message, not a cascade.
-        let p = parse("q = t & select { 名字 = .id }\n");
+        // Inside a record the same rule is stated where a reader meets it, and
+        // the uncloseable brace is not reported on top of it.
+        let p = parse("q = t & select { \u{b2} = .id }\n");
         let msgs = messages(&p);
         assert!(
-            msgs.iter()
-                .any(|m| m.contains("cannot name a field") && m.contains('名')),
+            msgs.iter().any(|m| m.contains("cannot name a field")),
             "{msgs:?}"
         );
         assert!(
             !msgs.iter().any(|m| m.contains("expected `}`")),
             "bailing suppresses the cascade: {msgs:?}"
         );
-        // A non-ASCII *string* is still fine: the rule is about names.
-        assert!(parse("q = \"名字\"\n").errors.is_empty());
     }
 
     #[test]

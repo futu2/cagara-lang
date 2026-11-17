@@ -263,6 +263,17 @@
   `cagara.path` stays window-scoped: the server is launched once, before any document
   exists.
 
+- The language server asks for save notifications. It advertised
+  `textDocumentSync` as the bare `TextDocumentSyncKind::INCREMENTAL`, which serialises as
+  the number `2`; a number has no room to mention saving, and the protocol reads a missing
+  `textDocumentSyncOptions.save` as "this server does not want save notifications". No
+  conforming client ever sent one — VS Code registers its save handler only when that field
+  is set — so the server's `didSave` handler could not run. It now advertises the options
+  form with `save: { includeText: true }`, and a save carrying different text
+  resynchronises the workspace rather than only the server's copy of the document, which is
+  what the handler used to do: the analysis reads the workspace, so the two copies
+  disagreeing was invisible only because nothing could reach the code.
+
 - The language server applies every edit in a burst. It advertises incremental sync, so
   each `didChange` carries a range written against the text the change before it
   produced — but the batch collector kept only the *last* change of a document and

@@ -26,12 +26,13 @@ use lsp_types::{
     GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability, InlayHint,
     InlayHintKind, InlayHintLabel, InlayHintParams, Location, LogMessageParams, MarkupContent,
     MarkupKind, MessageType, NumberOrString, OneOf, PrepareRenameResponse,
-    PublishDiagnosticsParams, ReferenceParams, RenameOptions, RenameParams, SemanticToken,
-    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    PublishDiagnosticsParams, ReferenceParams, RenameOptions, RenameParams, SaveOptions,
+    SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
     SignatureInformation, SymbolInformation, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri, WorkspaceEdit, WorkspaceSymbolParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, Uri, WorkspaceEdit, WorkspaceSymbolParams,
 };
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -178,12 +179,34 @@ pub fn run(build: &str) -> Res<()> {
 /// socket until the answer nobody wanted had already gone out.
 fn serve(conn: &Connection, build: &str) -> Res<()> {
     let caps = ServerCapabilities {
-        // Incremental: the client sends the range it changed, not the whole
-        // document. A 2000-line file costs a few dozen bytes per keystroke
-        // instead of the file, and the server applies the edit to the text it
-        // already has — see `apply_change`.
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(
-            TextDocumentSyncKind::INCREMENTAL,
+        // The options form, not the bare `TextDocumentSyncKind::INCREMENTAL`.
+        // The bare form is a number, and a number has no room to say anything
+        // about saving — so a client reads it as "no save notifications", and
+        // the `didSave` handler below could never run. Measured: VS Code
+        // registers its `DidSaveTextDocumentFeature` only when
+        // `textDocumentSyncOptions.save` is set, so with the bare form the
+        // handler was dead code that also made the save path untested.
+        //
+        // `change` stays incremental: the client sends the range it changed,
+        // not the whole document. A 2000-line file costs a few dozen bytes per
+        // keystroke instead of the file, and the server applies the edit to the
+        // text it already has — see `apply_change`.
+        //
+        // `include_text` is asked for because it is what makes the save
+        // authoritative. Without it a client may send only the URI, and a save
+        // then has to be *inferred* from the file on disk; with it the text the
+        // client saved arrives with the notification, which is the one thing a
+        // client cannot be wrong about. A client that ignores it sends no text,
+        // and the handler falls back to the file.
+        text_document_sync: Some(TextDocumentSyncCapability::Options(
+            TextDocumentSyncOptions {
+                open_close: Some(true),
+                change: Some(TextDocumentSyncKind::INCREMENTAL),
+                save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                    include_text: Some(true),
+                })),
+                ..Default::default()
+            },
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         // Which argument of the call the cursor is in. `hover` says what a name is;
@@ -1098,10 +1121,35 @@ fn notification(sender: &Sender<Message>, state: &mut State, n: Notification) ->
         }
         DidSaveTextDocument::METHOD => {
             let p: lsp_types::DidSaveTextDocumentParams = serde_json::from_value(n.params)?;
-            if let (Some(doc), Some(text)) =
-                (state.docs.get_mut(p.text_document.uri.as_str()), p.text)
-            {
-                doc.text = text;
+            let key = doc_key(&p.text_document.uri);
+            // A client that was asked for `includeText` sends the text it
+            // saved, and that text is the one thing it cannot be wrong about:
+            // it is what is now on disk. It is normally the text we already
+            // have — a save writes the buffer — so this is a resynchronisation
+            // rather than an edit, and the comparison is what keeps it cheap:
+            // `set_source` re-parses and drops the compile caches even when the
+            // text is identical, which would republish a document nothing
+            // changed in.
+            //
+            // It used to assign `doc.text` and stop there, which left the
+            // workspace — the thing the analysis actually reads — holding the
+            // pre-save text, so the two copies of the document disagreed. With
+            // the save notification unreachable (the capability advertised a
+            // bare sync kind, which has no room to mention saving) that was
+            // unobservable; advertising the save is what makes it a bug worth
+            // fixing in the same change.
+            if let (Some(doc), Some(text)) = (state.docs.get_mut(&key), p.text) {
+                if text != doc.text {
+                    doc.text = text;
+                    let text = doc.text.clone();
+                    let patched = state
+                        .ws
+                        .module_for_path(&doc.path)
+                        .is_some_and(|m| state.ws.set_source(m, text));
+                    if !patched {
+                        state.rebuild();
+                    }
+                }
             }
             // A save may have changed an imported file that is not open.
             // Re-read those files in place, which keeps the salsa memos and
@@ -1358,6 +1406,13 @@ mod tests {
         client: Connection,
         thread: Option<std::thread::JoinHandle<Result<(), String>>>,
         next: i32,
+        /// What `initialize` answered, so a test can assert the shape a client
+        /// reads rather than the shape the server built. The two are not the
+        /// same thing: a capability can be `Some` in Rust and still serialise
+        /// to something a client interprets differently — a bare
+        /// `TextDocumentSyncKind` is the number `2`, which says nothing about
+        /// saving, and that is how the `didSave` handler became unreachable.
+        caps: Value,
     }
 
     impl Editor {
@@ -1370,8 +1425,9 @@ mod tests {
                 client,
                 thread: Some(thread),
                 next: 1,
+                caps: Value::Null,
             };
-            ed.ask("initialize", json!({ "capabilities": {} }));
+            ed.caps = ed.ask("initialize", json!({ "capabilities": {} }));
             ed.client
                 .sender
                 .send(notify("initialized", json!({})))
@@ -1463,6 +1519,43 @@ mod tests {
                        adult = .id >= 18\n\
                        q = users & where adult & select { id = .id, who = .name }\n";
     const URI: &str = "file:///nonexistent/cagara-caps/main.cagara";
+
+    /// Saving is advertised in a form a client can act on.
+    ///
+    /// `textDocumentSync` used to be the bare `TextDocumentSyncKind::INCREMENTAL`,
+    /// which serialises as the number `2`. A number has no room to say anything
+    /// about saving, and the protocol reads the absence of
+    /// `textDocumentSyncOptions.save` as "this server does not want save
+    /// notifications" — so no conforming client ever sent one. Measured against
+    /// the shipped client: VS Code registers its `DidSaveTextDocumentFeature`
+    /// only when that field is set, which made the `didSave` handler dead code
+    /// and left the save path exercised by nothing but a test that sent the
+    /// notification regardless of what had been advertised.
+    ///
+    /// The assertion is on the serialised answer, not on `ServerCapabilities`,
+    /// because the two differing is exactly what went wrong: `Some(...)` in Rust
+    /// is not the same as a shape the client understands.
+    #[test]
+    fn the_save_notification_is_advertised() {
+        let ed = Editor::start();
+        let sync = &ed.caps["capabilities"]["textDocumentSync"];
+        assert_eq!(
+            sync["change"],
+            json!(2),
+            "incremental sync is still what is advertised: {sync}"
+        );
+        assert_eq!(
+            sync["openClose"],
+            json!(true),
+            "open and close are what the document map is built from: {sync}"
+        );
+        assert_eq!(
+            sync["save"]["includeText"],
+            json!(true),
+            "a save must ask for the text, or the client may send only a URI: {sync}"
+        );
+        ed.close();
+    }
 
     /// Every capability the server advertises answers through the protocol.
     ///
@@ -2460,6 +2553,90 @@ mod tests {
             .unwrap();
         let _ = response(&client, 2);
         let _ = t.join().unwrap();
+    }
+
+    /// The symbol names in a `documentSymbol` answer, in document order.
+    fn symbol_names(symbols: &Value) -> Vec<String> {
+        symbols
+            .as_array()
+            .unwrap_or_else(|| panic!("symbols: {symbols}"))
+            .iter()
+            .filter_map(|s| s["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// A save carrying different text resynchronises the workspace.
+    ///
+    /// `didSave` assigned the server's copy of the document and stopped there,
+    /// so the *workspace* — the text the analysis actually reads — kept the
+    /// pre-save text. Two copies of one document disagreeing is not a state a
+    /// later reader can reason about: `documentSymbol` answers from the
+    /// workspace, and a rebuild takes its buffers from the other copy.
+    ///
+    /// This is the resynchronisation path rather than the common one. A save
+    /// normally writes the buffer, so the text matches and nothing is re-parsed;
+    /// `a_save_publishes_only_the_documents_that_changed` pins that case, and
+    /// the comparison here is what keeps the two from being the same code path.
+    #[test]
+    fn a_save_resynchronises_the_document_the_analysis_reads() {
+        let mut ed = Editor::start();
+        ed.open(URI, "alpha = 1\nq = 2\n");
+        let opened = ed.ask(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": URI } }),
+        );
+        assert_eq!(symbol_names(&opened), ["alpha", "q"], "the opened text");
+
+        // The client saved text the server has not been told about. `includeText`
+        // is what lets it send that, which is why the capability asks for it.
+        ed.client
+            .sender
+            .send(notify(
+                "textDocument/didSave",
+                json!({ "textDocument": { "uri": URI }, "text": "bravo = 1\nzeta = 2\n" }),
+            ))
+            .unwrap();
+
+        let saved = ed.ask(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": URI } }),
+        );
+        assert_eq!(
+            symbol_names(&saved),
+            ["bravo", "zeta"],
+            "the workspace must hold the text that was saved, not the text before it"
+        );
+        ed.close();
+    }
+
+    /// A save without text is still a save.
+    ///
+    /// `includeText` is what the server *asks* for; a client may ignore it and
+    /// send only the URI. The handler must then fall back to the file rather
+    /// than treat the notification as malformed, so this asserts the session
+    /// survives it and the document is unchanged.
+    #[test]
+    fn a_save_without_text_is_harmless() {
+        let mut ed = Editor::start();
+        ed.open(URI, "alpha = 1\nq = 2\n");
+        ed.client
+            .sender
+            .send(notify(
+                "textDocument/didSave",
+                json!({ "textDocument": { "uri": URI } }),
+            ))
+            .unwrap();
+
+        let after = ed.ask(
+            "textDocument/documentSymbol",
+            json!({ "textDocument": { "uri": URI } }),
+        );
+        assert_eq!(
+            symbol_names(&after),
+            ["alpha", "q"],
+            "a save with no text must leave the buffer alone"
+        );
+        ed.close();
     }
 
     /// A save republishes the documents whose modules changed, and no others.

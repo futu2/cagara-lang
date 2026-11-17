@@ -647,12 +647,15 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
             }
         }
         ("CAGARA_IDIV", 2) => idiv(a[0].clone(), a[1].clone(), f),
+        // The divisor is guarded for the same reason as `/`: the operator is
+        // typed non-null, so a zero divisor must answer NULL everywhere rather
+        // than raise on one target. BigQuery's `MOD` yields NULL on zero already.
         ("CAGARA_MOD", 2) => match f {
             Fam::BigQuery => func("MOD", a.to_vec()),
             _ => bin(
                 atomic(a[0].clone()),
                 BinaryOperator::Modulo,
-                atomic(a[1].clone()),
+                atomic(guarded_divisor(a[1].clone(), f)),
             ),
         },
         // ── arrays ─────────────────────────────────────────────────────
@@ -1084,7 +1087,28 @@ fn days_between(a: Expr, b: Expr, f: Fam) -> Expr {
 
 /// `a / b` on integers, truncated toward zero (as in Postgres, SQLite,
 /// T-SQL, Trino). Elsewhere `/` gives a decimal or float.
+/// The divisor, guarded so a zero divisor gives NULL rather than an error.
+///
+/// The language types `/` and `%` as non-null `int`, and that is the promise the
+/// operator makes. Three families already keep it by accident — DuckDB's
+/// `DIVIDE`, BigQuery/Spark's `DIV` and SQLite's `/` all yield NULL on zero — but
+/// PostgreSQL and Trino **raise**, so the same well-typed program answered
+/// differently on different targets. `NULLIF(b, 0)` is what makes the promise
+/// true everywhere, which is the least a dialect-independent type can do.
+///
+/// A target whose own `/` already returns NULL gets no guard: the extra `NULLIF`
+/// is dead weight in the plan, and there is a test that the emitted SQL does not
+/// carry it.
+fn guarded_divisor(b: Expr, f: Fam) -> Expr {
+    let already_null = matches!(f, Fam::Sqlite | Fam::Duck | Fam::BigQuery | Fam::Spark);
+    if already_null {
+        return b;
+    }
+    func("NULLIF", vec![b, n("0")])
+}
+
 fn idiv(a: Expr, b: Expr, f: Fam) -> Expr {
+    let b = guarded_divisor(b, f);
     let slash = |a: Expr, b: Expr| bin(atomic(a), BinaryOperator::Divide, atomic(b));
     match f {
         Fam::Ansi | Fam::Sqlite | Fam::Tsql | Fam::Trino => atomic(slash(a, b)),

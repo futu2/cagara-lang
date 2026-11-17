@@ -2328,12 +2328,15 @@ fn trino_and_spark_spellings() {
     let cases: &[(&str, &[(&str, &str)])] = &[
         (
             ".i / .j",
+            // Every target answers NULL for a zero divisor: the families whose
+            // own `/` raises get `NULLIF(j, 0)`, and the rest are left alone
+            // because theirs already returns NULL.
             &[
-                ("trino", "(i / j)"),
+                ("trino", "(i / NULLIF(j, 0))"),
                 ("spark", "DIV(i, j)"),
                 ("duckdb", "DIVIDE(i, j)"),
                 ("bigquery", "DIV(i, j)"),
-                ("mysql", "CAST(((i - (i % j)) / j) AS SIGNED)"),
+                ("mysql", "CAST(((i - (i % NULLIF(j, 0))) / NULLIF(j, 0)) AS SIGNED)"),
             ],
         ),
         (".i % .j", &[("bigquery", "MOD(i, j)")]),

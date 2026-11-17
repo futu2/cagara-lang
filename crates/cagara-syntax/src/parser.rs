@@ -45,6 +45,19 @@ pub fn parse_with(input: &str, ops: &Ops) -> Parse {
         ops,
     };
     p.file();
+    // An unclosed block comment is *trivia*, so the parser skips past it and
+    // would never report it — and because the comment runs to the end of the
+    // input, every definition after the `/*` would vanish with no diagnostic.
+    // Reported here from the lexeme list, which still holds every token, rather
+    // than from the tree, where the token has been folded into trivia.
+    for lexeme in &p.toks {
+        if lexeme.kind == Token::UnterminatedComment {
+            p.errors.push(ParseError {
+                offset: lexeme.offset,
+                message: "unterminated block comment: `/*` must be closed by `*/`".to_string(),
+            });
+        }
+    }
     Parse {
         green: p.b.finish(),
         errors: p.errors,

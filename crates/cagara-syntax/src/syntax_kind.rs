@@ -175,6 +175,19 @@ kind_table! {
         // intent — the newline is excluded, so the token stops at the line's end and
         // nothing after it is swallowed.
         Comment TRIVIA #[regex(r"#[^\r\n]*", allow_greedy = true)],
+        /// A `/* … */` block comment, which may span lines and **nests**:
+        /// `/* a /* b */ c */` is one comment, so commenting out a region that
+        /// already contains a block comment works.
+        ///
+        /// Scanned by hand ([`crate::lexer::scan_block_comment`]) rather than by
+        /// a `logos` pattern, for the same reason [`SyntaxKind::String`] is:
+        /// a regular expression cannot count, so it cannot match a nested pair.
+        /// It is trivia, so the parser never sees it.
+        BlockComment TRIVIA,
+        /// `/*` with no closing `*/`. Distinct from [`SyntaxKind::Error`] so the
+        /// reader is told the comment is unclosed rather than that some token is
+        /// unexpected.
+        UnterminatedComment,
 
         ImportKw #[token("import")],
         AsKw #[token("as")],
@@ -391,7 +404,7 @@ mod tests {
     #[test]
     fn kind_order_and_numbering_are_frozen() {
         let expected = "\
-            Whitespace Comment ImportKw AsKw SqlKw PrimitiveKw CaseKw FatArrow Arrow ComposeRight \
+            Whitespace Comment BlockComment UnterminatedComment ImportKw AsKw SqlKw PrimitiveKw CaseKw FatArrow Arrow ComposeRight \
             AndAnd OrOr EqEq NotEq Diamond LtEq GtEq Lt Gt PlusPlus Plus Minus Star Slash Percent AmpOp Op \
             QuestionQuestion Question LtQuestion QuestionGt LtQuestionGt Dollar Bar LParen RParen \
             LBrace RBrace LBracket RBracket Comma Eq Colon Semicolon Field LeftField RightField \

@@ -176,7 +176,13 @@ fn skeleton(root: &SyntaxNode) -> (Vec<String>, Vec<String>) {
             WalkEvent::Leave(NodeOrToken::Node(_)) => shape.push(")".into()),
             WalkEvent::Enter(NodeOrToken::Token(t)) => match t.kind() {
                 K::Whitespace => {}
-                K::Comment => comments.push(t.text().trim_end().to_string()),
+                // Both comment forms are trivia whose text the formatter
+                // re-emits, so both are compared through `comments` rather than
+                // through `shape`. A block comment is kept whole, newlines
+                // included, because its internal layout is the writer's.
+                K::Comment | K::BlockComment => {
+                    comments.push(t.text().trim_end().to_string())
+                }
                 // An unlexable run or an unterminated string takes in the
                 // whitespace after it, which is the formatter's to change.
                 K::Error | K::UnterminatedString => {
@@ -196,7 +202,7 @@ struct Bail;
 type R = Result<Doc, Bail>;
 
 fn is_trivia(k: K) -> bool {
-    matches!(k, K::Whitespace | K::Comment)
+    matches!(k, K::Whitespace | K::Comment | K::BlockComment)
 }
 
 /// Children without trivia.
@@ -252,12 +258,15 @@ fn trivia_before(t: &SyntaxToken) -> Vec<SyntaxToken> {
 }
 
 fn has_comment_before(t: &SyntaxToken) -> bool {
-    trivia_before(t).iter().any(|p| p.kind() == K::Comment)
+    trivia_before(t)
+        .iter()
+        .any(|p| matches!(p.kind(), K::Comment | K::BlockComment))
 }
 
 /// Any comment strictly inside `n` (trivia never ends a well-formed node).
 fn has_inner_comment(n: &SyntaxNode) -> bool {
-    n.descendants_with_tokens().any(|e| e.kind() == K::Comment)
+    n.descendants_with_tokens()
+        .any(|e| matches!(e.kind(), K::Comment | K::BlockComment))
 }
 
 /// Does `field`'s value bring its own lines, so that its record should break
@@ -297,6 +306,9 @@ fn spelled_over_lines(n: &SyntaxNode) -> bool {
 }
 
 fn comment_text(t: &SyntaxToken) -> Doc {
+    // `trim_end` only touches trailing whitespace; a block comment's internal
+    // newlines are part of its text and are re-emitted as they were, so a
+    // multi-line comment keeps its own layout.
     text(t.text().trim_end())
 }
 
@@ -378,6 +390,11 @@ impl Fmt<'_> {
             match n.kind() {
                 K::Whitespace if !n.text().contains('\n') => {}
                 K::Comment => return Doc::LineSuffix(n.text().trim_end().into()),
+                // A block comment that spans lines cannot ride at the end of
+                // one, so it is left to the leading pass of the next token.
+                K::BlockComment if !n.text().contains('\n') => {
+                    return Doc::LineSuffix(n.text().trim_end().into())
+                }
                 _ => break,
             }
         }
@@ -594,7 +611,9 @@ impl Fmt<'_> {
             return false;
         };
         if !matches!(last.kind(), K::RecordExpr | K::ListExpr | K::ParenExpr)
-            || last.children_with_tokens().any(|e| e.kind() == K::Comment)
+            || last
+                .children_with_tokens()
+                .any(|e| matches!(e.kind(), K::Comment | K::BlockComment))
         {
             return false;
         }

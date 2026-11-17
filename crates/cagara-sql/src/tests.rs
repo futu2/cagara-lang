@@ -740,6 +740,59 @@ fn union_all_preserves_duplicates() {
     assert!(s.contains("UNION ALL"), "{s}");
 }
 
+/// `x == nothing` is `IS NULL`, and `x != nothing` is `IS NOT NULL`.
+///
+/// SQL cannot compare against NULL: `x = NULL` and `x <> NULL` are NULL for
+/// every row, so a `where` on either keeps nothing — which is the *opposite* of
+/// what `where (.m != nothing)` reads as. The comparison is rewritten to the
+/// predicate SQL has, and the rewrite is structural (the `nothing` definition's
+/// template is exactly `NULL`), so an alias of `nothing` works too.
+#[test]
+fn a_comparison_against_nothing_is_a_null_test() {
+    let t = "t : query { id = int, m = maybe int } = table \"public\" \"t\"\n";
+    let eq = sql(&format!("{t}q = t & select {{ .id, is_null = .m == nothing }}\n"), "q");
+    assert!(eq.contains("m IS NULL"), "{eq}");
+    assert!(!eq.contains("= NULL"), "the comparison must not survive: {eq}");
+    let ne = sql(&format!("{t}q = t & select {{ .id, present = .m != nothing }}\n"), "q");
+    assert!(ne.contains("m IS NOT NULL"), "{ne}");
+    // In a `where`, which is where the wrong answer was visible as zero rows.
+    let w = sql(&format!("{t}q = t & where (.m != nothing)\n"), "q");
+    assert!(w.contains("WHERE (m IS NOT NULL)"), "{w}");
+    // An alias of `nothing` is the same value.
+    let alias = sql(
+        &format!("{t}n = nothing\nq = t & select {{ .id, p = .m != n }}\n"),
+        "q",
+    );
+    assert!(alias.contains("m IS NOT NULL"), "{alias}");
+}
+
+/// `filtered` and `distinctAgg` reach `arrayAgg`.
+///
+/// They used to be dropped: the modifier attached to the call, and the
+/// `CAGARA_ARRAY_AGG` dispatch rebuilt the call from its arguments and lost it,
+/// so `filtered p (arrayAgg .x)` emitted a plain `ARRAY_AGG(x)` with no
+/// diagnostic. Every other aggregate honoured both, and `over` refused on this
+/// one — so the prelude was inconsistent with itself and this was the half that
+/// answered wrongly rather than loudly.
+#[test]
+fn array_agg_honours_the_aggregate_modifiers() {
+    let t = "t : query { k = int, id = int, s = string, flag = int } = table \"public\" \"t\"\n";
+    let f = sql(
+        &format!("{t}q = t & agg {{ k = group .k, xs = filtered (.flag > 1) (arrayAgg .id) }}\n"),
+        "q",
+    );
+    assert!(f.contains("FILTER (WHERE flag > 1)"), "{f}");
+    let d = sql(
+        &format!("{t}q = t & agg {{ k = group .k, xs = distinctAgg (arrayAgg .s) }}\n"),
+        "q",
+    );
+    assert!(d.contains("ARRAY_AGG(DISTINCT s)"), "{d}");
+    // The unmodified form is unchanged.
+    let plain = sql(&format!("{t}q = t & agg {{ k = group .k, xs = arrayAgg .id }}\n"), "q");
+    assert!(plain.contains("ARRAY_AGG(id)"), "{plain}");
+    assert!(!plain.contains("DISTINCT") && !plain.contains("FILTER"), "{plain}");
+}
+
 #[test]
 fn nullable_helpers_lower_to_portable_sql() {
     let s = sql(

@@ -415,6 +415,49 @@ fn saturated<'a>(ev: &Normalizer<'a, 'a>, template: TemplateFn) -> Result<Value<
     )
 }
 
+/// Is this expression the `nothing` sentinel — a scalar template whose whole
+/// body is `NULL`, with no arguments?
+///
+/// `nothing : expr ?r (maybe ?a) = sql "NULL"` is the only way the language
+/// writes NULL, so a template of exactly `NULL` reached through a definition is
+/// that definition. It is recognised structurally rather than by name because
+/// `nothing` may be aliased (`n = nothing`).
+fn is_null_sentinel(e: &CheckedExpr) -> bool {
+    matches!(
+        e.node(),
+        crate::checked::CheckedExprNode::Template { sql, args } if args.is_empty() && sql.trim() == "NULL"
+    )
+}
+
+/// `x == nothing` is `x IS NULL`, and `x != nothing` is `x IS NOT NULL`.
+///
+/// SQL has no way to compare against NULL: `x = NULL` and `x <> NULL` are both
+/// NULL for every row, so a `where` on either keeps **nothing**. That is the
+/// opposite of what the spelling reads as — `where (.m != nothing)` says "keep
+/// the rows where `m` is present" and kept zero rows — so the comparison is
+/// rewritten to the predicate SQL actually has. The type stays `maybe bool`
+/// (the signature's), which is sound: the value is a `bool` that is never NULL,
+/// and `where` accepts a `maybe bool`.
+fn rewrite_null_comparison(sql: &str, args: &[CheckedExpr], origin: Origin, ty: ScalarType) -> Option<CheckedExpr> {
+    let (negated, template) = match sql.trim() {
+        "$1 = $2" => (false, "$1 IS NULL"),
+        "$1 <> $2" => (true, "$1 IS NOT NULL"),
+        _ => return None,
+    };
+    let _ = negated;
+    let [a, b] = args else { return None };
+    // Exactly one side must be the sentinel: `nothing == nothing` is a constant
+    // TRUE, which no engine needs a column for, but it is also not a case worth
+    // a rewrite of its own — it stays `NULL = NULL`, i.e. NULL, and the type is
+    // `maybe bool`, so it behaves as "unknown", which is honest.
+    let other = match (is_null_sentinel(a), is_null_sentinel(b)) {
+        (false, true) => a,
+        (true, false) => b,
+        _ => return None,
+    };
+    Some(CheckedExpr::template(template, vec![other.clone()], ty, origin).ok()?)
+}
+
 fn build<'a>(
     sql: &str,
     kind: TemplateKind,
@@ -423,6 +466,12 @@ fn build<'a>(
     origin: Origin,
     ty: ScalarType,
 ) -> Result<Value<'a>, Control> {
+    // A comparison against the `nothing` sentinel is `IS NULL` / `IS NOT NULL`.
+    if kind == TemplateKind::Scalar {
+        if let Some(rewritten) = rewrite_null_comparison(sql, &args, origin, ty.clone()) {
+            return Ok(Value::Scalar(rewritten));
+        }
+    }
     let built = match kind {
         TemplateKind::Scalar => CheckedExpr::template(sql, args, ty, origin),
         TemplateKind::Agg => CheckedExpr::agg_template(sql, args, ty, origin),

@@ -99,7 +99,14 @@ fn node(e: Expr, to: Dialect) -> Result<Expr, String> {
     match lowered {
         // Non-atomic results are parenthesized so they keep precedence
         // inside whatever template they were substituted into.
-        Some(out) => Ok(atomic(out)),
+        //
+        // `distinct` and `filter` are re-attached because `intrinsic` builds a
+        // fresh call from the argument vector and has no room to carry them —
+        // which is how `filtered p (arrayAgg .x)` used to emit a plain
+        // `ARRAY_AGG(x)`: the predicate reached this function attached to the
+        // call, and the rebuilt call dropped it. Only an aggregate can carry
+        // either, so an intrinsic without one cannot reach here with them set.
+        Some(out) => Ok(atomic(with_aggregate_modifiers(out, distinct, filter))),
         None => Err(match refusal(&upper) {
             // A known intrinsic this target cannot express. The message names the
             // function the *reader* wrote and says what the target lacks — the
@@ -111,6 +118,40 @@ fn node(e: Expr, to: Dialect) -> Result<Expr, String> {
                 args.len()
             ),
         }),
+    }
+}
+
+/// Put `DISTINCT` and a `FILTER` back on a call that `intrinsic` rebuilt.
+///
+/// The intrinsic table answers "what does this function spell on this target",
+/// and its answer is a whole `Function` node — so the two aggregate modifiers the
+/// language carries on the *call* have to be moved onto the rebuilt one. A
+/// non-function result (an array literal, a cast, a `CASE`) has nowhere to put
+/// them; that is a bug in the table rather than in the program, so it is left
+/// alone rather than silently losing the modifier again.
+fn with_aggregate_modifiers(e: Expr, distinct: bool, filter: Option<Box<Expr>>) -> Expr {
+    if !distinct && filter.is_none() {
+        return e;
+    }
+    match e {
+        Expr::Function {
+            name,
+            args,
+            distinct: existing_distinct,
+            filter: existing_filter,
+            over,
+            order_by,
+            within_group,
+        } => Expr::Function {
+            name,
+            args,
+            distinct: distinct || existing_distinct,
+            filter: filter.or(existing_filter),
+            over,
+            order_by,
+            within_group,
+        },
+        other => other,
     }
 }
 

@@ -73,6 +73,9 @@ not : expr ?r bool -> expr ?r bool = sql "NOT $1"
 ## Arithmetic negation, overloaded on `int` and `float`.
 negate : expr ?r int -> expr ?r int = sql "-$1"
 negate : expr ?r float -> expr ?r float = sql "-$1"
+## A `decimal p s` negates exactly, and the result keeps the declared `(p,s)`:
+## a refund line is the same money with the opposite sign, not a wider type.
+negate : expr ?r (decimal ?p ?s) -> expr ?r (decimal ?p ?s) = sql "-($1)"
 
 ## Uppercase a string, in the database's collation.
 upper : expr ?r string -> expr ?r string = sql "UPPER($1)"
@@ -189,6 +192,9 @@ reverse : expr ?r string -> expr ?r string = sql "CAGARA_REVERSE($1)"
 ## Absolute value, overloaded on `int` and `float`.
 abs : expr ?r int -> expr ?r int = sql "ABS($1)"
 abs : expr ?r float -> expr ?r float = sql "ABS($1)"
+## The magnitude of money, exact and at the declared `(p,s)` — a variance is the
+## same units with the sign dropped.
+abs : expr ?r (decimal ?p ?s) -> expr ?r (decimal ?p ?s) = sql "ABS($1)"
 
 ## Round to the nearest integer, keeping the `float` type. Engines round ties
 ## differently; this leaves that to the target rather than pretending one rule
@@ -217,7 +223,10 @@ power : expr ?r float -> expr ?r float -> expr ?r float = sql "POWER($2, $1)"
 
 ## Sign of a number: -1, 0 or 1. Overloaded on `int` and `float`.
 sign : expr ?r int -> expr ?r int = sql "SIGN($1)"
-sign : expr ?r float -> expr ?r float = sql "SIGN($1)"
+## `SIGN` is integer-valued in SQL — -1, 0 or 1 — so a `float` input gives an
+## `int`. It used to give a `float`, which made a `case` arm comparing against
+## `0` need `0.0` for no reason.
+sign : expr ?r float -> expr ?r int = sql "CAST(SIGN($1) AS BIGINT)"
 
 # Exponentials and logarithms. `exp` and `ln` are spelled the same on every target
 # that has them; the logarithms are named for their base, because the bare `log`
@@ -254,7 +263,7 @@ logBase : expr ?r float -> expr ?r float -> expr ?r float = base => x => ln x / 
 ## Cube root. `CBRT` exists on DuckDB, Trino and MariaDB but not on SQLite, so this
 ## is `exp(ln|x| / 3)` with the sign put back: measured exact on all four, where
 ## `power(abs(x), 1.0/3)` is `1.9999999986` on MariaDB.
-cbrt : expr ?r float -> expr ?r float = x => sign x * exp (ln (abs x) / 3)
+cbrt : expr ?r float -> expr ?r float = x => toFloat (sign x) * exp (ln (abs x) / 3)
 
 ## Degrees from radians.
 degrees : expr ?r float -> expr ?r float = sql "DEGREES($1)"
@@ -599,3 +608,103 @@ nullIf : expr ?r ?a -> expr ?r ?a -> expr ?r (maybe ?a) = sql "NULLIF($1, $2)"
 ## `==` between two nullables would filter everything out.
 eqMaybe : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r bool =
   sql "COALESCE(($1 = $2) OR ($1 IS NULL AND $2 IS NULL), FALSE)"
+
+## `between lo hi x`: whether `x` is within `[lo, hi]`, both ends included —
+## `where (between 1 10 .age)`.
+##
+## The most-written analytics predicate, and the one shape a comparison chain
+## spells worst: `x >= lo && x <= hi` names `x` twice and reads in the wrong
+## order. Subject last, like every other predicate here.
+between : expr ?r ?a -> expr ?r ?a -> expr ?r ?a -> expr ?r bool = lo => hi => x =>
+  x >= lo && x <= hi
+
+## `ratio whole part`: `part / whole` as a `float`, and `0.0` when `whole` is
+## zero — a share that has no denominator is no share.
+##
+## Subject last, like every other function here: `ratio .total .paid` is "what
+## part of the total is paid". Without it the spelling is
+## `toFloat part / toFloat whole`, which fails to compile on `int` (integer
+## division is `int`), and `100 * .a / .b` silently truncates to `0` or `1`.
+##
+## Two overloads rather than one polymorphic definition: the language has no
+## numeric type class, so a body cannot do arithmetic on an `?a`. The `int` form
+## is the one a raw column needs; the `float` form is what a `sum` produces.
+ratio : expr ?r int -> expr ?r int -> expr ?r float = whole => part => ifThenElse (whole == 0) 0.0 (
+  toFloat part / toFloat whole
+)
+ratio : expr ?r float -> expr ?r float -> expr ?r float = whole => part => ifThenElse (
+  whole == 0.0
+) 0.0 (part / whole)
+
+## `percentOf whole part`: the same share out of a hundred —
+## `percentOf .total .paid` is the paid share as a percentage. Zero when `whole`
+## is zero, so a percentage column never needs a guard of its own.
+percentOf : expr ?r int -> expr ?r int -> expr ?r float = whole => part => 100.0 * ratio whole part
+percentOf : expr ?r float -> expr ?r float -> expr ?r float = whole => part =>
+  100.0 * ratio whole part
+
+## `safeDiv b a`: `a / b`, or NULL when `b` (the divisor, and the first
+## argument) is zero — `safeDiv 0 .count` is "the count, divided by zero, or
+## nothing".
+##
+## `/` is typed `int` and yields NULL at run time for a zero divisor on most
+## targets and raises on one, so a quotient that can be undefined is spelled
+## here so the checker makes the caller handle it. A `sql` template because the
+## result is `maybe` and a `case` cannot produce one (its arms share a type and
+## neither `nothing` nor `just` is the other's type) — the template also keeps
+## the integer-division rewrite, so it truncates like `/` does.
+safeDiv : expr ?r int -> expr ?r int -> expr ?r (maybe int) =
+  sql "CASE WHEN $1 = 0 THEN NULL ELSE CAGARA_IDIV($2, $1) END"
+
+## `safeMod b a`: `a % b`, or NULL when the divisor is zero. See `safeDiv`.
+safeMod : expr ?r int -> expr ?r int -> expr ?r (maybe int) =
+  sql "CASE WHEN $1 = 0 THEN NULL ELSE CAGARA_MOD($2, $1) END"
+
+## `weeksBetween start end`: whole weeks, from `daysBetween` so the two cannot
+## disagree.
+weeksBetween : expr ?r date -> expr ?r date -> expr ?r int = a => b => daysBetween a b / 7
+
+## `quartersBetween start end`: whole quarters, from `monthsBetween` for the same
+## reason.
+quartersBetween : expr ?r date -> expr ?r date -> expr ?r int = a => b => monthsBetween a b / 3
+
+## The ISO week number, 1–53: the week containing the year's first Thursday is
+## week 1, which is what `truncWeek` buckets by. Written from `dayOfYear` and
+## the weekday so it is the same number on every target — engines disagree about
+## `WEEKOFYEAR`, and some count from 0.
+weekOfYear : expr ?r date -> expr ?r int = d => (dayOfYear d - dayOfWeek d + 10) / 7
+
+## A `bool` from text: `"true"`, `"t"`, `"yes"`, `"y"` and `"1"` are true;
+## `"false"`, `"f"`, `"no"`, `"n"` and `"0"` are false, case-insensitively.
+##
+## Any other text reads as **false**, because a `CASE` cannot raise and the
+## alternative — a NULL — would not fit the non-null result. Use `tryBool` when
+## "not a boolean" has to be distinguishable from `false`.
+toBool : expr ?r string -> expr ?r bool = s =>
+  ifThenElse
+    (inList ["true", "t", "yes", "y", "1"] (lower s))
+    true
+    (ifThenElse (inList ["false", "f", "no", "n", "0"] (lower s)) false false)
+
+## `tryBool s`: `toBool` for a column that may hold something else — NULL where
+## the text names neither.
+##
+## Two templates, because a string literal cannot span a line and the whole
+## `CASE` is past the width: `tryBoolTrue` recognises the true spellings, and
+## this falls back to it. Composing two `maybe bool` values needs no `ifThenElse`
+## (whose type variable is non-null, so it cannot join a `just` with a `nothing`).
+tryBool : expr ?r string -> expr ?r (maybe bool) = s => tryBoolOr (tryBoolTrue s) (tryBoolFalse s)
+
+## `COALESCE(a, b)` over two `maybe bool`s: the first present one. A template
+## because `coalesce` takes a `maybe` and a non-null default, and both halves here
+## are nullable.
+tryBoolOr : expr ?r (maybe bool) -> expr ?r (maybe bool) -> expr ?r (maybe bool) =
+  sql "COALESCE($1, $2)"
+
+## The true half of `tryBool`: `just true`, or NULL.
+tryBoolTrue : expr ?r string -> expr ?r (maybe bool) =
+  sql "CASE WHEN LOWER($1) IN ('true','t','yes','y','1') THEN TRUE END"
+
+## The false half of `tryBool`: `just false`, or NULL.
+tryBoolFalse : expr ?r string -> expr ?r (maybe bool) =
+  sql "CASE WHEN LOWER($1) IN ('false','f','no','n','0') THEN FALSE END"

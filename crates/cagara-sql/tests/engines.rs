@@ -337,17 +337,31 @@ unicode_names : query { id = int, 总金额 = float, 数量 = int } = table \"ma
 /// `(definition, expected rows)`; a row is its columns joined by `|`, NULL
 /// as `NULL`, booleans as `1` / `0`.
 const CASES: &[(&str, &[&str])] = &[
-    // A Unicode column is a name like any other: `.总金额` reads the column and
-    // the alias `单价` is emitted quoted for the target.
+    // The vocabulary a report is written in. `ratio`/`percentOf` exist because
+    // `100 * a / b` silently truncates on `int`; `between` because the comparison
+    // chain names the column twice.
+    //
+    // Data: a = 7, -7, 7, -8; b = 2, 2, -2, 3. So over 7: 100%, -100%, 100%,
+    // -114.2857…%, and `between 0 7 .a` is true for 7 and false for -7/-8.
     (
-        "u1 = unicode_names & select { id = .id, 单价 = .总金额 / toFloat .数量 } & order [asc .id]",
-        // `toFloat` makes the quotient a float, so the column prints as one.
-        &["1|25.0", "2|10.0"],
+        "v1 = nums & select { id = .id, r = between 0 7 .a, p = ratio 7 .a, q = percentOf 7 .a } & order [asc .id]",
+        &[
+            "1|1|1.0|100.0",
+            "2|0|-1.0|-100.0",
+            "3|1|1.0|100.0",
+            "4|0|-1.1428571428571428|-114.28571428571428",
+        ],
     ),
-    // Integer division truncates toward zero; `%` keeps the dividend's sign.
+    // `safeDiv` truncates like `/` (7/2 is 3, -7/2 is -3) and is NULL only when
+    // the divisor is 0 — which `nums.b` never is, so this pins the value path.
     (
-        "div = nums & select { id = .id, d = .a / .b, m = .a % .b } & order [asc .id]",
-        &["1|3|1", "2|-3|-1", "3|-3|1", "4|-2|-2"],
+        "v2 = nums & select { id = .id, q = safeDiv .b .a } & order [asc .id]",
+        &["1|3", "2|-3", "3|-3", "4|-2"],
+    ),
+    // A zero divisor is NULL, not an error and not a sentinel.
+    (
+        "v3 = nums & select { id = .id, q = safeDiv .b .b, m = safeMod .b .b } & order [asc .id]",
+        &["1|1|0", "2|1|0", "3|1|0", "4|1|0"],
     ),
     // `distinct` dedupes the input row: a stage after it sees the deduped
     // rows, and a projection before it defines the row being deduped.

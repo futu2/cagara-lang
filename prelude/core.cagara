@@ -572,13 +572,30 @@ rank : winspec ?r -> win (expr ?r int) = sql "RANK()"
 ## (1, 2, 2, 3).
 denseRank : winspec ?r -> win (expr ?r int) = sql "DENSE_RANK()"
 
-## The value of `x` on the row `n` rows before this one in the partition —
-## `lag spec 1 .x` for the previous row. NULL at the partition edge.
+## The value of `x` on the previous row of the partition — `lag spec .x`.
+## NULL at the partition edge.
+##
+## For a longer step use `lagBy`, which is a separate name rather than an
+## overload: a name's definitions must all take the same number of parameters, so
+## `lag spec` and `lag spec 2` could not both exist. `lag spec .x` and `lagBy
+## spec 1 .x` are the same query.
 lag : winspec ?r -> expr ?r ?a -> win (expr ?r (maybe ?a)) = sql "LAG($1)"
 
-## The value of `x` on the row `n` rows after this one. NULL at the partition
-## edge.
+## `lagBy spec n x`: the value of `x` on the row `n` rows before this one, NULL
+## at the partition edge. `lagBy spec 12 .revenue` over a monthly partition is
+## the same month a year earlier.
+##
+## `n` is a constant at the call site: SQL wants a literal or a parameter there,
+## and a per-row offset is not what a window means.
+lagBy : winspec ?r -> expr ?r int -> expr ?r ?a -> win (expr ?r (maybe ?a)) = sql "LAG($2, $1)"
+
+## The value of `x` on the next row of the partition — `lead spec .x`. NULL at
+## the partition edge. `leadBy spec n .x` steps further; see `lag` about why the
+## two are different names.
 lead : winspec ?r -> expr ?r ?a -> win (expr ?r (maybe ?a)) = sql "LEAD($1)"
+
+## `leadBy spec n x`: the value of `x` on the row `n` rows after this one.
+leadBy : winspec ?r -> expr ?r int -> expr ?r ?a -> win (expr ?r (maybe ?a)) = sql "LEAD($2, $1)"
 
 ## The first value of `x` in the window's frame. With the default frame this is
 ## the partition's first row; with a moving frame it is the frame's first row —
@@ -770,3 +787,12 @@ isNotNull : expr ?r (maybe ?a) -> expr ?r bool = sql "$1 IS NOT NULL"
 ## `where` makes, stated where the value is used rather than where it is
 ## filtered.
 isTrue : expr ?r (maybe bool) -> expr ?r bool = sql "COALESCE($1, FALSE)"
+
+## Filter on a nullable condition, keeping the rows where it is TRUE — the same
+## three-valued filter as `where`, under a name that says the condition may be
+## NULL. `q & whereTrue .flag` is `q & where .flag`.
+##
+## It exists because `where` accepts a `maybe bool` but a reader looking at
+## `whereTrue` in this file's own text had nothing to find: the name was cited
+## in `where`'s documentation before it existed.
+whereTrue : expr ?r (maybe bool) -> query ?r -> query ?r = primitive "__where"

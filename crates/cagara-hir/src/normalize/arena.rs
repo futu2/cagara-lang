@@ -437,7 +437,12 @@ impl Builder {
         on: CheckedExpr,
     ) -> Result<NodeId, Error> {
         crate::checked::place(Place::JoinOn, &on, origin)?;
-        if !on.ty().is_bool() {
+        // A join predicate may be a `maybe bool`: SQL's `NULL = anything` is
+        // never true, which is exactly what joining on a nullable key wants. The
+        // checker decides the same thing (`step_join_on`), and this is the
+        // second half of one rule — the erasure pass must not be stricter than
+        // the type it erased.
+        if !on.ty().is_condition() {
             return Err(Error::kinded(
                 crate::workspace::DiagKind::NotACondition,
                 format!("a join predicate must be bool, found {}", on.ty()),

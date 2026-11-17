@@ -2583,6 +2583,27 @@ impl<'w> Checker<'w> {
                 let value = if ea.len() == 3 { &ea[2] } else { &ea[1] };
                 self.unify(value, want)
             }
+            // A join predicate: `bool` in the signature, `maybe bool` accepted.
+            //
+            // The row `(join ?r ?s)` appears in no other position, so this is
+            // exactly the join predicate and nothing else. SQL's own join
+            // semantics already say `NULL = anything` is never true, which is
+            // what joining on a key that an outer join made nullable wants — so
+            // the value needs no rewrite, only the type system's permission.
+            //
+            // Without it a three-table left join whose second key had gone
+            // nullable could not be written at all, and the only advice the
+            // compiler gave (`?? 0`) emits `COALESCE(key, 0)`, which matches a
+            // NULL-extended row to a real row whose key is 0.
+            (Ty::Con("expr", a), Ty::Con("expr", e))
+                if a.len() == 3
+                    && e.len() == 3
+                    && matches!(self.resolve(&e[1]), Ty::Con("join", _))
+                    && matches!(self.resolve(&a[2]), Ty::Con("maybe", m) if matches!(self.resolve(&m[0]), Ty::Con("bool", b) if b.is_empty())) =>
+            {
+                self.unify(&a[0], &e[0])?;
+                self.unify(&a[1], &e[1])
+            }
             (Ty::Con("expr", ea), Ty::Con("sortkey", _)) => {
                 self.key_phase(&ea[0].clone())?;
                 Err(Fail::from(
@@ -3740,12 +3761,31 @@ impl<'w> Checker<'w> {
                 return Err(Fail::from(rules::needs_side(n)));
             }
         }
-        self.unify(&v, &con("bool")).map_err(|_| {
-            Fail::kinded(
-                crate::workspace::DiagKind::NotACondition,
-                format!("a join predicate must be bool, found {}", self.show(&v)),
-            )
-        })?;
+        // A join predicate is a condition, so a `maybe bool` is as valid as a
+        // `bool` — and it is the *only* way to join on a nullable key.
+        //
+        // SQL's own rule is that `NULL = anything` never matches, which is
+        // exactly what a join on a nullable key wants: the unmatched rows stay
+        // unmatched. The ordinary expression `==` still requires two non-null
+        // operands, because there a NULL result silently drops a row from a
+        // `where`; a join predicate is a different position with a different
+        // meaning, so it is the position that changes rather than the operator.
+        //
+        // Before this, a three-table left join whose second key had gone nullable
+        // could not be written at all: the natural spelling was refused, and the
+        // only suggestion was `?? 0`, which emits `COALESCE(key, 0)` and matches
+        // a NULL-extended row to a real row whose key is 0 — a wrong answer that
+        // looks right.
+        let is_bool = self.unify(&v, &con("bool")).is_ok();
+        if !is_bool {
+            let maybe_bool = Ty::Con("maybe", vec![con("bool")]);
+            self.unify(&v, &maybe_bool).map_err(|_| {
+                Fail::kinded(
+                    crate::workspace::DiagKind::NotACondition,
+                    format!("a join predicate must be bool, found {}", self.show(&v)),
+                )
+            })?;
+        }
         Ok(true)
     }
 

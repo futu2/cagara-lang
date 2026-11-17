@@ -349,6 +349,22 @@ cube : expr ?r (maybe ?a) -> agg (expr ?r (maybe ?a)) = primitive "__cube"
 
 ## Inner join: `users & innerJoin orders (.<id == .>user_id)`.
 ##
+## The predicate is a *condition*, so a `maybe bool` is accepted as well as a
+## `bool` — SQL's join semantics already say `NULL = anything` is never true,
+## which is what joining on a key an outer join made nullable wants. Comparing a
+## nullable key to a present one needs `isTrue` around the comparison, because
+## `==` gives `maybe bool` there:
+##
+## ```
+## t1   = a & leftJoin b (.<id == .>aid)
+## main = t1 & leftJoin c (isTrue (.<bid == just .>bid2))
+## ```
+##
+## which emits `ON COALESCE(t2.bid = t3.bid2, FALSE)` — a NULL key matches
+## nothing, which is the answer the query wants. Do **not** write
+## `.<bid ?? 0 == .>bid2`: that matches a NULL-extended row to a real row whose
+## key is 0.
+##
 ## The left side is the piped query. The predicate is a `bool` over the joined
 ## row, whose columns are `.x` for the left side and `.>x` for the right.
 ##
@@ -677,10 +693,17 @@ runningFrame : frame = rows unboundedPreceding currentRow
 ## never true, which is what `isNull` and `eqMaybe` are for.
 _==_ : expr ?r ?a -> expr ?r ?a -> expr ?r bool = sql "$1 = $2"
 _==_ : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r (maybe bool) = sql "$1 = $2"
+## One nullable side and one present: `maybe bool`, because `NULL = 1` is unknown
+## rather than false. This is the form a join on a nullable key uses — the key's
+## nullability came from an outer join and is not a choice.
+_==_ : expr ?r (maybe ?a) -> expr ?r ?a -> expr ?r (maybe bool) = sql "$1 = $2"
+_==_ : expr ?r ?a -> expr ?r (maybe ?a) -> expr ?r (maybe bool) = sql "$1 = $2"
 
 ## `a != b`, SQL `<>`.
 _!=_ : expr ?r ?a -> expr ?r ?a -> expr ?r bool = sql "$1 <> $2"
 _!=_ : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r (maybe bool) = sql "$1 <> $2"
+_!=_ : expr ?r (maybe ?a) -> expr ?r ?a -> expr ?r (maybe bool) = sql "$1 <> $2"
+_!=_ : expr ?r ?a -> expr ?r (maybe ?a) -> expr ?r (maybe bool) = sql "$1 <> $2"
 
 ## `a < b`. NULL if either side is NULL.
 _<_ : expr ?r ?a -> expr ?r ?a -> expr ?r bool = sql "$1 < $2"

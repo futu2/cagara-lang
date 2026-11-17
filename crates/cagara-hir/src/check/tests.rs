@@ -1244,8 +1244,12 @@ fn join_errors() {
     // names the spelling rather than a kind mismatch.
     let e = err("q = users & where (.<id == 1)\n", "q");
     assert!(e.contains("cannot mix join-side columns"), "{e}");
+    // Comparing an `int` key to a `string` one: `==` is an overload set, so the
+    // message lists the candidates and names the argument that disagrees.
+    let e = err("q = orders & innerJoin users (.<user_id == .>name)\n", "q");
     assert!(
-        err("q = orders & innerJoin users (.<user_id == .>name)\n", "q").contains("type mismatch")
+        e.contains("no overload of `==` matches") && e.contains("argument 1 expects"),
+        "{e}"
     );
     assert!(
         err("q = orders & innerJoin users (.<nope == .>id)\n", "q").contains("no column `nope`")

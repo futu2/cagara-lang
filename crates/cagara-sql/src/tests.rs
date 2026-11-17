@@ -766,6 +766,30 @@ fn a_comparison_against_nothing_is_a_null_test() {
     assert!(alias.contains("m IS NOT NULL"), "{alias}");
 }
 
+/// A join on a key an outer join made nullable.
+///
+/// SQL's own join semantics say `NULL = anything` is never true, which is exactly
+/// what such a join wants: the NULL-extended rows stay unmatched. The predicate
+/// is a condition, so a `maybe bool` is accepted, and `isTrue` turns the
+/// comparison's `maybe bool` into one.
+///
+/// The trap this replaces is `.<bid ?? 0 == .>bid2`, which emits
+/// `COALESCE(bid, 0)` and matches a NULL-extended row to a real row whose key is
+/// 0 — a wrong answer that looks right.
+#[test]
+fn a_join_on_a_nullable_key_compares_null_as_never_matching() {
+    let src = "a : query { id = int } = table \"s\" \"a\"\n\
+               b : query { aid = int, bid = int } = table \"s\" \"b\"\n\
+               c : query { bid2 = int } = table \"s\" \"c\"\n\
+               t1 = a & leftJoin b (.<id == .>aid)\n\
+               q = t1 & leftJoin c (isTrue (.<bid == just .>bid2))\n";
+    let s = sql(src, "q");
+    // `COALESCE(…, FALSE)` is the NULL-never-matches spelling; a bare `= NULL`
+    // or a `COALESCE(key, 0)` would both be wrong.
+    assert!(s.contains("COALESCE((t2.bid = t3.bid2), FALSE)"), "{s}");
+    assert!(!s.contains("COALESCE(t2.bid, 0)"), "the wrong workaround: {s}");
+}
+
 /// `filtered` and `distinctAgg` reach `arrayAgg`.
 ///
 /// They used to be dropped: the modifier attached to the call, and the

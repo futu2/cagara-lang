@@ -87,10 +87,11 @@ impl ScalarType {
 
     /// Is a value of this type usable as a **filter condition**?
     ///
-    /// `bool` and `maybe bool`: SQL's `WHERE` already drops a NULL predicate,
-    /// so a three-valued condition means exactly what the stage means. Every
-    /// other consumer of a `bool` (a join predicate, `&&`, `ifThenElse`'s
-    /// condition) still requires the non-null one.
+    /// `bool` and `maybe bool`: SQL's `WHERE` already drops a NULL predicate, so
+    /// a three-valued condition means exactly what the stage means — and a join
+    /// predicate is the same kind of position: `NULL = anything` is never true,
+    /// which is what joining on a nullable key wants. Every other consumer of a
+    /// `bool` (`&&`, `ifThenElse`'s condition) still requires the non-null one.
     pub fn is_condition(&self) -> bool {
         match self {
             ScalarType::Bool => true,

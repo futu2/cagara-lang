@@ -488,12 +488,36 @@ fn every_pair_of_stages_is_lowered() {
         "the generator produced only {} stages",
         all.len()
     );
-    for (i, a) in all.iter().enumerate() {
-        for (j, b) in all.iter().enumerate() {
-            let src = format!("q = users & {a} & {b}\n");
-            check_pipeline(&src, (i * 100 + j) as u64);
+    // One thread per pair, because every pair is independent: the generators are
+    // seeded per pair and `check_pipeline` reads no shared state. As a plain
+    // double loop this was 400 compilations on one core — the single slowest test
+    // in the workspace at 120 seconds, on a machine with sixteen.
+    //
+    // The work is split by *row* of the matrix rather than by pair, so the threads
+    // are few (at most `all.len()`) and each one's failure still names the pair.
+    let pairs: Vec<(usize, usize, String)> = all
+        .iter()
+        .enumerate()
+        .flat_map(|(i, a)| {
+            all.iter()
+                .enumerate()
+                .map(move |(j, b)| (i, j, format!("q = users & {a} & {b}\n")))
+        })
+        .collect();
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(pairs.len());
+    let chunk = pairs.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        for slice in pairs.chunks(chunk) {
+            scope.spawn(move || {
+                for (i, j, src) in slice {
+                    check_pipeline(src, (*i * 100 + *j) as u64);
+                }
+            });
         }
-    }
+    });
 }
 
 /// The pipeline shorthands (`&?`, `&=`, `&*`, `&.`, `&-`) go through the same

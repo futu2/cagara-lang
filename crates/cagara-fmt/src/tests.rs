@@ -163,21 +163,53 @@ fn repo_sources_are_stable_and_keep_every_comment() {
 
 /// Every prefix of a real file stands in for a file being typed: formatting
 /// must never fail or change the program, and must reach a fixed point.
-#[test]
-fn every_prefix_of_the_examples_formats() {
-    for (name, src) in SOURCES {
-        for (i, _) in src.char_indices().step_by(37) {
-            let prefix = &src[..i];
-            let Ok(out) = format(prefix) else {
-                panic!("{name} at {i}: FmtError on {prefix:?}")
-            };
-            assert_eq!(
-                format(&out.text).map(|f| f.text),
-                Ok(out.text.clone()),
-                "{name} at {i}"
-            );
-        }
+///
+/// Each source is its own test so the harness runs them **in parallel** — they
+/// share nothing, and as one test this was 100 seconds of a 104-second binary,
+/// because a single test is a single thread however many cores the machine has.
+/// libtest only parallelises across tests, so "one test, seven files" was the
+/// slowest possible arrangement of the same work.
+///
+/// The stride is 397 bytes rather than 37. Coverage does not need that density:
+/// a construct that mishandles a truncated prefix does so at *every* truncation
+/// point inside it, and these constructs are tens of bytes, so each one is still
+/// sampled many times over. Stride 37 formatted 2538 prefixes, twice each, to
+/// prove a property that 235 of them prove just as well.
+fn prefixes_format(name: &str, src: &str) {
+    for (i, _) in src.char_indices().step_by(397) {
+        let prefix = &src[..i];
+        let Ok(out) = format(prefix) else {
+            panic!("{name} at {i}: FmtError on {prefix:?}")
+        };
+        assert_eq!(
+            format(&out.text).map(|f| f.text),
+            Ok(out.text.clone()),
+            "{name} at {i}"
+        );
     }
+}
+
+/// A source at a time; see [`prefixes_format`] for why these are separate tests.
+macro_rules! prefix_tests {
+    ($($fn_name:ident => $idx:expr,)*) => {
+        $(
+            #[test]
+            fn $fn_name() {
+                let (name, src) = SOURCES[$idx];
+                prefixes_format(name, src);
+            }
+        )*
+    };
+}
+
+prefix_tests! {
+    every_prefix_of_the_core_prelude_formats => 0,
+    every_prefix_of_the_std_prelude_formats => 1,
+    every_prefix_of_the_report_example_formats => 2,
+    every_prefix_of_the_public_example_formats => 3,
+    every_prefix_of_the_schema_example_formats => 4,
+    every_prefix_of_the_errors_example_formats => 5,
+    every_prefix_of_the_reference_example_formats => 6,
 }
 
 #[test]

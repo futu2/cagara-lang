@@ -1560,6 +1560,30 @@ fn rename_moves_one_column_and_keeps_the_others() {
 /// tells the reader the compiler is broken when they wrote `asc` in the one place
 /// a key has no direction — `partition` groups rows, it does not sort them. The
 /// message names the fix.
+/// A sort key in *any* expression position is a program error, not an internal one.
+///
+/// `order` and a window spec take `[asc .k]`, and `select { … }` is written with the
+/// same bracket-and-brace shape, so `select { ks = [asc .k] }` is a reasonable thing
+/// to try. It reached the normalizer as an argument of the wrong *kind*, which
+/// classified it `Fault::Compiler` and printed "internal error in `q`" — the one
+/// phrasing that tells a reader the bug is ours rather than that `asc` has no meaning
+/// outside a key position. The `partition` case below was fixed first; this is the
+/// same fix at the generic expression position, so every such use gets it.
+#[test]
+fn a_sort_key_in_an_expression_position_is_a_program_error() {
+    let src = "t : query { k = int } = table \"p\" \"t\"\n\
+               q = t & select { ks = [asc .k] }\n";
+    let diags: Vec<String> = crate::compile::compile(&Workspace::from_source(src))
+        .queries
+        .iter()
+        .filter_map(|q| q.result.as_ref().err().map(|d| d.message.clone()))
+        .collect();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    let e = &diags[0];
+    assert!(e.contains("a sort key is not an expression"), "{e}");
+    assert!(!e.contains("internal error"), "{e}");
+}
+
 #[test]
 fn a_misplaced_sort_key_is_a_program_error() {
     let src = "t : query { k = int } = table \"p\" \"t\"\n\

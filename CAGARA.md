@@ -44,11 +44,13 @@ Give this file to an agent as context, then ask for **one** `.cagara` file.
 8. **Predicates and sort keys are row-phase and non-null.** Handle `maybe` with `coalesce`, `??`,
    `isNull`/`isNotNull`, `isTrue`, `eqMaybe`. A `where` takes a `maybe bool` directly.
 9. **Joins require side-qualified columns in the predicate:** `.<x` (left) and `.>x` (right).
-   Shared output names keep the left value; outer joins make the nullable side `maybe`.
+   A shared output name keeps the left column and renames the right one to `right_<name>`, which
+   stays readable; outer joins make the nullable side `maybe`.
 10. **Set operations require the same columns:** same names and same types, matched by
     name — the order may differ, and the answer keeps the left operand's order.
-11. **`[..]` is a fixed key list, not a general list value.** It is valid as `order` keys, a window
-    spec's `partition`/`order`, and `inList` members. Nowhere else.
+11. **`[..]` is both a key list and a `list a` value.** As a key list it is what `order`, a window
+    spec's `partition`/`order` and `inList` take. As a value it is a `list a`, so it can be selected,
+    compared and passed to the list functions (§4.7) — and `list` is a type the language has.
 12. **`main` is the entry point and must be a `query`.** A scalar `main = 1` is rejected; omit
     `main` if the file is a library. `--only name` can still compile another definition.
 
@@ -511,8 +513,13 @@ second `select`/`update` stage instead.
 - `{ partition = [.user_id], order = [asc .ts] }`
 - `inList [1, 2, 3] .id`
 
-Elements must be homogeneous. `[1, 2.0]` is an error. `[]` is accepted where keys are expected.
-There is no `map`, `append`, or list-typed variable.
+Elements must be homogeneous. `[1, 2.0]` is an error. `[]` is accepted where keys are expected, and
+as a `list a` its element type comes from the context.
+
+A `[..]` written where a *value* is expected is a `list a` — `list int`, `list string` and so on —
+so it can be selected (`select { xs = [1, 2, 3] }`), compared (`[1, 2] == [1, 2]`), and passed to the
+list functions in §4.7. What the language has no *first-class function* for is building one
+incrementally: there is no `map` over a list, no `append`, and no `listMap`/`listFilter`.
 
 ### 4.5 Conditionals
 
@@ -713,14 +720,14 @@ are expression constructors used *inside* stages, not query stages themselves.
 | `omit "c"` | `symbol ?k -> query ?r -> query (removeKey ?k ?r)` | input without `c` | key is a literal |
 | `prefix "p"` | `symbol ?k -> query ?r -> query (keyMap ... r)` | every name prefixed | key is a literal |
 | `suffix "s"` | `symbol ?k -> query ?r -> query (keyMap ... r)` | every name suffixed | key is a literal |
-| `innerJoin q p` | `query ?s -> expr (join r s) bool -> query ?r -> query (merge ?r ?s)` | left then right-only | predicate uses `.<`/`.>` |
-| `leftJoin q p` | same, result right side nullable | left then right-only | right columns `maybe` |
-| `rightJoin q p` | same, result left side nullable | left then right-only | left columns `maybe` |
-| `fullJoin q p` | same, both sides nullable | left then right-only | both sides `maybe` |
-| `crossJoin q                | `q & crossJoin s` | every pair, one from each side
-markExists q p             | `q & markExists s p` | the left row plus `exists = bool`
-semiJoin q p` | `query ?s -> expr (join r s) bool -> query ?r -> query ?r` | left only | rows with a match |
+| `innerJoin q p` | `query ?s -> expr (join r s) bool -> query ?r -> query (merge ?r ?s)` | left row, then the right's other columns | predicate uses `.<`/`.>`; a shared name on the right becomes `right_<name>` |
+| `leftJoin q p` | same, result right side nullable | same | right columns `maybe` |
+| `rightJoin q p` | same, result left side nullable | same | left columns `maybe` |
+| `fullJoin q p` | same, both sides nullable | same | both sides `maybe` |
+| `crossJoin q` | `query ?s -> query ?r -> query (merge ?r ?s)` | left row, then the right's | every pair, one from each side |
+| `semiJoin q p` | `query ?s -> expr (join r s) bool -> query ?r -> query ?r` | left only | rows with a match, no new columns |
 | `antiJoin q p` | same | left only | rows without a match |
+| `markExists q p` | `query ?s -> expr (join r s) bool -> query ?r -> query (upd ?r "exists" bool)` | the left row plus `exists = bool` | the column *replaces* one of that name |
 | `union q2` | `query ?r -> query ?r -> query ?r` | left row | deduplicates |
 | `unionAll q2` | same | left row | keeps duplicates |
 | `intersect q2` | same | left row | deduplicates |
@@ -934,10 +941,11 @@ main =
   & select { .id, .name, .order_id, .amount }
 ```
 
-`users` and `orders` both have `id`, so the bare `innerJoin` refuses this join: the merged row would
-keep `users.id` and lose `orders.id` with no way to read it back. The way through is a `select` on
-the operand — it renames `orders.id` to `order_id` and keeps only the columns the join needs. There is
-no join spelling of its own for this: reshaping a side is what `select` and `update` are for.
+`users` and `orders` both have `id`, so the merged row cannot carry two columns of that name. The
+right one is **renamed** to `right_id` rather than dropped, so nothing is lost and
+`select { .id, .right_id }` reads both. A `select` on the operand is still worth writing when you
+want a different name or want to drop the unused columns — it renames `orders.id` to `order_id` —
+but it is a readability choice, not a requirement.
 
 | Named | Operator | Keeps |
 |---|---|---|
@@ -975,7 +983,8 @@ any join kind — `leftJoin`, `rightJoin` and `fullJoin` all take the same resha
 
 After a left/right/full join, the nullable side's columns become `maybe` (never doubly so). The join
 predicate still sees the non-null input types. `.<` and `.>` are valid **only** inside the predicate;
-after the join refer to `.x`, which follows the left-wins rule.
+after the join refer to `.x`, and a name both sides had is the left column — the right one is
+`right_<name>`.
 
 Filtering the nullable side is a semantic choice. `where (isNotNull .amount)` drops the unmatched
 rows; omit it to keep them. A comparison such as `where (.amount > 0.0)` is a type error until the
@@ -1083,7 +1092,7 @@ named = user & where (.name == "John" && .class_room == "A01")
 ```
 
 The column still keeps its leading dot (`.name`). A bare `name` would have to be
-a definition — the prelude alone defines 143 lowercase names, and `id`, `count`,
+a definition — the prelude alone documents 204 lowercase names, and `id`, `count`,
 `order`, `group`, `min`, `max`, `left` and `right` are all among them, so
 implicit column names would silently mean a function on the tables that matter
 most (`&? id == 1` reports `found a -> ?a`, which is the identity function).
@@ -1113,7 +1122,7 @@ fixed nothing that the wrapper does not.
 | `agg ?f` | exactly the fields of `f` |
 | `omit "c"` | input row minus `c`, order kept |
 | `prefix "p"` / `suffix "s"` | all names rewritten, order and types kept |
-| `innerJoin` | left columns, then right-only columns |
+| `innerJoin` | left row, then the right's other columns; a shared name on the right becomes `right_<name>` |
 | outer join | same, nullable side's types wrapped in `maybe` |
 | `semiJoin`, `antiJoin` | left row only |
 | set operation | left operand's row |
@@ -1526,7 +1535,10 @@ over        : winspec ?r -> agg (expr ?r (maybe ?a)) -> win (expr ?r (maybe ?a))
 ```
 
 `count` is a value, not a call: write `n = count`, not `count ()`. `sum`/`avg`/`min`/`max` return
-`maybe`; `coalesce 0 (sum .x)` makes a number. `countOf`/`countDistinct` require non-null input.
+`maybe`; `coalesce 0 (sum .x)` makes a number. `countOf`/`countDistinct` accept a nullable column
+directly — `COUNT(x)` skips NULLs by definition, which is what counting a nullable column *is* — so
+their `maybe` overloads are the same function, and `countOfMaybe`/`countDistinctMaybe` are aliases
+kept for queries written against them.
 `arrayAgg` needs a dialect with an array type (PostgreSQL, DuckDB); the others refuse it.
 
 The nullable overloads keep SQL's own semantics: the column passes straight through, so `sum .x`

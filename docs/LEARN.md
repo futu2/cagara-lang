@@ -138,14 +138,16 @@ The scalar types are:
 There is also `maybe a`, a value that may be SQL `NULL`; see
 [section 8](#8-nulls).
 
-There are no user-declared types, and a name in a type position that is not one
-of the constructors above is not "an unknown type" — it is a **type parameter**,
-the same mechanism as the `a` in `id : ?a -> ?a`. The definition becomes
-polymorphic in it and every use instantiates it afresh, so a column written
-`amount = decimal` can be used as a `string` in one query and as an `int` in
-another, and neither is rejected. A typo in a column type is therefore silent;
-use the names in the table verbatim, and treat a type that has to mean something
-specific as one of those six plus `maybe`/`list`.
+There are no user-declared types. A name in a type position is either one of the
+constructors above or a **type variable**, and a type variable is written with a `?`
+sigil — the `?a` in `id : ?a -> ?a`. The sigil is what makes a typo reportable:
+`amount = decimol` is `unknown type 'decimol'`, with the list of names the language
+does have, rather than a silently-polymorphic column that would accept anything.
+
+That matters because polymorphism is not a licence to be vague: a column annotated
+`a = ?x` really can be used as a `string` in one place and an `int` in another, and
+nothing rejects it. So use the constructor names verbatim for a column that has to
+mean something specific, and reach for `?a` only when you do mean "any type".
 
 A column may be declared nullable:
 
@@ -669,7 +671,7 @@ available after the join — `.right_id` is:
 order_names =
   orders
   & innerJoin users (.<user_id == .>id)
-  & select { .id, .right_id, .name, .amount }     # orders.id, users.id
+  & select { .id, .right_id, .name, .amount }     -- orders.id, users.id
 ```
 
 See [section 9](#9-joins) for the join output rules this follows from.
@@ -1080,7 +1082,7 @@ than numbered.
 order_names =
   orders
   & innerJoin users (.<user_id == .>id)
-  & select { .id, .right_id, .name, .amount }     # orders.id, users.id
+  & select { .id, .right_id, .name, .amount }     -- orders.id, users.id
 ```
 
 `.<x` / `.>x` name the inputs only *inside* the predicate; after the join the two
@@ -1115,19 +1117,16 @@ spec = { partition = [.user_id], order = [desc .created_at] }
 
 All three are optional; `{}` is a valid spec.
 
-> **`[..]` is a fixed-length key list, not a Haskell list.** Despite the
-> spelling, `[a, b]` is not a cons cell or a linked list with a `[]`/`(:)`
-> algebra. There is no `map`, no concatenation, and no list-typed variable you
-> can build up. It is a *syntax for writing a fixed list of sort keys or
-> partition keys*, and it is only meaningful where keys are expected: as the
-> argument of `order`, or in a spec's `partition` and `order` fields. A list of
-> column expressions is inferred as a `sortkey` row, which is why putting one
-> anywhere else is a type error:
+> **`[..]` is a fixed-length key list, and also a `list a` value.** Despite the
+> spelling it is not a cons cell or a linked list with a `[]`/`(:)` algebra:
+> there is no `map`, no `append`, and no way to build one up recursively. Where
+> keys are expected — the argument of `order`, a spec's `partition` and `order`
+> — a list of column expressions is inferred as a `sortkey` row, which is why one
+> whose elements are *sort keys* rather than columns is a type error there:
 
 ```haskell
-bad  = users & select {.id, ks = [asc .age]}   -- field `ks` of `select` must be a
-                                               -- column expression or constant, found list
-bad2 = users & where ([1, 2] == [1, 2])        -- type mismatch: expected expr ?a b, found list int
+bad  = users & select {.id, ks = [asc .age]}   -- a sort key is not an expression:
+                                               -- `order [asc .age]` is, `.age` is
 bad3 = users & select {.id, rn = rowNumber [asc .age]}
                                                -- expected winspec a, found list (sortkey ...)
 ```

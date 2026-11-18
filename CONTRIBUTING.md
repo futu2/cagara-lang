@@ -24,7 +24,7 @@ cargo install cargo-nextest --locked     # or: cargo binstall cargo-nextest
 `cargo test` runs the workspace's 19 test *binaries* one after another, so a single
 30-second binary holds the run while the other fifteen cores idle: 103 s in total.
 `cargo nextest run --workspace` runs each test in its own process and the binaries
-concurrently, and takes **47 s** for the same 815 tests. It also reports each
+concurrently, and takes **47 s** for the same 817 tests. It also reports each
 failure with its own captured output instead of interleaving everything.
 
 One runner is the point. A local run and a CI run should mean the same thing, and

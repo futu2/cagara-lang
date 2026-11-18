@@ -43,9 +43,10 @@ left join, for example, `sum .amount` keeps SQL's `SUM(amount)` meaning, while
 total = coalesce 0.0 (sum .amount)
 ```
 
-`countOf` follows the same non-null argument rule, even though SQL `COUNT(x)`
-ignores nulls. `countOfMaybe` is the explicit spelling and counts matched rows
-on a nullable join side:
+`countOf` accepts a nullable column directly, because SQL `COUNT(x)` already ignores
+nulls — counting a nullable column *is* counting its non-null values, so there is no
+rule to restate and no helper needed. `countOfMaybe` still exists as an alias for
+queries written against it, and reads well on a nullable join side:
 
 ```haskell
 matches = countOfMaybe .right_id

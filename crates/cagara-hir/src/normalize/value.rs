@@ -1033,6 +1033,20 @@ impl<'a> Normalizer<'a, 'a> {
                     None => expr,
                 })
             }
+            // A sort key is the one non-expression a user reaches for often, because
+            // `order` and a window spec take `[asc .k]` and `select` looks like the
+            // same kind of list. It arrives here as an unsupported *argument*, which
+            // renders as "internal error in `q`" — the one phrasing a user cannot act
+            // on. `partition` got this treatment already; every expression position
+            // gets it now, at the point where the wrong kind is refused.
+            Value::SortKey(..) => Err(Control::Program(
+                crate::core::Error::new(
+                    "a sort key is not an expression: `asc`/`desc` are only for `order` and a \
+                     window spec's `order`. Write the column itself here — `[asc .age]` is \
+                     `order [asc .age]`, and `.age` is the value",
+                )
+                .at(origin),
+            )),
             other => Err(Control::unsupported(
                 origin,
                 format!(

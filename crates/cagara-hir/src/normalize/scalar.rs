@@ -615,6 +615,19 @@ pub(crate) fn window_spec<'a>(
                     return Err(Control::unsupported(origin, "`partition` is a list"));
                 };
                 for item in items {
+                    // A partition key has no direction: the rows are grouped, not
+                    // sorted, so `partition = [asc .k]` is a habit from `order`
+                    // rather than something the language can do. Saying so is the
+                    // difference between a typo and "internal error in `main`".
+                    if let Value::SortKey(..) = item {
+                        return Err(Control::Program(
+                            crate::core::Error::new(
+                                "a partition key has no direction: write `partition = [.k]`, and \
+                                 put `asc`/`desc` keys in `order` instead",
+                            )
+                            .at(origin),
+                        ));
+                    }
                     partition.push(ev.as_expr(item.clone(), module, expr)?);
                 }
             }

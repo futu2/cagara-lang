@@ -97,21 +97,37 @@ impl Printer {
                     t => format!("{{ {} | {} }}", body.join(", "), self.ty(t, 0)),
                 }
             }
+            // The row formers, spelled the way the language spells them —
+            // application by juxtaposition, so the printed signature can be
+            // pasted back into a file. They used to print `merge(a, b)`, which is
+            // not this language's syntax at all: `f : query ?a -> query
+            // merge(?a, { value = int })` was a *syntax error*, so `--types` and
+            // the diagnostics were telling a reader to write something that does
+            // not parse.
+            //
+            // Each is parenthesized as an *argument*, because juxtaposition is
+            // greedy: `query removeKey "a" ?r` reads as `query` applied to three
+            // things, and the parser says so ("`query` takes 1 type argument(s),
+            // got 3"). `query (removeKey "a" ?r)` is the spelling that reads back.
             Ty::MapKey(km, row) => {
                 // Print the term as written. The *inner* row is already the
                 // renamed row once it has been stored, so applying the mapper
                 // again here would double-apply it (`u_u_id`). Reducing is the
                 // store's job, not the printer's.
-                format!("keyMap({}, {})", self.ty(km, 2), self.ty(row, 2))
+                let s = format!("keyMap {} {}", self.ty(km, 2), self.ty(row, 2));
+                paren(s, prec >= 2)
             }
             Ty::Merge(left, right) => {
-                format!("merge({}, {})", self.ty(left, 2), self.ty(right, 2))
+                let s = format!("merge {} {}", self.ty(left, 2), self.ty(right, 2));
+                paren(s, prec >= 2)
             }
             Ty::MapValue(label, row) => {
-                format!("mapValue({}, {})", self.ty(label, 2), self.ty(row, 2))
+                let s = format!("mapValue {} {}", self.ty(label, 2), self.ty(row, 2));
+                paren(s, prec >= 2)
             }
             Ty::RemoveKey(k, row) => {
-                format!("removeKey({}, {})", self.ty(k, 2), self.ty(row, 2))
+                let s = format!("removeKey {} {}", self.ty(k, 2), self.ty(row, 2));
+                paren(s, prec >= 2)
             }
             Ty::Fun(a, b) => {
                 let s = format!("{} -> {}", self.ty(a, 1), self.ty(b, 0));

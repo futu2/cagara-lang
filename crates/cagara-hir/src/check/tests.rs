@@ -1260,7 +1260,7 @@ fn join_errors() {
 fn update_merges_over_the_input_row() {
     assert_eq!(
         ty("u = update\n", "u"),
-        "expr ?a (row ?b) -> query ?a -> query merge(?a, ?b)"
+        "expr ?a (row ?b) -> query ?a -> query (merge ?a ?b)"
     );
     // An overwritten field keeps its position; the rest pass through.
     assert_eq!(
@@ -1468,7 +1468,71 @@ fn a_shared_join_column_needs_no_fix() {
     assert_eq!(q, "query { id = int, right_id = int, x = int, y = int }");
 }
 
-/// `(e : ty)` checks the expression against the type instead of inferring it.
+/// A user typo is never reported as a compiler fault.
+///
+/// `rowNumber {partition = [asc .k]}` reached `as_expr` with a sort key and came
+/// out as "internal error in `main`: this argument is not an expression". That
+/// tells the reader the compiler is broken when they wrote `asc` in the one place
+/// a key has no direction — `partition` groups rows, it does not sort them. The
+/// message names the fix.
+#[test]
+fn a_misplaced_sort_key_is_a_program_error() {
+    let src = "t : query { k = int } = table \"p\" \"t\"\n\
+               q = t & select { r = rowNumber {partition = [asc .k]} }\n";
+    // The refusal comes from the normalizer, so the message is reached through
+    // `compile`, not the checker.
+    let diags: Vec<String> = crate::compile::compile(&Workspace::from_source(src))
+        .queries
+        .iter()
+        .filter_map(|q| q.result.as_ref().err().map(|d| d.message.clone()))
+        .collect();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    let e = &diags[0];
+    assert!(e.contains("a partition key has no direction"), "{e}");
+    assert!(e.contains("partition = [.k]"), "{e}");
+    assert!(!e.contains("internal error"), "{e}");
+
+    // The spelling it suggests works.
+    let ok = "t : query { k = int } = table \"p\" \"t\"\n\
+              q = t & select { r = rowNumber {partition = [.k]} }\n";
+    assert_eq!(ty(ok, "q"), "query { r = int }");
+}
+
+/// A printed type can be pasted back into a signature.
+///
+/// `--types` and the diagnostics are the only way a reader learns a helper's
+/// inferred type, so a type they cannot write is a type they cannot use. The row
+/// formers used to print as `merge(a, b)` — a call syntax this language does not
+/// have — so `f : query ?a -> query merge(?a, { value = int })` was a *syntax
+/// error*. They print as application now, parenthesized where they sit in an
+/// argument position, because juxtaposition is greedy: `query removeKey "a" ?r`
+/// reads as `query` applied to three things.
+#[test]
+fn a_printed_type_is_writable() {
+    let src = "f = r => r & omit \"a\"\n\
+               g = r => r & prefix \"p_\"\n\
+               h = q => q & unnest [1]\n";
+    for (name, printed) in [
+        ("f", "query ?a -> query (removeKey \"a\" ?a)"),
+        ("g", "query ?a -> query (keyMap (prefix \"p_\") ?a)"),
+        ("h", "query ?a -> query (merge ?a { value = int })"),
+    ] {
+        assert_eq!(ty(src, name), printed, "{name}");
+        // The printed form is a signature the checker accepts, written above a
+        // body that has that type.
+        let round = format!(
+            "{name} : {printed} = {}",
+            match name {
+                "f" => "r => r & omit \"a\"",
+                "g" => "r => r & prefix \"p_\"",
+                _ => "q => q & unnest [1]",
+            }
+        );
+        assert_eq!(ty(&format!("{round}\n"), name), printed, "{name} round-trip");
+    }
+}
+
+/// `(e : ty)` checks the expression against the type instead of inferring it./// `(e : ty)` checks the expression against the type instead of inferring it.
 ///
 /// Inference had no escape hatch below a definition: a definition and a lambda
 /// parameter could be annotated, a sub-expression could not. The annotation

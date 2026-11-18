@@ -1065,14 +1065,15 @@ impl<'w> Checker<'w> {
                 self.conv(a, phase, names)?,
                 self.conv(b, phase, names)?,
             )),
-            // A string is only meaningful as a key mapper's affix, which
-            // `conv_keymap` handles; anywhere else it is a type-position
-            // mistake rather than something to accept silently.
-            TypeExpr::Str(_, sp) => Err(Fail::from(format!(
-                "a string is not a type here; it is only used as a key mapper's affix, \
-                 as in `keyMap (prefix \"u_\") r` (at byte {})",
-                sp.start
-            ))),
+            // A string in type position is a `symbol`: the label a row former
+            // records. `removeKey "a" ?r` is how `omit "a"` states its result, and
+            // printing it any other way makes `--types` unwritable — the reader is
+            // told the type of their definition in a notation no file can contain.
+            //
+            // A key mapper's affix is the same thing and is handled by
+            // `conv_keymap`, which needs the literal for a different reason: the
+            // mapping is part of the type, so it must be known at check time.
+            TypeExpr::Str(s, _) => Ok(Ty::Sym(s.clone())),
             TypeExpr::Error(_) => Ok(self.fresh()),
         }
     }

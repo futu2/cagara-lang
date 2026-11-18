@@ -69,7 +69,10 @@ a name.
 
 ### The language
 
-- **Block comments** `{- … -}` nest and may span lines.
+- **Block comments** `/* … */` nest and may span lines. The Haskell-style `{- … -}`
+  is *not* supported: `{` opens a record here, so `{-` would be ambiguous with a
+  record whose first token is `-`, and a lexer that guesses is worse than one that
+  requires `/*`.
 - **Unicode identifiers.** A column may be named `总金额`; each dialect's own quoting
   is used (`"…"`, `` `…` ``, `[…]`).
 - **Type ascription** `(e : ty)` — the only way to annotate below a definition or a

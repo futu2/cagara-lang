@@ -150,6 +150,7 @@ impl DefinitionFacts {
 pub(crate) fn child_exprs(e: &cagara_syntax::ast::Expr) -> Vec<&cagara_syntax::ast::Expr> {
     use cagara_syntax::ast::ExprKind;
     match &e.kind {
+        ExprKind::Ascribe { expr, .. } => vec![expr.as_ref()],
         ExprKind::App(function, args) => {
             let mut out = Vec::with_capacity(args.len() + 1);
             out.push(function.as_ref());

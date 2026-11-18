@@ -607,6 +607,20 @@ known, and the tie is a real ambiguity: only the row says whether `.d` is a `dat
 `timestamp`. `x : int = .a` stays an error for the same rule read backwards — a column reference
 *does* put a row into the expression, so it is not a value.
 
+`(e : ty)` is a **type ascription**: the expression is checked against the type rather than
+inferred. It is the only way to annotate below a definition or a lambda parameter, and it erases —
+the SQL is the expression's own, since the type was already checked:
+
+```cagara
+t : query { a = int, s = string } = table "public" "t"
+
+pinned = t & select { x = (.a : int) }         # `int`, not an unknown
+```
+
+It is a check, not a cast: `select { x = (.s : int) }` on that same table is an error — "expected
+int, found string" — in the words an unannotated mismatch gets. To convert, use a `to*` function
+(`toInt .s`).
+
 `list a` is a value type too, not only a key list. A column can hold one, an aggregate can build
 one, and a literal is one:
 

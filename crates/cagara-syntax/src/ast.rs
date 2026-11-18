@@ -118,6 +118,15 @@ pub struct LambdaParam {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExprKind {
     Name(String),
+    /// `(e : ty)` — the expression checked against the type rather than
+    /// inferred. Inference has no other escape hatch: a definition or a lambda
+    /// parameter can be annotated, but a sub-expression cannot.
+    Ascribe {
+        expr: Box<Expr>,
+        /// Boxed like `expr`: a `TypeExpr` is larger than the whole enum's
+        /// budget, and `Expr` is kept under 64 bytes (`expr_stays_small`).
+        ty: Box<TypeExpr>,
+    },
     Lit(Lit),
     /// `.x`, `.<x`, `.>x`
     Field(Side, String),
@@ -540,10 +549,33 @@ impl Lower<'_> {
                 }
                 None => ExprKind::Error,
             },
-            K::ParenExpr => match n.children().next() {
-                Some(c) => return self.expr(&c),
-                None => ExprKind::Error,
-            },
+            K::ParenExpr => {
+                // `(e : ty)` — an ascription. The type child is skipped by the
+                // plain-paren case below, so it is looked for first.
+                if let Some(ann) = n.children().find(|c| c.kind() == K::TypeAnn) {
+                    let ty = ann
+                        .children()
+                        .next()
+                        .map(|t| self.ty(&t))
+                        .unwrap_or(TypeExpr::Error(span(n)));
+                    let inner = n.children().find(|c| c.kind() != K::TypeAnn);
+                    let body = match inner {
+                        Some(e) => Box::new(self.expr(&e)),
+                        None => return self.mk(sp, ExprKind::Error),
+                    };
+                    return self.mk(
+                        sp,
+                        ExprKind::Ascribe {
+                            expr: body,
+                            ty: Box::new(ty),
+                        },
+                    );
+                }
+                match n.children().next() {
+                    Some(c) => return self.expr(&c),
+                    None => ExprKind::Error,
+                }
+            }
             K::Lambda => match (
                 token(n, K::Ident),
                 n.children().find(|c| c.kind() != K::TypeAnn),

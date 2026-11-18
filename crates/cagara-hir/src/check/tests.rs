@@ -1468,6 +1468,36 @@ fn a_shared_join_column_needs_no_fix() {
     assert_eq!(q, "query { id = int, right_id = int, x = int, y = int }");
 }
 
+/// `(e : ty)` checks the expression against the type instead of inferring it.
+///
+/// Inference had no escape hatch below a definition: a definition and a lambda
+/// parameter could be annotated, a sub-expression could not. The annotation
+/// constrains the *value's* type — not the row or the phase, which are properties
+/// of where the expression was written — and it erases: the SQL is the
+/// expression's own.
+#[test]
+fn a_type_ascription_constrains_and_erases() {
+    let src = "t : query { a = int, s = string } = table \"p\" \"t\"\n\
+               q = t & select { x = (.a : int), y = (.a + (1 : int)) }\n";
+    assert_eq!(
+        ty(src, "q"),
+        "query { x = int, y = int }",
+        "the ascription keeps the value's type"
+    );
+
+    // It is a *check*, not a cast: a column of the wrong type is an error, in the
+    // same words an unannotated mismatch gets.
+    let src = "t : query { s = string } = table \"p\" \"t\"\n\
+               q = t & select { x = (.s : int) }\n";
+    let e = err(src, "q");
+    assert!(e.contains("type mismatch"), "{e}");
+    assert!(e.contains("expected int, found string"), "{e}");
+
+    // A scalar definition is where an annotation is most useful: there is no
+    // row to supply the type.
+    assert_eq!(ty("x : int = (5 : int)\n", "x"), "int");
+}
+
 /// Type names are closed: an unknown name is an error, and a type variable is
 /// written with a `?` sigil.
 ///

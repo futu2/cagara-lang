@@ -41,6 +41,7 @@ pub fn parse_with(input: &str, ops: &Ops) -> Parse {
         depth: 0,
         bailed: false,
         arm_depth: None,
+        paren_atoms: 0,
         stop_at_in: false,
         ops,
     };
@@ -83,6 +84,14 @@ struct Parser<'a> {
     /// exception is about the arm's own level: a lambda nested inside the
     /// condition — in parentheses, in an argument — is a lambda like any other.
     arm_depth: Option<usize>,
+    /// Are we inside a `(` … `)` expression atom, where a `:` starts a type
+    /// ascription rather than being a mistake? A count, because ascriptions nest.
+    ///
+    /// The `:` is otherwise an error inside an expression (see the `Token::Colon`
+    /// arm in [`Parser::expr`]), and that diagnostic is the right one for `x : ty
+    /// => body`. Inside parentheses the `:` is unambiguous — `(e : ty)` — so the
+    /// expression stops there and the atom reads the type.
+    paren_atoms: usize,
     /// While parsing a `let` binding's value, an identifier spelled `in` ends
     /// the value instead of being applied as an argument. `in` stays an
     /// ordinary identifier otherwise (the prelude defines it as an alias of
@@ -778,10 +787,15 @@ impl<'a> Parser<'a> {
                 // `:` itself, instead of leaving the definition to report
                 // "unexpected tokens" past the whole body.
                 if l.kind == Token::Colon {
-                    self.bail(
-                        "a lambda parameter's type annotation is written \
-                         `(x : ty) => body`",
-                    );
+                    // Inside `( … )` the `:` is an ascription's separator, so the
+                    // expression stops and the atom reads the type.
+                    if self.paren_atoms == 0 {
+                        self.bail(
+                            "a lambda parameter's type annotation is written \
+                             `(x : ty) => body`",
+                        );
+                    }
+                    break;
                 }
                 break;
             };
@@ -1002,7 +1016,20 @@ impl<'a> Parser<'a> {
             Some(Token::LParen) => {
                 self.start(K::ParenExpr);
                 self.bump();
+                self.paren_atoms += 1;
                 self.without_in_stop(|p| p.expr());
+                self.paren_atoms -= 1;
+                // `(e : ty)` — a type *ascription*: the expression is checked
+                // against the type rather than inferred. The `:` cannot be part
+                // of the expression, so its presence here is unambiguous, and
+                // `(x : ty) => body` was already taken by the lambda form,
+                // which is recognised before this atom is reached.
+                if self.at(Token::Colon) {
+                    self.bump();
+                    self.start(K::TypeAnn);
+                    self.ty();
+                    self.finish();
+                }
                 self.expect(Token::RParen, "`)`");
                 self.finish();
             }
@@ -1259,17 +1286,27 @@ mod tests {
         );
     }
 
-    /// A `(name : ty)` group is a lambda's parameter only when an arrow
-    /// follows. Without one it stays an ordinary parenthesised expression, and
-    /// the `:` is a syntax error *there* rather than an annotation that eats the
-    /// group and then complains about a missing arrow.
+    /// A `(e : ty)` group is a lambda's parameter when an arrow follows, and a
+    /// type **ascription** when one does not.
+    ///
+    /// It used to be a syntax error either way, because a `:` had no meaning
+    /// inside an expression. It has one now — `(e : ty)` checks the expression
+    /// against the type — so the group parses and the annotation is the group's
+    /// own rather than an eaten parameter.
     #[test]
     fn a_parameter_group_needs_its_arrow() {
         let p = parse("f = (x : int) 1\n");
-        assert!(
-            p.errors.iter().any(|e| e.message.contains("=> body")),
-            "{:?}",
-            p.errors
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        // The *syntax* tree keeps the group and its annotation as children; the
+        // AST turns the pair into an `Ascribe` (`ast::tests` pins that).
+        assert_eq!(
+            body("f = (x : int) 1"),
+            "(App (ParenExpr (NameRef x) (TypeAnn (TyApp int))) (Literal 1))"
+        );
+        // The arrow still decides which form a group is.
+        assert_eq!(
+            body("f = (x : int) => x"),
+            "(Lambda x (TypeAnn (TyApp int)) (NameRef x))"
         );
         // The bare form names the parentheses that are missing, at the `:`,
         // rather than reporting whatever the definition ran into next.

@@ -297,6 +297,14 @@ pub(crate) enum Cons {
     /// naming, that made `a & union b` report `b`'s column order while its SQL
     /// emitted `a`'s.
     Set { left: Ty, right: Ty },
+    /// `(e : ty)`: `inner` must be `want`, once the row `inner` was written
+    /// against is known.
+    ///
+    /// Deferred for the same reason [`Cons::Lit`] is: a field's type is
+    /// `expr ?r ?a`, and `?r` is pinned by the enclosing stage. Comparing it with
+    /// the annotation immediately would reject `(.a : int)` on a program that is
+    /// perfectly well typed.
+    Ascribe { inner: Ty, want: Ty },
     /// A literal of scalar type `lit` used where `target` is expected, once
     /// `target` is known (int widens to float, string to date / timestamp).
     Lit { lit: &'static str, target: Ty },
@@ -600,6 +608,10 @@ fn closed_fields(t: &Ty) -> Option<Vec<(String, ScalarType)>> {
 impl Cons {
     pub(crate) fn map(&self, f: &mut impl FnMut(&Ty) -> Ty) -> Cons {
         match self {
+            Cons::Ascribe { inner, want } => Cons::Ascribe {
+                inner: f(inner),
+                want: f(want),
+            },
             Cons::Filter { pred, row } => Cons::Filter {
                 pred: f(pred),
                 row: f(row),

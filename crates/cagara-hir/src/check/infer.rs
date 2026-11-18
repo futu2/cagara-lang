@@ -1489,6 +1489,16 @@ impl<'w> Checker<'w> {
 
     pub(crate) fn infer(&mut self, env: &mut Vec<(String, Ty)>, e: &ast::Expr) -> R<Ty> {
         match &e.kind {
+            // `(e : ty)`: the expression is checked *against* the type rather
+            // than inferred and then unified, which is what makes the ascription
+            // an escape hatch — a literal widens, and an open row is closed.
+            ExprKind::Ascribe { expr, ty } => {
+                let want = self.annotation(ty).map_err(at(e.span))?;
+                let inner = self.infer(env, expr)?;
+                self.pending
+                    .push((Cons::Ascribe { inner, want: want.clone() }, e.span));
+                Ok(want)
+            }
             ExprKind::Name(..) => self.infer_name(env, e),
             ExprKind::Lit(..) => self.infer_lit(env, e),
             ExprKind::Field(..) => self.infer_field(env, e),
@@ -1537,6 +1547,17 @@ impl<'w> Checker<'w> {
             // Its fields are named, so the expected row supplies each field's
             // type rather than each field being unified against a fresh
             // variable.
+            // `(e : ty)`: `e` is checked against the *ambient* expectation, so
+            // its row and phase come from where it was written — a field
+            // inferred with no expectation would invent a row of its own — and
+            // the annotation is a second, deferred obligation on the value.
+            ExprKind::Ascribe { expr, ty } => {
+                let want = self.annotation(ty).map_err(at(e.span))?;
+                let inner = self.check(env, expr, expected)?;
+                self.pending
+                    .push((Cons::Ascribe { inner, want }, e.span));
+                Ok(expected.clone())
+            }
             ExprKind::Record(..) => self.check_record(env, e, expected),
             // A lambda's parameter type comes from the expected function type
             // when it has one.
@@ -3461,6 +3482,7 @@ impl<'w> Checker<'w> {
             Cons::JoinOn { .. } => self.step_join_on(c, sp),
             Cons::Set { .. } => self.step_set(c, sp),
             Cons::Lit { .. } => self.step_lit(c, sp),
+            Cons::Ascribe { .. } => self.step_ascribe(c, sp),
             Cons::Within { .. } => self.step_within(c, sp),
             Cons::Update { .. } => self.step_update(c, sp),
             Cons::Omit { .. } => self.step_omit(c, sp),
@@ -3875,6 +3897,33 @@ impl<'w> Checker<'w> {
             Ty::Var(_) => Ok(false),
             _ => self.lift(lit, target).map(|_| true),
         }
+    }
+
+    /// `(e : ty)` holds once `e`'s row is known.
+    ///
+    /// Waiting is the whole point: `(.a : int)` is `expr ?r ?a` against `int`, and
+    /// `?r` is pinned by the stage the ascription sits in. A row that is still open
+    /// means the enclosing stage has not been resolved yet, so this is retried
+    /// rather than reported.
+    fn step_ascribe(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
+        let Cons::Ascribe { inner, want } = c else {
+            unreachable!("dispatched on Cons::Ascribe")
+        };
+        // An expression's type is `expr ?phase ?row ?a`, and the annotation is
+        // about `?a` — the value's type. The row and the phase are properties of
+        // *where the expression was written*, not of what the ascription says, so
+        // they are not part of the check: `(.a : int)` constrains the column's
+        // type, and the stage still decides the row.
+        //
+        // This is what makes the check happen at all. Unifying the whole
+        // `expr …` against `int` compares a row against a scalar, which either
+        // fails on a well-typed program or — worse — waits forever for a row that
+        // the ascription itself is not asking about.
+        let subject = match self.resolve(inner) {
+            Ty::Con("expr", args) if args.len() == 3 => args[2].clone(),
+            other => other,
+        };
+        self.unify(&subject, want).map(|_| true)
     }
 
     fn step_within(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {

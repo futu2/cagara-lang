@@ -66,6 +66,10 @@ impl<'a> Normalizer<'a, 'a> {
     ) -> Result<Value<'a>, Control> {
         let origin = Origin::new(module, expr.span);
         match &expr.kind {
+            // `(e : ty)` is erased before this pass: the type was checked, and
+            // the value is the value. It reaches here only when the ascription
+            // is the *whole* expression, so the inner expression is reduced.
+            ExprKind::Ascribe { expr: inner, .. } => self.value(module, inner, env),
             ExprKind::Field(side, column) => self.field(module, expr, *side, column),
             // A literal is a value the operations decide the meaning of. A
             // string literal in a `symbol` position names an affix or a column;

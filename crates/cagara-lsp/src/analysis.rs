@@ -345,6 +345,9 @@ impl Walk<'_> {
                 self.expr(body);
                 self.env.pop();
             }
+            // An ascription's type is not an expression, so only the value is
+            // walked; a column inside `(e : ty)` is still a use of that column.
+            ExprKind::Ascribe { expr, .. } => self.expr(expr),
             ExprKind::Record(fs) => fs.iter().for_each(|(_, v)| self.expr(v)),
             ExprKind::List(xs) => xs.iter().for_each(|x| self.expr(x)),
             // Both halves of every arm are names in scope: a condition and the
@@ -1027,6 +1030,7 @@ fn atom_at(text: &str, e: &Expr, offset: usize, found: &mut Option<(Span, (usize
             args.iter().for_each(|a| atom_at(text, a, offset, found));
         }
         ExprKind::Lambda(_, body) => atom_at(text, body, offset, found),
+        ExprKind::Ascribe { expr, .. } => atom_at(text, expr, offset, found),
         ExprKind::Record(fs) => fs.iter().for_each(|(_, v)| atom_at(text, v, offset, found)),
         ExprKind::List(xs) => xs.iter().for_each(|x| atom_at(text, x, offset, found)),
         // Hover works on a column or literal anywhere, arms included.

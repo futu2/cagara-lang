@@ -187,7 +187,7 @@ kind_table! {
         /// `{- a {- b -} c -}` is one comment, so commenting out a region that
         /// already contains a block comment works.
         ///
-        /// Scanned by hand ([`crate::lexer::scan_block_comment`]) rather than by
+        /// Scanned by hand (`lexer::scan_block_comment`) rather than by
         /// a `logos` pattern, for the same reason [`SyntaxKind::String`] is:
         /// a regular expression cannot count, so it cannot match a nested pair.
         /// It is trivia, so the parser never sees it.

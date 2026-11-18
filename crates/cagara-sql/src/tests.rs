@@ -750,10 +750,19 @@ fn union_all_preserves_duplicates() {
 #[test]
 fn a_comparison_against_nothing_is_a_null_test() {
     let t = "t : query { id = int, m = maybe int } = table \"public\" \"t\"\n";
-    let eq = sql(&format!("{t}q = t & select {{ .id, is_null = .m == nothing }}\n"), "q");
+    let eq = sql(
+        &format!("{t}q = t & select {{ .id, is_null = .m == nothing }}\n"),
+        "q",
+    );
     assert!(eq.contains("m IS NULL"), "{eq}");
-    assert!(!eq.contains("= NULL"), "the comparison must not survive: {eq}");
-    let ne = sql(&format!("{t}q = t & select {{ .id, present = .m != nothing }}\n"), "q");
+    assert!(
+        !eq.contains("= NULL"),
+        "the comparison must not survive: {eq}"
+    );
+    let ne = sql(
+        &format!("{t}q = t & select {{ .id, present = .m != nothing }}\n"),
+        "q",
+    );
     assert!(ne.contains("m IS NOT NULL"), "{ne}");
     // In a `where`, which is where the wrong answer was visible as zero rows.
     let w = sql(&format!("{t}q = t & where (.m != nothing)\n"), "q");
@@ -840,7 +849,10 @@ fn a_join_on_a_nullable_key_compares_null_as_never_matching() {
     // `COALESCE(…, FALSE)` is the NULL-never-matches spelling; a bare `= NULL`
     // or a `COALESCE(key, 0)` would both be wrong.
     assert!(s.contains("COALESCE((t2.bid = t3.bid2), FALSE)"), "{s}");
-    assert!(!s.contains("COALESCE(t2.bid, 0)"), "the wrong workaround: {s}");
+    assert!(
+        !s.contains("COALESCE(t2.bid, 0)"),
+        "the wrong workaround: {s}"
+    );
 }
 
 /// `filtered` and `distinctAgg` reach `arrayAgg`.
@@ -865,9 +877,15 @@ fn array_agg_honours_the_aggregate_modifiers() {
     );
     assert!(d.contains("ARRAY_AGG(DISTINCT s)"), "{d}");
     // The unmodified form is unchanged.
-    let plain = sql(&format!("{t}q = t & agg {{ k = group .k, xs = arrayAgg .id }}\n"), "q");
+    let plain = sql(
+        &format!("{t}q = t & agg {{ k = group .k, xs = arrayAgg .id }}\n"),
+        "q",
+    );
     assert!(plain.contains("ARRAY_AGG(id)"), "{plain}");
-    assert!(!plain.contains("DISTINCT") && !plain.contains("FILTER"), "{plain}");
+    assert!(
+        !plain.contains("DISTINCT") && !plain.contains("FILTER"),
+        "{plain}"
+    );
 }
 
 #[test]
@@ -2389,7 +2407,10 @@ fn trino_and_spark_spellings() {
                 ("spark", "DIV(i, j)"),
                 ("duckdb", "DIVIDE(i, j)"),
                 ("bigquery", "DIV(i, j)"),
-                ("mysql", "CAST(((i - (i % NULLIF(j, 0))) / NULLIF(j, 0)) AS SIGNED)"),
+                (
+                    "mysql",
+                    "CAST(((i - (i % NULLIF(j, 0))) / NULLIF(j, 0)) AS SIGNED)",
+                ),
             ],
         ),
         (".i % .j", &[("bigquery", "MOD(i, j)")]),

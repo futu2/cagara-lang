@@ -212,7 +212,11 @@ fn every_prelude_name_is_in_the_reference() {
         .args(["doc", "--prelude"])
         .output()
         .expect("run cagara doc --prelude");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
 
     // The catalog prints one `## `name`` heading per entry.
@@ -267,9 +271,28 @@ fn the_catalog_writes_type_variables_the_way_the_language_does() {
         .collect();
     // Real type names, which are bare by definition.
     let real = [
-        "int", "float", "string", "bool", "date", "timestamp", "decimal", "list", "maybe",
-        "expr", "agg", "win", "query", "row", "sortkey", "symbol", "winspec", "frame",
-        "bound", "keyLabel", "valueLabel", "name",
+        "int",
+        "float",
+        "string",
+        "bool",
+        "date",
+        "timestamp",
+        "decimal",
+        "list",
+        "maybe",
+        "expr",
+        "agg",
+        "win",
+        "query",
+        "row",
+        "sortkey",
+        "symbol",
+        "winspec",
+        "frame",
+        "bound",
+        "keyLabel",
+        "valueLabel",
+        "name",
     ];
     let mut bad = Vec::new();
     for line in &section {
@@ -284,14 +307,18 @@ fn the_catalog_writes_type_variables_the_way_the_language_does() {
             }
             let before = sig[..i].chars().next_back();
             let after = sig[i + 1..].chars().next();
-            let standalone = before.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '?' && c != '`')
+            let standalone = before
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '?' && c != '`')
                 && after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '`');
             if !standalone {
                 continue;
             }
-            let word: String = sig[i..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let word: String = sig[i..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
             if word.len() == 1 && !real.contains(&word.as_str()) {
-                bad.push(format!("{}", line.trim()));
+                bad.push(line.trim().to_string());
                 break;
             }
         }

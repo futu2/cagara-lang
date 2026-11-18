@@ -108,10 +108,7 @@ fn node(e: Expr, to: Dialect) -> Result<Expr, String> {
         // call, and the rebuilt call dropped it. Only an aggregate can carry
         // either, so an intrinsic without one cannot reach here with them set.
         Some(out) => Ok(atomic(with_aggregate_modifiers(
-            out,
-            distinct,
-            filter,
-            order_by,
+            out, distinct, filter, order_by,
         ))),
         None => Err(match refusal(&upper) {
             // A known intrinsic this target cannot express. The message names the

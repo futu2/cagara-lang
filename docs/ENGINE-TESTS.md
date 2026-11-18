@@ -36,7 +36,7 @@ everything. That is what a full local run does:
 
 ```sh
 CAGARA_REQUIRE_ENGINES=1 MYSQL_SOCKET=… MYSQL=… CAGARA_PYTHON=… \
-  cargo test --workspace
+  cargo nextest run --workspace
 ```
 
 ## What CI runs
@@ -54,7 +54,7 @@ The `engines` job downloads exactly those two, verifies the digests, fails if
 
 ```sh
 CAGARA_ENGINES=sqlite,duckdb CAGARA_REQUIRE_ENGINES=1 \
-  cargo test -p cagara-sql --test engines --locked
+  cargo nextest run -p cagara-sql --test engines --locked
 ```
 
 `CAGARA_ENGINES` is an allow-list: only the engines it names run, and the rest skip even
@@ -164,8 +164,9 @@ M=mariadb-11.4.14-linux-systemd-x86_64
   -e 'CREATE DATABASE IF NOT EXISTS main'
 
 # then the test, with the two variables it looks for
+# `--exact` is nextest's `-- <filter>`: one test, by full name.
 MYSQL_SOCKET=$PWD/mysql.sock MYSQL=$PWD/$M/bin/mariadb \
-  cargo test -p cagara-sql --test engines -- mysql_agrees
+  cargo nextest run -p cagara-sql --test engines -- mysql_agrees
 ```
 
 `MYSQL_DB` overrides the database (default `main`, because that is the schema the
@@ -179,7 +180,7 @@ T-SQL, BigQuery, Snowflake and ANSI have no server here. They are still *execute
 translating them to DuckDB with an independent implementation:
 
 ```sh
-uv pip install sqlglot        # or: CAGARA_PYTHON=/path/to/python cargo test ...
+uv pip install sqlglot        # or: CAGARA_PYTHON=/path/to/python cargo nextest run ...
 ```
 
 `tests/emulate.py` reads our output in the target dialect and writes it as DuckDB;

@@ -335,8 +335,10 @@ impl<'a> Parser<'a> {
         // has, and the generic "expected `)`" says nothing about it: the `=` *is*
         // there, and it is the wrong operator. The message names the operator the
         // language has.
-        if matches!(t, Token::RParen | Token::RBracket | Token::RBrace | Token::Comma)
-            && self.at(Token::Eq)
+        if matches!(
+            t,
+            Token::RParen | Token::RBracket | Token::RBrace | Token::Comma
+        ) && self.at(Token::Eq)
         {
             self.error(
                 "`=` is not equality here: a comparison is `==` (a single `=` only introduces \

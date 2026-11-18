@@ -121,11 +121,12 @@ fn cpu_time() -> Option<Duration> {
     }
     // SAFETY: `rc == 0` means `getrusage` initialised the struct.
     let usage = unsafe { usage.assume_init() };
-    // `libc::timeval` fields are `time_t`/`suseconds_t`, whose widths differ by
-    // platform, so they are widened explicitly rather than assumed.
-    let secs = i64::from(usage.ru_utime.tv_sec) + i64::from(usage.ru_stime.tv_sec);
-    let micros = i64::from(usage.ru_utime.tv_usec) + i64::from(usage.ru_stime.tv_usec);
-    Some(Duration::from_secs(secs.max(0) as u64) + Duration::from_micros(micros.max(0) as u64))
+    // `libc::timeval`'s fields are `time_t`/`suseconds_t`, which are `i64` on
+    // Linux and `i32` on some other targets, so the sum is taken in the widest
+    // form and clamped rather than assumed non-negative.
+    let tv = |t: libc::timeval| (t.tv_sec as i128) * 1_000_000 + (t.tv_usec as i128);
+    let micros = (tv(usage.ru_utime) + tv(usage.ru_stime)).max(0) as u64;
+    Some(Duration::from_micros(micros))
 }
 
 /// The cost of the work, as CPU time when the platform reports it.

@@ -2467,7 +2467,8 @@ mod tests {
     /// other stage's.
     #[test]
     fn an_alias_and_a_shorthand_still_reach_the_declaration() {
-        let src = "--- T.\nusers : query {\n    --- Age.\n    age = int\n  } = table \"p\" \"t\"\n\n\
+        let src =
+            "--- T.\nusers : query {\n    --- Age.\n    age = int\n  } = table \"p\" \"t\"\n\n\
                    alias = users\n\
                    via_alias = alias & where (.age > 0)\n\
                    shorthand = users & where (.age > 0)\n\
@@ -2505,7 +2506,8 @@ mod tests {
     /// would be about a name that the record does not have.
     #[test]
     fn a_renamed_column_has_no_documentation() {
-        let src = "--- T.\nusers : query {\n    --- Key.\n    id = int\n  } = table \"p\" \"t\"\n\n\
+        let src =
+            "--- T.\nusers : query {\n    --- Key.\n    id = int\n  } = table \"p\" \"t\"\n\n\
                    q = users & prefix \"u_\" & where (.u_id > 0)\n";
         let ws = Workspace::open_with(Path::new("/nonexistent/prefixed.cagara"), src.to_string());
         let h = hover(&ws, at_in(src, "where (.u_id", 9)).unwrap();
@@ -3342,16 +3344,9 @@ mod tests {
 
 #[cfg(test)]
 mod severity_tests {
-    use super::{diagnostics, Report};
-    use cagara_hir::workspace::{Severity, Workspace};
+    use super::diagnostics;
+    use cagara_hir::workspace::Workspace;
 
-    /// A warning reaches the editor as a warning.
-    ///
-    /// The editor and `cagara check` read the same compilation diagnostics, so
-    /// a warning that the compiler recorded but never published would be
-    /// silently missing from both — this is the assertion that publish and
-    /// `--json` agree on *severity*, not only on text and position.
-    #[test]
     /// A shared join column publishes nothing at all.
     ///
     /// It used to be the one *warning* the language had. The right column is
@@ -3359,6 +3354,7 @@ mod severity_tests {
     /// report — which is the stronger claim, and the one worth pinning: a
     /// well-formed join produces no diagnostic, so an editor shows no squiggle on
     /// it.
+    #[test]
     fn a_shared_join_column_publishes_nothing() {
         let src = "users : query { id = int, name = string } = table \"s\" \"u\"\n\
                    orders : query { id = int, user_id = int } = table \"s\" \"o\"\n\

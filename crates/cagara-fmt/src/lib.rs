@@ -180,9 +180,7 @@ fn skeleton(root: &SyntaxNode) -> (Vec<String>, Vec<String>) {
                 // re-emits, so both are compared through `comments` rather than
                 // through `shape`. A block comment is kept whole, newlines
                 // included, because its internal layout is the writer's.
-                K::Comment | K::BlockComment => {
-                    comments.push(t.text().trim_end().to_string())
-                }
+                K::Comment | K::BlockComment => comments.push(t.text().trim_end().to_string()),
                 // An unlexable run or an unterminated string takes in the
                 // whitespace after it, which is the formatter's to change.
                 K::Error | K::UnterminatedString => {

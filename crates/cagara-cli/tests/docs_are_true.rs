@@ -248,6 +248,61 @@ fn every_prelude_name_is_in_the_reference() {
     );
 }
 
+/// The catalog spells a type variable the way the language does.
+///
+/// `CAGARA.md` §7 shows each name with its signature, and a reader treats those as
+/// something to copy. They were written `_&_ : a -> (?a -> ?b) -> ?b` — bare
+/// letters beside `?` sigils, inherited from before the `?a` change — and a bare
+/// letter is a type *constructor* name, so `id : a -> a` is an error and those 86
+/// lines taught a notation no file accepts. The catalog has two documented
+/// shorthands (`same`, `a|b`), but the *sigil* is not one of them.
+#[test]
+fn the_catalog_writes_type_variables_the_way_the_language_does() {
+    let root = repo_root();
+    let doc = std::fs::read_to_string(root.join("CAGARA.md")).expect("CAGARA.md");
+    let section: Vec<&str> = doc
+        .lines()
+        .skip_while(|l| !l.starts_with("### 7.1"))
+        .take_while(|l| !l.starts_with("## 8."))
+        .collect();
+    // Real type names, which are bare by definition.
+    let real = [
+        "int", "float", "string", "bool", "date", "timestamp", "decimal", "list", "maybe",
+        "expr", "agg", "win", "query", "row", "sortkey", "symbol", "winspec", "frame",
+        "bound", "keyLabel", "valueLabel", "name",
+    ];
+    let mut bad = Vec::new();
+    for line in &section {
+        let Some((_, rest)) = line.split_once(" : ") else {
+            continue;
+        };
+        let sig = rest.split("  ").next().unwrap_or(rest);
+        let sig = sig.split(" = ").next().unwrap_or(sig);
+        for (i, ch) in sig.char_indices() {
+            if !ch.is_ascii_lowercase() {
+                continue;
+            }
+            let before = sig[..i].chars().next_back();
+            let after = sig[i + 1..].chars().next();
+            let standalone = before.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '?' && c != '`')
+                && after.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '`');
+            if !standalone {
+                continue;
+            }
+            let word: String = sig[i..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            if word.len() == 1 && !real.contains(&word.as_str()) {
+                bad.push(format!("{}", line.trim()));
+                break;
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "these catalog lines write a type variable without the `?` sigil, so the \
+         signature cannot be pasted into a file: {bad:#?}"
+    );
+}
+
 /// Every document in `docs/` itself is reachable from somewhere a reader starts.
 ///
 /// `docs/` had sixteen files and no way to tell which four were current: the dated

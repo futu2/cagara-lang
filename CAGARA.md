@@ -1233,18 +1233,27 @@ function is missing, write a `sql` template (§8.4) or report it unavailable. Th
 summary: `cagara doc --prelude` prints the same catalog with each definition's own documentation,
 taken from the `---` blocks in `prelude/core.cagara` (and `prelude/std.cagara`).
 
-Notation: signatures are exact for the shown overloads; `expr ?r a` means an expression over the
-current row. A name with several lines is overloaded.
+Notation: signatures are exact for the shown overloads; `expr ?r ?a` means an expression over the
+current row. A name with several lines is overloaded. Two shorthands are used, because writing every
+overload out would bury the shape:
+
+- `same` means "the type of the argument this replaces" — `abs : expr ?r int -> same` is the `int`
+  overload, and the `float` one returns `float`.
+- `a|b` lists the overloads of one parameter — `negate : expr ?r int|float -> same` is two
+  definitions.
+
+Every type *variable* is written with the `?` sigil (`?a`, `?r`), which is the spelling a signature
+in a file must use: a bare letter is a type constructor name, so `id : a -> a` is an error.
 
 ### 7.1 Combinators and pipeline
 
 ```text
-_&_    : a -> (?a -> ?b) -> ?b          x & f      = f x
+_&_    : ?a -> (?a -> ?b) -> ?b          x & f      = f x
 _$_    : (?a -> ?b) -> ?a -> ?b          f $ x      = f x
-_>>>_  : (a -> b) -> (b -> c) -> a -> c
-_<<<_  : (b -> c) -> (a -> b) -> a -> c
-id     : a -> a
-asc desc : expr ?r a -> sortkey ?r
+_>>>_  : (?a -> ?b) -> (?b -> ?c) -> ?a -> ?c
+_<<<_  : (?b -> ?c) -> (?a -> ?b) -> ?a -> ?c
+id     : ?a -> ?a
+asc desc : expr ?r ?a -> sortkey ?r
 nullsFirst nullsLast : sortkey ?r -> sortkey ?r
 rename   : symbol ?to -> symbol ?from -> query ?r -> query (keyMap (renameSym ?to ?from) ?r)
 ```
@@ -1252,12 +1261,12 @@ rename   : symbol ?to -> symbol ?from -> query ?r -> query (keyMap (renameSym ?t
 ### 7.2 Comparison, logic, arithmetic, strings
 
 ```text
-==  !=  <  <=  >  >=   : expr ?r a -> expr ?r a -> expr ?r bool
+==  !=  <  <=  >  >=   : expr ?r ?a -> expr ?r ?a -> expr ?r bool
 &&  ||                 : expr ?r bool -> expr ?r bool -> expr ?r bool
-not                    : expr r bool -> expr r bool
-negate                 : expr r int|float -> same
+not                    : expr ?r bool -> expr ?r bool
+negate                 : expr ?r int|float -> same
 
-ifThenElse             : expr r bool -> expr r a -> expr r a -> expr r a  (searched CASE)
+ifThenElse             : expr ?r bool -> expr ?r ?a -> expr ?r ?a -> expr ?r ?a  (searched CASE)
 caseWhen               : the same function under an alias
 
 + - *                  : expr ?r int -> expr ?r int -> expr ?r int        (also float overloads)
@@ -1266,35 +1275,35 @@ caseWhen               : the same function under an alias
 %                      : expr ?r int -> expr ?r int -> expr ?r int        (sign of dividend)
 <>                     : expr ?r string -> expr ?r string -> expr ?r string
 <>                     : expr ?r (maybe string) -> expr ?r (maybe string) -> expr ?r (maybe string)
-concat                 : expr r string -> expr r string -> expr r string
+concat                 : expr ?r string -> expr ?r string -> expr ?r string
 
 upper lower trim ltrim rtrim : expr ?r string -> expr ?r string
-length                 : expr r string -> expr r int
-substring              : expr r int -> expr r int -> expr r string -> expr r string
+length                 : expr ?r string -> expr ?r int
+substring              : expr ?r int -> expr ?r int -> expr ?r string -> expr ?r string
 left right             : expr ?r int -> expr ?r string -> expr ?r string
 lpad rpad              : expr ?r int -> expr ?r string -> expr ?r string -> expr ?r string
-replaceAll             : expr r string -> expr r string -> expr r string -> expr r string
-strpos                 : expr r string -> expr r string -> expr r int
-contains               : expr r string -> expr r string -> expr r bool
+replaceAll             : expr ?r string -> expr ?r string -> expr ?r string -> expr ?r string
+strpos                 : expr ?r string -> expr ?r string -> expr ?r int
+contains               : expr ?r string -> expr ?r string -> expr ?r bool
 startsWith endsWith    : expr ?r string -> expr ?r string -> expr ?r bool
 like ilike             : expr ?r string -> expr ?r string -> expr ?r bool
 
-abs                    : expr r int|float|decimal p s -> same
-negate                 : expr r int|float|decimal p s -> same
-round                  : expr r float -> expr r float
-roundTo                : expr r int -> expr r float -> expr r float
+abs                    : expr ?r int|float|decimal ?p ?s -> same
+negate                 : expr ?r int|float|decimal ?p ?s -> same
+round                  : expr ?r float -> expr ?r float
+roundTo                : expr ?r int -> expr ?r float -> expr ?r float
 floor ceil             : expr ?r float -> expr ?r float
-sqrt                   : expr r float -> expr r float
+sqrt                   : expr ?r float -> expr ?r float
 cbrt                   : expr ?r float -> expr ?r float
 exp ln                 : expr ?r float -> expr ?r float
 log2 log10             : expr ?r float -> expr ?r float
 logBase                : expr ?r float -> expr ?r float -> expr ?r float
-power                  : expr r float -> expr r float -> expr r float
+power                  : expr ?r float -> expr ?r float -> expr ?r float
 radians degrees        : expr ?r float -> expr ?r float
-sign                   : expr r int -> expr r int;  expr r float -> expr r int
-greatest least         : expr ?r a -> expr ?r a -> expr ?r a     (two arguments)
+sign                   : expr ?r int -> expr ?r int;  expr r float -> expr r int
+greatest least         : expr ?r ?a -> expr ?r ?a -> expr ?r ?a     (two arguments)
 
-between                : expr ?r a -> expr ?r a -> expr ?r a -> expr ?r bool   between lo hi x
+between                : expr ?r ?a -> expr ?r ?a -> expr ?r ?a -> expr ?r bool   between lo hi x
 ratio                  : expr ?r int|float -> ... -> expr ?r float            ratio whole part
 percentOf              : expr ?r int|float -> ... -> expr ?r float            percentOf whole part
 chr ascii              : expr ?r int -> expr ?r string / expr ?r string -> expr ?r int
@@ -1335,21 +1344,21 @@ main = orders & select {
 ### 7.3 Casts
 
 ```text
-toInt        : expr r float|string -> expr r int
-toFloat      : expr r int|string -> expr r float
-toBool       : expr r int|float|string -> expr r bool   (a string reads true/t/yes/y/1)
-toString     : expr r int|float|date|timestamp|bool -> expr r string
-toDate       : expr r timestamp|string -> expr r date
-toTimestamp  : expr r date|string -> expr r timestamp
-toDecimal    : expr r int -> expr r int -> expr r string|int|float -> expr r float
-tryInt       : expr r string -> expr r (maybe int)
-tryFloat     : expr r string -> expr r (maybe float)
-tryDate      : expr r string -> expr r (maybe date)
-tryTimestamp : expr r string -> expr r (maybe timestamp)
-tryDecimal   : expr r int -> expr r int -> expr r string -> expr r (maybe float)
-fromString   : expr r string -> expr r int|float|date     (overloaded; may be ambiguous)
-fromInt      : expr r int -> expr r float
-fromFloat    : expr r float -> expr r int
+toInt        : expr ?r float|string -> expr ?r int
+toFloat      : expr ?r int|string -> expr ?r float
+toBool       : expr ?r int|float|string -> expr ?r bool   (a string reads true/t/yes/y/1)
+toString     : expr ?r int|float|date|timestamp|bool -> expr ?r string
+toDate       : expr ?r timestamp|string -> expr ?r date
+toTimestamp  : expr ?r date|string -> expr ?r timestamp
+toDecimal    : expr ?r int -> expr ?r int -> expr ?r string|int|float -> expr ?r float
+tryInt       : expr ?r string -> expr ?r (maybe int)
+tryFloat     : expr ?r string -> expr ?r (maybe float)
+tryDate      : expr ?r string -> expr ?r (maybe date)
+tryTimestamp : expr ?r string -> expr ?r (maybe timestamp)
+tryDecimal   : expr ?r int -> expr ?r int -> expr ?r string -> expr ?r (maybe float)
+fromString   : expr ?r string -> expr ?r int|float|date     (overloaded; may be ambiguous)
+fromInt      : expr ?r int -> expr ?r float
+fromFloat    : expr ?r float -> expr ?r int
 ```
 
 `toDecimal 18 2 .amount` emits `CAST(amount AS DECIMAL(18, 2))`; the language type stays `float`.
@@ -1359,17 +1368,17 @@ the backend casts to the matching SQL width rather than a 32-bit `INT`/`FLOAT`.
 ### 7.4 Dates and timestamps
 
 ```text
-currentDate      : expr r date
-currentTimestamp : expr r timestamp
-now              : expr r timestamp
-yesterday        : expr r date
+currentDate      : expr ?r date
+currentTimestamp : expr ?r timestamp
+now              : expr ?r timestamp
+yesterday        : expr ?r date
 
-toDate           : expr r timestamp|string -> expr r date
-toTimestamp      : expr r date|string -> expr r timestamp
-parseDate        : string -> expr r string -> expr r date
-parseTimestamp   : string -> expr r string -> expr r timestamp
-formatDate       : string -> expr r date -> expr r string
-formatTimestamp  : string -> expr r timestamp -> expr r string
+toDate           : expr ?r timestamp|string -> expr ?r date
+toTimestamp      : expr ?r date|string -> expr ?r timestamp
+parseDate        : string -> expr ?r string -> expr ?r date
+parseTimestamp   : string -> expr ?r string -> expr ?r timestamp
+formatDate       : string -> expr ?r date -> expr ?r string
+formatTimestamp  : string -> expr ?r timestamp -> expr ?r string
 
 addDays addWeeks addMonths addQuarters addYears
                  : expr ?r int -> expr ?r date -> expr ?r date
@@ -1388,7 +1397,7 @@ hour minute      : expr ?r timestamp -> expr ?r int
 monthName monthAbbrev dayName dayAbbrev
                  : expr ?r date|timestamp -> expr ?r string
 
-daysBetween      : expr r date -> expr r date -> expr r int
+daysBetween      : expr ?r date -> expr ?r date -> expr ?r int
 weeksBetween     : expr ?r date -> expr ?r date -> expr ?r int
 monthsBetween    : expr ?r date -> expr ?r date -> expr ?r int
 quartersBetween  : expr ?r date -> expr ?r date -> expr ?r int
@@ -1428,15 +1437,15 @@ main = orders & select {
 ### 7.5 Nulls
 
 ```text
-coalesce   : expr r a -> expr r (maybe a) -> expr r a
-??         : expr ?r (maybe a) -> expr ?r a -> expr ?r a
-nothing    : expr r (maybe a)
-just       : expr r a -> expr r (maybe a)
-nullIf     : expr r a -> expr r a -> expr r (maybe a)
-isNull     : expr r (maybe a) -> expr r bool
-isNotNull  : expr r (maybe a) -> expr r bool
-isTrue     : expr r (maybe bool) -> expr r bool
-eqMaybe    : expr r (maybe a) -> expr r (maybe a) -> expr r bool
+coalesce   : expr ?r ?a -> expr ?r (maybe ?a) -> expr ?r ?a
+??         : expr ?r (maybe ?a) -> expr ?r ?a -> expr ?r ?a
+nothing    : expr ?r (maybe ?a)
+just       : expr ?r ?a -> expr ?r (maybe ?a)
+nullIf     : expr ?r ?a -> expr ?r ?a -> expr ?r (maybe ?a)
+isNull     : expr ?r (maybe ?a) -> expr ?r bool
+isNotNull  : expr ?r (maybe ?a) -> expr ?r bool
+isTrue     : expr ?r (maybe bool) -> expr ?r bool
+eqMaybe    : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r bool
 whereTrue  : expr ?r (maybe bool) -> query ?r -> query ?r     (the same filter as `where`)
 ```
 
@@ -1471,29 +1480,29 @@ not vocabulary to reach for.
 ### 7.6 Aggregates (only in `agg`)
 
 ```text
-count              : agg (expr r int)                              COUNT(*)
-countOf            : expr r a -> agg (expr r int)                  COUNT(x)
-countOf            : expr r (maybe a) -> agg (expr r int)          COUNT(x)
-countDistinct      : expr r a -> agg (expr r int)                  COUNT(DISTINCT x)
-countDistinct      : expr r (maybe a) -> agg (expr r int)          COUNT(DISTINCT x)
-countOfMaybe       : expr r (maybe a) -> agg (expr r int)          COUNT(x), stated as nullable
-countDistinctMaybe : expr r (maybe a) -> agg (expr r int)          COUNT(DISTINCT x), stated as nullable
+count              : agg (expr ?r int)                              COUNT(*)
+countOf            : expr ?r ?a -> agg (expr ?r int)                  COUNT(x)
+countOf            : expr ?r (maybe ?a) -> agg (expr ?r int)          COUNT(x)
+countDistinct      : expr ?r ?a -> agg (expr ?r int)                  COUNT(DISTINCT x)
+countDistinct      : expr ?r (maybe ?a) -> agg (expr ?r int)          COUNT(DISTINCT x)
+countOfMaybe       : expr ?r (maybe ?a) -> agg (expr ?r int)          COUNT(x), stated as nullable
+countDistinctMaybe : expr ?r (maybe ?a) -> agg (expr ?r int)          COUNT(DISTINCT x), stated as nullable
 
-sum : expr r int -> agg (expr r (maybe int))        sum : expr r (maybe int) -> agg (expr r (maybe int))
-sum : expr r float -> agg (expr r (maybe float))    sum : expr r (maybe float) -> agg (expr r (maybe float))
-avg : expr r int -> agg (expr r (maybe float))      avg : expr r (maybe int) -> agg (expr r (maybe float))
-avg : expr r float -> agg (expr r (maybe float))    avg : expr r (maybe float) -> agg (expr r (maybe float))
-min : expr r a -> agg (expr r (maybe a))            min : expr r (maybe a) -> agg (expr r (maybe a))
-max : expr r a -> agg (expr r (maybe a))            max : expr r (maybe a) -> agg (expr r (maybe a))
+sum : expr ?r int -> agg (expr ?r (maybe int))        sum : expr r (maybe int) -> agg (expr r (maybe int))
+sum : expr ?r float -> agg (expr ?r (maybe float))    sum : expr r (maybe float) -> agg (expr r (maybe float))
+avg : expr ?r int -> agg (expr ?r (maybe float))      avg : expr r (maybe int) -> agg (expr r (maybe float))
+avg : expr ?r float -> agg (expr ?r (maybe float))    avg : expr r (maybe float) -> agg (expr r (maybe float))
+min : expr ?r ?a -> agg (expr ?r (maybe ?a))            min : expr r (maybe a) -> agg (expr r (maybe a))
+max : expr ?r ?a -> agg (expr ?r (maybe ?a))            max : expr r (maybe a) -> agg (expr r (maybe a))
 
-arrayAgg : expr r a -> agg (expr r (list a))       ARRAY_AGG(x) — a list column
+arrayAgg : expr ?r ?a -> agg (expr ?r (list ?a))       ARRAY_AGG(x) — a list column
 
-filtered    : expr r bool -> agg (expr r a) -> agg (expr r a)
-distinctAgg : agg (expr r a) -> agg (expr r a)
-filtered    : expr r bool -> agg (expr r (maybe a)) -> agg (expr r (maybe a))
-distinctAgg : agg (expr r (maybe a)) -> agg (expr r (maybe a))
-over        : winspec r -> agg (expr r a) -> win (expr r a)
-over        : winspec r -> agg (expr r (maybe a)) -> win (expr r (maybe a))
+filtered    : expr ?r bool -> agg (expr ?r ?a) -> agg (expr ?r ?a)
+distinctAgg : agg (expr ?r ?a) -> agg (expr ?r ?a)
+filtered    : expr ?r bool -> agg (expr ?r (maybe ?a)) -> agg (expr ?r (maybe ?a))
+distinctAgg : agg (expr ?r (maybe ?a)) -> agg (expr ?r (maybe ?a))
+over        : winspec ?r -> agg (expr ?r ?a) -> win (expr ?r ?a)
+over        : winspec ?r -> agg (expr ?r (maybe ?a)) -> win (expr ?r (maybe ?a))
 ```
 
 `count` is a value, not a call: write `n = count`, not `count ()`. `sum`/`avg`/`min`/`max` return
@@ -1527,10 +1536,10 @@ such as `truncMonth .ts` are fine, but aggregates and windows are not.
 
 ```text
 rowNumber rank denseRank : winspec ?r -> win (expr ?r int)
-lag lead                 : winspec ?r -> expr ?r a -> win (expr ?r (maybe a))
-lagBy leadBy             : winspec ?r -> expr ?r int -> expr ?r a -> win (expr ?r (maybe a))
-firstValue lastValue     : winspec ?r -> expr ?r a -> win (expr ?r (maybe a))
-ntile                    : winspec r -> expr r int -> win (expr r int)
+lag lead                 : winspec ?r -> expr ?r ?a -> win (expr ?r (maybe ?a))
+lagBy leadBy             : winspec ?r -> expr ?r int -> expr ?r ?a -> win (expr ?r (maybe ?a))
+firstValue lastValue     : winspec ?r -> expr ?r ?a -> win (expr ?r (maybe ?a))
+ntile                    : winspec ?r -> expr ?r int -> win (expr ?r int)
 percentRank cumeDist     : winspec ?r -> win (expr ?r float)
 
 rows range groups        : bound -> bound -> frame

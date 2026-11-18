@@ -37,6 +37,47 @@ stderr used to produce a failure message of nothing but the SQL (this is what
 message; and the emulated-dialect test gates on `sqlglot` but executes its results on
 DuckDB, which it never checked for.
 
+### One program, one answer
+
+`docs/SQL-DIALECTS.md` states the prelude's purpose as "the language does not change
+with `--dialect`". Seven functions broke that, all silent except one, and all found by
+running the same program on SQLite, DuckDB and PostgreSQL and diffing the rows.
+
+- **`formatTimestamp` returned NULL for every row on SQLite.** It emitted
+  `STRFTIME(value, fmt)`; SQLite's order is `(fmt, value)`, and it answers NULL for an
+  unparseable time rather than rejecting the statement. The *date* branch two lines
+  below already had it right. A column of NULLs under a non-null `string` type.
+- **`monthName`/`dayName`/`monthAbbrev`/`dayAbbrev` were NULL for every row on
+  SQLite.** They are `formatDate "%B"`; SQLite's `strftime` has no name specifiers and
+  answers NULL rather than failing. Now a compile error on SQLite, because a silent
+  NULL column is worse than an error that names the dialect.
+- **PostgreSQL carried a trailing space** on those names: `TO_CHAR(…, 'Month')`
+  blank-pads to nine characters, so `formatDate "%B %d"` gave `February  29` there and
+  nowhere else. The `FM` prefix is the unpadded form.
+- **`cbrt 0.0` failed the query** on DuckDB and PostgreSQL with `cannot take logarithm
+  of zero`, from an emulation whose type says non-null `float`. The answer is 0 by
+  definition; the zero case is now written out.
+- **`like` matched case-insensitively on SQLite**, because SQLite's `LIKE` does. It is
+  now a `GLOB` with the pattern translated (`%`→`*`, `_`→`?`, literal `*`/`?`/`[`
+  escaped), which is the case-sensitive matcher SQLite has.
+- **`left`/`right` with a negative length** returned `''` on SQLite where the others
+  drop that many from the end or the front.
+- **`lpad`/`rpad` are refused on SQLite** instead of emitting `LPAD`, which the engine
+  rejects at run time. It has neither `LPAD` nor `REPEAT`, and the fill needs a
+  recursive query.
+
+`roundTo` on an exact half is the one left: SQLite has no decimal type, so
+`roundTo 1 0.35` is `0.3` there and `0.4` on the others, and the emitted SQL is
+identical — nothing in the compiler can reconcile it. `CAGARA.md` now says so.
+
+### `cagara fmt` formats `catalog`
+
+A `catalog` declaration fell through the formatter's item dispatch to the verbatim
+fallback, so the whole item was echoed byte for byte and `fmt --check` called a file of
+them formatted. The test covering it asserted `fmt(x) == x` on already-canonical input,
+which a formatter that does nothing satisfies trivially — it now feeds deliberately
+misformatted input, and reverting the fix makes it fail.
+
 ### Migrating from 0.4.x
 
 | Was | Now | How to find it |

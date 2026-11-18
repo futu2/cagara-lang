@@ -1908,14 +1908,17 @@ to a helper — it is an ordinary value, so nothing special applies to it.
 
 ### Why these are not plain SQL
 
-Every date operation above, and the string operations whose spelling differs
-across engines (`length`, `left`/`right`, `strpos`, `contains`, `startsWith`,
-`endsWith`), call a `CAGARA_*` intrinsic rather than spelling ANSI SQL directly —
-`upper`, `lower`, `trim`, `ltrim`, `rtrim`, `lpad`, `rpad`, `substring`,
-`replaceAll`, `like` and `ilike` are ordinary SQL templates — so that
-[`crates/cagara-sql/src/intrinsics.rs`](../crates/cagara-sql/src/intrinsics.rs)
-can emit the right thing per dialect. The same expression therefore lowers
-differently depending on `--dialect`:
+Every date operation above, and every string operation whose spelling or *meaning*
+differs across engines, calls a `CAGARA_*` intrinsic rather than spelling ANSI SQL
+directly, so that
+[`crates/cagara-sql/src/intrinsics.rs`](../crates/cagara-sql/src/intrinsics.rs) can
+emit the right thing per dialect. That set is larger than it looks, because a name
+is not safe to pass through just because every engine has it: `like` is
+case-insensitive on SQLite and case-sensitive everywhere else, so it is an intrinsic
+too. The names that *are* plain templates are the ones no engine disagrees about —
+`upper`, `lower`, `trim`, `ltrim`, `rtrim`, `substring` and `replaceAll`.
+
+The same expression therefore lowers differently depending on `--dialect`:
 
 ```haskell
 t = orders & select {.id, y = yearOfDate .created_at, d = dayOfWeek .created_at}
@@ -1933,8 +1936,14 @@ Note that MySQL adjustment specifically: it exists so that `dayOfWeek` means the
 same thing on every engine. This is the reason to check the
 [dialect reference](SQL-DIALECTS.md) before trusting a lightly tested engine —
 the *semantics* are supposed to be constant across dialects, and where a dialect
-needed adjusting, that document says so. `ilike` is another example: SQLite has
-no `ILIKE`, so it lowers to `LOWER(s) LIKE LOWER(pattern)`.
+needed adjusting, that document says so. `ilike` is another example: SQLite has no
+`ILIKE`, so it lowers to `LOWER(s) LIKE LOWER(pattern)` — and `like` itself becomes a
+`GLOB`, because SQLite's `LIKE` folds case.
+
+Two functions are refused rather than spelled differently, because the engine cannot
+mean what the language says: `lpad`/`rpad` on SQLite (it has neither `LPAD` nor
+`REPEAT`), and `monthName`/`dayName` there too (its `strftime` has no name
+specifiers). Both are compile errors that name the dialect, not wrong answers.
 
 ---
 

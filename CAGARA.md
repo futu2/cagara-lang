@@ -1329,6 +1329,19 @@ Argument order is subject-last, which is the reverse of the SQL spelling:
 Positions and lengths are 1-based. `contains`/`startsWith`/`endsWith` treat `%` and `_` literally;
 `like` does not. `length` counts characters, including trailing spaces.
 
+Four cases where an engine's own rule would differ, and the language does not follow it:
+
+- `like` is **case-sensitive** everywhere. SQLite's `LIKE` is case-insensitive for ASCII unless the
+  connection turns that off, so it is spelled as a `GLOB` with the pattern translated instead.
+- `ilike` folds case, but only ASCII does that on SQLite — its case mapping is ASCII-only, and
+  `upper`/`lower` have the same limit there.
+- `lpad`/`rpad` are a compile error on SQLite: it has neither `LPAD` nor `REPEAT` and the fill
+  cannot be built without a recursive query. Use `left`/`right` or `substring`.
+- `roundTo` on an exact half is **the engine's own rule**, and the engines do not agree: SQLite has
+  no decimal type, so `roundTo 1 0.35` is `0.3` there and `0.4` on DuckDB and PostgreSQL. The
+  emitted SQL is identical, so nothing in the compiler can reconcile them. Round half away from
+  zero explicitly if the value matters.
+
 ```cagara
 orders : query { id = int, email = string, name = string } = table "public" "orders"
 
@@ -1412,10 +1425,17 @@ use `truncMonth .d`, whose result is a date. `monthName`/`dayName` are the Engli
 label rather than a number.
 
 - `parseDate "%Y%m%d" s`, `parseTimestamp "%Y-%m-%d %H:%M:%S" s` and their `format*` inverses take a
-  **format**, written once for every dialect: the language reads `%Y %m %d %H %M %S` and `%%`, and the backend translates it
-  (`YYYYMMDD` for PostgreSQL, `%Y%m%d` for MySQL, `yyyyMMdd` for Spark, …). The format must be a
-  literal. SQLite and T-SQL can print by format but have no format parser, so `parseDate` is a
-  compile error there — parse an ISO string with `toDate` instead.
+  **format**, written once for every dialect: the language reads `%Y %m %d %H %M %S`, `%b`/`%B`
+  (month name), `%a`/`%A` (weekday name), `%j` (day of year) and `%%`, and the backend translates
+  it (`YYYYMMDD` for PostgreSQL, `%Y%m%d` for MySQL, `yyyyMMdd` for Spark, …). The format must be
+  a literal.
+- Two dialect gaps, both compile errors rather than wrong answers:
+  - SQLite and T-SQL can print by format but have no format *parser*, so `parseDate` is a compile
+    error there — parse an ISO string with `toDate` instead.
+  - SQLite's `strftime` has no specifier for a month or weekday **name**, and answers NULL rather
+    than failing, so `%b %B %a %A` are compile errors on SQLite. That makes `monthName`, `dayName`,
+    `monthAbbrev` and `dayAbbrev` — which are `formatDate "%B"` and friends — unavailable there;
+    format `%m` and map it, or run the query on a dialect that has names.
 - `date` has no hour; `hour`/`truncHour`/`addHours` require `timestamp`. Convert with `toTimestamp`.
 - `daysBetween start end` is positive when `end` is later; use `toDate` on a timestamp first.
 - `dayOfWeek` is 0 for Sunday; `truncWeek` starts on Monday (ISO).

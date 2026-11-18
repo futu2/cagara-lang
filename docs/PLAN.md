@@ -201,38 +201,30 @@ lowers to a lateral join internally in `lower.rs`, but the language offers no wa
 to write one, and `CAGARA.md` §9.1 lists `LATERAL` among the constructs that do not
 exist).
 
-### A. The tooling surfaces
+### A–C. The three tables that were here
 
-The compiler had the engine-backed differential suite; the tools around it had far
-less. A boundary here was anything an editor or a script could reach and a test
-could not.
+Three tables of "Done" rows used to sit here — the tooling surfaces (A), the deferred
+language work (B) and documentation (C). They are gone because a table of finished
+items is a changelog, and `CHANGELOG.md` already is one; keeping both meant two
+records of the same work drifting apart. What survives is the part that is *not*
+recoverable from the changelog — a one-line note on the bug each item found, since
+that is what makes the item worth having been done:
 
-| # | item | outcome |
-|---|---|---|
-| ~~A1~~ | Language server, end to end | **Done.** Four server-level tests driving every advertised capability; found that none of them had ever been reached through the protocol. |
-| ~~A2~~ | `references` and `highlights` across an import | **Done.** A real bug: `references` was `highlights` filtered, so it only ever saw the file the request came from — a short list rather than an error. |
-| ~~A3~~ | `fmt` as an invariant, not examples | **Done.** Two properties — every shipped program formats, and every one means the same afterwards — plus the awkward shapes. The mutation showed the first version tested the wrong half. |
-| ~~A4~~ | `doc`'s `--json` contract | **Done.** One object per name with a `signatures` array, as the markdown has always grouped them. The shape changed. |
-| ~~A5~~ | `check` over a tree | **Done.** A real bug: a symlink loop made one six-byte file be checked 41 times (1.6 s against 0.04 s). |
-
-### B. The deferred language work
-
-These were the features with a known shape. Each is now done or settled; the
-outcomes record what the work measured.
-
-| # | item | outcome |
-|---|---|---|
-| ~~B1~~ | **Done, after a revert and a language decision.** Aligning by name makes the checker's row order and the SQL's column order disagree: `&` is reverse application, so the primitive's first parameter is the operand written on the *right*, while `step_set` binds the output to `left`. The SQL keeps the left's order; the type said the right's. The first attempt was reverted because settling that is a language decision rather than a projection in the arena. It found a real bug on the way: `cagara check` accepted the mismatched-order file that `cagara --only` refused — fixed separately. The decision was then made (a set operation answers with its left operand's row) and alignment by name landed; see "The set-operation decision" below. |
-| ~~B2~~ | **Done.** A file declares a parameter with a default and `--param` overrides the value, keeping the file's type |
-| ~~B3~~ | **Done, with two dialect refusals that measurement forced.** `range` and `groups` are constructors and `Frame` carries the unit; MySQL refuses `groups` (syntax error) and every dialect that emulates `NULLS LAST` refuses `range` (it needs one sort key; the emulation adds a second). **Extended:** the `groups` refusal is now asked of a capability table rather than of the MySQL family, because T-SQL documents `{ ROWS \| RANGE }` too and the family test accepted it — see [Capabilities](#capabilities) |
-| ~~B4~~ | **Done.** `catalog "schema" { name = { … } }` lowers to one ordinary table definition per entry, so nothing downstream needed a case for it |
-
-### C. Documentation that stays true
-
-| # | item | outcome |
-|---|---|---|
-| ~~C1~~ | **Done.** Every ```` ```cagara ```` block in `docs/` compiles or is a listed fragment; the guide's shorthand table is checked against the fixed table *and* against the prelude's bodies; the two claims a reader would act on (paging order, empty `[]`) were measured and corrected; the examples are tested and the fragments are named |
-| ~~C2~~ | **Done.** Kept per-commit through Phases A and B: the deferred-work table and `CHANGELOG.md` were kept current at every commit — no commit left a doc describing the previous behaviour |
+- **The language server had never been driven end to end** through the protocol, and
+  `references` was `highlights` filtered — so it only ever saw the file the request
+  came from, and answered with a short list rather than an error.
+- **The formatter was tested with examples, not as an invariant.** The first version
+  of the property test checked the wrong half of it.
+- **`cagara check` accepted a file that `cagara --only` refused**, and a symlink loop
+  made one six-byte file be checked 41 times (1.6 s against 0.04 s).
+- **Set operations answered with the wrong operand's row**: `&` is reverse
+  application, so the primitive's first *parameter* is the operand written on the
+  right, while the SQL kept the left's column order. The type said one order and the
+  SQL had the other. See [The set-operation decision](#the-set-operation-decision).
+- **`GROUPS` reached T-SQL** because the check was `fam(d) != Fam::Mysql`; T-SQL is a
+  different family and has no `GROUPS` frame either. See [Capabilities](#capabilities).
+- **A capability check stopped at a `Select`**, so an unsupported construct behind a
+  later stage was never seen and failed at the server instead of at compile time.
 
 ### Completed backend work
 

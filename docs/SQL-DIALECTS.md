@@ -112,6 +112,23 @@ SQLite and T-SQL have no format *parser* (SQLite reads ISO strings only, T-SQL's
 `PARSE` is culture-driven), so `parseDate` is refused there; both can still print
 by format.
 
+SQLite's `strftime` is also a *subset* of C's, and the missing part is exactly the
+name specifiers: `%b %B %a %A` have no spelling there and answer NULL rather than
+failing, so a `formatDate "%B"` under a non-null `string` type would be a column of
+NULLs. Those specifiers are refused on SQLite, which makes `monthName`, `dayName`,
+`monthAbbrev` and `dayAbbrev` unavailable there. PostgreSQL's `TO_CHAR` is the other
+direction of the same problem: `Month`/`Day` blank-pad to nine characters, so the
+translation uses the unpadded `FMMonth`/`FMDay` — otherwise `formatDate "%B %d"`
+would be `February  29` on PostgreSQL alone.
+
+Two more functions hide an engine rule behind one spelling, and the prelude does not
+follow the engine:
+
+| function | the divergence | what the language does |
+|---|---|---|
+| `like` | SQLite's `LIKE` is case-insensitive for ASCII unless the connection sets `PRAGMA case_sensitive_like` | emits a `GLOB` with the pattern translated (`%`→`*`, `_`→`?`, literal `*`/`?`/`[` escaped), because `GLOB` is the case-sensitive matcher SQLite has |
+| `lpad`, `rpad` | SQLite has neither `LPAD` nor `REPEAT` | refused at compile time; `left`/`right`/`substring` are the portable alternatives |
+
 ## Rewritten instead of refused
 
 A construct the target cannot spell is **rewritten into equivalent SQL** wherever an

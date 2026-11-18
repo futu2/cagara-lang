@@ -192,7 +192,11 @@ pub(crate) fn kind_of(t: &Ty, vars: &[VarInfo]) -> Kind {
         Ty::Sym(_) => Kind::Type,
         // A type-level number is not a type of anything; it is a parameter.
         Ty::Nat(_) => Kind::Type,
-        Ty::Con("KeyMapId" | "KeyMapCompose" | "labelPrefix" | "labelSuffix", _) => Kind::KeyMap,
+        Ty::Con(
+            "KeyMapId" | "KeyMapCompose" | "KeyMapRename" | "labelPrefix" | "labelSuffix"
+            | "labelRename",
+            _,
+        ) => Kind::KeyMap,
         Ty::Con(_, _) => Kind::Type,
         Ty::Fun(_, _) => Kind::Type,
         Ty::Row(_, _) => Kind::Row,
@@ -414,6 +418,41 @@ mod keymap_baseline_tests {
             vec![("id".into(), con("int")), ("name".into(), con("string"))],
             Ty::Empty,
         )
+    }
+
+    /// A rename mapper renames one key and leaves the rest.
+    ///
+    /// It is the first `KeyMap` whose result depends on *which* key it sees, so
+    /// it is also the test that `apply` is called per field rather than once for
+    /// the row.
+    #[test]
+    fn a_rename_mapper_touches_one_key() {
+        let km = KeyMap::Rename("name".into(), "label".into()).to_ty();
+        let out = reduce_mapkey(&km, &row2()).expect("a closed row reduces");
+        assert_eq!(
+            names(&out),
+            vec!["id".to_string(), "label".to_string()],
+            "`name` became `label`, and `id` is untouched"
+        );
+        // The two spellings it round-trips through: the closed form a stored
+        // term carries, and the open form a signature carries.
+        assert_eq!(
+            KeyMap::of_ty(&Ty::Con(
+                "KeyMapRename",
+                vec![
+                    Ty::KeyAffix("KeyAffix", "name".into()),
+                    Ty::KeyAffix("KeyAffix", "label".into()),
+                ]
+            )),
+            Some(KeyMap::Rename("name".into(), "label".into()))
+        );
+        assert_eq!(
+            KeyMap::of_label_ty(&Ty::Con(
+                "labelRename",
+                vec![Ty::Sym("name".into()), Ty::Sym("label".into())]
+            )),
+            Some(KeyMap::Rename("name".into(), "label".into()))
+        );
     }
 
     fn names(t: &Ty) -> Vec<String> {

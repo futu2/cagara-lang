@@ -968,9 +968,8 @@ main = users & innerJoin orders (.<id == .>user_id)
 A name already taken is prefixed again (`right_right_id`) rather than numbered: `id_2` says nothing
 about why, and its number depends on how many joins came before.
 
-`select` renames and drops, `update` overwrites and appends. To rename one column and keep the
-others, `update { years = .age } & omit "age"` — note that `update` alone would *keep* `age` as well,
-which is the trap to watch for, and either one reshapes an operand for
+`select` renames and drops, `update` overwrites and appends, and `rename "to" "from"` moves one
+column while keeping the others, and either one reshapes an operand for
 any join kind — `leftJoin`, `rightJoin` and `fullJoin` all take the same reshaped operand.
 
 After a left/right/full join, the nullable side's columns become `maybe` (never doubly so). The join
@@ -1246,6 +1245,7 @@ _<<<_  : (b -> c) -> (a -> b) -> a -> c
 id     : a -> a
 asc desc : expr ?r a -> sortkey ?r
 nullsFirst nullsLast : sortkey ?r -> sortkey ?r
+rename   : symbol ?to -> symbol ?from -> query ?r -> query (keyMap (renameSym ?to ?from) ?r)
 ```
 
 ### 7.2 Comparison, logic, arithmetic, strings

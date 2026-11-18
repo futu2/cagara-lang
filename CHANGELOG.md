@@ -85,18 +85,15 @@ a name.
   is used (`"…"`, `` `…` ``, `[…]`).
 - **Type ascription** `(e : ty)` — the only way to annotate below a definition or a
   lambda parameter. It is a check, not a cast, and it erases.
+- **`rename "to" "from"`** moves one column and keeps the others. `select` renames
+  but drops everything else, and `update` renames but *keeps* the old name too; the
+  two-stage spelling (`update { to = .from } & omit "from"`) also appends a column
+  when the source is misspelled, where `rename` reports it.
 - **`limit` and `offset` take a constant expression**: `limit (2 + 3)` is `LIMIT 5`.
   An expression that reads a column is still refused, because it cannot be a count.
 - **`--types` no longer passes a file the erasure pass rejects**, and `--only` accepts
   a definition that is not a query (answering with its type).
 - `where (.id = 1)` said `expected ')'`; it now says that a comparison is `==`.
-
-### Not in this release
-
-- `rename "to" "from"` as a single stage. `update { to = .from } & omit "from"` does
-  the same thing today, and `CAGARA.md` documents it with the trap (`update` alone
-  keeps both columns). A stage is worth adding, and it needs a row rule the type
-  language does not yet have.
 
 ### Dialect-independent compilation
 

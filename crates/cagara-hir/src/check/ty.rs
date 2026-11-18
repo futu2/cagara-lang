@@ -76,6 +76,22 @@ pub(crate) enum KeyMap {
     Suffix(String),
     /// Composition: apply the first mapper, then the second.
     Compose(Box<KeyMap>, Box<KeyMap>),
+    /// Rename one key, leave the rest: `rename "years" "age"` on a whole row.
+    ///
+    /// It is a `KeyMap` rather than a new kind of stage because that is what it
+    /// is — a function of a column's *name*. The alternative, a former that
+    /// removes a key and adds one carrying another key's type, has no spelling in
+    /// this type language at all: there is no "the type of column `k` in row `r`"
+    /// term, so such a former would have to reach into the row it rewrites.
+    Rename(String, String),
+}
+
+/// The string inside a `KeyAffix`, for the mappers that carry two of them.
+fn affix_text(t: &Ty) -> Option<String> {
+    match t {
+        Ty::KeyAffix(_, s) => Some(s.clone()),
+        _ => None,
+    }
 }
 
 impl KeyMap {
@@ -88,6 +104,15 @@ impl KeyMap {
             KeyMap::Prefix(s) => Ty::KeyAffix("KeyMapPrefix", s.clone()),
             KeyMap::Suffix(s) => Ty::KeyAffix("KeyMapSuffix", s.clone()),
             KeyMap::Compose(f, g) => Ty::Con("KeyMapCompose", vec![f.to_ty(), g.to_ty()]),
+            // Two affixes, the same shape `Compose` uses: a `Con` with one
+            // argument per label.
+            KeyMap::Rename(from, to) => Ty::Con(
+                "KeyMapRename",
+                vec![
+                    Ty::KeyAffix("KeyAffix", from.clone()),
+                    Ty::KeyAffix("KeyAffix", to.clone()),
+                ],
+            ),
         }
     }
 
@@ -106,6 +131,10 @@ impl KeyMap {
                 )
                 .normalize(),
             ),
+            // `rename "to" "from"`, both labels known.
+            Ty::Con("KeyMapRename", a) if a.len() == 2 => {
+                Some(KeyMap::Rename(affix_text(&a[0])?, affix_text(&a[1])?))
+            }
             _ => None,
         }
     }
@@ -127,6 +156,11 @@ impl KeyMap {
                 Ty::Sym(s) => Some(KeyMap::Suffix(s.clone())),
                 _ => None,
             },
+            // `renameSym ?to ?from`, once both labels are bound.
+            Ty::Con("labelRename", a) if a.len() == 2 => match (&a[0], &a[1]) {
+                (Ty::Sym(f), Ty::Sym(t)) => Some(KeyMap::Rename(f.clone(), t.clone())),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -142,6 +176,15 @@ impl KeyMap {
             KeyMap::Prefix(p) => format!("{}{}", p, name),
             KeyMap::Suffix(s) => format!("{}{}", name, s),
             KeyMap::Compose(f, g) => g.apply(&f.apply(name)),
+            // The one mapper whose result depends on *which* key it sees, which
+            // is exactly what a `KeyMap` is handed.
+            KeyMap::Rename(from, to) => {
+                if name == from {
+                    to.clone()
+                } else {
+                    name.to_string()
+                }
+            }
         }
     }
 

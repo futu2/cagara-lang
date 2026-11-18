@@ -779,6 +779,68 @@ impl<'a> Normalizer<'a, 'a> {
             ));
         };
         let built = match spec.kind {
+            // `rename "to" "from" q`: `q & update { to = .from } & omit "from"`.
+            //
+            // Desugared rather than given an IR node, because those two stages say
+            // exactly what a rename is and their SQL is already right. It is still
+            // one *stage* to the reader, which is the point: the composition has
+            // two traps this avoids — `update` appends a name the row does not
+            // have, so a misspelled source would add a column instead of failing,
+            // and renaming onto a name that already exists would overwrite it in
+            // silence. Both are errors here.
+            QueryNodeKind::Rename => {
+                let (Some(Value::Label(to)), Some(Value::Label(from))) =
+                    (arguments.first(), arguments.get(1))
+                else {
+                    return Err(Control::unsupported(
+                        origin,
+                        "`rename` takes the new name, then the old one",
+                    ));
+                };
+                let (to, from) = (to.text.clone(), from.text.clone());
+                let row = self.builder.node(input).row.clone();
+                if !row.has(&from) {
+                    let avail = row.names().join(", ");
+                    return Err(Control::Program(
+                        crate::core::Error::kinded(
+                            crate::workspace::DiagKind::UnknownColumn,
+                            format!("no column `{from}`; available: {avail}"),
+                        )
+                        .at(origin),
+                    ));
+                }
+                if to != from && row.has(&to) {
+                    let avail = row.names().join(", ");
+                    return Err(Control::Program(
+                        crate::core::Error::kinded(
+                            crate::workspace::DiagKind::UnknownColumn,
+                            format!(
+                                "`{to}` is already a column; rename `{from}` to another name \
+                                 (available: {avail})"
+                            ),
+                        )
+                        .at(origin),
+                    ));
+                }
+                let ty = row
+                    .get(&from)
+                    .cloned()
+                    .unwrap_or(crate::core::ScalarType::Unknown);
+                let column = crate::checked::CheckedExpr::column(
+                    crate::ir::Side::Single,
+                    from.clone(),
+                    ty,
+                    origin,
+                );
+                let updated = self.builder.project(
+                    site,
+                    origin,
+                    input,
+                    Projection::Update,
+                    vec![(to, column)],
+                )?;
+                self.builder.rewrite(site, origin, updated, Rewrite::Omit(from))
+            }
             QueryNodeKind::Prefix
             | QueryNodeKind::Suffix
             | QueryNodeKind::Omit
@@ -1223,6 +1285,7 @@ impl<'a> Normalizer<'a, 'a> {
             RowStage::Prefix => QueryNodeKind::Prefix,
             RowStage::Suffix => QueryNodeKind::Suffix,
             RowStage::MapValue => QueryNodeKind::MapValue,
+            RowStage::Rename => QueryNodeKind::Rename,
             RowStage::Agg => QueryNodeKind::Agg,
             RowStage::Order => QueryNodeKind::Order,
             RowStage::Limit => QueryNodeKind::Limit,
@@ -1616,6 +1679,7 @@ pub(crate) fn stage_spec(prim: crate::primitive::Prim) -> Option<StageSpec> {
         RowStage::Prefix => QueryNodeKind::Prefix,
         RowStage::Suffix => QueryNodeKind::Suffix,
         RowStage::MapValue => QueryNodeKind::MapValue,
+        RowStage::Rename => QueryNodeKind::Rename,
         RowStage::Agg => QueryNodeKind::Agg,
         RowStage::Order => QueryNodeKind::Order,
         RowStage::Limit => QueryNodeKind::Limit,

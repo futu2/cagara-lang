@@ -200,6 +200,20 @@ prefix : symbol ?k -> query ?r -> query (keyMap (prependSym ?k) ?r) = primitive 
 --- label-driven witness with its result in the same way as `prefix`.
 suffix : symbol ?k -> query ?r -> query (keyMap (appendSym ?k) ?r) = primitive "__suffix"
 
+--- `rename "years" "age" q`: rename one column, leaving every other one alone.
+---
+--- `select { years = .age }` renames but drops everything else, and
+--- `update { years = .age } & omit "age"` renames and keeps them — two stages for
+--- one idea, with a trap: `update` *appends* a name the row does not have, so a
+--- misspelled source would add a column instead of failing, and renaming onto a
+--- name that already exists would overwrite it in silence.
+---
+--- This is one stage, so both are errors. It is also the only way to rename a
+--- column a `group` key produced, where writing the expression again would mean
+--- repeating it.
+rename : symbol ?to -> symbol ?from -> query ?r -> query (keyMap (renameSym ?to ?from) ?r) =
+  primitive "__rename"
+
 --- Group and aggregate: `agg { n = count, total = sum .amount }`. Inside an
 --- `agg` the argument is at depth 1 — a row expression, not a scalar — which is
 --- where the aggregate functions in this file apply.

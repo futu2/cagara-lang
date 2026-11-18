@@ -1197,6 +1197,31 @@ impl<'w> Checker<'w> {
                 }
                 Ok(KeyMap::Id.to_ty())
             }
+            // `renameSym ?to ?from` — the rename mapper. Both labels are
+            // `symbol` variables, so it stays open until the call site binds
+            // them, exactly as `prependSym` does.
+            "renameSym" => {
+                let [to, from] = args.as_slice() else {
+                    return Err(Fail::from("`renameSym` takes two symbol arguments"));
+                };
+                let mut bare = |t: &TypeExpr| -> Result<Ty, Fail> {
+                    let TypeExpr::App { head, args, .. } = t else {
+                        return Err(Fail::from("`renameSym` needs bare symbol variables"));
+                    };
+                    if !args.is_empty() {
+                        return Err(Fail::from("`renameSym` needs bare symbol variables"));
+                    }
+                    Ok(self.rigid(head, names))
+                };
+                // `(from, to)`, the order `KeyMap::Rename` and `to_ty` use. The
+                // two labels were briefly stored `(to, from)` here while the
+                // decoder read `(from, to)`, which applied the rename backwards:
+                // `rename "years" "age"` looked for a column called `years`, found
+                // none, and left the row alone — with the right SQL, because the
+                // normalizer reads the names from the value rather than the type.
+                let (f, t) = (bare(from)?, bare(to)?);
+                Ok(Ty::Con("labelRename", vec![f, t]))
+            }
             "prefix" | "suffix" => {
                 let [arg] = args.as_slice() else {
                     return Err(Fail::from(format!(
@@ -3391,6 +3416,25 @@ impl<'w> Checker<'w> {
             // `arrayAggBy [asc .ts] .id`: a key list, then the value. The result
             // is `list a` in `agg` phase, like `arrayAgg` — the difference is the
             // order the keys give, which is the whole point.
+            // `rename "to" "from" q`:
+            //   `symbol ?to -> symbol ?from -> query ?r -> query (keyMap (renameSym ?to ?from) ?r)`
+            //
+            // The row rule is a `KeyMap`, so the output row is a type-level term
+            // the signature names — the same shape `prefix`/`suffix` use, and the
+            // reason `rename` is a stage the *checker* understands rather than a
+            // macro only the normalizer could expand.
+            Rename => {
+                let (to, from, r) = (self.fresh(), self.fresh(), self.fresh_row());
+                let mapper = Ty::Con("labelRename", vec![from.clone(), to.clone()]);
+                let out = Ty::MapKey(Box::new(mapper), Box::new(r.clone()));
+                fun(
+                    Ty::Con("keyLabel", vec![to]),
+                    fun(
+                        Ty::Con("keyLabel", vec![from]),
+                        fun(query(r), query(out)),
+                    ),
+                )
+            }
             ArrayAggBy => {
                 let (r, a) = (self.fresh(), self.fresh());
                 fun(

@@ -61,6 +61,8 @@ pub enum Prim {
     /// `arrayAggBy keys e`: an ordered list aggregate, the one aggregate that
     /// carries sort keys inside its call.
     ArrayAggBy,
+    /// `rename "to" "from"`: rename one column, leaving the rest.
+    Rename,
     Rows,
     /// `range start end`: a frame counted in the order key's *values*.
     Range,
@@ -122,6 +124,7 @@ pub const PRIMS: &[(&str, Prim)] = &[
     ("__nullsFirst", Prim::NullsFirst),
     ("__nullsLast", Prim::NullsLast),
     ("__arrayAggBy", Prim::ArrayAggBy),
+    ("__rename", Prim::Rename),
     ("__desc", Prim::Desc),
     ("__rows", Prim::Rows),
     ("__range", Prim::Range),
@@ -183,7 +186,7 @@ impl Prim {
             | Rows | Range | Groups | Prefix | Suffix | Merge | MapValue | Lift => 2,
             Distinct => 1,
             In => 2,
-            Join(_) | MarkExists => 3,
+            Join(_) | MarkExists | Rename => 3,
             Filtered | Over | ArrayAggBy => 2,
             DistinctAgg => 1,
             Set(_) => 2,

@@ -1468,6 +1468,65 @@ fn a_shared_join_column_needs_no_fix() {
     assert_eq!(q, "query { id = int, right_id = int, x = int, y = int }");
 }
 
+/// `rename "to" "from"` renames one column and keeps the rest.
+///
+/// It is one stage, not `update` followed by `omit`, so the two things that
+/// composition gets wrong are errors: a source name the row does not have (which
+/// `update` would *append* as a new column) and a target name already taken (which
+/// `update` would overwrite in silence).
+#[test]
+fn rename_moves_one_column_and_keeps_the_others() {
+    let src = "t : query { id = int, age = int } = table \"p\" \"t\"\n\
+               q = t & rename \"years\" \"age\"\n";
+    assert_eq!(
+        ty(src, "q"),
+        "query { id = int, years = int }",
+        "the old name is gone and the new one has its type"
+    );
+    // The renamed column is readable, which is the whole point: the type says
+    // `years`, so `.years` must resolve.
+    assert_eq!(
+        ty(
+            "t : query { id = int, age = int } = table \"p\" \"t\"\n\
+             q = t & rename \"years\" \"age\" & select { .id, .years }\n",
+            "q"
+        ),
+        "query { id = int, years = int }"
+    );
+    // A misspelled source is an error, not a silently added column. Both refusals
+    // come from the normalizer — the checker only knows the row shape — so they
+    // are read through `compile`.
+    let compile_err = |src: &str| -> String {
+        let diags: Vec<String> = crate::compile::compile(&Workspace::from_source(src))
+            .queries
+            .iter()
+            .filter_map(|q| q.result.as_ref().err().map(|d| d.message.clone()))
+            .collect();
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        diags.into_iter().next().expect("one diagnostic")
+    };
+    let e = compile_err(
+        "t : query { id = int, age = int } = table \"p\" \"t\"\n\
+         q = t & rename \"years\" \"nope\"\n",
+    );
+    assert!(e.contains("no column `nope`"), "{e}");
+    // So is renaming onto a name that exists.
+    let e = compile_err(
+        "t : query { id = int, age = int } = table \"p\" \"t\"\n\
+         q = t & rename \"id\" \"age\"\n",
+    );
+    assert!(e.contains("already a column"), "{e}");
+    // Two in a row compose.
+    assert_eq!(
+        ty(
+            "t : query { id = int, age = int } = table \"p\" \"t\"\n\
+             q = t & rename \"years\" \"age\" & rename \"ident\" \"id\"\n",
+            "q"
+        ),
+        "query { ident = int, years = int }"
+    );
+}
+
 /// A user typo is never reported as a compiler fault.
 ///
 /// `rowNumber {partition = [asc .k]}` reached `as_expr` with a sort key and came

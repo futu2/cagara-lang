@@ -78,6 +78,10 @@ pub(crate) enum QueryNodeKind {
     Suffix,
     Omit,
     MapValue,
+    /// `rename "to" "from"`. It has no IR node of its own: it desugars to an
+    /// `Update` of one field and an `Omit` of the old name, which is exactly what
+    /// the two stages mean and what the SQL already knows how to emit.
+    Rename,
     Where,
     Unnest,
     Select,

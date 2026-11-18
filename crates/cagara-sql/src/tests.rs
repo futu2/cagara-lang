@@ -766,6 +766,28 @@ fn a_comparison_against_nothing_is_a_null_test() {
     assert!(alias.contains("m IS NOT NULL"), "{alias}");
 }
 
+/// `rename` is one stage that emits the `AS` of an `update`.
+///
+/// It desugars to `update { to = .from } & omit "from"` in the normalizer, so the
+/// SQL is what those two stages already emit — there is no new lowering, and the
+/// interesting part is that the *checks* happen once, at the stage the reader
+/// wrote.
+#[test]
+fn rename_moves_a_column() {
+    let src = "t : query { id = int, age = int } = table \"p\" \"t\"\n\
+               q = t & rename \"years\" \"age\"\n";
+    let s = sql(src, "q");
+    assert!(s.contains("age AS years"), "{s}");
+    assert!(!s.contains("age,"), "the old name is gone: {s}");
+
+    // Two in a row are two renames, and the second sees the first's output.
+    let src = "t : query { id = int, age = int } = table \"p\" \"t\"\n\
+               q = t & rename \"years\" \"age\" & rename \"ident\" \"id\"\n";
+    let s = sql(src, "q");
+    assert!(s.contains("age AS years"), "{s}");
+    assert!(s.contains("id AS ident"), "{s}");
+}
+
 /// A join renames a shared column instead of dropping it.
 ///
 /// The right column used to be unreachable: `.<x`/`.>x` name the inputs only

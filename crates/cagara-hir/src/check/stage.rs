@@ -107,6 +107,8 @@ pub enum RowStage {
     Prefix,
     Suffix,
     MapValue,
+    /// `rename "to" "from"`: one column renamed, the rest untouched.
+    Rename,
     Agg,
     Order,
     Limit,
@@ -131,6 +133,7 @@ impl RowStage {
             Update => RowStage::Update,
             Omit => RowStage::Omit,
             Prefix => RowStage::Prefix,
+            Rename => RowStage::Rename,
             Suffix => RowStage::Suffix,
             MapValue => RowStage::MapValue,
             AggStage => RowStage::Agg,
@@ -150,14 +153,19 @@ impl RowStage {
     /// Does this stage's output row follow from its input row and its witness
     /// alone?
     ///
-    /// The four that do are the row *rewrites*: a rename renames, a removal
-    /// removes, a wrapper wraps. A projection or an aggregate builds its row
-    /// from expressions the stage was given, so its output is not a function of
-    /// its input and there is nothing to recompute.
+    /// The ones that do are the row *rewrites*: a prefix renames every column, a
+    /// removal removes, a wrapper wraps, and `rename` renames one. A projection
+    /// or an aggregate builds its row from expressions the stage was given, so
+    /// its output is not a function of its input and there is nothing to
+    /// recompute.
     fn recomputes(self) -> bool {
         matches!(
             self,
-            RowStage::Prefix | RowStage::Suffix | RowStage::Omit | RowStage::MapValue
+            RowStage::Prefix
+                | RowStage::Suffix
+                | RowStage::Omit
+                | RowStage::MapValue
+                | RowStage::Rename
         )
     }
 }

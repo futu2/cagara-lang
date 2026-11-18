@@ -1426,6 +1426,21 @@ fn publish(
 
 #[cfg(test)]
 mod tests {
+    /// How long a test waits for the server to answer *at all*.
+    ///
+    /// This is a hang detector, not a performance assertion: the server runs on
+    /// its own thread and the tests drive it over an in-memory connection, so the
+    /// only question is "did it answer". Six hundred milliseconds was enough when
+    /// this suite ran alone and not enough with other test binaries competing for
+    /// the machine, which made the result depend on how the suite was invoked.
+    const SERVER_BUDGET: Duration = Duration::from_millis(5_000);
+
+    /// How long a test waits before concluding the server will publish *nothing*.
+    ///
+    /// A test that asserts silence has to spend this to make its point, so it is a
+    /// floor on that test's cost rather than a hang detector — and the server
+    /// publishes on the first analysis pass, so it does not need to be long.
+    const SERVER_SILENCE: Duration = Duration::from_millis(600);
     use super::{
         analyse, apply_change, coalesce_changes, serve, Cancellations, LogMessage,
         LogMessageParams, MessageType, PublishDiagnostics, Work,
@@ -1587,9 +1602,21 @@ mod tests {
         /// `ask` drops notifications while it waits for its response, which is right
         /// for a capability test and useless for the one thing the server sends without
         /// being asked: diagnostics. This collects them.
-        fn notifications(&mut self, quiet: Duration) -> Vec<Message> {
-            let mut out = Vec::new();
-            while let Ok(m) = self.client.receiver.recv_timeout(quiet) {
+        /// Every message the server sends: waiting up to `budget` for the first
+        /// one, then draining for a moment after the last.
+        ///
+        /// The two waits are different questions and one number cannot answer
+        /// both. `budget` is "before I conclude it is not going to answer" — a
+        /// hang detector, so generous. The drain is "after the last message,
+        /// before I conclude there are no more" — the server writes a burst in one
+        /// go, so a short one is plenty.
+        fn notifications(&mut self, budget: Duration) -> Vec<Message> {
+            let Ok(first) = self.client.receiver.recv_timeout(budget) else {
+                return Vec::new();
+            };
+            let mut out = vec![first];
+            const DRAIN: Duration = Duration::from_millis(600);
+            while let Ok(m) = self.client.receiver.recv_timeout(DRAIN) {
                 out.push(m);
             }
             out
@@ -1866,7 +1893,7 @@ mod tests {
             "t : query { id = int, name = string } = table \"m\" \"t\"\n\
              q = t & order [asc (.id + 1)] & select {.id} & distinct\n",
         );
-        let ds = ed.published(URI, Duration::from_millis(600));
+        let ds = ed.published(URI, SERVER_BUDGET);
         assert_eq!(ds.len(), 1, "one diagnostic: {ds:?}");
         assert_eq!(ds[0]["severity"], json!(1), "an error: {ds:?}");
         assert!(
@@ -1895,7 +1922,7 @@ mod tests {
              b : query { id = int } = table \"m\" \"b\"\n\
              q = a & fullJoin b (.<id == .>id)\n",
         );
-        let ds = ed.published(URI, Duration::from_millis(600));
+        let ds = ed.published(URI, SERVER_BUDGET);
         assert!(
             !ds.iter().any(|d| d["message"]
                 .as_str()
@@ -2199,9 +2226,17 @@ mod tests {
     }
 
     /// Collect every diagnostic message the client was sent.
-    fn messages(client: &Connection, quiet: Duration) -> Vec<String> {
+    /// See `tests::notifications` for why the two waits differ.
+    fn messages(client: &Connection, budget: Duration) -> Vec<String> {
+        let Ok(first) = client.receiver.recv_timeout(budget) else {
+            return Vec::new();
+        };
+        let mut pending = vec![first];
+        while let Ok(message) = client.receiver.recv_timeout(Duration::from_millis(600)) {
+            pending.push(message);
+        }
         let mut out = Vec::new();
-        while let Ok(message) = client.receiver.recv_timeout(quiet) {
+        for message in pending {
             let Message::Notification(n) = message else {
                 continue;
             };
@@ -2495,7 +2530,7 @@ mod tests {
     fn a_cancelled_request_is_answered_with_request_cancelled() {
         let mut ed = Editor::start();
         ed.open(URI, DOC);
-        let _ = ed.published(URI, Duration::from_millis(600));
+        let _ = ed.published(URI, SERVER_BUDGET);
 
         let id = ed.next;
         ed.next += 1;
@@ -2548,7 +2583,7 @@ mod tests {
     fn a_burst_of_requests_is_each_answered_exactly_once() {
         let mut ed = Editor::start();
         ed.open(URI, DOC);
-        let _ = ed.published(URI, Duration::from_millis(600));
+        let _ = ed.published(URI, SERVER_BUDGET);
 
         let ids: Vec<i32> = (100..108).collect();
         for id in &ids {
@@ -2636,8 +2671,14 @@ mod tests {
                 } }),
             ))
             .unwrap();
-        let quiet = Duration::from_millis(600);
-        assert!(messages(&client, quiet).is_empty(), "the file checks");
+        // An assertion of silence: it has to spend the wait to make its point.
+        // The diagnostics this test then looks for *do* arrive, so they get the
+        // generous budget.
+        let quiet = SERVER_BUDGET;
+        assert!(
+            messages(&client, SERVER_SILENCE).is_empty(),
+            "the file checks"
+        );
 
         // Replace `(.a > 1)` with `(.nope > 1)`: line 1, columns 13..21.
         client
@@ -2932,11 +2973,11 @@ mod tests {
         }
         // Opening publishes each document as it arrives.
         assert_eq!(
-            published(&client, Duration::from_millis(600)),
+            published(&client, SERVER_BUDGET),
             vec!["a.cagara", "b.cagara", "lib.cagara"]
         );
 
-        let quiet = Duration::from_millis(600);
+        let quiet = SERVER_BUDGET;
 
         // Typing in `a` publishes `a`.
         client
@@ -3036,7 +3077,7 @@ mod tests {
                 } }),
             ))
             .unwrap();
-        let quiet = Duration::from_millis(600);
+        let quiet = SERVER_BUDGET;
         assert!(
             !messages(&client, quiet).is_empty(),
             "the file has an error and a warning"

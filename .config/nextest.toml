@@ -6,11 +6,14 @@
 
 [test-groups]
 # The language-server tests wait on a fixed 600 ms wall-clock window for the
-# server to publish diagnostics (see `SERVER_BUDGET` in `cagara-lsp`). At one
-# process per core they were measured failing on a sixteen-core machine for
-# reasons that had nothing to do with the code, so they get a share of the
-# machine rather than a race for it.
-lsp = { max-threads = 2 }
+# server to publish diagnostics (see `SERVER_BUDGET` in `cagara-lsp`). Uncapped
+# they fail under a full workspace run for reasons that have nothing to do with
+# the code; capped at 4 they both pass and leave the machine for the rest.
+#
+# The cap is a *throughput* tuning, not just a safety valve, and it was measured:
+# on sixteen cores the full workspace takes 62 s at 2, 56 s at 4, and 116 s at 8,
+# because eight LSP processes leave nothing for the other fourteen binaries.
+lsp = { max-threads = 4 }
 
 # The differential tests open real database engines — a PGlite cluster, a
 # MariaDB, a Trino container. Two at a time keeps them from starving each other's

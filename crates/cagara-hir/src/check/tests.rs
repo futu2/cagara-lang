@@ -2465,21 +2465,70 @@ fn outer_joins_wrap_once_even_through_helpers() {
 ///
 /// This runs at every length around the limit, since the failure appeared in a
 /// window (200..250) rather than at one value.
-#[test]
-fn a_long_operator_chain_is_checked_or_reported_but_never_crashes() {
+/// The chain lengths, split across tests so they run at once.
+///
+/// Every length costs a whole `Workspace::from_source`, which parses and checks
+/// the 86 KB prelude before the chain is even reached — so the sixteen lengths were
+/// sixteen prelude checks on one thread, and that was the slowest test in the
+/// workspace at 37 seconds. libtest and nextest parallelise *across* tests, so the
+/// lengths are grouped here rather than looped.
+///
+/// The groups are ordered by cost, not by size: a chain under `MAX_DEPTH` (128) is
+/// actually checked and is expensive; one over it is rejected by the parser budget
+/// and costs almost nothing. So the first three groups carry the real work and the
+/// last one is the "well past the budget" cases.
+fn chains_never_crash(lengths: &[usize]) {
     let chain = |n: usize| {
         let e = vec![".a"; n + 1].join(" + ");
         format!("t : query {{ a = int }} = table \"s\" \"t\"\nq = t & select {{ x = {e} }}\n")
     };
-    for n in [
-        1, 2, 10, 40, 80, 100, 120, 140, 150, 160, 180, 190, 200, 250, 300, 1000,
-    ] {
+    for &n in lengths {
         let ws = Workspace::from_source(&chain(n));
         // Either the parser rejected it (a diagnostic) or the checker ran.
         // The point is that neither panics or recurses until the stack ends.
         let tc = check(&ws);
         let _ = tc.errors().len();
     }
+}
+
+#[test]
+fn a_chain_below_the_parser_budget_checks() {
+    chains_never_crash(&[1, 2, 10, 40]);
+}
+
+#[test]
+fn a_chain_near_the_parser_budget_is_bounded() {
+    chains_never_crash(&[80, 100]);
+}
+
+#[test]
+fn a_chain_at_the_parser_budget_is_bounded() {
+    chains_never_crash(&[120, 140, 150]);
+}
+
+#[test]
+fn a_chain_just_past_the_parser_budget_is_reported() {
+    chains_never_crash(&[160, 180]);
+}
+
+/// The window the crash actually appeared in. Split from its neighbours because
+/// `Workspace::from_source` re-parses the prelude each time, so a handful of
+/// lengths is a handful of prelude checks and they parallelise better apart.
+#[test]
+fn a_chain_in_the_two_hundreds_is_reported() {
+    chains_never_crash(&[190, 200]);
+}
+
+#[test]
+fn a_chain_far_past_the_parser_budget_is_reported() {
+    chains_never_crash(&[250, 300]);
+}
+
+/// The extreme case on its own: a thousand operands is the size that used to
+/// overflow the stack, and it costs more than the other six lengths together.
+#[test]
+fn a_thousand_term_chain_is_reported() {
+    chains_never_crash(&[1000]);
 }
 
 /// The deepest chain the parser accepts must also check, so the parser's

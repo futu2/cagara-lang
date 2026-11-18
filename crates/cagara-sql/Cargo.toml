@@ -10,3 +10,9 @@ publish = false
 sqlglot-rust.workspace = true
 cagara-hir = { path = "../cagara-hir" }
 
+[dev-dependencies]
+# `tests/perf.rs` measures CPU time rather than wall time, so its budget means
+# the same thing on an idle machine and on a loaded one. `libc` is already in the
+# tree transitively; this only names it.
+libc = "0.2"
+

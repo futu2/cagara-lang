@@ -459,9 +459,13 @@ fn compile_one(src: &str) -> Option<String> {
     compile(&rel, Options::default()).ok()
 }
 
-#[test]
-fn generated_valid_programs_never_panic_the_compiler() {
-    for seed in 1..=400u64 {
+/// Run seeds `lo..=hi` through the whole pipeline.
+///
+/// A range rather than a count so the split below can be a plain table: a failing
+/// seed names itself in the panic either way, but the *test* that fails tells you
+/// which tenth of the space to look in.
+fn seeds_never_panic(lo: u64, hi: u64) {
+    for seed in lo..=hi {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let n = 1 + rng.below(3);
         let mut src = String::new();
@@ -470,6 +474,41 @@ fn generated_valid_programs_never_panic_the_compiler() {
         }
         check_pipeline(&src, seed);
     }
+}
+
+/// Four hundred generated programs, split across ten tests so they run at once.
+///
+/// This was one test, and one test is one thread: 68 seconds on a machine with
+/// sixteen cores, for 400 independent compilations. libtest and nextest both
+/// parallelise *across* tests and not inside one, so the seed range is the unit of
+/// parallelism — the same reason `cagara-fmt`'s prefix tests are one per file.
+///
+/// The split is by seed, which is the only property that matters here: the
+/// generator is seeded per program and `check_pipeline` holds no state between
+/// them, so any partition of `1..=400` covers the same ground. Ten ranges of forty
+/// keep the table readable and the failure attribution exact.
+macro_rules! panic_free_tests {
+    ($($name:ident: $lo:literal ..= $hi:literal,)*) => {
+        $(
+            #[test]
+            fn $name() {
+                seeds_never_panic($lo, $hi);
+            }
+        )*
+    };
+}
+
+panic_free_tests! {
+    generated_programs_1_to_40_never_panic_the_compiler: 1..=40,
+    generated_programs_41_to_80_never_panic_the_compiler: 41..=80,
+    generated_programs_81_to_120_never_panic_the_compiler: 81..=120,
+    generated_programs_121_to_160_never_panic_the_compiler: 121..=160,
+    generated_programs_161_to_200_never_panic_the_compiler: 161..=200,
+    generated_programs_201_to_240_never_panic_the_compiler: 201..=240,
+    generated_programs_241_to_280_never_panic_the_compiler: 241..=280,
+    generated_programs_281_to_320_never_panic_the_compiler: 281..=320,
+    generated_programs_321_to_360_never_panic_the_compiler: 321..=360,
+    generated_programs_361_to_400_never_panic_the_compiler: 361..=400,
 }
 
 /// Every ordered pair of stages, so a stage that only lowers badly after a
@@ -555,12 +594,16 @@ fn pipeline_shorthands_match_their_long_forms() {
 /// The floor is high on purpose: every generated program should compile. If a
 /// change to the generator drops this, the fuzzer has stopped covering the
 /// lowering paths it exists to cover.
-#[test]
-fn the_generator_reaches_sql() {
+///
+/// Split by seed range for the same reason as the panic tests: 200 compilations in
+/// one test is 200 compilations on one thread, and this was the second-slowest test
+/// in the workspace at 47 seconds. Each slice asserts its own floor, so a
+/// regression still names the range it happened in.
+fn seeds_all_reach_sql(lo: u64, hi: u64) {
     let mut compiled = 0;
     let mut total = 0;
     let mut examples = Vec::new();
-    for seed in 1..=200u64 {
+    for seed in lo..=hi {
         let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
         let src = program(&mut rng, 0);
         total += 1;
@@ -573,7 +616,26 @@ fn the_generator_reaches_sql() {
     assert_eq!(
         compiled,
         total,
-        "only {compiled}/{total} generated programs reached SQL; examples that did not:\n{}",
+        "only {compiled}/{total} generated programs reached SQL (seeds {lo}..={hi}); \
+         examples that did not:\n{}",
         examples.join("")
     );
+}
+
+macro_rules! reaches_sql_tests {
+    ($($name:ident: $lo:literal ..= $hi:literal,)*) => {
+        $(
+            #[test]
+            fn $name() {
+                seeds_all_reach_sql($lo, $hi);
+            }
+        )*
+    };
+}
+
+reaches_sql_tests! {
+    generated_programs_1_to_50_all_reach_sql: 1..=50,
+    generated_programs_51_to_100_all_reach_sql: 51..=100,
+    generated_programs_101_to_150_all_reach_sql: 101..=150,
+    generated_programs_151_to_200_all_reach_sql: 151..=200,
 }

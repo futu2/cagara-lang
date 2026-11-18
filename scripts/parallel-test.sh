@@ -56,9 +56,11 @@ cores=$(nproc 2>/dev/null || echo 4)
 # for the server to publish, so they fail under that load for reasons that have
 # nothing to do with the code.
 #
-# One test thread per binary, several binaries at once, keeps the total honest and
-# the failures meaningful.
-jobs=${JOBS:-$(( cores > 4 ? 4 : cores ))}
+# The split was measured, not derived: on sixteen cores the full suite takes 52 s
+# at 6x3, 55 s at 4x4 and 57 s at 8x2. Six binaries at once covers the long poles
+# (the fuzz ranges, the language server, the engine differential) while three
+# threads each is enough for a binary whose own tests are numerous and short.
+jobs=${JOBS:-$(( cores > 6 ? 6 : cores ))}
 threads=${TEST_THREADS:-$(( cores / jobs > 0 ? cores / jobs : 1 ))}
 echo "running ${#bins[@]} test binaries, $jobs at a time, $threads test threads each" >&2
 

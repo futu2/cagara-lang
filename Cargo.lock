@@ -90,6 +90,7 @@ name = "cagara-sql"
 version = "0.4.2"
 dependencies = [
  "cagara-hir",
+ "libc",
  "sqlglot-rust",
 ]
 

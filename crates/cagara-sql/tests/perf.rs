@@ -65,11 +65,13 @@ fn many_defs(n: usize) -> String {
 /// measuring the wrong thing).
 fn time_check(src: &str) -> (Duration, usize) {
     let full = format!("{SCHEMA}{src}");
+    // Building the workspace is setup, not the thing being measured, so the
+    // CPU baseline is taken after it.
     let ws = Workspace::from_source(&full);
     assert!(ws.diags.is_empty(), "load diagnostics: {:?}", ws.diags);
-    let t = Instant::now();
+    let (t, t_cpu) = (Instant::now(), cpu_time());
     let tc = check(&ws);
-    let d = t.elapsed();
+    let d = measure(t, t_cpu);
     assert!(
         tc.errors().is_empty(),
         "benchmark program has type errors: {:?}",
@@ -86,20 +88,57 @@ fn time_check(src: &str) -> (Duration, usize) {
 fn time_compile(src: &str) -> Duration {
     let full = format!("{SCHEMA}{src}");
     let ws = Workspace::from_source(&full);
-    let t = Instant::now();
+    let (t, t_cpu) = (Instant::now(), cpu_time());
     let tc = check(&ws);
     for (_, r) in root_queries_checked(&ws, &tc) {
         if let Ok(rel) = r {
             let _ = compile(&rel, Options::default());
         }
     }
-    t.elapsed()
+    measure(t, t_cpu)
 }
 
 /// Generous ceiling for one measurement. These programs take well under a
 /// second on a laptop; 10 s is slow enough for a loaded CI runner and still
 /// catches a quadratic jump at the larger sizes.
 const LIMIT: Duration = Duration::from_secs(10);
+
+/// CPU time this process has used, or `None` where it cannot be measured.
+///
+/// A wall-clock budget measures the machine as much as the code: the same test
+/// passes alone and fails when fifteen other test binaries are running, which
+/// makes it a measure of the runner rather than of the checker. CPU time does not
+/// care how many other processes exist — a descheduled process is simply not
+/// accumulating any — so the budget means the same thing either way.
+fn cpu_time() -> Option<Duration> {
+    // SAFETY: `getrusage` writes a `rusage` this call owns, and `RUSAGE_SELF`
+    // asks about this process. The return value is checked before the result is
+    // read.
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: `rc == 0` means `getrusage` initialised the struct.
+    let usage = unsafe { usage.assume_init() };
+    // `libc::timeval` fields are `time_t`/`suseconds_t`, whose widths differ by
+    // platform, so they are widened explicitly rather than assumed.
+    let secs = i64::from(usage.ru_utime.tv_sec) + i64::from(usage.ru_stime.tv_sec);
+    let micros = i64::from(usage.ru_utime.tv_usec) + i64::from(usage.ru_stime.tv_usec);
+    Some(Duration::from_secs(secs.max(0) as u64) + Duration::from_micros(micros.max(0) as u64))
+}
+
+/// The cost of the work, as CPU time when the platform reports it.
+///
+/// Falls back to elapsed wall time, which is the old behaviour, rather than
+/// skipping the assertion: a slow *algorithm* is still worth catching even on a
+/// platform where the number is noisy.
+fn measure(wall_start: Instant, cpu_start: Option<Duration>) -> Duration {
+    match (cpu_start, cpu_time()) {
+        (Some(before), Some(after)) => after.saturating_sub(before),
+        _ => wall_start.elapsed(),
+    }
+}
 
 #[track_caller]
 fn assert_under(label: &str, d: Duration) {

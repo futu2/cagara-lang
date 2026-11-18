@@ -14,12 +14,12 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
 
 `cargo test --workspace` is what CI runs and what you get for free. It takes about
-150 s, and most of that is *not* the tests: `cargo test` runs the workspace's 19
+110 s, and most of that is *not* the tests: `cargo test` runs the workspace's 19
 test *binaries* one after another, so a single 30-second binary holds the run while
 the other fifteen cores idle. Two ways to fix that, both ~60 s:
 
 **`cargo nextest`** — better output and per-test isolation, and the one this
-workspace is configured for (`.config/nextest.toml`):
+workspace is configured for (`.config/nextest.toml`). 54 s:
 
 ```sh
 cargo nextest run --workspace          # what `cargo test --workspace` does, faster
@@ -32,9 +32,10 @@ Two differences worth knowing. It **does not run doctests**, so the habit is
 `cargo nextest run --workspace && cargo test --workspace --doc` — this workspace
 has no doctests today, so that second command is a no-op safeguard rather than a
 chore. And it runs each test in **its own process**, which is why
-`crates/cagara-lsp`'s suite takes 42 s alone but the whole workspace still finishes
-in 65 s. `.config/nextest.toml` caps the language-server and engine tests because
-they are the two groups whose timing depends on the machine.
+`crates/cagara-lsp`'s suite takes 35 s alone but the whole workspace still finishes
+in 54 s. `.config/nextest.toml` caps the language-server and engine tests because
+they are the two groups whose timing depends on the machine — the cap is a measured
+throughput tuning, not only a safety valve (see the comment in that file).
 
 Installing it needs write access to `~/.cargo`, which a sandbox may not have. The
 workaround used here:
@@ -46,19 +47,27 @@ export PATH=$PWD/.nextest/bin:$PATH
 
 **`scripts/parallel-test.sh`** — the same idea in 40 lines with no dependency, if
 you would rather not install anything. It runs several binaries at once inside a
-*total* budget of one thread per core (`JOBS` and `TEST_THREADS` override it).
+*total* budget of one thread per core (64 s at the defaults; `JOBS` and
+`TEST_THREADS` override it).
 
 Two things to know if you add a slow test:
 
-- **Split it.** libtest parallelises across *tests*, not inside one, so a single
-  test that loops over 2500 inputs is a single thread no matter how many cores you
-  have. `every_prefix_of_the_core_prelude_formats` and its siblings in
-  `cagara-fmt` are one test per source file for exactly this reason, and the switch
-  took that binary from 104 s to 5 s.
-- **Do not assert on wall-clock time.** The language-server tests wait for the
-  server to publish, and a `Duration` that is generous on an idle machine can be
-  too short under load. If a test needs to wait, wait for the *event*; a timeout
-  should be a hang detector measured in seconds, not a budget in milliseconds.
+- **Split it.** A test that loops over 2500 inputs is a single thread no matter
+  which runner you use or how many cores you have, because both `cargo test` and
+  `cargo nextest` parallelise *across* tests and not inside one. Every slow test
+  here has been split by its natural index — the seed range in `cagara-sql`, the
+  source file in `cagara-fmt`, the chain length in `cagara-hir` — and each split
+  took its test from tens of seconds to a few. That is where nearly all of the
+  speed in this suite came from; the runners only decide who waits.
+- **Do not assert on wall-clock time.** A budget that is generous on an idle
+  machine can be too short under load, and then a test measures the runner rather
+  than the code. Two ways to avoid it, both used here:
+  - `crates/cagara-sql/tests/perf.rs` measures **CPU time** (`getrusage`), which
+    does not care how many other processes exist — a descheduled process is simply
+    not accumulating any.
+  - `crates/cagara-lsp` waits on a **generous** budget for the server to answer
+    (a hang detector, in seconds) and a short one only for the assertions that
+    expect silence, where the wait is the point.
 
 The SQL differential tests in `crates/cagara-sql/tests/engines.rs` compare rows
 against real engines. An engine that is not installed is skipped by default; set

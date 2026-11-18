@@ -149,9 +149,10 @@ The constructors are the single statement of relational validity:
 |---|---|---|
 | `Builder::table` | the columns must be known | the table's columns |
 | `Builder::rewrite` (`prefix`, `suffix`, `omit`, `mapValue`) | the affix/column/wrapper applies; `omit` of a missing column is a program error | computed by the operation from the input row |
+| `rename "to" "from"` | no rule of its own: it desugars to `project(Update)` then `rewrite(Omit)`, so its SQL needs no new lowering | the two stages' rows |
 | `Builder::keep_row` (`where`, `order`, `limit`, `offset`, `distinct`) | predicates are `bool` and row-phase and read only input columns; keys are row-phase and read only input columns; counts are non-negative | the input's row |
 | `Builder::project` (`select`, `update`, `agg`) | fields placed by phase (`rules::Place`); `update` merges over the input row (right-wins); `agg` rejects `win`-phase fields | computed from the fields |
-| `Builder::join` | side-qualified columns only (`rules::needs_side`), each present on its side; the predicate is row-phase `bool` | left columns, then the right's that the left lacks; nullable sides wrapped in `maybe` |
+| `Builder::join` | side-qualified columns only (`rules::needs_side`), each present on its side; the predicate is row-phase `bool` | left columns, then the right's — a shared name keeps the left and the right becomes `right_<name>` (`rules::join_columns`); nullable sides wrapped in `maybe` |
 | `Builder::set` | both inputs expose the same columns, with the same types — matched by name, so the orders may differ, and the right input is projected into the left's order | the left input's row |
 
 These are every constructor there is. A primitive with no rule — `primitive "__merge"`, which no

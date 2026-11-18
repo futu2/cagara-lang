@@ -94,6 +94,11 @@ a name.
 - **`--types` no longer passes a file the erasure pass rejects**, and `--only` accepts
   a definition that is not a query (answering with its type).
 - `where (.id = 1)` said `expected ')'`; it now says that a comparison is `==`.
+- **`limit n & offset m` warns.** It takes `n` rows and then skips `m` of them, so
+  it is `LIMIT 0` whenever `m >= n` — a query that runs and answers with nothing.
+  The two orders are both legal and mean different things, so this is advice, not
+  an error; `offset m & limit n` is the spelling a page wants. The 0.3.2 review
+  asked for this diagnostic and it never landed.
 
 ### Dialect-independent compilation
 

@@ -170,7 +170,7 @@ Haskell's: `1.5` is a `float`, but `1` can be used where a `float` is expected.
 This is the **only** implicit conversion. Values never convert implicitly:
 
 ```haskell
-bad = orders & select { x = .amount + .user_id }   # int and float: type error
+bad = orders & select { x = .amount + .user_id }   -- int and float: type error
 ```
 
 ---
@@ -254,8 +254,8 @@ before a file is read, so no `infixl` line can declare it. The table in
 error pointing at the operator rather than a silently different parse:
 
 ```haskell
-bad = users &? 5   # type error: `5` is not a predicate
-bad = users &~ 5   # type error: `5` is not a query
+bad = users &? 5   -- type error: `5` is not a predicate
+bad = users &~ 5   -- type error: `5` is not a query
 ```
 
 What each operator *means* is an ordinary prelude definition (`_&&_`, `_++_`,
@@ -407,7 +407,7 @@ value must have one type — the same rules `ifThenElse`'s three arguments obey:
 -- A condition must be a bool, and must not be nullable: a NULL cannot choose
 -- an arm. Use `coalesce` or `isNotNull` first, as in `where`.
 bad  = orders & select { b = case { .amount => 1; true => 0 } }
-bad2 = people & select { b = case { .score > 10 => 1; true => 0 } }   # .score is maybe
+bad2 = people & select { b = case { .score > 10 => 1; true => 0 } }   -- .score is maybe
 good = people & select { b = case { coalesce 0 .score > 10 => 1; true => 0 } }
 ```
 
@@ -437,7 +437,7 @@ point cannot represent it, and `--types` says which scale a value has.
 
 ```haskell
 money : query { id = int, total = decimal 10 2 } = table "sales" "orders"
-q = money & select { .id, .total }          # total : decimal 10 2
+q = money & select { .id, .total }          -- total : decimal 10 2
 ```
 
 The parameters are checked where they are written (`0 ≤ s ≤ p ≤ 38`). Arithmetic
@@ -445,8 +445,8 @@ does **not** convert: `+` and `-` take two operands of the same `decimal p s` an
 return that type, so a chain works without casts —
 
 ```haskell
-q = money & select { gross = .total + .tax }        # decimal 10 2, still
-bad = money & select { mixed = .total + .other }    # decimal 10 2 + decimal 12 2: error
+q = money & select { gross = .total + .tax }        -- decimal 10 2, still
+bad = money & select { mixed = .total + .other }    -- decimal 10 2 + decimal 12 2: error
 ```
 
 — and the declared width is the promise about how large a value can be.
@@ -587,15 +587,15 @@ Because `omit` knows the row it produces, later stages see the column is gone:
 
 ```haskell
 ok  = users & omit "age" & where (.active)
-bad = users & omit "age" & where (.age > 1)   # error: no column `age`
+bad = users & omit "age" & where (.age > 1)   -- error: no column `age`
 ```
 
 And it composes like any other transformation, because the row it produces is
 computed from the query it is applied to:
 
 ```haskell
-no_id = omit "id"      # one definition...
-a = users & no_id      # ...used on different tables
+no_id = omit "id"      -- one definition...
+a = users & no_id      -- ...used on different tables
 b = orders & no_id
 ```
 
@@ -610,13 +610,13 @@ error: `omit` needs a literal column name, such as `omit "password_hash"`: the c
 It may still reach the stage through a helper's parameter, because the label is
 bound at the call site: `no_id = k => q => omit k q` then `users & no_id "id"`.
 
-### Rewriting names: `prefix` and `suffix`
+### Rewriting names: `prefix`, `suffix`, and `rename`
 
 `prefix "text"` and `suffix "text"` apply a rewrite to **every** column name:
 
 ```haskell
-prefixed = users & prefix "u_"               # id -> u_id, name -> u_name, ...
-suffixed = users & suffix "_v2"              # id -> id_v2, ...
+prefixed = users & prefix "u_"               -- id -> u_id, name -> u_name, ...
+suffixed = users & suffix "_v2"              -- id -> id_v2, ...
 ```
 
 ```sql
@@ -629,6 +629,18 @@ columns collide. Removing a column is `omit`'s job; the error it raises for a
 column that is not there is the one to expect from this family of stages
 (`no column 'salary'; available: id, name, age`).
 
+One column is `rename "new" "old"`:
+
+```haskell
+moved = users & rename "years" "age"      -- age -> years, everything else kept
+```
+
+It is one stage, not `update` followed by `omit`, so both mistakes are errors: a
+source name the row does not have (`no column 'nope'`) and a target name already
+taken (`'id' is already a column`). The `update`/`omit` pair gets the first one
+wrong in particular — `update` *appends* a name it does not find, so a typo adds a
+column instead of failing.
+
 There is no `pick`, `mapKeys`, or `Labels` type. Row maps keep names in the
 row algebra while preserving ordinary type unification. See the
 [row type reference](ROW-TYPES.md) for the rules.
@@ -637,28 +649,27 @@ row algebra while preserving ordinary type unification. See the
 |---|---|
 | keep these columns | `select {.a, .b}` |
 | drop one column | `omit "b"` |
+| rename one column | `rename "new" "old"` |
 | add a prefix or suffix to every key | `prefix "u_"` / `suffix "_v2"` |
 | recompute a column in place | `update {a = .a + 1}` |
-| keep both sides of a join | rename one side *before* the join |
+| keep both sides of a join | nothing — the right one becomes `right_<name>` |
 
 One trap is worth stating here, because the two stages look similar:
 `update {new = .old}` **appends** `new` and keeps `old` in place, so it adds a
-column rather than moving one. Use `prefix` or `suffix` when changing every
-column name. Section
+column rather than moving one. `rename "new" "old"` is the stage that moves one;
+use `prefix` or `suffix` when changing every column name. Section
 [5](#5-choosing-columns-select-and-update) covers `update` in full.
 
-**Keeping both sides of a join.** Since a shared name resolves to the left
-column — the join's output row is `merge ?r ?s` — rename on one side *before*
-joining when you need the right column too. `.<x` / `.>x` belong to the join
-predicate only, so `.>id` is **not** available after the join. The compiler warns
-about the name it drops; the warning does not fail the build:
+**Keeping both sides of a join.** Nothing to do: a name both inputs have keeps the
+left value under its own name and gives the right one `right_<name>`, so both are
+readable. `.<x` / `.>x` belong to the join predicate only, so `.>id` is **not**
+available after the join — `.right_id` is:
 
 ```haskell
 order_names =
   orders
-  & select { .user_id, .amount, order_id = .id }
   & innerJoin users (.<user_id == .>id)
-  & select { order_id = .order_id, name = .name, amount = .amount }
+  & select { .id, .right_id, .name, .amount }     # orders.id, users.id
 ```
 
 See [section 9](#9-joins) for the join output rules this follows from.
@@ -686,6 +697,14 @@ the two directions stable with respect to each other, and the compiler emits
 whatever each dialect needs to achieve it (`NULLS LAST`, or a leading
 `CASE WHEN x IS NULL` key where the dialect lacks it).
 
+`nullsFirst (asc .due)` overrides it for one key — "the rows with no date first" —
+and `nullsLast` states the default. Both wrap a *direction*, so `nullsFirst .due`
+is an error: where NULLs go depends on the direction the default already chose.
+
+```haskell
+unscheduled_first = tasks & order [nullsFirst (asc .due), asc .id]
+```
+
 `limit` and `offset` cap and skip rows, and **the order matters** — they are pipeline
 stages, so each one acts on what the one before it returned:
 
@@ -700,9 +719,13 @@ nothing = orders & order [asc .id] & limit 20 & offset 20
 
 `limit 5 & offset 2` keeps rows 3 to 5: five rows are taken, then two are skipped.
 `offset 2 & limit 5` keeps rows 3 to 7: two are skipped, then five are taken. The
-compiler folds the first into `LIMIT 3 OFFSET 2` and the second into
-`LIMIT 5 OFFSET 2`, so neither is surprising in the SQL — it is the pipeline reading,
-kept all the way down.
+first of those is legal and almost never what was meant, so the compiler says so —
+a warning, not an error, because "skip rows *within* the first n" is a real
+question even if it is rarely the one being asked.
+
+The compiler folds the first into `LIMIT 3 OFFSET 2` and the second into
+`LIMIT 5 OFFSET 2`, so neither is surprising in the SQL — it is the pipeline
+reading, kept all the way down.
 
 A `distinct` cannot follow an `order` whose key the projection dropped — that
 pair is an error, because the sort key is neither sortable under `DISTINCT` nor
@@ -1047,19 +1070,21 @@ error: `.<x` and `.>x` refer to the inputs of a join
 
 ### Output columns of a join
 
-The output has the left input's columns, then the right input's columns that the
-left does not already have. **On a shared name, the left column wins.** This
-keeps the common case (join on a key, keep the left key) simple.
-
-When you need both values, rename before joining — `update` is the tool:
+The output is the left input's columns, then the right input's — including the ones
+the left already has, under a renamed key. **On a shared name the left column keeps
+its name and the right one becomes `right_<name>`**, so nothing is lost and neither
+value is shadowed. A name already taken is prefixed again (`right_right_id`) rather
+than numbered.
 
 ```haskell
 order_names =
   orders
-  & select { .user_id, .amount, order_id = .id }
   & innerJoin users (.<user_id == .>id)
-  & select { order_id = .order_id, name = .name, amount = .amount }
+  & select { .id, .right_id, .name, .amount }     # orders.id, users.id
 ```
+
+`.<x` / `.>x` name the inputs only *inside* the predicate; after the join the two
+columns are `.x` and `.right_x`.
 
 ### Nullability after an outer join
 
@@ -1100,9 +1125,9 @@ All three are optional; `{}` is a valid spec.
 > anywhere else is a type error:
 
 ```haskell
-bad  = users & select {.id, ks = [asc .age]}   # field `ks` of `select` must be a
+bad  = users & select {.id, ks = [asc .age]}   -- field `ks` of `select` must be a
                                                -- column expression or constant, found list
-bad2 = users & where ([1, 2] == [1, 2])        # type mismatch: expected expr ?a b, found list int
+bad2 = users & where ([1, 2] == [1, 2])        -- type mismatch: expected expr ?a b, found list int
 bad3 = users & select {.id, rn = rowNumber [asc .age]}
                                                -- expected winspec a, found list (sortkey ...)
 ```
@@ -1216,20 +1241,20 @@ result keeps the columns and order of the subject, which is the query written fi
 (`users &| vips` answers in `users`' order):
 
 ```haskell
-everyone = users &| vips        # union
-both     = users &^ vips        # intersect
-rest     = users &~ vips        # except
-allUsers = users &! vips        # unionAll
+everyone = users &| vips        -- union
+both     = users &^ vips        -- intersect
+rest     = users &~ vips        -- except
+allUsers = users &! vips        -- unionAll
 ```
 
 Each one also has a named function. A stage takes its subject **last**, and for
 a set operation the subject is the left operand:
 
 ```haskell
-everyone = union vips users          # users UNION vips
-both     = intersect vips users      # users INTERSECT vips
-rest     = except vips users         # users EXCEPT vips
-allUsers = unionAll vips users       # users UNION ALL vips
+everyone = union vips users          -- users UNION vips
+both     = intersect vips users      -- users INTERSECT vips
+rest     = except vips users         -- users EXCEPT vips
+allUsers = unionAll vips users       -- users UNION ALL vips
 ```
 
 The result keeps the columns and order of the subject — the query the pipeline
@@ -1317,10 +1342,10 @@ add = a => b => a + b
 partial application a reusable transformation:
 
 ```haskell
-coalesce 0          # a function: turn a maybe int into an int
-addDays 7           # a function: shift a date a week later
-contains "@"        # a function: test a string
-upper >>> trim      # a function: uppercase then trim
+coalesce 0          -- a function: turn a maybe int into an int
+addDays 7           -- a function: shift a date a week later
+contains "@"        -- a function: test a string
+upper >>> trim      -- a function: uppercase then trim
 ```
 
 The combinators:
@@ -1358,9 +1383,9 @@ A function name can be bound to another definition, and calling that alias is
 the same as calling what it names:
 
 ```haskell
-up = upper                    # an alias for a template
-myCase = caseWhen             # `caseWhen` is itself an alias of `ifThenElse`
-s = sum                       # an alias of an overload set
+up = upper                    -- an alias for a template
+myCase = caseWhen             -- `caseWhen` is itself an alias of `ifThenElse`
+s = sum                       -- an alias of an overload set
 q = users & select { x = up .name }
 ```
 
@@ -1418,7 +1443,9 @@ byId : expr { id = int | ?r } int -> query { id = int | ?r } -> query { id = int
 
 **Comparison and logic:** `==` `!=` `<` `<=` `>` `>=` `&&` `||` `not`
 
-**Arithmetic:** `+` `-` `*` `/` `negate` (int and float), `%` (int only), `<>` / `concat`
+**Arithmetic:** `+` `-` `*` `/` `negate` (int and float), `%` (int only), `<>` / `concat`;
+`safeDiv b a` / `safeMod b a` answer `maybe int` instead of failing on a zero divisor;
+`between lo hi x` `ratio whole part` `percentOf whole part`
 
 **Strings:** `upper` `lower` `trim` `ltrim` `rtrim` `length` `like` `ilike`
 `substring start len s` `left n s` `right n s` `lpad n fill s` `rpad n fill s`
@@ -1429,23 +1456,31 @@ byId : expr { id = int | ?r } int -> query { id = int | ?r } -> query { id = int
 `parseTimestamp` `formatDate` `formatTimestamp` `toString`
 `addDays` `addWeeks` `addMonths` `addQuarters` `addYears` `addHours`
 `addMinutes` `addSeconds`; `truncYear` `truncQuarter` `truncMonth` `truncWeek`
-`truncDay` `truncHour` `truncMinute`; `year` `quarter` `month` `day`
-`dayOfWeek` `dayOfYear` `hour` `minute`; `daysBetween start end`
+`truncDay` `truncHour` `truncMinute`; `yearOfDate` `quarter` `monthOfYear`
+`dayOfMonth` `dayOfWeek` `dayOfYear` `weekOfYear` `hour` `minute`; `monthName`
+`monthAbbrev` `dayName` `dayAbbrev`; and the elapsed counts — `daysBetween`,
+`weeksBetween`, `monthsBetween`, `quartersBetween`, `yearsBetween`, and
+`secondsBetween` / `minutesBetween` / `hoursBetween` for timestamps
 
-**Math:** `abs` `round` `roundTo digits x` `floor` `ceil` `sqrt`
-`power exponent base` `sign` `greatest a b` `least a b`
+**Math:** `abs` `round` `roundTo digits x` `floor` `ceil` `sqrt` `cbrt` `exp` `ln`
+`log2` `log10` `logBase b x` `power exponent base` `radians` `degrees` `chr` `ascii`
+`sign` (an `int`, on a float too) `greatest a b` `least a b`
 
-**Aggregates:** `count` `countOf` `countDistinct` `sum` `avg` `min` `max`;
-`filtered` `distinctAgg` `over`; every one of them also accepts a `maybe` column
-(`countOfMaybe` and `countDistinctMaybe` remain as aliases)
+**Aggregates:** `count` `countOf` `countDistinct` `sum` `avg` `min` `max`
+`arrayAgg` `arrayAggBy`; `filtered` `distinctAgg` `over`; every one of them also
+accepts a `maybe` column (`countOfMaybe` and `countDistinctMaybe` remain as
+aliases). `arrayAggBy [asc .ts] .id` is the *ordered* list aggregate —
+`arrayAgg` has no order of its own, so its list is whatever the engine produced.
 
 **Nulls:** `nothing` `coalesce` `??` `just` `nullIf` `isNull` `isNotNull` `isTrue`
-`eqMaybe`
+`eqMaybe` `whereTrue` (the same filter as `where`, for a `maybe bool`)
 
 **Casts:** `toInt` `toFloat` `toBool` `toString` `toDecimal` `tryInt` `tryFloat` `tryDate` `tryTimestamp` `tryDecimal` (`from*` spellings: `fromString`, `fromInt`, `fromFloat`)
 
-**Windows:** `rowNumber` `rank` `denseRank` `lag` `lead` `firstValue` `lastValue` `ntile spec n`
-`percentRank` `cumeDist` — and any aggregate, made a window by `over spec agg`
+**Windows:** `rowNumber` `rank` `denseRank` `lag` `lead` `lagBy` `leadBy` `firstValue`
+`lastValue` `ntile spec n` `percentRank` `cumeDist` — and any aggregate, made a window
+by `over spec agg`. `lag spec .x` is the previous row; `lagBy spec 12 .x` is twelve
+rows back.
 
 **Conditionals:** `ifThenElse` (alias `caseWhen`), `case { cond => value; ...; true => default }`
 
@@ -1572,7 +1607,7 @@ literals widen to *either*, depending on what the surrounding context expects.
 |---|---|---|---|
 | `currentDate`, `yesterday` (no argument) | — | — | `date` |
 | `now` / `currentTimestamp` (no argument) | — | — | `timestamp` |
-| `year`, `quarter`, `month`, `day`, `dayOfWeek`, `dayOfYear` | ✓ | ✓ | `int` |
+| `yearOfDate`, `quarter`, `monthOfYear`, `dayOfMonth`, `dayOfWeek`, `dayOfYear`, `weekOfYear` | ✓ | ✓ | `int` |
 | `hour`, `minute` | ✗ | ✓ | `int` |
 | `truncYear`, `truncQuarter`, `truncMonth`, `truncWeek` | ✓ | ✓ | same type in |
 | `truncDay`, `truncHour`, `truncMinute` | ✗ | ✓ | `timestamp` |
@@ -1618,14 +1653,14 @@ overloaded function gives the checker nothing to go on. That split explains two
 results that look inconsistent until you see the rule:
 
 ```haskell
-ok   = orders & select { x = daysBetween "2024-01-01" "2024-02-01" }  # both widen to date
-ok2  = orders & select { x = .due > "2024-01-01" }                    # widens for the comparison
-bad  = orders & select { x = addDays 7 "2024-01-01" }                 # error: string, not date
-bad2 = orders & select { x = year "2024-01-01" }                      # error: string, not date
+ok   = orders & select { x = daysBetween "2024-01-01" "2024-02-01" }  -- both widen to date
+ok2  = orders & select { x = .due > "2024-01-01" }                    -- widens for the comparison
+bad  = orders & select { x = addDays 7 "2024-01-01" }                 -- error: string, not date
+bad2 = orders & select { x = yearOfDate "2024-01-01" }                -- error: string, not date
 ```
 
 `daysBetween` has a single overload whose parameter is `date`, so the literal
-widens. `addDays` and `year` are each overloaded across `date` and `timestamp`,
+widens. `addDays` and `yearOfDate` are each overloaded across `date` and `timestamp`,
 so a bare literal is ambiguous and stays a `string`. The fix is to say which one
 you mean, with `toDate` / `toTimestamp`:
 
@@ -1670,14 +1705,17 @@ FROM public.orders;
 
 `toDate` and `toString` fix the spelling (ISO). When the input or the output has
 another shape — an `YYYYMMDD` column, a `%Y-%m` bucket — give the format, and
-write it once: the language reads strftime's `%Y %m %d %H %M %S` (plus `%%`),
-and the backend translates it to whatever the target wants.
+write it once: the language reads strftime's `%Y %m %d %H %M %S` (plus `%%`), and
+`formatDate` also takes the names — `%b`/`%B` for a month, `%a`/`%A` for a weekday,
+`%j` for the day of the year. The backend translates all of them to whatever the
+target wants; a C-style `%M` means *minutes*, so passing the string through
+untranslated would turn a month name into a number.
 
 ```haskell
 t = orders & select {
   .id,
-  parsed = parseDate "%Y%m%d" .packed,          # "20240131" -> date
-  label = formatDate "%Y-%m" .due               # date -> "2024-01"
+  parsed = parseDate "%Y%m%d" .packed,          -- "20240131" -> date
+  label = formatDate "%Y-%m" .due               -- date -> "2024-01"
 }
 ```
 
@@ -1712,8 +1750,8 @@ overload. `lift` is the one combinator that bridges the gap. The function comes 
 ```haskell
 t = orders & select {
   .id,
-  packed = lift (parseDate "%Y%m%d") .packed_date,   # maybe string -> maybe date
-  size = lift listLength .maybe_items                # maybe (list int) -> maybe int
+  packed = lift (parseDate "%Y%m%d") .packed_date,   -- maybe string -> maybe date
+  size = lift listLength .maybe_items                -- maybe (list int) -> maybe int
 }
 ```
 
@@ -1796,10 +1834,10 @@ Because the subject is last, these functions are all reusable transformations,
 which is the idiomatic way to name a cleaning step once:
 
 ```haskell
-normalize = trim >>> lower              # a function of a string
+normalize = trim >>> lower              -- a function of a string
 clean = orders & select {.id, email = .email & normalize}
-half = substring 1 2                    # a function of a string
-week_ago = addDays (-7)                 # a function of a date
+half = substring 1 2                    -- a function of a string
+week_ago = addDays (-7)                 -- a function of a date
 ```
 
 Only `clean` is a query, so it is the only one that emits SQL:
@@ -1815,9 +1853,9 @@ is *any* such function can be used as a stage. The body may apply a single
 stage, or thread the query through several:
 
 ```haskell
-no_id  = omit "id"                        # point-free: the body is the stage
-big    = q => where (.age > 18) q         # a lambda naming its parameter
-adults = q => where (.name != "") (where (.age > 18) q)   # stages in sequence
+no_id  = omit "id"                        -- point-free: the body is the stage
+big    = q => where (.age > 18) q         -- a lambda naming its parameter
+adults = q => where (.name != "") (where (.age > 18) q)   -- stages in sequence
 
 a = users & no_id
 b = users & big
@@ -1860,7 +1898,7 @@ with `>>>` (and its mirror `<<<`) like any other function:
 ```haskell
 public_ids = select {.id} >>> where (.id > 1)
 t = users & public_ids
-u = users & (select {.id} >>> where (.id > 1) >>> select {.id})   # chains
+u = users & (select {.id} >>> where (.id > 1) >>> select {.id})   -- chains
 ```
 
 `>>>` binds tighter than everything, so a composed stage is one operand of `&`.
@@ -1944,8 +1982,8 @@ alias they stay behind it, and the bare name is not in scope:
 
 ```haskell
 import "sch.cagara" as s
-x = users & select {.id}     # error: unknown name `users`
-y = s.users & select {.id}   # the aliased spelling
+x = users & select {.id}     -- error: unknown name `users`
+y = s.users & select {.id}   -- the aliased spelling
 ```
 
 Without one, the module's definitions join the importing module's scope

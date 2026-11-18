@@ -498,7 +498,7 @@ which the language does not offer and does not need to.
 
 - `monthsBetween`/`yearsBetween`/`hoursBetween`/`minutesBetween`/`secondsBetween`, and the
   `second` field they needed. The calendar ones are the **elapsed** count, written from
-  `year`/`month`/`day` rather than delegated to `DATE_DIFF`, which counts boundaries and
+  `yearOfDate`/`monthOfYear`/`dayOfMonth` rather than delegated to `DATE_DIFF`, which counts boundaries and
   disagrees with an age (`2024-01-31` to `2024-02-01` is `0` elapsed, `1` crossed).
   Measuring the clock ones found two bugs: the obvious `hour b - hour a` is wrong across
   midnight, and SQLite's `CAGARA_PART` had a `_ =>` catch-all that made *any* newly

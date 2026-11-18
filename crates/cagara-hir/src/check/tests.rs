@@ -1468,6 +1468,32 @@ fn a_shared_join_column_needs_no_fix() {
     assert_eq!(q, "query { id = int, right_id = int, x = int, y = int }");
 }
 
+/// `limit` then `offset` is advice, not an error.
+///
+/// `limit n & offset m` takes `n` rows and then skips `m` of them, so it is
+/// `LIMIT 0` whenever `m >= n` — a query that runs and answers with nothing. The
+/// two stages are legal in either order and mean different things, so this is a
+/// warning; the point is that a silent empty page is almost never what was meant.
+///
+/// It is also the first warning the language has again: the join-collision one was
+/// removed when the collision became a rename, and the channel outlived it.
+#[test]
+fn limit_then_offset_is_advised_against() {
+    let bad = "t : query { a = int } = table \"p\" \"t\"\n\
+               q = t & limit 20 & offset 40\n";
+    let w = warnings(bad);
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].contains("`limit` then `offset`"), "{w:?}");
+    assert!(w[0].contains("offset 40 & limit 20"), "{w:?}");
+    // A warning, not a failure: the query still compiles.
+    assert_eq!(ty(bad, "q"), "query { a = int }");
+
+    // The other order is what a page is, and says nothing.
+    let good = "t : query { a = int } = table \"p\" \"t\"\n\
+                q = t & offset 40 & limit 20\n";
+    assert!(warnings(good).is_empty(), "{:?}", warnings(good));
+}
+
 /// `rename "to" "from"` renames one column and keeps the rest.
 ///
 /// It is one stage, not `update` followed by `omit`, so the two things that

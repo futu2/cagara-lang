@@ -332,6 +332,37 @@ impl<'w> Checker<'w> {
     /// nothing to report against. The schema layer, by contrast, reports its
     /// rules as diagnostics because *those* can be violated by a program.
     pub(crate) fn finish_row_stages(&mut self) -> Vec<RowStageView> {
+        // `limit n & offset m` takes `n` rows and then skips `m` of them, so it
+        // keeps nothing when `m >= n` — `LIMIT 0`, which is a query that runs and
+        // answers with no rows. The two stages are legal in either order and mean
+        // different things, so this is advice rather than an error; but "the page
+        // I asked for is empty" is almost always the wrong query, and it is worth
+        // one line to say why.
+        //
+        // Read from the recorded order, which is pipeline order within one
+        // definition: a helper's stages are recorded in the helper's own body, so
+        // the pair is reported where it was written.
+        // The recording is in pipeline order, so a `Limit` immediately followed by
+        // an `Offset` is the reader's `limit n & offset m`.
+        //
+        // Read from the recording rather than from the two stages' own rows,
+        // because both have the same row type (`query ?r -> query ?r`) and nothing
+        // in the type says which came first.
+        let warn_span = self.row_stages.windows(2).find_map(|pair| {
+            let [a, b] = pair else { return None };
+            (a.kind == RowStage::Limit && b.kind == RowStage::Offset).then_some(b.span)
+        });
+        if let Some(span) = warn_span {
+            self.warn(
+                span,
+                crate::workspace::DiagKind::Other,
+                "`limit` then `offset` skips rows *after* taking them, so the answer is \
+                 usually empty — `limit 20 & offset 40` keeps nothing, and \
+                 `limit 5 & offset 2` keeps rows 3 to 5 of the first five. To page \
+                 through rows, write `offset 40 & limit 20`"
+                    .to_string(),
+            );
+        }
         let mut out = Vec::new();
         for s in std::mem::take(&mut self.row_stages) {
             let input = self.zonk(&s.input);

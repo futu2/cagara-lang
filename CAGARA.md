@@ -590,9 +590,10 @@ definition, not at some call site far away:
 The axes that *are* overloads are what the prelude uses: a narrower or wider type (`int`/`float`), a
 nullable one (`a`/`maybe a`), a source type (`string`/`int` into `toInt`), and a phase (`expr`/value).
 
-An expression that reads **no row** is also a value. A function like `year` has one signature —
-`year : expr ?r int` — and `year .d` puts `d`'s column into the expression's row, while
-`year currentDate` leaves that row a variable, because nothing in it refers to a column. A row
+An expression that reads **no row** is also a value. A function like `yearOfDate` has one
+signature — `yearOfDate : expr ?r int` — and `yearOfDate .d` puts `d`'s column into the
+expression's row, while `yearOfDate currentDate` leaves that row a variable, because nothing in it
+refers to a column. A row
 expression whose row is still unknown is read as its value wherever a scalar is expected:
 
 ```cagara
@@ -1083,7 +1084,7 @@ named = user & where (.name == "John" && .class_room == "A01")
 
 The column still keeps its leading dot (`.name`). A bare `name` would have to be
 a definition — the prelude alone defines 143 lowercase names, and `id`, `count`,
-`order`, `group`, `min`, `max`, `year`, `left` and `right` are all among them, so
+`order`, `group`, `min`, `max`, `left` and `right` are all among them, so
 implicit column names would silently mean a function on the tables that matter
 most (`&? id == 1` reports `found a -> ?a`, which is the identity function).
 
@@ -1982,7 +1983,7 @@ The compiler names the column and often the fix. Match the wording, then apply t
 | `\`main\` must be a query, found ...` | scalar definition named `main` | make `main` a query, or omit it for a library |
 | `a line starting with an identifier in column 0 begins a new definition` | unindented continuation | indent the line, or terminate the previous item with `;` |
 | `a lambda parameter's type annotation is written \`(x : ty) => body\`` | `x : int => x` | put the parameter and its type in parentheses |
-| `unknown name \`_&_\`` | prelude disabled | remove `# no prelude` or define your own |
+| `unknown name \`_&_\`` | prelude disabled | remove `-- no prelude` or define your own |
 
 Two habits prevent the rest: give every table an accurate closed annotation, and ask **which phase**
 (row, aggregate, window) each value belongs to. Most phase errors are fixed by moving the computation

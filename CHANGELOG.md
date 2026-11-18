@@ -8,6 +8,35 @@ different from the one every existing file uses. The migration is mechanical and
 `cagara fmt --canonical` is not yet able to do all of it, so the steps are listed
 here in full.
 
+### Fixed in 0.5.0 after the first CI run
+
+The 0.5.0 CI run found that the engine suite only worked on a machine that happened
+to have every engine installed. Two jobs failed for the same underlying reason — a
+test deciding for itself whether an engine was missing — in eight tests across two
+different jobs:
+
+- `a_catalog_declaration_is_a_table` and six others had no guard at all, so the
+  `rust` job (which sets `CAGARA_NO_ENGINES=1`) panicked with "duckdb is not
+  installed" instead of skipping.
+- `a_lifted_value_keeps_its_nulls_on_the_engines` gated the whole test on "DuckDB or
+  Postgres", then ran both unconditionally; the `engines` job wants DuckDB and not
+  Postgres, so the Postgres half failed. A whole-test guard cannot express that.
+- `every_construct_we_emit_is_one_the_engine_reads` looped over a matrix of engines
+  and panicked on the first absent one, taking the other engine's coverage with it.
+
+The decision now lives in `rows_or_skip` and `pg_rows_or_skip`, which distinguish
+three outcomes rather than two: this run does not want the engine (skip), the engine
+is wanted but absent (skip, unless `CAGARA_REQUIRE_ENGINES` makes that a lie), and
+the engine ran and refused the SQL (always a failure). A new test scans the file and
+fails if a `None` arm panics again, because the bug only appears in an environment
+most local runs do not have — which is exactly why it reached a release.
+
+Two smaller fixes from the same run: an engine that exits non-zero without writing
+stderr used to produce a failure message of nothing but the SQL (this is what
+"`postgres: `" with an empty explanation was), so the exit status is now part of the
+message; and the emulated-dialect test gates on `sqlglot` but executes its results on
+DuckDB, which it never checked for.
+
 ### Migrating from 0.4.x
 
 | Was | Now | How to find it |

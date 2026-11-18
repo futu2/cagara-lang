@@ -1103,6 +1103,104 @@ const ENGINES: &[Engine] = &[
     },
 ];
 
+/// Rows from a shell engine, or `None` when this invocation must not run it.
+///
+/// **This is the only place an engine's absence is decided.** A test that calls
+/// [`run_setup`] directly has to repeat that decision itself, and the two tests that
+/// forgot to are how this function came to exist: `a_catalog_declaration_is_a_table`
+/// panicked with "duckdb is not installed" in the job that sets `CAGARA_NO_ENGINES`,
+/// and `a_lifted_value_keeps_its_nulls_on_the_engines` tried Postgres in the job whose
+/// `CAGARA_ENGINES=sqlite,duckdb` had excluded it. Both are skips, and a test cannot
+/// silently get them wrong if it goes through here.
+///
+/// The three outcomes are deliberately distinct:
+///
+///   * this run does not want the engine — skip, say so, carry on;
+///   * the engine is wanted but absent — skip, unless `CAGARA_REQUIRE_ENGINES` says
+///     a skip would be a lie, in which case that is the failure;
+///   * the engine ran and the SQL was rejected — always a failure, never a skip.
+fn rows_or_skip(e: &Engine, setup: &str, sql: &str) -> Option<Vec<String>> {
+    let name = engine_name(e);
+    if !engine_enabled(name) {
+        eprintln!("skipping {}: not in CAGARA_ENGINES", e.dialect);
+        return None;
+    }
+    match run_setup(e, setup, sql) {
+        Some(Ok(rows)) => Some(rows),
+        Some(Err(m)) => panic!("{}: {m}\n  {sql}", e.dialect),
+        None if must_run(name) => panic!(
+            "`{}` is not installed (CAGARA_REQUIRE_ENGINES is set)",
+            e.shell
+        ),
+        None => {
+            eprintln!("skipping {}: `{}` is not installed", e.dialect, e.shell);
+            None
+        }
+    }
+}
+
+/// The PGlite harness, which speaks to Postgres compiled to WASM.
+fn pg_harness() -> &'static str {
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs")
+}
+
+/// Whether `node` and `@electric-sql/pglite` can run at all.
+///
+/// Asked of the harness rather than by shelling `node --version`, because pglite is
+/// an npm package rather than a binary: node can be present and the harness still
+/// unusable. `--check` is the harness answering for itself.
+fn pg_ready() -> bool {
+    Command::new("node")
+        .args([pg_harness(), "--check"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Whether a shell-driven engine's executable can be started at all.
+///
+/// `run_setup` answers this by returning `None`, which is right for one call. A loop
+/// over several engines needs the answer *before* it starts, so it can skip one
+/// engine and still run the rest — which is what
+/// `every_construct_we_emit_is_one_the_engine_reads` could not do.
+fn available(e: &Engine) -> bool {
+    Command::new(e.shell)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// Rows from Postgres, or `None` when this invocation must not run it.
+///
+/// The same three outcomes as [`rows_or_skip`]; see there for why the decision lives
+/// in one function.
+fn pg_rows_or_skip(setup: &str, query: &str) -> Option<Vec<String>> {
+    if !engine_enabled("postgres") {
+        eprintln!("skipping postgres: not in CAGARA_ENGINES");
+        return None;
+    }
+    if !pg_ready() {
+        assert!(
+            !must_run("postgres"),
+            "`node` with @electric-sql/pglite is not installed (CAGARA_REQUIRE_ENGINES is set)"
+        );
+        eprintln!("skipping postgres: `node` or @electric-sql/pglite is not installed");
+        return None;
+    }
+    Some(
+        pg_batch(
+            pg_harness(),
+            setup,
+            std::slice::from_ref(&query.to_string()),
+        )
+        .into_iter()
+        .next()
+        .expect("one block per query"),
+    )
+}
+
 /// Rows of the last statement in `sql`, under this engine's own `setup`.
 fn run_setup(e: &Engine, setup: &str, sql: &str) -> Option<Result<Vec<String>, String>> {
     let args: Vec<&std::ffi::OsStr> = e.args.iter().map(std::ffi::OsStr::new).collect();
@@ -1143,8 +1241,18 @@ fn run_script(
         .expect("write script");
     let out = child.wait_with_output().expect("run shell");
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // A shell that fails without saying why used to produce a message of nothing
+    // but the SQL, which is how a CI failure arrived as `postgres: ` followed by a
+    // query that was in fact fine — the harness had exited 4 because PGlite was
+    // not importable, and `process.exit` writes no stderr. The exit status is part
+    // of the message now, so an empty explanation is at least a diagnosable one.
     if !out.status.success() || stderr.contains("Error") {
-        return Some(Err(format!("{stderr}\n{sql}")));
+        let why = if stderr.trim().is_empty() {
+            format!("exited {} without a message", out.status)
+        } else {
+            stderr.trim().to_string()
+        };
+        return Some(Err(format!("{why}\n  {sql}")));
     }
     let rows = String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -1197,6 +1305,16 @@ fn a_list_compares_as_a_value_on_the_engines() {
         args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
         dialect: "duckdb",
     };
+    // The gate above is about `sqlglot`; the *results* are executed on DuckDB, which
+    // is a different engine and needs its own answer.
+    if !engine_enabled("duckdb") || !available(&duck) {
+        assert!(
+            !must_run("duckdb"),
+            "`duckdb` is not installed (CAGARA_REQUIRE_ENGINES is set)"
+        );
+        eprintln!("skipping the emulated dialects: duckdb is not available to run them");
+        return;
+    }
     let sql = compile(
         rel,
         Options {
@@ -1216,6 +1334,10 @@ fn a_list_compares_as_a_value_on_the_engines() {
 
     // PostgreSQL, through PGlite.
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
+    if !engine_enabled("postgres") {
+        eprintln!("skipping postgres: not in CAGARA_ENGINES");
+        return;
+    }
     let ready = Command::new("node")
         .args([harness, "--check"])
         .status()
@@ -1407,10 +1529,6 @@ fn well_formed_bodies() {
 /// with the right shape.
 #[test]
 fn a_set_operation_aligns_by_name_and_keeps_the_left_order() {
-    if !engine_enabled("duckdb") {
-        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
-        return;
-    }
     const DEFS: &str = "\
 t : query { id = int, name = string } = table \"main\" \"users\"\n\
 a = t & select { id = .id, name = .name }\n\
@@ -1450,17 +1568,14 @@ ba = b & union a & order [asc .id]\n";
         ("ba", ["ann|1", "bob|2", "it's a\\b |3"]),
     ] {
         let q = sql(name);
-        match run_setup(&engine, SETUP, &q) {
-            Some(Ok(rows)) => {
-                assert_eq!(rows.len(), want.len(), "{name}: {rows:?}\n  {q}");
-                assert!(
-                    rows.iter().zip(&want).all(|(a, b)| same_row(a, b)),
-                    "{name}: {rows:?} vs {want:?}\n  {q}"
-                );
-            }
-            Some(Err(m)) => panic!("{name}: duckdb: {m}\n  {q}"),
-            None => panic!("duckdb is not installed"),
-        }
+        let Some(rows) = rows_or_skip(&engine, SETUP, &q) else {
+            return;
+        };
+        assert_eq!(rows.len(), want.len(), "{name}: {rows:?}\n  {q}");
+        assert!(
+            rows.iter().zip(&want).all(|(a, b)| same_row(a, b)),
+            "{name}: {rows:?} vs {want:?}\n  {q}"
+        );
     }
 }
 
@@ -1481,10 +1596,6 @@ ba = b & union a & order [asc .id]\n";
 /// clause is fine as long as the answer is this one.
 #[test]
 fn paging_is_a_pipeline_and_the_order_matters() {
-    if !engine_enabled("duckdb") {
-        eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");
-        return;
-    }
     const DEFS: &str = "\
 n : query { id = int } = table \"main\" \"nums\"\n\
 skip_then_take = n & order [asc .id] & offset 2 & limit 2\n\
@@ -1533,15 +1644,14 @@ take_all_then_skip = n & order [asc .id] & limit 2 & offset 2\n";
         ("take_all_then_skip", vec![]),
     ] {
         let q = sql(name);
-        match run_setup(&engine, SETUP, &q) {
-            Some(Ok(rows)) => assert_eq!(
-                rows.iter().map(String::as_str).collect::<Vec<_>>(),
-                want,
-                "{name}: {rows:?} vs {want:?}\n  {q}"
-            ),
-            Some(Err(m)) => panic!("{name}: duckdb: {m}\n  {q}"),
-            None => panic!("duckdb is not installed"),
-        }
+        let Some(rows) = rows_or_skip(&engine, SETUP, &q) else {
+            return;
+        };
+        assert_eq!(
+            rows.iter().map(String::as_str).collect::<Vec<_>>(),
+            want,
+            "{name}: {rows:?} vs {want:?}\n  {q}"
+        );
     }
 }
 
@@ -1855,6 +1965,10 @@ fn a_parsed_and_printed_date_agrees_on_the_engines() {
 
     // PostgreSQL, through PGlite.
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
+    if !engine_enabled("postgres") {
+        eprintln!("skipping postgres: not in CAGARA_ENGINES");
+        return;
+    }
     let ready = Command::new("node")
         .args([harness, "--check"])
         .status()
@@ -1976,6 +2090,10 @@ fn money_is_exact_on_the_engines() {
     }
 
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
+    if !engine_enabled("postgres") {
+        eprintln!("skipping postgres: not in CAGARA_ENGINES");
+        return;
+    }
     let ready = Command::new("node")
         .args([harness, "--check"])
         .status()
@@ -2061,15 +2179,12 @@ fn a_lifted_value_keeps_its_nulls_on_the_engines() {
         },
     )
     .expect("duckdb");
-    let Some(rows) = run_setup(&duck, setup, &sql) else {
-        panic!("`duckdb` is not installed");
-    };
-    match rows {
-        Ok(rows) => assert_eq!(rows, want, "{sql}"),
-        Err(m) => panic!("duckdb: {m}\n  {sql}"),
+    if let Some(rows) = rows_or_skip(&duck, setup, &sql) {
+        assert_eq!(rows, want, "{sql}");
     }
 
-    let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
+    // The two engines are decided separately: `CAGARA_ENGINES=sqlite,duckdb` wants
+    // DuckDB and not Postgres, and a guard on the test as a whole cannot say that.
     let pg = compile(
         rel,
         Options {
@@ -2078,10 +2193,11 @@ fn a_lifted_value_keeps_its_nulls_on_the_engines() {
         },
     )
     .expect("postgres");
-    let pg_setup = String::from("CREATE SCHEMA main;\n").clone()
+    let pg_setup_text = String::from("CREATE SCHEMA main;\n").clone()
         + &setup.replace("CREATE SCHEMA IF NOT EXISTS main;\n", "");
-    let blocks = pg_batch(harness, &pg_setup, std::slice::from_ref(&pg));
-    assert_eq!(blocks[0], want, "{pg}");
+    if let Some(rows) = pg_rows_or_skip(&pg_setup_text, &pg) {
+        assert_eq!(rows, want, "{pg}");
+    }
 }
 
 /// The tables `examples/report.cagara` queries, with rows chosen so every
@@ -2818,7 +2934,7 @@ fn the_emulated_dialects_mean_the_same_thing() {
                     }
                     unreadable.push((name.to_string(), dialect_name.to_string()));
                 }
-                None => panic!("`duckdb` is not installed"),
+                None => panic!("duckdb disappeared between the check and the run"),
             }
         }
     }
@@ -2971,7 +3087,29 @@ fn every_construct_we_emit_is_one_the_engine_reads() {
     ];
     let mut failures = Vec::new();
     let mut ran = 0;
+    let mut skipped = 0;
     for (engine, setup) in &engines {
+        // Each engine is decided for itself: the allow-list and the shell's
+        // presence are separate questions, and a matrix test that asks either one
+        // for the whole loop cannot skip half of it.
+        if !engine_enabled(engine_name(engine)) {
+            eprintln!("skipping {}: not in CAGARA_ENGINES", engine.dialect);
+            skipped += 1;
+            continue;
+        }
+        if !available(engine) {
+            assert!(
+                !must_run(engine_name(engine)),
+                "`{}` is not installed (CAGARA_REQUIRE_ENGINES is set)",
+                engine.shell
+            );
+            eprintln!(
+                "skipping {}: `{}` is not installed",
+                engine.dialect, engine.shell
+            );
+            skipped += 1;
+            continue;
+        }
         let opts = Options {
             dialect: Dialect::from_str(engine.dialect).expect("dialect"),
             ..Options::default()
@@ -2998,11 +3136,17 @@ fn every_construct_we_emit_is_one_the_engine_reads() {
                     "`{name}` on {}: the engine refused what we emitted\n  {sql}\n  {m}",
                     engine.dialect
                 )),
-                None => panic!("{} is not installed", engine.shell),
+                // `available` said it was there, so this is a spawn that failed
+                // between the check and the run rather than an absent engine.
+                None => panic!("{} disappeared between the check and the run", engine.shell),
             }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    if skipped == engines.len() {
+        eprintln!("skipping: no engine in this matrix is available");
+        return;
+    }
     assert!(ran >= 10, "only {ran} constructs ran");
 }
 
@@ -3056,6 +3200,14 @@ fn the_join_spellings_match_a_correlated_subquery() {
         args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
         dialect: "duckdb",
     };
+    if !engine_enabled("duckdb") || !available(&engine) {
+        assert!(
+            !must_run("duckdb"),
+            "`duckdb` is not installed (CAGARA_REQUIRE_ENGINES is set)"
+        );
+        eprintln!("skipping: duckdb is not in CAGARA_ENGINES or not installed");
+        return;
+    }
     let mut failures = Vec::new();
     for (name, def, correlated) in PAIRS {
         let ws = Workspace::from_source(&format!("{TABLES}{def}\n"));
@@ -3066,8 +3218,11 @@ fn the_join_spellings_match_a_correlated_subquery() {
             .unwrap_or_else(|| panic!("`{name}`: no query `q`"));
         let rel = rel.unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
         let ours = compile(&rel, Options::default()).unwrap_or_else(|e| panic!("`{name}`: {e}"));
+        // `available` was asked above, so `None` here is a refused statement
+        // rather than an absent engine — the two used to share one `else` arm and
+        // a missing engine reported as "refused our SQL".
         let Some(Ok(ours_rows)) = run_setup(&engine, SETUP, &ours) else {
-            panic!("`{name}`: `duckdb` refused our SQL or is not installed\n  {ours}");
+            panic!("`{name}`: `duckdb` refused our SQL\n  {ours}");
         };
         let Some(Ok(their_rows)) = run_setup(&engine, SETUP, correlated) else {
             panic!("`{name}`: `duckdb` refused the correlated subquery\n  {correlated}");
@@ -3123,10 +3278,8 @@ q_not = users & antiJoin orders (.<id == .>user_id) & select {.id} & order [asc 
             .unwrap_or_else(|| panic!("no query `{name}`"));
         let rel = rel.unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
         let sql = compile(&rel, Options::default()).unwrap_or_else(|e| panic!("`{name}`: {e}"));
-        match run_setup(&engine, SETUP, &sql) {
-            Some(Ok(rows)) => assert_eq!(rows, want, "`{name}`: {sql}"),
-            Some(Err(m)) => panic!("`{name}`: {m}\n  {sql}"),
-            None => panic!("duckdb is not installed"),
+        if let Some(rows) = rows_or_skip(&engine, SETUP, &sql) {
+            assert_eq!(rows, want, "`{name}`: {sql}");
         }
     }
 }
@@ -3173,21 +3326,18 @@ q_and = users & markExists orders (.<id == .>user_id && .>amount > 4.5) \
             .unwrap_or_else(|| panic!("no query `{name}`"));
         let rel = rel.unwrap_or_else(|d| panic!("`{name}`: {}", d.message));
         let sql = compile(&rel, Options::default()).unwrap_or_else(|e| panic!("`{name}`: {e}"));
-        match run_setup(&engine, SETUP, &sql) {
-            Some(Ok(rows)) => {
-                assert_eq!(
-                    rows.len(),
-                    want.len(),
-                    "`{name}`: {rows:?} against {want:?}"
-                );
-                assert!(
-                    rows.iter().zip(&want).all(|(a, b)| same_row(a, b)),
-                    "`{name}`: {rows:?} against {want:?}\n  {sql}"
-                );
-            }
-            Some(Err(m)) => panic!("`{name}`: {m}\n  {sql}"),
-            None => panic!("duckdb is not installed"),
-        }
+        let Some(rows) = rows_or_skip(&engine, SETUP, &sql) else {
+            return;
+        };
+        assert_eq!(
+            rows.len(),
+            want.len(),
+            "`{name}`: {rows:?} against {want:?}"
+        );
+        assert!(
+            rows.iter().zip(&want).all(|(a, b)| same_row(a, b)),
+            "`{name}`: {rows:?} against {want:?}\n  {sql}"
+        );
     }
 }
 
@@ -3216,28 +3366,30 @@ fn a_decimal_sum_outgrows_its_operand_type() {
     let setup = "CREATE TABLE t (v DECIMAL(10, 2));\n\
                  INSERT INTO t VALUES (99999999.99);\n";
     // The sum, as the engine types it.
-    match run_setup(&duck, setup, "SELECT typeof(v + v) AS t FROM t") {
-        Some(Ok(rows)) => assert_eq!(rows, vec!["DECIMAL(11,2)".to_string()]),
-        Some(Err(m)) => panic!("duckdb: {m}"),
-        None => panic!("duckdb is not installed"),
-    }
+    let Some(rows) = rows_or_skip(&duck, setup, "SELECT typeof(v + v) AS t FROM t") else {
+        return;
+    };
+    assert_eq!(rows, vec!["DECIMAL(11,2)".to_string()]);
     // And the value, which the declared type cannot hold.
-    match run_setup(&duck, setup, "SELECT v + v AS s FROM t") {
-        Some(Ok(rows)) => assert_eq!(rows, vec!["199999999.98".to_string()]),
-        Some(Err(m)) => panic!("duckdb: {m}"),
-        None => panic!("duckdb is not installed"),
-    }
+    let Some(rows) = rows_or_skip(&duck, setup, "SELECT v + v AS s FROM t") else {
+        return;
+    };
+    assert_eq!(rows, vec!["199999999.98".to_string()]);
     // Casting it back to the operand type is the error, and it is an error rather
-    // than a silent wrap: that is what makes the wider type necessary.
-    let narrowed = run_setup(
+    // than a silent wrap: that is what makes the wider type necessary. A *success*
+    // here is the failure, so this one asks `run_setup` directly — the only shape
+    // `rows_or_skip` cannot express, since it turns an error into a panic.
+    match run_setup(
         &duck,
         setup,
         "SELECT CAST(v + v AS DECIMAL(10, 2)) AS s FROM t",
-    );
-    match narrowed {
+    ) {
         Some(Ok(rows)) => panic!("duckdb accepted an out-of-range cast: {rows:?}"),
         Some(Err(_)) => {}
-        None => panic!("duckdb is not installed"),
+        None if must_run("duckdb") => {
+            panic!("`duckdb` is not installed (CAGARA_REQUIRE_ENGINES is set)")
+        }
+        None => eprintln!("skipping duckdb: not installed"),
     }
 }
 
@@ -3272,18 +3424,15 @@ q_twice = nums & markExists dupes (.<id == .>id) \
         .expect("q_twice");
     let rel = rel.unwrap_or_else(|d| panic!("q_twice: {}", d.message));
     let sql = compile(&rel, Options::default()).expect("duckdb");
-    match run_setup(&engine, SETUP, &sql) {
-        Some(Ok(rows)) => {
-            let want = ["1|true", "2|true", "3|false", "4|false"];
-            assert_eq!(rows.len(), want.len(), "{rows:?} vs {want:?}\n  {sql}");
-            assert!(
-                rows.iter().zip(&want).all(|(a, b)| same_row(a, b)),
-                "{rows:?} vs {want:?}\n  {sql}"
-            );
-        }
-        Some(Err(m)) => panic!("duckdb: {m}\n  {sql}"),
-        None => panic!("duckdb is not installed"),
-    }
+    let Some(rows) = rows_or_skip(&engine, SETUP, &sql) else {
+        return;
+    };
+    let want = ["1|true", "2|true", "3|false", "4|false"];
+    assert_eq!(rows.len(), want.len(), "{rows:?} vs {want:?}\n  {sql}");
+    assert!(
+        rows.iter().zip(&want).all(|(a, b)| same_row(a, b)),
+        "{rows:?} vs {want:?}\n  {sql}"
+    );
 }
 
 /// The three frame units are three different clauses, not three spellings of one.
@@ -3364,17 +3513,14 @@ q = nums & select { id = .id, m = .a % .b } & order [asc .id]\
     // `%` keeps the dividend's sign, so the rows are the ones the shared `div` case
     // already pins — the point here is that the *table* came from the catalog.
     let want = ["1|1", "2|-1", "3|1", "4|-2"];
-    match run_setup(&engine, SETUP, &sql) {
-        Some(Ok(rows)) => {
-            assert_eq!(rows.len(), want.len(), "{rows:?} vs {want:?}");
-            assert!(
-                rows.iter().zip(&want).all(|(a, b)| same_row(a, b)),
-                "{rows:?} vs {want:?}\n  {sql}"
-            );
-        }
-        Some(Err(m)) => panic!("duckdb: {m}\n  {sql}"),
-        None => panic!("duckdb is not installed"),
-    }
+    let Some(rows) = rows_or_skip(&engine, SETUP, &sql) else {
+        return;
+    };
+    assert_eq!(rows.len(), want.len(), "{rows:?} vs {want:?}");
+    assert!(
+        rows.iter().zip(&want).all(|(a, b)| same_row(a, b)),
+        "{rows:?} vs {want:?}\n  {sql}"
+    );
 }
 
 /// The targets that cannot read a frame unit refuse it — and the two lists differ.
@@ -3663,6 +3809,10 @@ fn postgres_agrees_via_pglite() {
         return;
     }
     let harness = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/pglite.mjs");
+    if !engine_enabled("postgres") {
+        eprintln!("skipping postgres: not in CAGARA_ENGINES");
+        return;
+    }
     let ready = Command::new("node")
         .args([harness, "--check"])
         .status()
@@ -4090,4 +4240,46 @@ INSERT INTO main.r VALUES (1, 'x'), (2, 'u');\n";
         Some(Err(m)) => panic!("sqlite: {m}\n  {emulated}"),
         None => {}
     }
+}
+
+/// No test in this file panics because an engine is absent.
+///
+/// Two CI jobs run this binary under conditions where an engine is deliberately
+/// missing — `CAGARA_NO_ENGINES=1` in the `rust` job, and `CAGARA_ENGINES=sqlite,duckdb`
+/// in the `engines` job — and a test that decides absence for itself panics there
+/// instead of skipping. That is what shipped 0.5.0 broken, twice, in two different
+/// jobs: one test with no guard at all, and one whose guard covered the test as a
+/// whole when it needed to cover each engine separately.
+///
+/// `rows_or_skip` and `pg_rows_or_skip` own that decision now, so the rule this
+/// checks is simply that the file contains no other way to learn an engine is gone.
+/// It is a source scan rather than a run, because the failure only appears in an
+/// environment most local runs do not have — which is exactly why the bug survived
+/// to a release.
+#[test]
+fn no_test_decides_for_itself_that_an_engine_is_absent() {
+    let src = include_str!("engines.rs");
+    // The two helpers are the sanctioned paths; a `None` arm that panics is a test
+    // making the call on its own.
+    let offenders: Vec<(usize, &str)> = src
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let t = line.trim();
+            t.starts_with("None => panic!(")
+                && !t.contains("disappeared between the check and the run")
+                && !t.contains("is not installed (CAGARA_REQUIRE_ENGINES is set)")
+        })
+        .map(|(i, line)| (i + 1, line.trim()))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "these lines panic when an engine is absent instead of skipping; route them \
+         through `rows_or_skip` or `pg_rows_or_skip`:\n{}",
+        offenders
+            .iter()
+            .map(|(n, l)| format!("  engines.rs:{n}: {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }

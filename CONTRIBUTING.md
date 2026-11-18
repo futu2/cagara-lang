@@ -13,13 +13,40 @@ cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
 
-`cargo test --workspace` is what CI runs and what you get for free. Locally,
-`scripts/parallel-test.sh` runs the same tests about three times faster: `cargo
-test` executes the workspace's 19 test *binaries* one after another, so a single
-30-second binary holds the run while the other fifteen cores idle. The script runs
-several binaries at once with a *total* parallelism budget of one thread per core
-(`JOBS` and `TEST_THREADS` override it). It needs no install — `cargo nextest`
-does the same thing, if you have it.
+`cargo test --workspace` is what CI runs and what you get for free. It takes about
+150 s, and most of that is *not* the tests: `cargo test` runs the workspace's 19
+test *binaries* one after another, so a single 30-second binary holds the run while
+the other fifteen cores idle. Two ways to fix that, both ~60 s:
+
+**`cargo nextest`** — better output and per-test isolation, and the one this
+workspace is configured for (`.config/nextest.toml`):
+
+```sh
+cargo nextest run --workspace          # what `cargo test --workspace` does, faster
+cargo nextest run -p cagara-sql        # one package
+cargo nextest run -E 'binary(fuzz)'    # filter expressions, not just substrings
+cargo nextest run --no-fail-fast       # see every failure, not just the first
+```
+
+Two differences worth knowing. It **does not run doctests**, so the habit is
+`cargo nextest run --workspace && cargo test --workspace --doc` — this workspace
+has no doctests today, so that second command is a no-op safeguard rather than a
+chore. And it runs each test in **its own process**, which is why
+`crates/cagara-lsp`'s suite takes 42 s alone but the whole workspace still finishes
+in 65 s. `.config/nextest.toml` caps the language-server and engine tests because
+they are the two groups whose timing depends on the machine.
+
+Installing it needs write access to `~/.cargo`, which a sandbox may not have. The
+workaround used here:
+
+```sh
+CARGO_HOME=$PWD/.cargo-home cargo install cargo-nextest --locked --root $PWD/.nextest
+export PATH=$PWD/.nextest/bin:$PATH
+```
+
+**`scripts/parallel-test.sh`** — the same idea in 40 lines with no dependency, if
+you would rather not install anything. It runs several binaries at once inside a
+*total* budget of one thread per core (`JOBS` and `TEST_THREADS` override it).
 
 Two things to know if you add a slow test:
 

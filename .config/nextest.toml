@@ -1,0 +1,33 @@
+# `cargo nextest` configuration.
+#
+# nextest is not a drop-in replacement for `cargo test` here — it is a better
+# runner for the same tests, and this file says the two things about this
+# workspace that a default configuration gets wrong.
+
+[test-groups]
+# The language-server tests wait on a fixed 600 ms wall-clock window for the
+# server to publish diagnostics (see `SERVER_BUDGET` in `cagara-lsp`). At one
+# process per core they were measured failing on a sixteen-core machine for
+# reasons that had nothing to do with the code, so they get a share of the
+# machine rather than a race for it.
+lsp = { max-threads = 2 }
+
+# The differential tests open real database engines — a PGlite cluster, a
+# MariaDB, a Trino container. Two at a time keeps them from starving each other's
+# startup, which is most of their cost.
+engines = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = 'binary(cagara_lsp)'
+test-group = 'lsp'
+
+[[profile.default.overrides]]
+filter = 'binary(engines)'
+test-group = 'engines'
+
+# `cargo test` reports a failing test's output interleaved with everything else;
+# nextest keeps each test's output until it fails, which is the whole point of
+# process-per-test. Show it for failures only.
+[profile.default]
+failure-output = "immediate-final"
+slow-timeout = { period = "60s", terminate-after = 10 }

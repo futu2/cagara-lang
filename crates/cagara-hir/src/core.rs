@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_keeps_left_positions_and_appends_right_only_fields() {
+    fn merge_keeps_left_positions_renames_collisions_and_appends_right_fields() {
         let left = RowType::new(vec![
             ("id".into(), ScalarType::Int),
             ("name".into(), ScalarType::String),
@@ -445,9 +445,17 @@ mod tests {
         let merged = left.merge(&right);
         assert_eq!(
             merged.names(),
-            vec!["id".to_string(), "name".to_string(), "age".to_string()]
+            vec![
+                "id".to_string(),
+                "name".to_string(),
+                "right_name".to_string(),
+                "age".to_string()
+            ]
         );
-        // Left wins on collision.
+        // A collision is renamed, not dropped: the left keeps its name and the
+        // right keeps its value under `right_<name>`.
+        assert_eq!(merged.get("right_name"), Some(&ScalarType::Bool));
+        // Left keeps its position and its type on a collision.
         assert_eq!(merged.get("name"), Some(&ScalarType::String));
     }
 

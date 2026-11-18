@@ -138,14 +138,43 @@ pub fn nested(what: &str, p: Phase) -> Result<(), String> {
 /// the left does not have (the left one wins on a name collision).
 pub fn join_columns<T: Clone>(left: &[(String, T)], right: &[(String, T)]) -> Vec<(String, T)> {
     let mut out = left.to_vec();
-    let left_names: HashSet<_> = left.iter().map(|(name, _)| name.as_str()).collect();
-    out.extend(
-        right
-            .iter()
-            .filter(|(name, _)| !left_names.contains(name.as_str()))
-            .cloned(),
-    );
+    let mut taken: HashSet<String> = left.iter().map(|(name, _)| name.clone()).collect();
+    for (name, ty) in right {
+        // A name both sides have is **renamed**, not dropped.
+        //
+        // Dropping it made the right column unreachable: `.<x`/`.>x` name the
+        // inputs only inside the predicate, so after the join there was no way to
+        // ask for it, and `.id` silently meant the left one. A warning was the
+        // previous answer, and a warning does not stop a wrong answer.
+        //
+        // Renaming loses nothing and needs no diagnostic: the column is there
+        // under a name that says where it came from. `right_` is the prefix the
+        // old warning suggested, so a reader following that advice and a reader
+        // letting the compiler do it get the same query.
+        let name = if taken.contains(name.as_str()) {
+            renamed(name, &taken)
+        } else {
+            name.clone()
+        };
+        taken.insert(name.clone());
+        out.push((name, ty.clone()));
+    }
     out
+}
+
+/// `id` → `right_id`, and `right_id` → `right_right_id` if that is taken too.
+///
+/// A fixed prefix rather than a counter: `id_2` says nothing about *why*, and the
+/// number depends on how many joins came before, which is not something a reader
+/// can predict from the query in front of them. Repeated prefixing terminates
+/// because each round adds a name that was not there, and a schema cannot have
+/// infinitely many columns.
+fn renamed(name: &str, taken: &HashSet<String>) -> String {
+    let mut candidate = format!("right_{name}");
+    while taken.contains(candidate.as_str()) {
+        candidate = format!("right_{candidate}");
+    }
+    candidate
 }
 
 #[cfg(test)]

@@ -192,12 +192,12 @@ mod tests {
                         Box::new(Expr::Col(Side::Single, "k".into())),
                     ),
                 ),
-                ("n".into(), Expr::Agg("COUNT".into(), vec![], None)),
+                ("n".into(), Expr::Agg("COUNT".into(), vec![], None, vec![])),
             ],
         );
         let outer = Rel::Agg(
             Box::new(inner),
-            vec![("total".into(), Expr::Agg("COUNT".into(), vec![], None))],
+            vec![("total".into(), Expr::Agg("COUNT".into(), vec![], None, vec![]))],
         );
         assert!(any_expr(&outer, &|e| matches!(e, Expr::Grouping(..))));
     }

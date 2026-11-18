@@ -1373,12 +1373,12 @@ fn the_editor_and_the_command_line_agree() {
         from_lsp, from_cli,
         "the two must report the same diagnostics"
     );
-    assert_eq!(from_cli.len(), 4, "{from_cli:?}");
-    // The warning is one of them, and it is a warning on both sides.
+    assert_eq!(from_cli.len(), 3, "{from_cli:?}");
+    // Every one is an error: a join whose inputs share a column is no longer a
+    // warning, because the column is renamed rather than dropped, so there is
+    // nothing to warn about.
     assert!(
-        from_cli
-            .iter()
-            .any(|(_, _, level, msg)| level == "warning" && msg.contains("on both sides")),
+        from_cli.iter().all(|(_, _, level, _)| level == "error"),
         "{from_cli:?}"
     );
     // The emoji line is why the columns are converted at all: a byte column
@@ -1391,58 +1391,27 @@ fn the_editor_and_the_command_line_agree() {
     );
 }
 
-/// A warning is reported, and the run still succeeds.
+/// A join whose inputs share a column renames the right one.
 ///
-/// Some diagnostics describe what the program *means* rather than a mistake: a
-/// join whose inputs share a column keeps the left one, which is exactly what
-/// its output row says, and the reader is told that the right one cannot be
-/// read afterwards. Failing the build over that forced a `select` on every join
-/// between two tables that both have an `id`, so it is a warning — printed with
-/// `warning:`, present in `--json` with `"severity":"warning"`, and not an exit
-/// code.
+/// It used to keep the left column and *drop* the right one, with a warning. That
+/// made the right column unreachable — `.<x`/`.>x` name the inputs only inside
+/// the predicate — so `.id` silently meant the left one, and the warning did not
+/// prevent the wrong answer. `right_id` is the column now, and the query says so.
 #[test]
-fn a_warning_is_reported_and_does_not_fail_the_build() {
-    let dir = TempDir::new("warn");
+fn a_shared_join_column_is_renamed_and_usable() {
+    let dir = TempDir::new("join-rename");
     let path = dir.write(
         "q.cagara",
         "users : query { id = int, name = string } = table \"s\" \"u\"\n\
-         orders : query { id = int, user_id = int } = table \"s\" \"o\"\n\
-         q = users & innerJoin orders (.<id == .>user_id)\n",
+         orders : query { id = int, user_id = int, amount = float } = table \"s\" \"o\"\n\
+         main = users & innerJoin orders (.<id == .>user_id)\n\
+           & select { .id, .name, .right_id, .amount }\n",
     );
-
-    // The query compiles: `--list` prints its SQL and exits 0.
-    let out = cagara([path.clone().into_os_string()]);
+    let out = cagara([path.into_os_string()]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    let err = stderr(&out);
-    assert!(
-        err.contains("warning: this join has `id` on both sides"),
-        "{err}"
-    );
-    assert!(!err.contains("error:"), "{err}");
-    // `q` is not `main`, so the SQL needs `--only`; it compiles all the same.
-    let out = cagara([
-        path.clone().into_os_string(),
-        std::ffi::OsString::from("--only"),
-        std::ffi::OsString::from("q"),
-    ]);
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert!(stdout(&out).contains("INNER JOIN"), "{}", stdout(&out));
-
-    // And `check`, which is what a hook runs, agrees: warning out, exit 0.
-    let out = cagara([
-        std::ffi::OsString::from("check"),
-        std::ffi::OsString::from("--json"),
-        path.clone().into_os_string(),
-    ]);
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    let line = stdout(&out);
-    assert!(line.contains("\"severity\":\"warning\""), "{line}");
-    assert!(line.contains("on both sides"), "{line}");
-
-    // `check` without `--json` says `warning:` too, not `error:`.
-    let out = cagara([std::ffi::OsString::from("check"), path.into_os_string()]);
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    let err = stderr(&out);
-    assert!(err.contains(": warning: "), "{err}");
-    assert!(!err.contains(": error: "), "{err}");
+    // No warning: nothing was lost.
+    assert!(stderr(&out).is_empty(), "{}", stderr(&out));
+    let sql = stdout(&out);
+    assert!(sql.contains("t2.id AS right_id"), "{sql}");
+    assert!(sql.contains("t1.id"), "{sql}");
 }

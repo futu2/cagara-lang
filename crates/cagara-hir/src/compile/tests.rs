@@ -912,13 +912,15 @@ fn cached_relations_keep_current_source_locations() {
 ///
 /// `compile_reusing` deliberately carries warnings in the same list as errors
 /// ("Warnings travel with the errors: the editor and `cagara check` read this
-/// list"), so "did this compile" cannot be asked as "is the list empty" — that
-/// question called a valid overlapping-column join broken. The severity on the
-/// diagnostic is what answers it, and `cagara check` decides a run the same way
-/// (`Found::fails`); `a_warning_is_reported_and_does_not_fail_the_build` in
-/// `cagara-cli` pins the user-visible half of that.
+/// A join that shares a column name compiles, and says nothing.
+///
+/// It used to produce a warning — "the right side's cannot be read afterwards" —
+/// which described a real loss without preventing it. The right column is
+/// `right_id` now, so there is nothing lost and nothing to say: `diagnostics` is
+/// empty, which is also the plainest evidence that a well-formed join is not
+/// being reported as anything.
 #[test]
-fn a_warning_does_not_fail_a_compilation() {
+fn a_shared_join_column_compiles_silently() {
     let src = "a : query { id = int } = table \"s\" \"a\"\n\
                b : query { id = int } = table \"s\" \"b\"\n\
                q = a & innerJoin b (.<id == .>id)\n";
@@ -929,18 +931,12 @@ fn a_warning_does_not_fail_a_compilation() {
         .find(|query| query.name == "q")
         .unwrap_or_else(|| panic!("`q` did not compile: {:?}", compilation.diagnostics));
     assert!(query.result.is_ok(), "{:?}", query.result);
-    assert_eq!(
-        compilation.diagnostics.len(),
-        1,
-        "one overlapping-column warning, no error: {:?}",
-        compilation.diagnostics
-    );
-    assert_eq!(compilation.diagnostics[0].severity, Severity::Warning);
     assert!(
-        !has_errors(&compilation),
-        "a warning does not make the compilation a failure: {:?}",
+        compilation.diagnostics.is_empty(),
+        "a renamed collision loses nothing: {:?}",
         compilation.diagnostics
     );
+    assert!(!has_errors(&compilation));
 }
 
 /// The converse: an error-severity diagnostic is what fails a compilation, so

@@ -80,11 +80,19 @@ impl<'w> Checker<'w> {
     /// same route to the editor and the command line as an error does, and
     /// kept in its own list so nothing that asks "did this definition check"
     /// has to learn about severity.
+    ///
+    /// No diagnostic in the language uses this today: the one that did — a join
+    /// keeping the left column of a shared name — is gone, because the column is
+    /// renamed instead of dropped and there is nothing left to warn about. The
+    /// channel stays (the command line and the editor both read it), and these
+    /// two are how a future warning reaches it.
+    #[allow(dead_code)]
     pub(crate) fn warn(&mut self, span: Span, kind: crate::workspace::DiagKind, message: String) {
         self.warnings.push((span, message, kind, Vec::new()));
     }
 
     /// A warning that comes with fixes the reader can apply.
+    #[allow(dead_code)]
     pub(crate) fn warn_with(
         &mut self,
         span: Span,
@@ -4049,7 +4057,7 @@ impl<'w> Checker<'w> {
         }
     }
 
-    fn step_join_out(&mut self, c: &Cons, sp: Span) -> Result<bool, Fail> {
+    fn step_join_out(&mut self, c: &Cons, _sp: Span) -> Result<bool, Fail> {
         let Cons::JoinOut {
             left,
             right,
@@ -4084,69 +4092,12 @@ impl<'w> Checker<'w> {
             self.unify(&row(lf, Ty::Empty), out)?;
             return Ok(true);
         }
-        // A name both inputs have: the merge keeps the left value and drops the
-        // right, which is the shape `merge ?r ?s` describes. That is *allowed* —
-        // making it an error forced a `select` on every join whose tables share
-        // an `id`, which is most of them — but it is worth saying, because the
-        // right column cannot be read afterwards (`.<x`/`.>x` name the inputs
-        // only inside the predicate).
-        let shared: Vec<&str> = rf
-            .iter()
-            .map(|(k, _)| k.as_str())
-            .filter(|k| lf.iter().any(|(n, _)| n == k))
-            .collect();
-        if !shared.is_empty() {
-            let names = shared
-                .iter()
-                .map(|n| format!("`{n}`"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let first = shared[0];
-            let msg = format!(
-                "this join has {names} on both sides: the merged row keeps the left one, so the \
-right side's cannot be read afterwards. Rename it on the operand to keep it: `& innerJoin (q & \
-select {{ right_{first} = .{first} }}) (.<a == .>b)`"
-            );
-            // The rename is mechanical, so it is offered as a fix: wrap the
-            // right operand in a `select` that renames the shared columns, and
-            // rename the predicate's right-side references to match.
-            let args = self.join_args.get(&(sp.start, sp.end)).copied();
-            let fix = args.and_then(|a| {
-                let (right, pred) = (a.right?, a.pred?);
-                let fields = shared
-                    .iter()
-                    .map(|n| format!("right_{n} = .{n}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let mut edits = vec![crate::workspace::SuggestionEdit::Surround {
-                    span: right,
-                    before: "(".to_string(),
-                    after: format!(" & select {{ {fields} }})"),
-                }];
-                for n in &shared {
-                    edits.push(crate::workspace::SuggestionEdit::Retoken {
-                        span: pred,
-                        from: format!(".>{n}"),
-                        to: format!(".>right_{n}"),
-                    });
-                }
-                Some(vec![crate::workspace::Suggestion::new(
-                    format!(
-                        "Rename the right side's {} to `right_…`",
-                        shared.join("`, `")
-                    ),
-                    edits,
-                )])
-            });
-            // A shared column name is `join-overlap`: the same category the
-            // language server published for this message before the kind
-            // existed.
-            let kind = crate::workspace::DiagKind::JoinOverlap;
-            match fix {
-                Some(suggestions) => self.warn_with(sp, kind, msg, suggestions),
-                None => self.warn(sp, kind, msg),
-            }
-        }
+        // A name both inputs have is renamed, not dropped: the merged row keeps
+        // the left value under its own name and the right one under
+        // `right_<name>` (`rules::join_columns`). Nothing is lost and nothing is
+        // silently shadowed, so there is nothing to warn about — the previous
+        // version warned and dropped, which told a reader about the loss without
+        // preventing it.
         let wrap = |this: &Self, on: bool, (k, t): (String, Ty)| match this.resolve(&t) {
             Ty::Con("maybe", _) => (k, t),
             _ if on => (k, Ty::Con("maybe", vec![t])),

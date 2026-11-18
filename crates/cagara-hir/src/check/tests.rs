@@ -1437,39 +1437,35 @@ fn an_overload_on_a_maybe_says_how_to_take_it_out() {
 ///
 /// The join warning names a rename it could not previously perform, and the
 /// `maybe` used as a value comes with the `coalesce` that makes it one. The
-/// aloha span and the replacement are on the diagnostic itself, so the language
-/// server never has to guess.
+/// A join whose inputs share a column needs no fix, because the compiler makes it.
+///
+/// This test used to check that the *suggestion* on the join warning named the
+/// right operand and the predicate — the machinery that carries an edit from the
+/// checker to the editor. There is no warning now: the shared column is renamed to
+/// `right_<name>` (`rules::join_columns`), so there is nothing to suggest and
+/// nothing to lose. The machinery is still exercised by every diagnostic that has
+/// a fix; what matters here is that the answer is right without one.
 #[test]
-fn a_diagnostic_carries_the_fix_it_knows() {
-    use crate::workspace::SuggestionEdit;
-
-    // The join warning: rename the right side's shared column and the
-    // predicate's references to it.
+fn a_shared_join_column_needs_no_fix() {
     let src = "a : query { id = int, x = int } = table \"s\" \"a\"\n\
                b : query { id = int, y = int } = table \"s\" \"b\"\n\
                q = a & innerJoin b (.<id == .>id)\n";
     let ws = Workspace::from_source(src);
     assert!(ws.diags.is_empty(), "{:?}", ws.diags);
     let tc = check(&ws);
-    let w = tc
-        .warnings()
-        .iter()
-        .find(|w| w.diag.message.contains("on both sides"))
-        .unwrap_or_else(|| panic!("no join warning: {:?}", tc.warnings()));
-    let fix = w
-        .diag
-        .suggestions
-        .first()
-        .unwrap_or_else(|| panic!("no suggestion on the join warning"));
-    assert!(fix.title.contains("right_"), "{}", fix.title);
-    let text = &ws.modules[ws.root].text;
-    let slice = |span: cagara_syntax::ast::Span| &text[span.start as usize..span.end as usize];
-    let (right, pred) = fix.edits.iter().fold((None, None), |(r, p), e| match e {
-        SuggestionEdit::Surround { span, .. } => (Some(*span), p),
-        SuggestionEdit::Retoken { span, .. } => (r, Some(*span)),
-    });
-    assert_eq!(slice(right.expect("an operand span")), "b");
-    assert_eq!(slice(pred.expect("a predicate span")), ".<id == .>id");
+    assert!(
+        tc.warnings().is_empty(),
+        "a renamed collision loses nothing, so it says nothing: {:?}",
+        tc.warnings()
+    );
+    // The right column is reachable under its new name.
+    let q = ty(
+        "a : query { id = int, x = int } = table \"s\" \"a\"\n\
+         b : query { id = int, y = int } = table \"s\" \"b\"\n\
+         q = a & innerJoin b (.<id == .>id) & select { .id, .right_id, .x, .y }\n",
+        "q",
+    );
+    assert_eq!(q, "query { id = int, right_id = int, x = int, y = int }");
 }
 
 /// Type names are closed: an unknown name is an error, and a type variable is
@@ -4150,19 +4146,20 @@ fn reshaping_a_join_operand_is_what_names_the_output_columns() {
         ),
         "query { id = int, name = string, age = int, active = bool, user_id = int, order_id = int }"
     );
-    // A name both sides still have is *allowed*: the merge keeps the left one,
-    // which is what `merge ?r ?s` says, and forcing a `select` on every join
-    // whose tables share an `id` was the more expensive mistake. The join still
-    // checks, and a warning says the right column cannot be read afterwards.
+    // A name both sides have is *renamed*: the left keeps its name and its
+    // position, and the right keeps its value under `right_<name>`. Nothing is
+    // dropped, so there is nothing to warn about — the previous version kept the
+    // left one and dropped the right, which made it unreachable and warned
+    // instead of preventing the wrong answer.
     assert_eq!(
         ty("q = users & innerJoin orders (.<id == .>user_id)\n", "q"),
-        "query { id = int, name = string, age = int, active = bool, user_id = int, amount = float, status = string }",
-        "the left `id` survives and the right one is dropped"
+        "query { id = int, name = string, age = int, active = bool, right_id = int, user_id = int, amount = float, status = string }",
+        "the left `id` keeps its name and the right one is `right_id`"
     );
-    let w = warnings("q = users & innerJoin orders (.<id == .>user_id)\n");
-    assert_eq!(w.len(), 1, "{w:?}");
-    assert!(w[0].contains("on both sides"), "{w:?}");
-    assert!(w[0].contains("cannot be read afterwards"), "{w:?}");
+    assert!(
+        warnings("q = users & innerJoin orders (.<id == .>user_id)\n").is_empty(),
+        "a renamed collision loses nothing, so it says nothing"
+    );
     // A join with nothing in common says nothing.
     assert!(warnings(
         "q = users & innerJoin (orders & select { user_id = .user_id }) (.<id == .>user_id)\n"

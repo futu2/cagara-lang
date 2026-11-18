@@ -3346,19 +3346,21 @@ mod severity_tests {
     /// silently missing from both — this is the assertion that publish and
     /// `--json` agree on *severity*, not only on text and position.
     #[test]
-    fn a_join_warning_is_published_with_warning_severity() {
+    /// A shared join column publishes nothing at all.
+    ///
+    /// It used to be the one *warning* the language had. The right column is
+    /// renamed to `right_<name>` instead of being dropped, so there is nothing to
+    /// report — which is the stronger claim, and the one worth pinning: a
+    /// well-formed join produces no diagnostic, so an editor shows no squiggle on
+    /// it.
+    fn a_shared_join_column_publishes_nothing() {
         let src = "users : query { id = int, name = string } = table \"s\" \"u\"\n\
                    orders : query { id = int, user_id = int } = table \"s\" \"o\"\n\
                    q = users & innerJoin orders (.<id == .>user_id)\n";
         let ws = Workspace::from_source(src);
         assert!(ws.diags.is_empty(), "{:?}", ws.diags);
         let ds = diagnostics(&ws);
-        assert_eq!(ds.len(), 1, "{ds:?}");
-        let Report {
-            message, severity, ..
-        } = &ds[0];
-        assert_eq!(*severity, Severity::Warning);
-        assert!(message.contains("on both sides"), "{message}");
+        assert!(ds.is_empty(), "{ds:?}");
     }
 }
 

@@ -3114,8 +3114,10 @@ mod tests {
         // none to show. One hint, therefore.
         assert_eq!(labels.len(), 1, "hints: {labels:?}");
 
-        // The join warning's fix comes from the diagnostic itself: wrap the
-        // right operand and rename the predicate's reference to the column.
+        // A fix comes from the diagnostic itself. The two mechanical ones are a
+        // bare sort key and a name a "did you mean" resolved; the join-rename fix
+        // is gone, because the compiler renames the column instead of warning
+        // about it.
         client
             .sender
             .send(notify(
@@ -3123,9 +3125,9 @@ mod tests {
                 json!({
                     "textDocument": { "uri": uri, "version": 2 },
                     "contentChanges": [{
-                        "text": "a : query { id = int, x = int } = table \"s\" \"a\"\n\
-                                 b : query { id = int, y = int } = table \"s\" \"b\"\n\
-                                 q = a & innerJoin b (.<id == .>id)\n"
+                        "text": "t : query { a = int } = table \"s\" \"t\"\n\
+                                 unsorted = t & order [.a]\n\
+                                 bad : intt = 1\n"
                     }]
                 }),
             ))
@@ -3146,33 +3148,20 @@ mod tests {
         let r = response(&client, 5);
         let actions: Vec<serde_json::Value> =
             serde_json::from_value(r.response_result.unwrap()).unwrap();
-        let join = actions
+        let titles: Vec<&str> = actions
             .iter()
-            .find(|a| {
-                a.get("title")
-                    .and_then(|t| t.as_str())
-                    .is_some_and(|t| t.contains("right_"))
-            })
-            .unwrap_or_else(|| panic!("no join rename fix: {actions:?}"));
-        let edits = join
-            .pointer("/edit/changes")
-            .and_then(|c| c.as_object())
-            .and_then(|c| c.values().next())
-            .and_then(|e| e.as_array())
-            .unwrap_or_else(|| panic!("no edits: {join:?}"));
-        let texts: Vec<&str> = edits
-            .iter()
-            .filter_map(|e| e.get("newText").and_then(|t| t.as_str()))
+            .filter_map(|a| a.get("title").and_then(|t| t.as_str()))
             .collect();
+        // The bare sort key offers both directions, and the unknown type offers
+        // the name it was reaching for.
         assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("& select { right_id = .id })")),
-            "the operand is not renamed: {texts:?}"
+            titles.iter().any(|t| t.contains("`asc`"))
+                && titles.iter().any(|t| t.contains("`desc`")),
+            "the bare sort key has a fix: {titles:?}"
         );
         assert!(
-            texts.contains(&".>right_id"),
-            "the predicate is not retokened: {texts:?}"
+            titles.iter().any(|t| t.contains("Rename to `int`")),
+            "the unknown type has a \"did you mean\" fix: {titles:?}"
         );
 
         client

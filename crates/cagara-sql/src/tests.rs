@@ -766,6 +766,37 @@ fn a_comparison_against_nothing_is_a_null_test() {
     assert!(alias.contains("m IS NOT NULL"), "{alias}");
 }
 
+/// A join renames a shared column instead of dropping it.
+///
+/// The right column used to be unreachable: `.<x`/`.>x` name the inputs only
+/// inside the predicate, so after the join there was no way to ask for the right
+/// side's `id`, and `.id` silently meant the left one. A warning said so and did
+/// not prevent it.
+///
+/// It is `right_<name>` now — the prefix the old warning suggested, so a reader
+/// following that advice and one letting the compiler do it get the same query.
+/// A name already taken is prefixed again rather than numbered, because `id_2`
+/// says nothing about why and its number depends on how many joins came before.
+#[test]
+fn a_join_renames_a_shared_column() {
+    let src = "u : query { id = int, name = string } = table \"p\" \"u\"\n\
+               o : query { id = int, user_id = int, amount = float } = table \"p\" \"o\"\n\
+               q = u & innerJoin o (.<id == .>user_id) & select { .id, .right_id, .amount }\n";
+    let s = sql(src, "q");
+    assert!(s.contains("t2.id AS right_id"), "{s}");
+    // The left one is still the plain name, so nothing was shadowed.
+    assert!(s.contains("t1.id"), "{s}");
+
+    // A schema that already has `right_id` gets a second prefix rather than a
+    // collision.
+    let src = "a : query { id = int, right_id = int } = table \"p\" \"a\"\n\
+               b : query { id = int } = table \"p\" \"b\"\n\
+               q = a & innerJoin b (.<id == .>id) & select { .id, .right_id, .right_right_id }\n";
+    let s = sql(src, "q");
+    assert!(s.contains("t2.id AS right_right_id"), "{s}");
+    assert!(s.contains("t1.right_id"), "{s}");
+}
+
 /// A join on a key an outer join made nullable.
 ///
 /// SQL's own join semantics say `NULL = anything` is never true, which is exactly

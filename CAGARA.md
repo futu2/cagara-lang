@@ -929,32 +929,29 @@ no join spelling of its own for this: reshaping a side is what `select` and `upd
 | `leftJoin q p` | `q <? p` | all left rows |
 | `rightJoin q p` | `q ?> p` | all right rows |
 | `fullJoin q p` | `q <?> p` | all rows from both |
-| `crossJoin q                | `q & crossJoin s` | every pair, one from each side
-markExists q p             | `q & markExists s p` | the left row plus `exists = bool`
-semiJoin q p` | — | left rows with a match (left columns only) |
+| `crossJoin q` | `q & crossJoin s` | every pair, one from each side |
+| `markExists q p` | `q & markExists s p` | the left row plus `exists = bool` |
+| `semiJoin q p` | — | left rows with a match (left columns only) |
 | `antiJoin q p` | — | left rows with no match (left columns only) |
 
-Output columns: left input's columns, then the right input's columns that the left does not have.
+Output columns: left input's columns, then the right input's — including the ones the left also has,
+under a renamed key.
 
-A name **both** sides have keeps the **left** value and drops the right one: that is what the output
-row's `merge ?r ?s` says, and it is what lets two tables that both have an `id` be joined without a
-projection first. The compiler reports a **warning**, because the right column cannot be read
-afterwards — `.<x`/`.>x` name the inputs only inside the predicate. A warning does not fail the
-build; rename on the operand when you need the right column too:
+A name **both** sides have is **renamed**: the left keeps it and the right becomes
+`right_<name>`, so two tables that both have an `id` can be joined and both ids read. `.<x`/`.>x`
+name the inputs only inside the predicate, so a dropped column would be unreachable — there is
+nothing to warn about because nothing is lost:
 
 ```cagara
 users : query { id = int, name = string } = table "public" "users"
 orders : query { id = int, user_id = int, amount = float } = table "public" "orders"
 
-main =
-  users
-  & innerJoin (orders & select { user_id = .user_id, order_id = .id, amount = .amount })
-      (.<id == .>user_id)
-  & select { .id, .name, .order_id }
-
-# Without the rename the join still works, warns once, and keeps `users.id`:
-still_joins = users & innerJoin orders (.<id == .>user_id)
+main = users & innerJoin orders (.<id == .>user_id)
+             & select { .id, .name, .right_id, .amount }
 ```
+
+A name already taken is prefixed again (`right_right_id`) rather than numbered: `id_2` says nothing
+about why, and its number depends on how many joins came before.
 
 `select` renames and drops, `update` overwrites and appends, and either one reshapes an operand for
 any join kind — `leftJoin`, `rightJoin` and `fullJoin` all take the same reshaped operand.

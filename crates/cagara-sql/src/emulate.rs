@@ -539,7 +539,7 @@ mod tests {
                     "b".into(),
                     Expr::Grouping(GroupingShape::Rollup, Box::new(col("b"))),
                 ),
-                ("n".into(), Expr::Agg("COUNT".into(), vec![], None)),
+                ("n".into(), Expr::Agg("COUNT".into(), vec![], None, vec![])),
             ],
         );
         let out = emulate(&agg, Dialect::Sqlite);
@@ -581,7 +581,7 @@ mod tests {
                     "b".into(),
                     Expr::Grouping(GroupingShape::Cube, Box::new(col("b"))),
                 ),
-                ("n".into(), Expr::Agg("COUNT".into(), vec![], None)),
+                ("n".into(), Expr::Agg("COUNT".into(), vec![], None, vec![])),
             ],
         );
         let out = emulate(&agg, Dialect::Sqlite);
@@ -620,7 +620,7 @@ mod tests {
                     "a".into(),
                     Expr::Grouping(GroupingShape::Rollup, Box::new(col("a"))),
                 ),
-                ("n".into(), Expr::Agg("COUNT".into(), vec![], None)),
+                ("n".into(), Expr::Agg("COUNT".into(), vec![], None, vec![])),
             ],
         );
         let out = emulate(&agg, Dialect::Sqlite);
@@ -644,7 +644,7 @@ mod tests {
             Box::new(table("t", &["a", "n"])),
             vec![
                 ("a".into(), Expr::Group(Box::new(col("a")))),
-                ("n".into(), Expr::Agg("COUNT".into(), vec![], None)),
+                ("n".into(), Expr::Agg("COUNT".into(), vec![], None, vec![])),
             ],
         );
         for d in [Dialect::Sqlite, Dialect::Mysql, Dialect::Postgres] {
@@ -720,7 +720,7 @@ mod tests {
                     "c".into(),
                     Expr::Grouping(GroupingShape::Cube, Box::new(col("c"))),
                 ),
-                ("n".into(), Expr::Agg("COUNT".into(), vec![], None)),
+                ("n".into(), Expr::Agg("COUNT".into(), vec![], None, vec![])),
             ],
         );
         let out = emulate(&agg, Dialect::Sqlite);

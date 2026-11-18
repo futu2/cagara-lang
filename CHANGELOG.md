@@ -2,6 +2,91 @@
 
 ## Unreleased
 
+### Seven wrong answers, and the words to say what you meant
+
+Each of these compiled and produced a wrong answer, or refused something the
+language plainly has. The first group is the reason for the release.
+
+**A join whose inputs share a column dropped the right one.** `users & innerJoin
+orders (.<id == .>user_id)` kept `users.id` and discarded `orders.id` with a
+warning. `.<x`/`.>x` name the inputs only inside the predicate, so the right column
+was *unreachable* afterwards and `.id` silently meant the left one — following the
+warning's own advice produced a query that read the wrong column and looked right.
+It is `right_id` now, the prefix the warning suggested, so both routes give the same
+query. A name already taken is prefixed again (`right_right_id`) rather than
+numbered, because `id_2` says nothing about why.
+
+**`x == nothing` was `x = NULL`, which is never true.** It is `x IS NULL` now, and
+`x != nothing` is `IS NOT NULL`. The comparison is rewritten rather than emitted,
+because SQL cannot compare against NULL and an aggregate over the result was quietly
+empty.
+
+**`filtered` and `distinctAgg` were dropped on `arrayAgg`.** The predicate reached
+the intrinsic and the rebuilt call had no room for it, so `filtered p (arrayAgg .x)`
+emitted a plain `ARRAY_AGG(x)` — the filter silently ignored. Both are re-attached
+after the rebuild.
+
+**A zero divisor raised on PostgreSQL and returned NULL everywhere else.** `/` is
+typed `int` and cannot be undefined, so the disagreement was a target-dependent
+error. Every target answers NULL now, and `safeDiv`/`safeMod` say so in the type:
+`expr ?r (maybe int)`.
+
+**`month`, `day` and `year` meant two things.** `month .d` was the field 1–12 and
+`truncMonth .d` was the bucket, so `group (month .d)` put January 2024 and January
+2025 in one row. The field readers are `monthOfYear`, `dayOfMonth` and `yearOfDate`;
+`truncMonth` and its siblings are unchanged. A name that says *which* question it
+answers cannot be misread.
+
+**A join predicate could not see a nullable key.** `.<bid == just .>bid2` failed to
+type, so joining on a column an outer join had made nullable had no spelling.
+A join predicate is a *condition* now (`isTrue (.<a == just .>b)`), and `==` has
+mixed-nullability overloads.
+
+**A bare lowercase letter was a type variable.** `t : query { a = int }` worked by
+luck and `a`/`b`/`c` were silently variables, so `{ id = a }` meant something
+entirely different from `{ id = b }`. Type variables are written `?a`, and a name is
+a name.
+
+### Words that were missing
+
+- `arrayAggBy [asc .ts] .id` — an ordered list aggregate (`ARRAY_AGG(id ORDER BY ts)`).
+  `arrayAgg` has no order of its own, so "the last three ids" could not be said.
+- `nullsFirst (asc .m)` / `nullsLast` — NULLs sort last in both directions by default;
+  this moves them, expanding to `m IS NULL DESC, m ASC`.
+- `between`, `ratio`, `percentOf`, `safeDiv`, `safeMod`.
+- `lagBy`/`leadBy` — a lag with an offset. Separate names because a name's definitions
+  must take the same number of parameters, so `lag spec` and `lag spec 2` cannot be
+  overloads.
+- `monthName`/`monthAbbrev`/`dayName`/`dayAbbrev`, plus `%b`/`%B`/`%a`/`%A`/`%j` in the
+  format vocabulary, translated per target.
+- `weeksBetween`/`quartersBetween`/`monthsBetween`/`yearsBetween` and the timestamp
+  `secondsBetween`/`minutesBetween`/`hoursBetween`.
+- `weekOfYear`, `toBool` from a string, `tryBool`, `whereTrue`.
+- `abs`/`negate` on `decimal`; `sign` returns `int` on a float.
+- `crossJoin`, `markExists`, `listAt`, `range`, `chr`, `ascii`, the `log` family and
+  `countOfMaybe`/`countDistinctMaybe` were defined all along and absent from the
+  manual; §7 is now checked against `cagara doc --prelude` by a test.
+
+### The language
+
+- **Block comments** `{- … -}` nest and may span lines.
+- **Unicode identifiers.** A column may be named `总金额`; each dialect's own quoting
+  is used (`"…"`, `` `…` ``, `[…]`).
+- **Type ascription** `(e : ty)` — the only way to annotate below a definition or a
+  lambda parameter. It is a check, not a cast, and it erases.
+- **`limit` and `offset` take a constant expression**: `limit (2 + 3)` is `LIMIT 5`.
+  An expression that reads a column is still refused, because it cannot be a count.
+- **`--types` no longer passes a file the erasure pass rejects**, and `--only` accepts
+  a definition that is not a query (answering with its type).
+- `where (.id = 1)` said `expected ')'`; it now says that a comparison is `==`.
+
+### Not in this release
+
+- `rename "to" "from"` as a single stage. `update { to = .from } & omit "from"` does
+  the same thing today, and `CAGARA.md` documents it with the trap (`update` alone
+  keeps both columns). A stage is worth adding, and it needs a row rule the type
+  language does not yet have.
+
 ### Dialect-independent compilation
 
 - **An unsupported construct is refused wherever it appears, not only at the top.**

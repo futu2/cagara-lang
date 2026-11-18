@@ -417,7 +417,10 @@ impl<'a> Normalizer<'a, 'a> {
                 origin,
             } => {
                 let Some(Value::Tuple { items, .. }) = Some(arg.clone()) else {
-                    return Err(Control::unsupported(origin, "`arrayAggBy` takes a key list"));
+                    return Err(Control::unsupported(
+                        origin,
+                        "`arrayAggBy` takes a key list",
+                    ));
                 };
                 let mut keys = Vec::with_capacity(items.len());
                 for item in &items {
@@ -448,7 +451,8 @@ impl<'a> Normalizer<'a, 'a> {
                     "CAGARA_ARRAY_AGG($1)",
                     vec![value],
                     keys,
-                    self.ty_at(origin).unwrap_or(crate::core::ScalarType::Unknown),
+                    self.ty_at(origin)
+                        .unwrap_or(crate::core::ScalarType::Unknown),
                     origin,
                 )
                 .map(Value::Scalar)
@@ -458,20 +462,18 @@ impl<'a> Normalizer<'a, 'a> {
                 order,
                 args: _,
                 origin,
-            } => {
-                match arg {
-                    Value::SortKey(key, ascending, _) => {
-                        Ok(Value::SortKey(key, ascending, Some(order)))
-                    }
-                    other => Err(Control::unsupported(
-                        origin,
-                        format!(
-                            "`nullsFirst`/`nullsLast` modify a sort key, and this is {}",
-                            value_class(&other)
-                        ),
-                    )),
+            } => match arg {
+                Value::SortKey(key, ascending, _) => {
+                    Ok(Value::SortKey(key, ascending, Some(order)))
                 }
-            }
+                other => Err(Control::unsupported(
+                    origin,
+                    format!(
+                        "`nullsFirst`/`nullsLast` modify a sort key, and this is {}",
+                        value_class(&other)
+                    ),
+                )),
+            },
             Value::Group { arg: None, origin } => {
                 let key = self.as_expr(arg, self.call_module(), self.call_expr()?)?;
                 CheckedExpr::group(key, origin)
@@ -839,7 +841,8 @@ impl<'a> Normalizer<'a, 'a> {
                     Projection::Update,
                     vec![(to, column)],
                 )?;
-                self.builder.rewrite(site, origin, updated, Rewrite::Omit(from))
+                self.builder
+                    .rewrite(site, origin, updated, Rewrite::Omit(from))
             }
             QueryNodeKind::Prefix
             | QueryNodeKind::Suffix
@@ -1423,7 +1426,11 @@ impl<'a> Normalizer<'a, 'a> {
 fn fold_int(sql: &str, args: &[i64]) -> Option<i64> {
     // `-(x)` / `-$1`: a negation, which the parser writes as a template too.
     if let Some(rest) = sql.trim().strip_prefix('-') {
-        let inner = rest.trim().trim_start_matches('(').trim_end_matches(')').trim();
+        let inner = rest
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .trim();
         let k: usize = inner.strip_prefix('$')?.parse().ok()?;
         return args.get(k.checked_sub(1)?).copied().map(|v: i64| -v);
     }
@@ -1571,16 +1578,16 @@ pub(crate) fn own(value: &Value<'_>) -> Value<'static> {
             args: args.iter().map(own).collect(),
             origin: *origin,
         },
-        Value::NullsOrder { order, args, origin } => Value::NullsOrder {
+        Value::NullsOrder {
+            order,
+            args,
+            origin,
+        } => Value::NullsOrder {
             order: *order,
             args: args.iter().map(own).collect(),
             origin: *origin,
         },
-        Value::OrderedAgg {
-            keys,
-            args,
-            origin,
-        } => Value::OrderedAgg {
+        Value::OrderedAgg { keys, args, origin } => Value::OrderedAgg {
             keys: keys.clone(),
             args: args.iter().map(own).collect(),
             origin: *origin,

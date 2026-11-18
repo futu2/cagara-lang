@@ -1613,7 +1613,11 @@ fn a_printed_type_is_writable() {
                 _ => "q => q & unnest [1]",
             }
         );
-        assert_eq!(ty(&format!("{round}\n"), name), printed, "{name} round-trip");
+        assert_eq!(
+            ty(&format!("{round}\n"), name),
+            printed,
+            "{name} round-trip"
+        );
     }
 }
 
@@ -3074,10 +3078,7 @@ fn directional_affix_witness_is_shared_with_result_mapper() {
     assert!(e.contains("type mismatch"), "{e}");
     // The printer spells a type variable with its sigil, so the message names
     // `?m` and `?k` — the same spelling the source would use.
-    assert!(
-        e.contains("expected ?m") && e.contains("found ?k"),
-        "{e}"
-    );
+    assert!(e.contains("expected ?m") && e.contains("found ?k"), "{e}");
 }
 
 #[test]

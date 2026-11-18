@@ -1368,8 +1368,7 @@ fn an_impossible_window_frame_is_reported() {
 /// this example uses one that is not.
 #[test]
 fn an_elaboration_error_points_at_the_users_module_not_the_prelude() {
-    let ws =
-        Workspace::from_source("q : query { a = int } = table \"s\" \"t\" & limit (.a + 1)\n");
+    let ws = Workspace::from_source("q : query { a = int } = table \"s\" \"t\" & limit (.a + 1)\n");
     let diags: Vec<Diag> = compile(&ws)
         .queries
         .iter()

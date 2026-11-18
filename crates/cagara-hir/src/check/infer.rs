@@ -61,12 +61,18 @@ fn key_argument_message(f: &ast::Expr) -> String {
              of the type, so it must be known when the query is checked"
                 .into()
         }
+        ExprKind::Name(n) if n == "rename" => {
+            "`rename` needs two literal column names, such as `rename \"years\" \"age\"`".into()
+        }
         ExprKind::Name(n) if n == "mapValue" => {
             "`mapValue` needs a literal wrapper, such as `mapValue \"nullable\"` or \
              `mapValue \"list\"`"
                 .into()
         }
-        _ => "a key argument must be a literal string, such as `prefix \"user_\"`: the \
+        // A helper's own parameter: name the property, not a stage the helper may
+        // have nothing to do with. Suggesting `prefix "user_"` for `rename 1 2`
+        // was advice about a different function.
+        _ => "this argument must be a literal string naming a column or an affix — the \
               mapping is part of the type, so it must be known when the query is checked"
             .into(),
     }
@@ -1521,8 +1527,13 @@ impl<'w> Checker<'w> {
             ExprKind::Ascribe { expr, ty } => {
                 let want = self.annotation(ty).map_err(at(e.span))?;
                 let inner = self.infer(env, expr)?;
-                self.pending
-                    .push((Cons::Ascribe { inner, want: want.clone() }, e.span));
+                self.pending.push((
+                    Cons::Ascribe {
+                        inner,
+                        want: want.clone(),
+                    },
+                    e.span,
+                ));
                 Ok(want)
             }
             ExprKind::Name(..) => self.infer_name(env, e),
@@ -1580,8 +1591,7 @@ impl<'w> Checker<'w> {
             ExprKind::Ascribe { expr, ty } => {
                 let want = self.annotation(ty).map_err(at(e.span))?;
                 let inner = self.check(env, expr, expected)?;
-                self.pending
-                    .push((Cons::Ascribe { inner, want }, e.span));
+                self.pending.push((Cons::Ascribe { inner, want }, e.span));
                 Ok(expected.clone())
             }
             ExprKind::Record(..) => self.check_record(env, e, expected),
@@ -3429,10 +3439,7 @@ impl<'w> Checker<'w> {
                 let out = Ty::MapKey(Box::new(mapper), Box::new(r.clone()));
                 fun(
                     Ty::Con("keyLabel", vec![to]),
-                    fun(
-                        Ty::Con("keyLabel", vec![from]),
-                        fun(query(r), query(out)),
-                    ),
+                    fun(Ty::Con("keyLabel", vec![from]), fun(query(r), query(out))),
                 )
             }
             ArrayAggBy => {

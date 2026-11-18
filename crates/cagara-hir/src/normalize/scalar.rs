@@ -470,7 +470,12 @@ fn is_null_sentinel(e: &CheckedExpr) -> bool {
 /// rewritten to the predicate SQL actually has. The type stays `maybe bool`
 /// (the signature's), which is sound: the value is a `bool` that is never NULL,
 /// and `where` accepts a `maybe bool`.
-fn rewrite_null_comparison(sql: &str, args: &[CheckedExpr], origin: Origin, ty: ScalarType) -> Option<CheckedExpr> {
+fn rewrite_null_comparison(
+    sql: &str,
+    args: &[CheckedExpr],
+    origin: Origin,
+    ty: ScalarType,
+) -> Option<CheckedExpr> {
     let (negated, template) = match sql.trim() {
         "$1 = $2" => (false, "$1 IS NULL"),
         "$1 <> $2" => (true, "$1 IS NOT NULL"),

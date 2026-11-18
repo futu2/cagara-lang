@@ -207,7 +207,11 @@ pub(crate) enum Value<'a> {
     /// `asc e` / `desc e`, with the direction and — when `nullsFirst` wrapped it
     /// — where the NULLs go. `None` is the language's default, which is last in
     /// both directions.
-    SortKey(crate::checked::CheckedExpr, bool, Option<crate::ir::NullOrder>),
+    SortKey(
+        crate::checked::CheckedExpr,
+        bool,
+        Option<crate::ir::NullOrder>,
+    ),
     /// `group expr`, awaiting the key.
     Group {
         arg: Option<crate::checked::CheckedExpr>,

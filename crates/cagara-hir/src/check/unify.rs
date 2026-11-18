@@ -80,9 +80,10 @@ impl<'w> Checker<'w> {
             }
             // `renameSym` carries *two* labels, bound by two separate
             // applications, so both have to be followed for the same reason.
-            Ty::Con("labelRename", a) if a.len() == 2 => {
-                Ty::Con("labelRename", vec![self.resolve(&a[0]), self.resolve(&a[1])])
-            }
+            Ty::Con("labelRename", a) if a.len() == 2 => Ty::Con(
+                "labelRename",
+                vec![self.resolve(&a[0]), self.resolve(&a[1])],
+            ),
             other => other.clone(),
         };
         match KeyMap::of_label_ty(&km) {

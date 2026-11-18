@@ -181,7 +181,9 @@ impl Prim {
         use Prim::*;
         match self {
             UnboundedPreceding | UnboundedFollowing | CurrentRow => 0,
-            Group | Rollup | Cube | Asc | Desc | NullsFirst | NullsLast | Preceding | Following => 1,
+            Group | Rollup | Cube | Asc | Desc | NullsFirst | NullsLast | Preceding | Following => {
+                1
+            }
             Where | Unnest | Select | Update | Omit | AggStage | Order | Limit | Offset | Table
             | Rows | Range | Groups | Prefix | Suffix | Merge | MapValue | Lift => 2,
             Distinct => 1,

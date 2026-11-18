@@ -105,12 +105,7 @@ pub enum Expr {
     /// known).
     /// An aggregate template, its arguments, its `filtered` predicate, and the
     /// sort keys an ordered aggregate (`arrayAggBy`) carries.
-    Agg(
-        String,
-        Vec<Expr>,
-        Option<Box<Expr>>,
-        Vec<(Expr, bool)>,
-    ),
+    Agg(String, Vec<Expr>, Option<Box<Expr>>, Vec<(Expr, bool)>),
     /// Grouping key (`group e`).
     Group(Box<Expr>),
     /// A grouping key that also gets subtotal rows (`rollup e`, `cube e`). The

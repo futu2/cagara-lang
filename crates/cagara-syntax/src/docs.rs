@@ -3,21 +3,21 @@
 //! A `#` comment is prose for whoever reads the file. Two prefixed forms of it
 //! are documentation instead, and are attached to something:
 //!
-//! - `##` on the line(s) directly above a top-level definition documents *that
-//!   definition*. The block ends at the first line that is not a `##` line, so
+//! - `---` on the line(s) directly above a top-level definition documents *that
+//!   definition*. The block ends at the first line that is not a `---` line, so
 //!   a blank line or an ordinary `#` comment separates a doc block from a
 //!   definition and leaves it unattached.
-//! - `#!` above the first item documents the *file*. The last such run wins, so
+//! - `--!` above the first item documents the *file*. The last such run wins, so
 //!   a file can keep its prose header and put its own documentation below it.
 //!
 //! Nothing about the grammar changes: the lexer still produces one `Comment`
-//! token, the formatter still prints it verbatim, and a file with no `##` lines
+//! token, the formatter still prints it verbatim, and a file with no `---` lines
 //! means exactly what it meant before. What the markers add is a name for text
 //! that already had a place, so more than one reader can use it — `cagara doc`
 //! prints a reference, the language server answers hover from it, and the
 //! comments stay next to the definitions they describe.
 //!
-//! Both markers require the line they mark: a `##` at the end of a line of code
+//! Both markers require the line they mark: a `---` at the end of a line of code
 //! is a trailing comment, not documentation of the next definition.
 
 use crate::ast::{Module, TypeExpr};
@@ -34,7 +34,7 @@ pub const ITEM_MARKER: &str = "---";
 pub const MODULE_MARKER: &str = "--!";
 
 /// The documentation of the item whose first token is at `offset`: the block
-/// of `##` lines directly above the line `offset` is on.
+/// of `---` lines directly above the line `offset` is on.
 ///
 /// `None` when there is no such block, which is the ordinary case.
 ///
@@ -64,7 +64,7 @@ pub fn item_doc(src: &str, offset: usize) -> Option<String> {
 
 /// Is `offset` the first thing on its line, whitespace aside?
 ///
-/// A `##` block belongs to an item that *starts a line*: that is what makes it a
+/// A `---` block belongs to an item that *starts a line*: that is what makes it a
 /// block above the item rather than a trailing comment on the line before.
 fn starts_its_line(src: &str, offset: usize) -> bool {
     let Some(before) = src.get(..offset.min(src.len())) else {
@@ -76,7 +76,7 @@ fn starts_its_line(src: &str, offset: usize) -> bool {
         .is_some_and(|lead| lead.chars().all(char::is_whitespace))
 }
 
-/// The documentation of a whole file: the last `#!` run above its first item.
+/// The documentation of a whole file: the last `--!` run above its first item.
 ///
 /// Read from the module rather than from the text alone, because "above the
 /// first item" is a fact about the program: a file with no items has no
@@ -132,7 +132,7 @@ fn line_above(src: &str, offset: usize) -> Option<(usize, &str)> {
 }
 
 /// A file's line index, for questions that are about the whole file rather than
-/// about one definition: a file's own `#!` block, and the line number a warning
+/// about one definition: a file's own `--!` block, and the line number a warning
 /// names.
 ///
 /// Built once per file by callers that ask several of these questions.
@@ -157,7 +157,7 @@ impl<'a> Docs<'a> {
     /// order.
     ///
     /// A record's fields are where a table's columns are named, so this is
-    /// where a column's documentation lives: `##` above the field, read from the
+    /// where a column's documentation lives: `---` above the field, read from the
     /// same text with the same rule as a definition's. Grouped by record rather
     /// than flattened because "this table documents two columns out of six" is
     /// a fact about one field list, not about the file.
@@ -213,7 +213,7 @@ impl<'a> Docs<'a> {
         }
     }
 
-    /// The documentation of the file: the last `#!` run that ends before
+    /// The documentation of the file: the last `--!` run that ends before
     /// `before`, which callers pass as the offset of the first item (or the end
     /// of the file when there is no item).
     pub fn module(&self, before: usize) -> Option<String> {
@@ -387,7 +387,7 @@ mod tests {
         );
     }
 
-    /// `#!` after the first item documents nothing: a file's documentation
+    /// `--!` after the first item documents nothing: a file's documentation
     /// describes the whole file, so it cannot come after half of it.
     #[test]
     fn a_file_doc_below_an_item_is_ignored() {
@@ -414,7 +414,7 @@ mod tests {
         );
     }
 
-    /// A file with no items at all is all header, so its `#!` block is its
+    /// A file with no items at all is all header, so its `--!` block is its
     /// documentation.
     #[test]
     fn a_file_with_no_items_can_still_be_documented() {
@@ -484,10 +484,10 @@ mod tests {
     /// The rule used to be "read the block above the field's line", which is right
     /// for a field on its own line and wrong for one that is not: a table declared
     /// inside a `catalog` puts its columns on the entry's line, and every column
-    /// claimed the entry's own `##` block. `cagara doc` then printed the entry's
+    /// claimed the entry's own `---` block. `cagara doc` then printed the entry's
     /// prose under every column — visible, and wrong.
     ///
-    /// The condition is that the field *starts its line*: a `##` block belongs to an
+    /// The condition is that the field *starts its line*: a `---` block belongs to an
     /// item that begins one, which is what makes it a block above the item rather
     /// than a trailing comment on the line before.
     #[test]
@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn a_prefix_only_doc_marker_is_an_empty_doc() {
-        // `##` with no text is a separator inside a block, but a lone one is
+        // `---` with no text is a separator inside a block, but a lone one is
         // not documentation worth reporting either.
         let src = "---\nmain = q\n";
         assert_eq!(item_doc(src, at(src, "main")), None);

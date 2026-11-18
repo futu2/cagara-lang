@@ -245,7 +245,7 @@ fn serve(conn: &Connection, build: &str) -> Res<()> {
         workspace_symbol_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
-        // Definitions whose body spans lines, `##` doc blocks, and `catalog` blocks.
+        // Definitions whose body spans lines, `---` doc blocks, and `catalog` blocks.
         // A file of table declarations is otherwise a wall of text an editor cannot
         // collapse.
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),

@@ -31,7 +31,7 @@
 
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "cagara";
-          version = "0.4.2";
+          version = "0.5.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           cargoBuildFlags = [ "-p" "cagara-cli" ];

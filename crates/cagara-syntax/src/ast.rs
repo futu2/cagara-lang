@@ -35,7 +35,7 @@ pub struct Def {
 /// One `name = type` in a record type — a column of a table, or a field of a
 /// signature's row.
 ///
-/// The span is the field's own, and it is what connects a `##` block to the
+/// The span is the field's own, and it is what connects a `---` block to the
 /// field: a field is not an item, so its documentation is read from the text at
 /// that position rather than being carried here (see [`crate::docs`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,7 +292,7 @@ impl Lower<'_> {
     /// about, and `cagara doc`, the language server's outline and the formatter's
     /// type printing all keep working without a case for it.
     ///
-    /// Each generated definition's span starts at its own name, so the `##` block
+    /// Each generated definition's span starts at its own name, so the `---` block
     /// written above an entry documents that table and the editor can jump to it.
     fn catalog(&mut self, n: &SyntaxNode, out: &mut Vec<Def>) {
         let Some(schema) = token(n, K::String) else {

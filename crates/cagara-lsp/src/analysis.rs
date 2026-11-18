@@ -405,7 +405,7 @@ fn root_range(p: &Positions, start: usize, end: usize) -> Range {
 ///
 /// A field is not an item, so it has no type of its own to show — the
 /// declaration line beside the cursor already says that. What it does have is
-/// the `##` block above it, which is the column's documentation, and asking for
+/// the `---` block above it, which is the column's documentation, and asking for
 /// it while editing the table is the point of writing it down.
 fn declared_field_hover(ws: &Workspace, offset: usize) -> Option<String> {
     let md = &ws.modules[ws.root];
@@ -439,7 +439,7 @@ fn declared_field_hover(ws: &Workspace, offset: usize) -> Option<String> {
 /// input is the query the stage is piped from — so this walks that chain down
 /// through the steps that keep their columns and stops at the expression whose
 /// row ?a signature fixed. That definition's declared record type is where the
-/// column's `##` block is.
+/// column's `---` block is.
 ///
 /// Nothing is shown when the walk reaches no declaration: a column a `select`
 /// computed, one that arrived through a join, or one an `agg` named has no
@@ -772,7 +772,7 @@ fn contains(span: Span, offset: usize) -> bool {
 /// Markdown for the name under the cursor. At a use, its type there (the
 /// definition's scheme instantiated, as far as the checker got), followed
 /// by the definition's general type (every candidate for an overload set)
-/// when that differs, and by the definition's own `##` documentation.
+/// when that differs, and by the definition's own `---` documentation.
 ///
 /// The doc text is the same text `cagara doc` prints — one source for both, so
 /// a reader in the editor and a reader of the reference see the same words.
@@ -866,7 +866,7 @@ enum Atom {
 ///
 /// A column also carries its own documentation, when [`column_doc`] can follow
 /// the row back to the declaration that named it: the type says what the column
-/// *is* at this use, and the `##` block says what the column *means*.
+/// *is* at this use, and the `---` block says what the column *means*.
 fn atom_hover(ws: &Workspace, occs: &[Occ], offset: usize) -> Option<String> {
     let md = &ws.modules[ws.root];
     let mut found = None;
@@ -1193,7 +1193,7 @@ pub fn encode_tokens(tokens: &[Token]) -> Vec<[u32; 5]> {
 /// - a **definition** whose body runs over more than one line. The range starts at the
 ///   definition's name, not at its type: folding `q : query { … } = …` should keep `q`
 ///   visible, which is what an outline of the file is for.
-/// - a **`##` doc block**, which is prose and usually the longest thing in the file.
+/// - a **`---` doc block**, which is prose and usually the longest thing in the file.
 ///   `FoldingRangeKind::Comment` is what lets an editor offer "fold all comments"
 ///   separately from "fold all definitions".
 /// - a **`catalog` declaration**, which is a schema's worth of tables in one block.
@@ -1248,7 +1248,7 @@ pub fn folding_ranges(ws: &Workspace) -> Vec<FoldingRange> {
             }
         }
     }
-    // The `##` blocks. A block is a run of lines each starting with `##` after
+    // The `---` blocks. A block is a run of lines each starting with `---` after
     // indentation; `starts_its_line` is the same rule `cagara_syntax::docs` uses to
     // decide what documents what, so a block folded here is a block that is read as
     // documentation there.
@@ -2364,7 +2364,7 @@ mod tests {
         assert!(h.contains("local binding"), "{h}");
     }
 
-    /// Hover carries the definition's own `##` text, from whichever module the
+    /// Hover carries the definition's own `---` text, from whichever module the
     /// definition lives in: the prelude's documentation is what a reader needs
     /// at `where`, and a local definition's is what they wrote themselves.
     ///
@@ -2386,7 +2386,7 @@ mod tests {
         assert!(!h.contains("---\n\n"), "no doc for a column: {h}");
     }
 
-    /// A column is a field of a record type, so its documentation is the `##`
+    /// A column is a field of a record type, so its documentation is the `---`
     /// block above the field in the signature that named it — one level below
     /// the definition that carries the table.
     const COLUMNS: &str = "--- The user table.\n\
@@ -2989,7 +2989,7 @@ mod tests {
         assert!(prepare_rename(&ws, at("sum .age", 1)).is_err());
     }
 
-    /// Folding: the multi-line definitions, the `##` blocks, and nothing else.
+    /// Folding: the multi-line definitions, the `---` blocks, and nothing else.
     ///
     /// A one-line definition gets no range, because an editor given a range whose
     /// start and end are the same line folds a line into itself. In `SRC` that is
@@ -3074,7 +3074,7 @@ mod tests {
             fs.iter().any(|f| f.start_line == 0
                 && f.end_line == 1
                 && f.kind == Some(FoldingRangeKind::Comment)),
-            "the `##` block: {fs:?}"
+            "the `---` block: {fs:?}"
         );
         // `q` spans lines 3..6. Its range starts at the name, so `q` stays visible.
         let q = fs

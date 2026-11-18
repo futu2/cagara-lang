@@ -1,6 +1,37 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-11-18
+
+**This release renames things, so it is a minor bump rather than a patch.** Three
+spellings changed, one comparison behaves differently, and the comment syntax is
+different from the one every existing file uses. The migration is mechanical and
+`cagara fmt --canonical` is not yet able to do all of it, so the steps are listed
+here in full.
+
+### Migrating from 0.4.x
+
+| Was | Now | How to find it |
+|---|---|---|
+| `month .d`, `day .d`, `year .d` | `monthOfYear .d`, `dayOfMonth .d`, `yearOfDate .d` | grep for the bare names; the compiler reports an unknown name |
+| `t : query { a = int }` where `a`–`c` was a *type variable* | `t : query { a = int }` is a column; type variables are `?a` | the compiler reports an unknown type |
+| `# comment` | `-- comment` (and `{- … -}` for a block) | the compiler reports "`#` is not a comment" at the first one |
+| `/* … */` | `{- … -}` | not a comment any more, so it is a syntax error |
+| `x == nothing` | unchanged source, different SQL: `x IS NULL` | behaviour only — the old form compiled and returned no rows |
+| `& innerJoin q (.<id == .>id)` with a shared `id` | the right one is `right_id` | the output row gains a column |
+
+Mechanically, for the comment spelling — all three forms at once, because doing
+them one at a time turns `##` into `--#`:
+
+```sh
+grep -rl '^[[:space:]]*#' --include='*.cagara' . | xargs sed -i -E \
+  -e 's/^([[:space:]]*)##/---/' \
+  -e 's/^([[:space:]]*)#!/--!/' \
+  -e 's/^([[:space:]]*)#($|[^#!])/\1--\2/'
+```
+
+Run it on a copy first. It is line-anchored, so a trailing `#` comment survives and
+needs a second pass or a manual edit; `#` inside a string literal is untouched
+because the line does not begin with it.
 
 ### Seven wrong answers, and the words to say what you meant
 
@@ -136,6 +167,15 @@ a name.
   `CAGARA_ENGINES` is an allow-list, so the job requires the two engines it installs
   without failing on the three it does not; `CAGARA_REQUIRE_ENGINES` still fails the
   run when an allowed engine is missing. The full five-engine matrix stays local.
+
+- **Tests run under `cargo nextest`**, here and in CI. `cargo test` runs the
+  workspace's 19 test binaries one after another, so a single 30-second binary held
+  the run while the other fifteen cores idled: 103 s, against 47 s for the same 815
+  tests. One runner also means a green local run and a green CI run mean the same
+  thing. nextest does not compile doctests — this workspace has none — so CI runs
+  `cargo test --workspace --doc` as a guard. The slowest tests were split by their
+  natural index (seed range, source file, chain length), which is where most of the
+  speed came from; a single test is a single thread under any runner.
 
 - **Diagnostics carry a kind, and the language server knows the document's dialect.**
   LSP diagnostic codes were inferred from message substrings, so rewording a message

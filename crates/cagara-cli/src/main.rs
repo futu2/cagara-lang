@@ -7,7 +7,7 @@
 //! Prints the SQL for the root file's `main` definition, or with `--only`
 //! another definition; `--types` prints inferred types instead. A file without
 //! `main` is a library and prints nothing. `cagara fmt` formats files in place.
-//! `cagara doc` prints the reference a file carries in its `##` and `#!`
+//! `cagara doc` prints the reference a file carries in its `---` and `--!`
 //! comments. `cagara lsp` runs the language server over stdio.
 
 mod check;
@@ -55,7 +55,7 @@ const USAGE: &str =
                                    [--param NAME[=VALUE]|NAME:TYPE=VALUE]… [--pretty] [--optimize]
                                    [--types] [--list]
        cagara fmt [--check] <files...>   format files in place (`-` for stdin to stdout)
-       cagara doc <files...|-> [--json]  the reference a file carries in `##` comments
+       cagara doc <files...|-> [--json]  the reference a file carries in `---` comments
        cagara doc --prelude              the built-in prelude, documented
        cagara doc <files...> --check     list definitions with no doc comment (warns only)
        cagara check [--json] <path>...    report every file under `path` that does not check

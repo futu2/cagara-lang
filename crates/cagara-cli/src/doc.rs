@@ -1,6 +1,6 @@
 //! `cagara doc`: the reference a file carries in its own comments.
 //!
-//! `##` documents the definition under it, `#!` documents the file (the
+//! `---` documents the definition under it, `--!` documents the file (the
 //! markers are described in [`cagara_syntax::docs`]). This subcommand is what
 //! makes that text useful away from the source: markdown for a person, JSON
 //! with `--json` for a tool, and `--check` for the one question a writer asks
@@ -172,7 +172,7 @@ fn document(
     Ok(())
 }
 
-/// `--check`: say which names carry no `##` documentation.
+/// `--check`: say which names carry no `---` documentation.
 ///
 /// One warning per name rather than per definition: an overload set is one
 /// thing to document, and four warnings for `toDecimal` would read as four

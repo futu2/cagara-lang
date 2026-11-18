@@ -20,7 +20,7 @@ fn read(name: &str) -> String {
 /// Every name a file defines, in order of first appearance, overloads deduped.
 fn names(src: &str) -> BTreeSet<String> {
     src.lines()
-        .filter(|l| !l.starts_with('#') && !l.starts_with(' ') && !l.starts_with('\t'))
+        .filter(|l| !l.starts_with(' ') && !l.starts_with('\t'))
         .filter_map(|l| l.split_once(':'))
         .map(|(n, _)| n.trim().to_string())
         .filter(|n| !n.is_empty() && !n.contains(' '))

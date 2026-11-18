@@ -1440,63 +1440,40 @@ byId : expr { id = int | ?r } int -> query { id = int | ?r } -> query { id = int
 
 ### The prelude at a glance
 
-**Comparison and logic:** `==` `!=` `<` `<=` `>` `>=` `&&` `||` `not`
+This is orientation, not the catalog. `cagara doc --prelude` prints every name with
+its signature and doc comment, generated from the prelude itself — that is the list to
+trust, and the one that cannot drift. What follows is the shape of it, so you know
+what to look up.
 
-**Arithmetic:** `+` `-` `*` `/` `negate` (int and float), `%` (int only), `<>` / `concat`;
-`safeDiv b a` / `safeMod b a` answer `maybe int` instead of failing on a zero divisor;
-`between lo hi x` `ratio whole part` `percentOf whole part`
+| group | the names worth knowing |
+|---|---|
+| logic | `==` `!=` `<` `<=` `>` `>=` `&&` `\|\|` `not` |
+| arithmetic | `+` `-` `*` `/` `%` `negate`, `<>`/`concat`; `safeDiv` `safeMod` for a quotient that can be undefined, `between` `ratio` `percentOf` |
+| strings | `upper` `lower` `trim` `ltrim` `rtrim` `length` `substring` `left` `right` `lpad` `rpad` `replaceAll` `strpos` `contains` `startsWith` `endsWith` `like` `ilike` |
+| dates | `currentDate` `now` `yesterday` `toDate` `toTimestamp` `parseDate` `formatDate`; `add*` and `trunc*` by unit; the field readers `yearOfDate` `monthOfYear` `dayOfMonth` `dayOfWeek` `dayOfYear` `weekOfYear` `hour` `minute`; the name forms `monthName` `dayName`; elapsed counts `daysBetween` `monthsBetween` `secondsBetween` and friends |
+| math | `abs` `round` `roundTo` `floor` `ceil` `sqrt` `cbrt` `exp` `ln` `log2` `log10` `logBase` `power` `sign` `greatest` `least` |
+| aggregates | `count` `countOf` `countDistinct` `sum` `avg` `min` `max` `arrayAgg` `arrayAggBy`, modified by `filtered` `distinctAgg` `over` |
+| nulls | `nothing` `just` `coalesce` `??` `nullIf` `isNull` `isNotNull` `isTrue` `eqMaybe` |
+| casts | `toInt` `toFloat` `toBool` `toString` `toDecimal` and the `try*` forms that answer `maybe` |
+| windows | `rowNumber` `rank` `denseRank` `lag` `lead` `firstValue` `lastValue` `ntile` `percentRank` `cumeDist`, and any aggregate under `over` |
+| conditionals | `ifThenElse` (alias `caseWhen`), and `case { … }` |
 
-**Strings:** `upper` `lower` `trim` `ltrim` `rtrim` `length` `like` `ilike`
-`substring start len s` `left n s` `right n s` `lpad n fill s` `rpad n fill s`
-`replaceAll from to s` `strpos sub s` `contains sub s` `startsWith prefix s`
-`endsWith suffix s`
+Two things the table cannot show. Every aggregate also accepts a `maybe` column —
+`countOfMaybe` and `countDistinctMaybe` are aliases kept for older queries. And
+`arrayAgg` has no order of its own, so its list is whatever the engine produced; use
+`arrayAggBy [asc .ts] .id` when the order matters.
 
-**Dates and timestamps:** `currentDate` `yesterday` `now` `toDate` `toTimestamp` `parseDate`
-`parseTimestamp` `formatDate` `formatTimestamp` `toString`
-`addDays` `addWeeks` `addMonths` `addQuarters` `addYears` `addHours`
-`addMinutes` `addSeconds`; `truncYear` `truncQuarter` `truncMonth` `truncWeek`
-`truncDay` `truncHour` `truncMinute`; `yearOfDate` `quarter` `monthOfYear`
-`dayOfMonth` `dayOfWeek` `dayOfYear` `weekOfYear` `hour` `minute`; `monthName`
-`monthAbbrev` `dayName` `dayAbbrev`; and the elapsed counts — `daysBetween`,
-`weeksBetween`, `monthsBetween`, `quartersBetween`, `yearsBetween`, and
-`secondsBetween` / `minutesBetween` / `hoursBetween` for timestamps
-
-**Math:** `abs` `round` `roundTo digits x` `floor` `ceil` `sqrt` `cbrt` `exp` `ln`
-`log2` `log10` `logBase b x` `power exponent base` `radians` `degrees` `chr` `ascii`
-`sign` (an `int`, on a float too) `greatest a b` `least a b`
-
-**Aggregates:** `count` `countOf` `countDistinct` `sum` `avg` `min` `max`
-`arrayAgg` `arrayAggBy`; `filtered` `distinctAgg` `over`; every one of them also
-accepts a `maybe` column (`countOfMaybe` and `countDistinctMaybe` remain as
-aliases). `arrayAggBy [asc .ts] .id` is the *ordered* list aggregate —
-`arrayAgg` has no order of its own, so its list is whatever the engine produced.
-
-**Nulls:** `nothing` `coalesce` `??` `just` `nullIf` `isNull` `isNotNull` `isTrue`
-`eqMaybe` `whereTrue` (the same filter as `where`, for a `maybe bool`)
-
-**Casts:** `toInt` `toFloat` `toBool` `toString` `toDecimal` `tryInt` `tryFloat` `tryDate` `tryTimestamp` `tryDecimal` (`from*` spellings: `fromString`, `fromInt`, `fromFloat`)
-
-**Windows:** `rowNumber` `rank` `denseRank` `lag` `lead` `lagBy` `leadBy` `firstValue`
-`lastValue` `ntile spec n` `percentRank` `cumeDist` — and any aggregate, made a window
-by `over spec agg`. `lag spec .x` is the previous row; `lagBy spec 12 .x` is twelve
-rows back.
-
-**Conditionals:** `ifThenElse` (alias `caseWhen`), `case { cond => value; ...; true => default }`
-
-Positions are 1-based, as in SQL. `addWeeks` and `addQuarters` are defined in
-Cagara as 7 days and 3 months, so the date units the prelude spells are `DAY`,
-`MONTH` and `YEAR` (with `HOUR`/`MINUTE`/`SECOND` for timestamps), plus
-`WEEK`/`QUARTER` for the `trunc*` helpers; every one of them is a `CAGARA_*`
-intrinsic, not raw SQL.
+Positions are 1-based, as in SQL. `addWeeks` and `addQuarters` are defined in Cagara
+as 7 days and 3 months, so the date units the prelude spells are `DAY`, `MONTH` and
+`YEAR` (plus `HOUR`/`MINUTE`/`SECOND`, and `WEEK`/`QUARTER` for the `trunc*` helpers).
 String literals widen to `date` and `timestamp`, so comparisons read naturally:
 
 ```haskell
 recent = orders & where (.created_at >= "2024-01-01")
 ```
 
-The next section is a working reference for the string and date halves of that
-list: argument order, which types each function accepts, and the traps the
-signatures alone do not tell you about.
+Section 13 is a working reference for the string and date halves: argument order, the
+types each function accepts, and the traps the signatures alone do not tell you about.
 
 ---
 

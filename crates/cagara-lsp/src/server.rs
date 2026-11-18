@@ -2719,12 +2719,21 @@ mod tests {
             "a full replacement with the original text checks again"
         );
 
+        // `shutdown` answers and then waits for `exit`; without it the server thread
+        // sits in its read loop until the 30-second timeout the library imposes, and
+        // `let _ = t.join()` threw that failure away. So this test cost 31 s to prove
+        // a full-document replacement and never checked that the server shut down.
+        // The sibling test above sends `exit` and asserts the join.
         client
             .sender
             .send(request(2, "shutdown", serde_json::Value::Null))
             .unwrap();
         let _ = response(&client, 2);
-        let _ = t.join().unwrap();
+        client
+            .sender
+            .send(notify("exit", serde_json::Value::Null))
+            .unwrap();
+        t.join().unwrap().unwrap();
     }
 
     /// The symbol names in a `documentSymbol` answer, in document order.
@@ -3210,7 +3219,13 @@ mod tests {
             .send(request(4, "shutdown", serde_json::Value::Null))
             .unwrap();
         let _ = response(&client, 4);
-        let _ = t.join().unwrap();
+        // See the note in the sibling test: without `exit` this waits out the
+        // library's 30-second timeout and discards the error.
+        client
+            .sender
+            .send(notify("exit", serde_json::Value::Null))
+            .unwrap();
+        t.join().unwrap().unwrap();
     }
 }
 

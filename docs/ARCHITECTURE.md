@@ -104,7 +104,7 @@ anything above it.
 
 | crate | what it owns | depends on |
 |---|---|---|
-| `cagara-syntax` | lexer, parser, AST, the operator table, the `##` doc comments | — |
+| `cagara-syntax` | lexer, parser, AST, the operator table, the `---` doc comments | — |
 | `cagara-hir` | resolution, the checker, the typed core, the normalizer, the relational arena, erasure to `Rel`, schema validation | syntax |
 | `cagara-sql` | `Rel` → SQL: `rewrite` (`Rel` → `Rel`), `lower` (`Rel` → `Stage`), `stage` (`Stage` → statement), `dialect` (statement → target), `intrinsics` (the `CAGARA_*` templates) | hir |
 | `cagara-fmt` | source formatting, on the lossless rowan tree | syntax |

@@ -60,13 +60,13 @@ maps each common one to its fix.
 ## 1. Program shape
 
 A file is a sequence of imports and definitions. Order does not matter; a definition may refer to
-one written later. Comments start with `#` and run to end of line. Two prefixed forms of comment are
-*documentation* and attach to something: `##` above a definition documents it, `#!` above the first
+one written later. Comments start with `--` and run to end of line; a block comment is `{- … -}` and nests. Two prefixed forms of comment are
+*documentation* and attach to something: `---` above a definition documents it, `--!` above the first
 item documents the file (§1.2). They are ordinary comments to the compiler and change nothing about
 a program.
 
 ```cagara
-# Optional module imports (see §8.3).
+-- Optional module imports (see §8.3).
 users : query { id = int, name = string, age = int, active = bool } =
   table "public" "users"
 
@@ -77,7 +77,7 @@ adults =
   & order [asc .label]
   & limit 10
 
-# The definition printed by `cagara file.cagara`.
+-- The definition printed by `cagara file.cagara`.
 main = adults
 ```
 
@@ -199,44 +199,44 @@ but prints nothing and exits 0.
 
 ### 1.2 Documentation
 
-A `##` line is documentation of the definition directly below it, and a `#!` block above the first
-item is documentation of the file. Nothing is required: a file with no `##` lines means what it did
+A `---` line is documentation of the definition directly below it, and a `--!` block above the first
+item is documentation of the file. Nothing is required: a file with no `---` lines means what it did
 before, and `cagara file.cagara` ignores both forms.
 
 ```cagara
-#! User reporting: the shared user table and the active-user view.
+--! User reporting: the shared user table and the active-user view.
 
-## The user table. The row type is named here because a table's columns come
-## from its signature, not from the database.
+--- The user table. The row type is named here because a table's columns come
+--- from its signature, not from the database.
 users : query {
-    ## The primary key.
+    --- The primary key.
     id = int,
-    ## Display name; two people may share one.
+    --- Display name; two people may share one.
     name = string,
-    ## Age in years.
+    --- Age in years.
     age = int,
-    ## Whether the account is active.
+    --- Whether the account is active.
     active = bool
   } = table "public" "users"
 
-## Adults only, with `name` relabelled for display.
-##
-## `select` drops the columns it does not list; `update` would keep them.
+--- Adults only, with `name` relabelled for display.
+---
+--- `select` drops the columns it does not list; `update` would keep them.
 active_users =
   users
   & where (.age >= 18 && .active)
   & select { id = .id, label = upper .name }
 
-## The definition `cagara file.cagara` prints.
+--- The definition `cagara file.cagara` prints.
 main = active_users
 ```
 
 Attachment is by adjacency, not by indentation or by naming: the block must end on the line
-immediately above the definition, and a blank line or an ordinary `#` comment ends it. A `##` at the
+immediately above the definition, and a blank line or an ordinary `--` comment ends it. A `---` at the
 end of a line of code is a trailing comment and attaches to nothing.
 
 A **column** is a field of a record type, not an item of its own, so it is documented the same way
-one level down: a `##` block above the field, inside the signature that names it. A record written on
+one level down: a `---` block above the field, inside the signature that names it. A record written on
 one line has no such line, so it documents nothing; break the type over several lines to document
 its fields, and `cagara fmt` will lay the record out as §1.2 shows. Hovering a column in the editor
 shows that text too, as long as the row it is read from still comes from the declaration: a column a
@@ -247,7 +247,7 @@ type. The two levels are independent — the block above `users` is the table's,
 
 `cagara doc file.cagara` prints that text as a reference — a section per name, with the inferred
 signature and the field notes, in source order — and `cagara doc --prelude` does the same for the
-prelude, which is how §7 is generated. `cagara doc file.cagara --check` lists the top-level definitions that have no `##`
+prelude, which is how §7 is generated. `cagara doc file.cagara --check` lists the top-level definitions that have no `---`
 block; it **warns and exits 0**, because a missing doc comment is a writing task, not a compile
 error. `--json` prints the same content for a tool to consume.
 
@@ -596,9 +596,9 @@ An expression that reads **no row** is also a value. A function like `year` has 
 expression whose row is still unknown is read as its value wherever a scalar is expected:
 
 ```cagara
-start : date = truncYear currentDate      # a value: nothing here reads a row
-y : int = yearOfDate currentDate           # likewise
-cutoff : date = addDays (-7) currentDate  # so parametric helpers compose
+start : date = truncYear currentDate      -- a value: nothing here reads a row
+y : int = yearOfDate currentDate           -- likewise
+cutoff : date = addDays (-7) currentDate  -- so parametric helpers compose
 ```
 
 That is why there is no second `date -> date` overload of `truncYear`. Adding one beside
@@ -614,7 +614,7 @@ the SQL is the expression's own, since the type was already checked:
 ```cagara
 t : query { a = int, s = string } = table "public" "t"
 
-pinned = t & select { x = (.a : int) }         # `int`, not an unknown
+pinned = t & select { x = (.a : int) }         -- `int`, not an unknown
 ```
 
 It is a check, not a cast: `select { x = (.s : int) }` on that same table is an error — "expected
@@ -627,18 +627,18 @@ one, and a literal is one:
 ```cagara
 t : query { id = int, n = int } = table "public" "t"
 
-grouped = t & agg { k = group .id, xs = arrayAgg .n }        # xs : list int
-fixed   = t & select { threes = [1, 2, 3] }                  # a list literal
+grouped = t & agg { k = group .id, xs = arrayAgg .n }        -- xs : list int
+fixed   = t & select { threes = [1, 2, 3] }                  -- a list literal
 twice   = t & agg { k = group .id, xs = arrayAgg .n }
-            & select { k = .k, both = .xs <> .xs }           # `<>` concatenates lists
-sized   = t & select { n = listLength [1, 2, 3] }            # 3
-found   = t & select { y = listContains [1, 2, 3] 2 }        # true
-ordered = t & agg { k = group .id, xs = arrayAggBy [asc .n] .n }   # the list, sorted
-back    = t & agg { xs = arrayAgg .n } & unnest .xs          # the rows again…
-            & select { n = .value }                          # …as `value`
+            & select { k = .k, both = .xs <> .xs }           -- `<>` concatenates lists
+sized   = t & select { n = listLength [1, 2, 3] }            -- 3
+found   = t & select { y = listContains [1, 2, 3] 2 }        -- true
+ordered = t & agg { k = group .id, xs = arrayAggBy [asc .n] .n }   -- the list, sorted
+back    = t & agg { xs = arrayAgg .n } & unnest .xs          -- the rows again…
+            & select { n = .value }                          -- …as `value`
 lifted  = t & agg { k = group .id, xs = arrayAgg .n }
-            & update { maybe_xs = just .xs }                     # stand-in for a nullable column
-            & select { k = .k, n = lift listLength .maybe_xs }   # a maybe list, measured
+            & update { maybe_xs = just .xs }                     -- stand-in for a nullable column
+            & select { k = .k, n = lift listLength .maybe_xs }   -- a maybe list, measured
 ```
 
 `lift f x` applies `f` to the value inside a `maybe`: `nothing` stays `nothing`, `just v` becomes
@@ -770,8 +770,8 @@ pass through.
 ```cagara
 users : query { id = int, name = string, age = int } = table "public" "users"
 
-picked = users & select { id = .id, label = upper .name }     # id, label
-merged = users & update { age = .age + 1, display = .name }   # id, name, age, display
+picked = users & select { id = .id, label = upper .name }     -- id, label
+merged = users & update { age = .age + 1, display = .name }   -- id, name, age, display
 ```
 
 `select {.a, .b}` is shorthand for `{a = .a, b = .b}`. To rename, write `new = .old`. To drop a
@@ -811,9 +811,9 @@ and every overload emits the same `SUM(x)`.
 
   ```cagara
   & agg {
-      total = sum .amount,                                    # SUM(amount)
-      paid  = filtered (.status == "paid") (sum .amount),     # SUM(CASE WHEN … THEN amount END)
-      who   = distinctAgg (countOf .user_id),                 # COUNT(DISTINCT user_id)
+      total = sum .amount,                                    -- SUM(amount)
+      paid  = filtered (.status == "paid") (sum .amount),     -- SUM(CASE WHEN … THEN amount END)
+      who   = distinctAgg (countOf .user_id),                 -- COUNT(DISTINCT user_id)
     }
   ```
 
@@ -1017,7 +1017,7 @@ last argument, i.e. the query the pipeline supplies, and the one written first i
 a : query { id = int, name = string } = table "public" "a"
 b : query { id = int, name = string } = table "public" "b"
 
-main = a & except b      # a EXCEPT b
+main = a & except b      -- a EXCEPT b
 ```
 
 | Function | Meaning | Duplicates |
@@ -1072,13 +1072,13 @@ and logical operator binds tighter than `&?` — while the named form does
 user : query { name = string, class_room = string, age = int } =
   table "public" "users"
 
-# one condition per `&?`: no parentheses, no `where`
+-- one condition per `&?`: no parentheses, no `where`
 john = user &? .name == "John" &? .class_room == "A01"
 
-# or one `&?` and `&&`: the same single WHERE
+-- or one `&?` and `&&`: the same single WHERE
 also_john = user &? .name == "John" && .class_room == "A01"
 
-# the named form needs the parentheses
+-- the named form needs the parentheses
 named = user & where (.name == "John" && .class_room == "A01")
 ```
 
@@ -1231,7 +1231,7 @@ main =
 The prelude is imported automatically. **Only these names exist** (plus the stage names in §5). If a
 function is missing, write a `sql` template (§8.4) or report it unavailable. The tables below are a
 summary: `cagara doc --prelude` prints the same catalog with each definition's own documentation,
-taken from the `##` blocks in `prelude/core.cagara` (and `prelude/std.cagara`).
+taken from the `---` blocks in `prelude/core.cagara` (and `prelude/std.cagara`).
 
 Notation: signatures are exact for the shown overloads; `expr ?r a` means an expression over the
 current row. A name with several lines is overloaded.
@@ -1631,7 +1631,7 @@ prelude, not in user code.
 `primitive "..."` is internal: it names a built-in operation, and it is how the prelude defines its
 own stages. Writing `primitive "__merge"` yourself is an internal error, because there is no
 query-level `merge` — two queries are combined with a join or a set operation, and `merge ?r ?s` is
-only a row *type* former in signatures (`update` and the joins use it). `# no prelude` on the first
+only a row *type* former in signatures (`update` and the joins use it). `-- no prelude` on the first
 line disables the prelude and requires redefining `table` with `primitive "__table"`; do not use it
 unless the task asks.
 
@@ -1646,7 +1646,7 @@ cagara file.cagara [--dialect NAME] [--only DEF|alias.DEF] [--arg VALUE]…
                     [--pretty] [--optimize] [--types] [--list]
 cagara -                         # read source from stdin
 cagara fmt [--check] <files...>  # format in place; `-` for stdin
-cagara doc <files...|-> [--json] # the reference a file carries in `##` comments
+cagara doc <files...|-> [--json] -- the reference a file carries in `---` comments
 cagara doc --prelude             # the built-in prelude, documented
 cagara doc <files...> --check    # list definitions with no doc comment (warns only)
 cagara lsp                       # language server over stdio
@@ -1686,8 +1686,8 @@ cagara --version                 # also -V; exit 0
   depend on the printed field order.
 - `--pretty` formats the SQL; `--optimize` runs the SQL optimizer.
 - `fmt` is a formatter, not a validity fixer: an unparseable file is left unchanged.
-- `doc` prints the `##` documentation of each top-level definition with its inferred signature and
-  the `##` notes of its record fields, as markdown or with `--json`. It needs no `main` and no well-typed file: a reference is most useful
+- `doc` prints the `---` documentation of each top-level definition with its inferred signature and
+  the `---` notes of its record fields, as markdown or with `--json`. It needs no `main` and no well-typed file: a reference is most useful
   for a file that is still being written. `--check` reports undocumented definitions on stderr and
   exits 0, so it can be run in a loop without failing a build.
 

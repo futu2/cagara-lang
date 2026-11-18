@@ -69,10 +69,18 @@ a name.
 
 ### The language
 
-- **Block comments** `/* … */` nest and may span lines. The Haskell-style `{- … -}`
-  is *not* supported: `{` opens a record here, so `{-` would be ambiguous with a
-  record whose first token is `-`, and a lexer that guesses is worse than one that
-  requires `/*`.
+- **The comments are the Haskell pair.** A line comment is `--` and a block
+  comment is `{- … -}`, which nests and may span lines. The two forms are one
+  family, so there is one thing to remember instead of two unrelated spellings.
+  Documentation moves with them: `---` above a definition documents it and `--!`
+  above the first item documents the file.
+
+  `#` is no longer a comment, and a file that still uses one is told so — "`#` is
+  not a comment: a comment starts with `--`" — rather than "unexpected tokens".
+  `{` opens a record, and what may follow one is a field name, `.name`, `}` or a
+  type, never `-`, so `{-` is unambiguous; the formatter's fuzzer found the one
+  case that is not (`{->`, an unterminated comment) and the formatter now refuses
+  a file it cannot read rather than guessing.
 - **Unicode identifiers.** A column may be named `总金额`; each dialect's own quoting
   is used (`"…"`, `` `…` ``, `[…]`).
 - **Type ascription** `(e : ty)` — the only way to annotate below a definition or a

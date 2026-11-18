@@ -789,7 +789,7 @@ fn imported_dependency_edits_and_locations_match_fresh_compilation() {
     let module = ws.module_for_path(&lib_path).unwrap();
     for source in [
         lib.replace("one", "two"),
-        format!("# moved\n{lib}"),
+        format!("-- moved\n{lib}"),
         "value = false\n".into(),
         lib.into(),
     ] {
@@ -899,7 +899,7 @@ fn cached_relations_keep_current_source_locations() {
     let src = "q : query { a = int } = table \"public\" \"items\"\n";
     let mut ws = Workspace::from_source(src);
     assert!(!has_errors(&compile(&ws)));
-    assert!(ws.set_source(ws.root, format!("# moved\n{src}")));
+    assert!(ws.set_source(ws.root, format!("-- moved\n{src}")));
     let cached = compile(&ws);
     let fresh = compile_checked(&ws, &crate::check::check(&ws));
     assert_eq!(
@@ -1103,7 +1103,7 @@ fn a_move_rechecks_nothing_and_reuses_every_elaboration() {
 
     // Two comment lines above everything, so every definition moves by the same
     // distance and none of them is touched.
-    assert!(ws.set_source(ws.root, format!("# moved\n# twice\n{src}")));
+    assert!(ws.set_source(ws.root, format!("-- moved\n-- twice\n{src}")));
     let moved = compile(&ws);
 
     assert_eq!(
@@ -1161,10 +1161,10 @@ fn a_kept_definition_answers_span_lookups_in_current_coordinates() {
                b = a + 2\n";
     let mut ws = Workspace::from_source(src);
     compile(&ws);
-    assert!(ws.set_source(ws.root, format!("# moved\n{src}")));
+    assert!(ws.set_source(ws.root, format!("-- moved\n{src}")));
 
     let edited = crate::check::check(&ws);
-    let fresh = Workspace::from_source(&format!("# moved\n{src}"));
+    let fresh = Workspace::from_source(&format!("-- moved\n{src}"));
     let fresh_check = crate::check::check(&fresh);
     let mut asked = 0;
     for def in &ws.modules[ws.root].module.defs {

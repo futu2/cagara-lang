@@ -1255,7 +1255,9 @@ pub fn folding_ranges(ws: &Workspace) -> Vec<FoldingRange> {
     let mut run: Option<(usize, usize)> = None;
     for (i, line) in text.lines().enumerate() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("##") {
+        // The doc marker, from the one place it is defined: the LSP folds the same
+        // blocks the parser reads as documentation.
+        if trimmed.starts_with(cagara_syntax::docs::ITEM_MARKER) {
             run = match run {
                 Some((first, _)) => Some((first, i)),
                 None => Some((i, i)),
@@ -2387,19 +2389,19 @@ mod tests {
     /// A column is a field of a record type, so its documentation is the `##`
     /// block above the field in the signature that named it — one level below
     /// the definition that carries the table.
-    const COLUMNS: &str = "## The user table.\n\
+    const COLUMNS: &str = "--- The user table.\n\
                            users : query {\n\
-                           \x20   ## The primary key.\n\
+                           \x20   --- The primary key.\n\
                            \x20   id = int,\n\
-                           \x20   ## Age in years.\n\
+                           \x20   --- Age in years.\n\
                            \x20   age = int\n\
                            \x20 } = table \"p\" \"users\"\n\
                            \n\
-                           ## The order table.\n\
+                           --- The order table.\n\
                            orders : query {\n\
-                           \x20   ## The amount charged.\n\
+                           \x20   --- The amount charged.\n\
                            \x20   amount = float,\n\
-                           \x20   ## The user who placed it.\n\
+                           \x20   --- The user who placed it.\n\
                            \x20   user_id = int\n\
                            \x20 } = table \"p\" \"orders\"\n\
                            \n\
@@ -2449,7 +2451,7 @@ mod tests {
         let h = hover(&ws, at_in(COLUMNS, "id = int", 1)).expect("a hover");
         assert_eq!(h, "The primary key.");
         // A field with no block says nothing, rather than an empty tooltip.
-        let src = "users : query {\n    ## Key.\n    id = int,\n    name = string\n  } = table \"p\" \"t\"\n\n\
+        let src = "users : query {\n    --- Key.\n    id = int,\n    name = string\n  } = table \"p\" \"t\"\n\n\
                    q = users\n";
         let ws = Workspace::open_with(
             Path::new("/nonexistent/plain-fields.cagara"),
@@ -2465,7 +2467,7 @@ mod tests {
     /// other stage's.
     #[test]
     fn an_alias_and_a_shorthand_still_reach_the_declaration() {
-        let src = "## T.\nusers : query {\n    ## Age.\n    age = int\n  } = table \"p\" \"t\"\n\n\
+        let src = "--- T.\nusers : query {\n    --- Age.\n    age = int\n  } = table \"p\" \"t\"\n\n\
                    alias = users\n\
                    via_alias = alias & where (.age > 0)\n\
                    shorthand = users & where (.age > 0)\n\
@@ -2503,7 +2505,7 @@ mod tests {
     /// would be about a name that the record does not have.
     #[test]
     fn a_renamed_column_has_no_documentation() {
-        let src = "## T.\nusers : query {\n    ## Key.\n    id = int\n  } = table \"p\" \"t\"\n\n\
+        let src = "--- T.\nusers : query {\n    --- Key.\n    id = int\n  } = table \"p\" \"t\"\n\n\
                    q = users & prefix \"u_\" & where (.u_id > 0)\n";
         let ws = Workspace::open_with(Path::new("/nonexistent/prefixed.cagara"), src.to_string());
         let h = hover(&ws, at_in(src, "where (.u_id", 9)).unwrap();
@@ -3054,8 +3056,8 @@ mod tests {
 
     #[test]
     fn folding_covers_definitions_and_doc_blocks() {
-        let src = "## A file about users.\n\
-                   ## It spans two lines.\n\
+        let src = "--- A file about users.\n\
+                   --- It spans two lines.\n\
                    users : query { id = int, name = string } = table \"p\" \"users\"\n\
                    q = users & select {\n\
                    \x20 id = .id,\n\

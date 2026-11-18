@@ -47,7 +47,7 @@ struct ProbeSlot {
 /// would let an ordinary comment mentioning the phrase opt a file out by
 /// accident, and the failure would be a hundred unknown-name errors rather
 /// than a diagnostic about the marker.
-const NO_PRELUDE: &str = "# no prelude";
+const NO_PRELUDE: &str = "-- no prelude";
 
 fn opts_out_of_prelude(text: &str) -> bool {
     text.lines()
@@ -876,7 +876,7 @@ impl Workspace {
         let parsed = parse_module(&self.db, file).clone();
 
         // The prelude is imported implicitly — unless the file opts out with
-        // `# no prelude` on its first line. Opting out removes the *names*
+        // `-- no prelude` on its first line. Opting out removes the *names*
         // only: the grammar is the compiler's, so `1 + 2` still parses and
         // `_+_` is simply a name this module has not defined. That is what
         // makes a user's own prelude possible: turn the implicit one off and
@@ -1872,7 +1872,7 @@ mod tests {
         );
     }
 
-    /// `# no prelude` on the first line removes the implicit import, and with
+    /// `-- no prelude` on the first line removes the implicit import, and with
     /// it every name the prelude defines — but not the grammar.
     ///
     /// That split is the whole point: `&`, `where` and `+` are the compiler's
@@ -1892,7 +1892,7 @@ mod tests {
                 .collect()
         };
 
-        let errors = msgs("# no prelude\nq = table \"s\" \"t\"\n");
+        let errors = msgs("-- no prelude\nq = table \"s\" \"t\"\n");
         assert!(
             errors.iter().any(|m| m.contains("unknown name `table`")),
             "{errors:?}"
@@ -1907,7 +1907,7 @@ mod tests {
         // `primitive` form, which needs no import because it is a body form
         // rather than a name.
         let errors = msgs(
-            "# no prelude\n\
+            "-- no prelude\n\
              table : string -> string -> query ?r = primitive \"__table\"\n\
              t : query { a = int } = table \"s\" \"t\"\n",
         );
@@ -1922,7 +1922,7 @@ mod tests {
             // In the prelude itself: the form is spelled, not the name.
             "q = __where\n",
             // And in a module that opted out.
-            "# no prelude\nq = __where\n",
+            "-- no prelude\nq = __where\n",
         ] {
             let ws = Workspace::from_source(src);
             let tc = crate::check::check(&ws);
@@ -1945,11 +1945,11 @@ mod tests {
     fn the_opt_out_marker_is_exact() {
         for src in [
             // Leading whitespace, or anything after it, is not the marker.
-            " # no prelude\nq = 1\n",
+            " -- no prelude\nq = 1\n",
             "# no prelude \nq = 1\n",
             "# no prelude, please\nq = 1\n",
             // Not on the first line.
-            "# a comment\n# no prelude\nq = 1\n",
+            "# a comment\n-- no prelude\nq = 1\n",
         ] {
             // `upper` is the prelude's, so it resolving proves the prelude is
             // still there.
@@ -1966,7 +1966,7 @@ mod tests {
             );
         }
         // A trailing `\r` from a CRLF file is the one thing tolerated.
-        let ws = Workspace::from_source("# no prelude\r\nq = table \"s\" \"t\"\n");
+        let ws = Workspace::from_source("-- no prelude\r\nq = table \"s\" \"t\"\n");
         let tc = crate::check::check(&ws);
         assert!(
             tc.errors()

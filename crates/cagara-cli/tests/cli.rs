@@ -1148,7 +1148,7 @@ fn param_overrides_a_value_the_file_declares() {
     let dir = TempDir::new("param-override");
     let path = dir.write(
         "q.cagara",
-        "## How many rows to keep.\n\
+        "--- How many rows to keep.\n\
          rows_n : int = 5\n\
          t : query { id = int } = table \"s\" \"t\"\n\
          q = t & limit rows_n\n",
@@ -1304,12 +1304,12 @@ fn the_editor_and_the_command_line_agree() {
     // column differ, which is exactly the case the conversion can get wrong.
     let src = "t : query { id = int, name = string } = table \"s\" \"t\"\n\
                o : query { id = int, user_id = int } = table \"s\" \"o\"\n\n\
-               # 🎉🎉\n\
+               -- 🎉🎉\n\
                a = t & select { .nope }\n\
                b = t & select { x = upper .id }\n\
                c = t & select { .id } & where (.id)\n\
-               # A join whose inputs share `id`: a warning, and both paths must\n\
-               # report it with the same severity and position.\n\
+               -- A join whose inputs share `id`: a warning, and both paths must\n\
+               -- report it with the same severity and position.\n\
                d = t & innerJoin o (.<id == .>user_id)\n";
     let path = dir.write("p.cagara", src);
 

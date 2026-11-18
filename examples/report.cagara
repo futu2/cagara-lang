@@ -1,52 +1,52 @@
-#! One report per feature: filtering, projection, aggregation, windows, joins,
-#! nulls, and the operator shorthands.
-#!
-#! The prelude is imported automatically. Run it to see the SQL `main` compiles
-#! to (`cagara examples/report.cagara`), and read the file as a tour.
+--! One report per feature: filtering, projection, aggregation, windows, joins,
+--! nulls, and the operator shorthands.
+--!
+--! The prelude is imported automatically. Run it to see the SQL `main` compiles
+--! to (`cagara examples/report.cagara`), and read the file as a tour.
 
-## The user table, with its columns named by hand: a table's row type comes from
-## its signature, so `users` is what every `.name` below is checked against, and
-## the `##` blocks here are the reference for those columns.
+--- The user table, with its columns named by hand: a table's row type comes from
+--- its signature, so `users` is what every `.name` below is checked against, and
+--- the `##` blocks here are the reference for those columns.
 users : query {
-    ## The primary key.
+    --- The primary key.
     id = int,
-    ## Display name; two people may share one.
+    --- Display name; two people may share one.
     name = string,
-    ## Age in years, which is why `addYears` below is a date function only.
+    --- Age in years, which is why `addYears` below is a date function only.
     age = int,
-    ## Whether the account is active. Filtering on it is `&? .active`.
+    --- Whether the account is active. Filtering on it is `&? .active`.
     active = bool
   } = table "public" "users"
 
-## The order table: one row per order.
+--- The order table: one row per order.
 orders : query {
-    ## The primary key.
+    --- The primary key.
     id = int,
-    ## The user who placed it. Joins reach this side as `.>user_id`.
+    --- The user who placed it. Joins reach this side as `.>user_id`.
     user_id = int,
-    ## The charged amount, in the currency of the source table — a `float`, so
-    ## sums of it are approximate.
+    --- The charged amount, in the currency of the source table — a `float`, so
+    --- sums of it are approximate.
     amount = float,
-    ## Free text the source system writes; filterable but not enumerable.
+    --- Free text the source system writes; filterable but not enumerable.
     status = string,
-    ## The day the order was placed — a `date`, not a `timestamp`, so it has no
-    ## hour to truncate.
+    --- The day the order was placed — a `date`, not a `timestamp`, so it has no
+    --- hour to truncate.
     created_at = date
   } = table "public" "orders"
 
-## Filtering, projection, ordering and paging in one pipeline, written with the
-## stage shorthands: `&?` is `where`, `&=` is `select`, `&.` is `order`, `&-` is
-## `limit`. They are the same calls — a shorthand is a wrapper in the prelude —
-## and they save the parentheses a named form needs, because application binds
-## tighter than every operator while `&?` sits below the comparisons:
-##
-##     users &? .age >= 18                     -- a condition, no brackets
-##     users &? .name == "ann" && .active      -- two of them, one WHERE
-##     users & where (.age >= 18)              -- the named form needs brackets
-##
-## `select` renames (`label`) and recomputes (`next_age`) as it projects;
-## columns not listed are dropped, which is why `select` is the projection and
-## `update` is the merge.
+--- Filtering, projection, ordering and paging in one pipeline, written with the
+--- stage shorthands: `&?` is `where`, `&=` is `select`, `&.` is `order`, `&-` is
+--- `limit`. They are the same calls — a shorthand is a wrapper in the prelude —
+--- and they save the parentheses a named form needs, because application binds
+--- tighter than every operator while `&?` sits below the comparisons:
+---
+---     users &? .age >= 18                     -- a condition, no brackets
+---     users &? .name == "ann" && .active      -- two of them, one WHERE
+---     users & where (.age >= 18)              -- the named form needs brackets
+---
+--- `select` renames (`label`) and recomputes (`next_age`) as it projects;
+--- columns not listed are dropped, which is why `select` is the projection and
+--- `update` is the merge.
 adults =
   users
   &? .age >= 18
@@ -55,14 +55,14 @@ adults =
   &. [asc .label]
   &- 10
 
-## Aggregation, then a filter on the aggregate's own result. The filter belongs
-## to the aggregate, so it is emitted as `HAVING` on the same statement rather
-## than as a derived table the query then filters — every column it can name is
-## a grouping key or an aggregate value, which is exactly what `HAVING` reads.
-## See "Current boundaries" in docs/PLAN.md for the cases that do wrap.
-##
-## `coalesce 0.0 .revenue` is there because `sum` is `maybe`: every aggregate
-## that can be NULL says so in its type.
+--- Aggregation, then a filter on the aggregate's own result. The filter belongs
+--- to the aggregate, so it is emitted as `HAVING` on the same statement rather
+--- than as a derived table the query then filters — every column it can name is
+--- a grouping key or an aggregate value, which is exactly what `HAVING` reads.
+--- See "Current boundaries" in docs/PLAN.md for the cases that do wrap.
+---
+--- `coalesce 0.0 .revenue` is there because `sum` is `maybe`: every aggregate
+--- that can be NULL says so in its type.
 revenue =
   orders
   & where (.status == "paid")
@@ -70,20 +70,20 @@ revenue =
   & where (.n >= 5)
   & order [desc (coalesce 0.0 .revenue)]
 
-## A window spec, shared by the definitions below: partition by user, newest
-## first. Written once because two windows want the same ordering.
+--- A window spec, shared by the definitions below: partition by user, newest
+--- first. Written once because two windows want the same ordering.
 spec = { partition = [.user_id], order = [desc .created_at] }
 
-## The latest three orders per user: number the rows within each partition, then
-## filter on the number. The filter cannot be in the same `select` — a window
-## function is evaluated after filtering — so it is the next stage.
+--- The latest three orders per user: number the rows within each partition, then
+--- filter on the number. The filter cannot be in the same `select` — a window
+--- function is evaluated after filtering — so it is the next stage.
 latest =
   orders
   & select { id = .id, user_id = .user_id, rn = rowNumber spec }
   & where (.rn <= 3)
 
-## A running total per user: `over` with `runningFrame`, which is the frame
-## from the partition's start to the current row.
+--- A running total per user: `over` with `runningFrame`, which is the frame
+--- from the partition's start to the current row.
 running =
   orders
   & select {
@@ -93,20 +93,20 @@ running =
     )
   }
 
-## A join, read in stages: the names are made unique before the join (both
-## tables have an `id`), then the joined row is projected. `orders ? on` is
-## `innerJoin orders on`, with the piped query as the left side. `.<x` is the
-## left side of the join, `.>x` the right.
+--- A join, read in stages: the names are made unique before the join (both
+--- tables have an `id`), then the joined row is projected. `orders ? on` is
+--- `innerJoin orders on`, with the piped query as the left side. `.<x` is the
+--- left side of the join, `.>x` the right.
 order_names =
   orders
   &= { .user_id, .amount, order_id = .id }
   & users ? (.<user_id == .>id)
   &= { order_id = .order_id, name = .name, amount = .amount }
 
-## Nulls are explicit: the right side of a left join is `maybe`, and so are
-## `sum` / `avg` / `min` / `max`. Operators take non-null values, so each one is
-## `coalesce`d — `0.0` for money, and a count built from a test rather than
-## `count`, so that a user with no orders is 0 and not NULL.
+--- Nulls are explicit: the right side of a left join is `maybe`, and so are
+--- `sum` / `avg` / `min` / `max`. Operators take non-null values, so each one is
+--- `coalesce`d — `0.0` for money, and a count built from a test rather than
+--- `count`, so that a user with no orders is 0 and not NULL.
 user_totals =
   users
   & (orders &= { user_id = .user_id, amount = .amount, status = .status }) <? (.<id == .>user_id)
@@ -116,10 +116,10 @@ user_totals =
     orders = coalesce 0 (sum (ifThenElse (isNotNull .user_id) 1 0))
   }
 
-## The same report as `user_totals`, for active users, written with the
-## shorthands end to end: `&?` (`where`), `&*` (`agg`), `&.` (`order`), `&-`
-## (`limit`). `??` is `coalesce`, and `<?` is `leftJoin` — the left side keeps
-## every row, so `sum .amount` stays `maybe` and the `??` is what makes it 0.
+--- The same report as `user_totals`, for active users, written with the
+--- shorthands end to end: `&?` (`where`), `&*` (`agg`), `&.` (`order`), `&-`
+--- (`limit`). `??` is `coalesce`, and `<?` is `leftJoin` — the left side keeps
+--- every row, so `sum .amount` stays `maybe` and the `??` is what makes it 0.
 active_totals =
   users
   &? .active
@@ -128,6 +128,6 @@ active_totals =
   &. [desc .total]
   &- 20
 
-## The aggregate report is what `cagara report.cagara` prints: a file runs one
-## query, and `main` is how it says which.
+--- The aggregate report is what `cagara report.cagara` prints: a file runs one
+--- query, and `main` is how it says which.
 main = revenue

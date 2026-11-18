@@ -716,7 +716,7 @@ mod tests {
     /// commented definition would otherwise get a stray leading position.
     #[test]
     fn a_doc_block_does_not_move_the_definition_span() {
-        let src = "## Docs.\nmain = 1\n";
+        let src = "--- Docs.\nmain = 1\n";
         let (m, _) = lower_source(src);
         let start = m.defs[0].span.start as usize;
         assert_eq!(&src[start..start + 4], "main");
@@ -960,13 +960,13 @@ mod catalog_tests {
         assert!(matches!(&inner.kind, ExprKind::Name(n) if n == "table"));
     }
 
-    /// A `##` block above an entry documents that entry.
+    /// A `---` block above an entry documents that entry.
     ///
     /// The generated definition's span starts at the entry's name, which is what
     /// connects the two — the same rule every other definition uses.
     #[test]
     fn an_entrys_doc_block_reaches_its_definition() {
-        let src = "catalog \"s\" {\n  ## The users.\n  users = { id = int }\n}\n";
+        let src = "catalog \"s\" {\n  --- The users.\n  users = { id = int }\n}\n";
         let (m, errors) = lower_source(src);
         assert!(errors.is_empty(), "{errors:?}");
         let doc = crate::docs::item_doc(src, m.defs[0].span.start as usize);

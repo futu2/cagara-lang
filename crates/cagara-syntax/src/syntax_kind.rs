@@ -174,17 +174,28 @@ kind_table! {
         // consumes the rest of the input can hide a later token. Here that is the
         // intent — the newline is excluded, so the token stops at the line's end and
         // nothing after it is swallowed.
-        Comment TRIVIA #[regex(r"#[^\r\n]*", allow_greedy = true)],
-        /// A `/* … */` block comment, which may span lines and **nests**:
-        /// `/* a /* b */ c */` is one comment, so commenting out a region that
+        // `--` rather than `#`, and `{- … -}` rather than `/* … */`: the two
+        // comment forms are one family, and it is the Haskell one — which is
+        // where this language's type system comes from, so a reader arriving from
+        // there finds the comments where they left them.
+        //
+        // `--` is two `Minus` tokens today, which no program means: `a -- b` is
+        // not a subtraction, and `a - -b` is how a double negation is written.
+        // The pattern is listed before `Minus`, so the pair wins.
+        Comment TRIVIA #[regex(r"--[^\r\n]*", allow_greedy = true)],
+        /// A `{- … -}` block comment, which may span lines and **nests**:
+        /// `{- a {- b -} c -}` is one comment, so commenting out a region that
         /// already contains a block comment works.
         ///
         /// Scanned by hand ([`crate::lexer::scan_block_comment`]) rather than by
         /// a `logos` pattern, for the same reason [`SyntaxKind::String`] is:
         /// a regular expression cannot count, so it cannot match a nested pair.
         /// It is trivia, so the parser never sees it.
+        ///
+        /// `{-` is unambiguous: `{` opens a record, and what may follow one is a
+        /// field name, `.name`, `}` or a type — never `-`.
         BlockComment TRIVIA,
-        /// `/*` with no closing `*/`. Distinct from [`SyntaxKind::Error`] so the
+        /// `{-` with no closing `-}`. Distinct from [`SyntaxKind::Error`] so the
         /// reader is told the comment is unclosed rather than that some token is
         /// unexpected.
         UnterminatedComment,

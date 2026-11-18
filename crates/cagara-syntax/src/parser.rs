@@ -48,15 +48,27 @@ pub fn parse_with(input: &str, ops: &Ops) -> Parse {
     p.file();
     // An unclosed block comment is *trivia*, so the parser skips past it and
     // would never report it — and because the comment runs to the end of the
-    // input, every definition after the `/*` would vanish with no diagnostic.
+    // input, every definition after the `{-` would vanish with no diagnostic.
     // Reported here from the lexeme list, which still holds every token, rather
     // than from the tree, where the token has been folded into trivia.
+    //
+    // A bare `#` is reported too. It was the line-comment spelling until the
+    // comments became the Haskell pair (`--`, `{- … -}`), so every file written
+    // before that change has one, and "unexpected tokens after definition" at the
+    // first `#` is the least useful thing that could be said about it.
     for lexeme in &p.toks {
-        if lexeme.kind == Token::UnterminatedComment {
-            p.errors.push(ParseError {
+        match lexeme.kind {
+            Token::UnterminatedComment => p.errors.push(ParseError {
                 offset: lexeme.offset,
-                message: "unterminated block comment: `/*` must be closed by `*/`".to_string(),
-            });
+                message: "unterminated block comment: `{-` must be closed by `-}`".to_string(),
+            }),
+            Token::Error if lexeme.text == "#" => p.errors.push(ParseError {
+                offset: lexeme.offset,
+                message: "`#` is not a comment: a comment starts with `--`, and a block \
+                          comment is `{- … -}`"
+                    .to_string(),
+            }),
+            _ => {}
         }
     }
     Parse {
@@ -1324,6 +1336,30 @@ mod tests {
         assert_eq!(p.syntax().children().count(), 2);
     }
 
+    /// A `#` is no longer a comment, and saying so beats "unexpected tokens".
+    #[test]
+    fn a_hash_is_reported_as_the_old_comment_spelling() {
+        let p = parse("x : int = 1 # nope\n");
+        let msgs: Vec<&str> = p.errors.iter().map(|e| e.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("`#` is not a comment")),
+            "{msgs:?}"
+        );
+        assert!(msgs.iter().any(|m| m.contains("`--`")), "{msgs:?}");
+    }
+
+    /// An unclosed `{-` is reported, with the spelling it is looking for.
+    #[test]
+    fn an_unclosed_block_comment_names_its_delimiter() {
+        let p = parse("x : int = 1\n{- unterminated\n");
+        let msgs: Vec<&str> = p.errors.iter().map(|e| e.message.as_str()).collect();
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("`{-` must be closed by `-}`")),
+            "{msgs:?}"
+        );
+    }
+
     #[test]
     fn projection_vs_field_argument() {
         assert_eq!(body("x = m.users"), "(ProjExpr (NameRef m) .users)");
@@ -1597,7 +1633,10 @@ mod tests {
         // add an "expected `)`" apiece while unwinding. The next definition
         // parses normally, and its own errors are still reported.
         let deep_parens = format!("x = {}1{}\ny = 2\n", "(".repeat(4000), ")".repeat(4000));
-        let deep_neg = format!("x = {}1\ny = 2\n", "-".repeat(4000));
+        // `-` repeated is a *comment* now (`--`), so the negation chain is
+        // written with spaces between the signs. It is the same nesting depth and
+        // still a stack-overflow shape.
+        let deep_neg = format!("x = {}1\ny = 2\n", "- ".repeat(4000));
         let long_chain = format!("x = 1{}\ny = 2\n", " + 1".repeat(4000));
         for src in [deep_parens, deep_neg, long_chain] {
             let p = parse(&src);

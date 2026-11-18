@@ -34,8 +34,10 @@ pub fn lex(input: &str) -> Vec<Lexeme<'_>> {
     let mut pos = 0usize;
     while pos < input.len() {
         let rest = &input[pos..];
-        // `/*` would otherwise lex as `Slash` then `Star`.
-        if rest.starts_with("/*") {
+        // `{-` would otherwise lex as `{` then `Minus`. It cannot be a record:
+        // what may follow `{` is a field name, `.name`, `}` or a type, and none
+        // of them starts with `-`.
+        if rest.starts_with("{-") {
             let (kind, end) = scan_block_comment(input, pos);
             out.push(Lexeme {
                 kind,
@@ -151,11 +153,11 @@ fn scan_block_comment(input: &str, start: usize) -> (Token, usize) {
     let mut depth = 1usize;
     while let Some(&byte) = bytes.get(i) {
         match byte {
-            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+            b'{' if bytes.get(i + 1) == Some(&b'-') => {
                 depth += 1;
                 i += 2;
             }
-            b'*' if bytes.get(i + 1) == Some(&b'/') => {
+            b'-' if bytes.get(i + 1) == Some(&b'}') => {
                 depth -= 1;
                 i += 2;
                 if depth == 0 {
@@ -250,7 +252,7 @@ mod tests {
 
     #[test]
     fn comments_are_trivia_and_lossless() {
-        let src = "x = 1 # c\ny = 2";
+        let src = "x = 1 -- c\ny = 2";
         let toks = lex(src);
         let rebuilt: String = toks.iter().map(|l| l.text).collect();
         assert_eq!(rebuilt, src);
@@ -259,7 +261,7 @@ mod tests {
 
     #[test]
     fn block_comments_are_trivia_and_lossless() {
-        let src = "x = 1\n/* a /* nested */ still */\ny = 2";
+        let src = "x = 1\n{- a {- nested -} still -}\ny = 2";
         let toks = lex(src);
         let rebuilt: String = toks.iter().map(|l| l.text).collect();
         assert_eq!(rebuilt, src, "the token stream must rebuild the source");
@@ -268,18 +270,18 @@ mod tests {
             .filter(|l| l.kind == Token::BlockComment)
             .map(|l| l.text)
             .collect();
-        assert_eq!(blocks, vec!["/* a /* nested */ still */"]);
+        assert_eq!(blocks, vec!["{- a {- nested -} still -}"]);
         // The nested `*/` does not end it, so `y` is still a token.
         assert!(toks.iter().any(|l| l.kind == Token::Ident && l.text == "y"));
     }
 
     #[test]
     fn a_block_comment_may_span_lines() {
-        let toks = lex("/* one\n   two */\nx");
+        let toks = lex("{- one\n   two -}\nx");
         let rebuilt: String = toks.iter().map(|l| l.text).collect();
-        assert_eq!(rebuilt, "/* one\n   two */\nx");
+        assert_eq!(rebuilt, "{- one\n   two -}\nx");
         assert_eq!(toks[0].kind, Token::BlockComment);
-        assert_eq!(toks[0].text, "/* one\n   two */");
+        assert_eq!(toks[0].text, "{- one\n   two -}");
     }
 
     /// An unclosed block comment is reported, not silently swallowed.
@@ -289,12 +291,12 @@ mod tests {
     /// vanish with no diagnostic.
     #[test]
     fn an_unclosed_block_comment_has_its_own_kind() {
-        let toks = lex("/* never closed\nx = 1");
+        let toks = lex("{- never closed\nx = 1");
         assert_eq!(toks[0].kind, Token::UnterminatedComment);
-        assert_eq!(toks[0].text, "/* never closed\nx = 1");
+        assert_eq!(toks[0].text, "{- never closed\nx = 1");
         // Still lossless.
         let rebuilt: String = toks.iter().map(|l| l.text).collect();
-        assert_eq!(rebuilt, "/* never closed\nx = 1");
+        assert_eq!(rebuilt, "{- never closed\nx = 1");
     }
 
     /// A `#` *inside* a string is string content, and the `#` comment pattern
@@ -307,7 +309,7 @@ mod tests {
     /// boundary is what keeps `logos` inside unclaimed text.
     #[test]
     fn a_hash_inside_a_string_does_not_start_a_comment() {
-        let src = "a = \"x # not a comment\"\nb = 2";
+        let src = "a = \"x -- not a comment\"\nb = 2";
         let toks = lex(src);
         assert!(
             !toks.iter().any(|l| l.kind == Token::Comment),
@@ -337,7 +339,7 @@ mod tests {
     /// token, so nothing was reported and the tree still round-tripped.
     #[test]
     fn a_comment_ends_at_a_bare_carriage_return() {
-        for src in ["a = 1 # c\rb = 2\r", "a = 1 # c\r\nb = 2\r\n"] {
+        for src in ["a = 1 -- c\rb = 2\r", "a = 1 -- c\r\nb = 2\r\n"] {
             let idents: Vec<_> = lex(src)
                 .into_iter()
                 .filter(|l| l.kind == Token::Ident)
@@ -349,7 +351,7 @@ mod tests {
                 .into_iter()
                 .find(|l| l.kind == Token::Comment)
                 .expect("a comment");
-            assert_eq!(comment.text, "# c", "{src:?}");
+            assert_eq!(comment.text, "-- c", "{src:?}");
         }
     }
 

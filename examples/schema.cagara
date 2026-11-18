@@ -1,17 +1,17 @@
-#! Shared table definitions, imported by public.cagara.
-#!
-#! A library: it has no `main`, so `cagara schema.cagara` prints nothing and
-#! succeeds. Import it with an alias (`import "schema.cagara" as s`) and read a
-#! table as `s.users`.
+--! Shared table definitions, imported by public.cagara.
+--!
+--! A library: it has no `main`, so `cagara schema.cagara` prints nothing and
+--! succeeds. Import it with an alias (`import "schema.cagara" as s`) and read a
+--! table as `s.users`.
 
-## The user table. `password_hash` is here and dropped at the import site: a
-## table definition describes the table, and what may be published is decided
-## where the query is written.
+--- The user table. `password_hash` is here and dropped at the import site: a
+--- table definition describes the table, and what may be published is decided
+--- where the query is written.
 users : query {
-    ## The primary key.
+    --- The primary key.
     id = int,
-    ## The name, as the person writes it — not necessarily unique.
+    --- The name, as the person writes it — not necessarily unique.
     name = string,
-    ## Never selected by `public.cagara`: hashes are not published.
+    --- Never selected by `public.cagara`: hashes are not published.
     password_hash = string
   } = table "public" "users"

@@ -1,4 +1,4 @@
-//! `cagara doc`: the reference a file carries in its `##` and `#!` comments.
+//! `cagara doc`: the reference a file carries in its `---` and `--!` comments.
 //!
 //! The behaviour under test is the whole path — marker, attachment to the
 //! definition, inferred signature, and the two renderings — because the point
@@ -55,12 +55,12 @@ fn repo_root() -> PathBuf {
 }
 
 /// A documented query file: one definition with a doc block, one without.
-const DOCUMENTED: &str = "#! The counting file.\n\
+const DOCUMENTED: &str = "--! The counting file.\n\
                           \n\
-                          ## Counts the rows.\n\
+                          --- Counts the rows.\n\
                           rows : query { a = int } = table \"s\" \"t\"\n\
                           \n\
-                          ## The answer.\n\
+                          --- The answer.\n\
                           main = rows & select { x = .a }\n";
 
 #[test]
@@ -103,7 +103,7 @@ fn check_warns_and_still_succeeds() {
     let f = dir.write(
         "q.cagara",
         "rows : query { a = int } = table \"s\" \"t\"\n\
-         ## Documented.\n\
+         --- Documented.\n\
          main = rows & select { x = .a }\n",
     );
     let out = doc(&f, &["--check"]);
@@ -138,7 +138,7 @@ fn an_overload_set_is_documented_and_reported_once() {
     let dir = TempDir::new("overload");
     let f = dir.write(
         "q.cagara",
-        "## Adds a column up.\n\
+        "--- Adds a column up.\n\
          total : expr ?r int -> agg (expr ?r (maybe int)) = sql \"SUM($1)\"\n\
          total : expr ?r float -> agg (expr ?r (maybe float)) = sql \"SUM($1)\"\n\
          t : query { a = int } = table \"s\" \"t\"\n\
@@ -162,18 +162,18 @@ fn an_overload_set_is_documented_and_reported_once() {
 }
 
 /// A table's columns are fields of one definition, so a column's documentation
-/// is the `##` block above the field in the signature that names it. It prints
+/// is the `---` block above the field in the signature that names it. It prints
 /// under that definition, not as a section of its own.
-const FIELDS: &str = "## The user table.\n\
+const FIELDS: &str = "--- The user table.\n\
                       users : query {\n\
-                      \x20 ## The primary key.\n\
+                      \x20 --- The primary key.\n\
                       \x20 id = int,\n\
-                      \x20 ## The name, as the person writes it.\n\
+                      \x20 --- The name, as the person writes it.\n\
                       \x20 name = string,\n\
                       \x20 password_hash = string\n\
                       } = table \"public\" \"users\"\n\
                       \n\
-                      ## The answer.\n\
+                      --- The answer.\n\
                       main = users\n";
 
 #[test]
@@ -236,22 +236,22 @@ fn a_partly_documented_record_is_reported() {
     // self-evident is not a gap.
     let f = dir.write(
         "plain.cagara",
-        "## The table.\nusers : query { id = int, name = string } = table \"s\" \"t\"\n\
-         ## The answer.\nmain = users\n",
+        "--- The table.\nusers : query { id = int, name = string } = table \"s\" \"t\"\n\
+         --- The answer.\nmain = users\n",
     );
     let out = doc(&f, &["--check"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).is_empty(), "{}", stderr(&out));
 }
 
-/// The formatter keeps the attachment: `##` lines stay above their definition,
+/// The formatter keeps the attachment: `---` lines stay above their definition,
 /// and the reference reads the same after `cagara fmt` as before it.
 #[test]
 fn documents_survive_the_formatter() {
     let dir = TempDir::new("fmt");
     let f = dir.write(
         "q.cagara",
-        "##   Deliberately   spaced.\nrows : query { a = int } = table \"s\" \"t\"\n\n## Second.\nmain = rows & select { x = .a }\n",
+        "---   Deliberately   spaced.\nrows : query { a = int } = table \"s\" \"t\"\n\n--- Second.\nmain = rows & select { x = .a }\n",
     );
     let before = doc(&f, &[]);
     assert!(before.status.success(), "{}", stderr(&before));
@@ -310,7 +310,7 @@ fn json_groups_an_overload_set() {
 #[test]
 fn a_broken_file_is_reported_and_prints_nothing() {
     let dir = TempDir::new("broken");
-    let f = dir.write("q.cagara", "## Docs.\nmain = = 1\n");
+    let f = dir.write("q.cagara", "--- Docs.\nmain = = 1\n");
     let out = doc(&f, &[]);
     assert!(!out.status.success(), "{}", stderr(&out));
     assert!(!stderr(&out).is_empty(), "the syntax error is reported");
@@ -333,7 +333,7 @@ fn the_prelude_is_available_without_a_file() {
 ///
 /// This is the gate on *our* file, not on a user's: `cagara doc --check` warns
 /// instead of failing, but the prelude ships as the language's own reference,
-/// so a new definition added without a `##` block should be caught here.
+/// so a new definition added without a `---` block should be caught here.
 #[test]
 fn the_prelude_documents_every_definition() {
     let out = cagara(vec!["doc".into(), "--prelude".into(), "--check".into()]);

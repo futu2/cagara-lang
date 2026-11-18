@@ -34,13 +34,13 @@ output you can reproduce with the `cagara` binary.
 
 ## 1. The shape of a program
 
-A Cagara file is a sequence of top-level definitions. Comments start with `#`
-and run to the end of the line. A `##` line documents the definition below it
-and a `#!` block documents the file; `cagara doc` turns them into a reference,
+A Cagara file is a sequence of top-level definitions. Comments start with `--`
+and run to the end of the line. A `---` line documents the definition below it
+and a `--!` block documents the file; `cagara doc` turns them into a reference,
 and `cagara doc --prelude` prints the prelude's own (see §17).
 
 ```haskell
-# A definition is `name = expression`, optionally with a type annotation.
+-- A definition is `name = expression`, optionally with a type annotation.
 users : query { id = int, name = string, age = int, active = bool } =
   table "public" "users"
 
@@ -51,7 +51,7 @@ adults =
   & order [asc .name]
   & limit 10
 
-# `main` is the definition printed by `cagara file.cagara`.
+-- `main` is the definition printed by `cagara file.cagara`.
 main = adults
 ```
 
@@ -62,15 +62,15 @@ value: it lowers to one ordinary definition per entry, exactly as if each had be
 written out.
 
 ```haskell
-## The public schema.
+--- The public schema.
 catalog "public" {
-  ## The user table.
+  --- The user table.
   users = { id = int, name = string, age = int, active = bool },
   orders = { id = int, user_id = int, amount = float }
 }
 ```
 
-The columns are a record type, and a `##` block above an entry documents that table —
+The columns are a record type, and a `---` block above an entry documents that table —
 `cagara doc` shows it, and the language server's outline lists each entry. `catalog` is
 not a keyword, so a definition may still be called `catalog`.
 
@@ -319,10 +319,10 @@ file cannot declare an operator or change one's level.
 Two consequences worth remembering:
 
 ```haskell
-# ?? binds tighter than arithmetic, so this is COALESCE(s, 0) + 1
+-- ?? binds tighter than arithmetic, so this is COALESCE(s, 0) + 1
 a = t & select { x = .s ?? 0 + 1 }
 
-# <> is right-associative, like the :: of list languages
+-- <> is right-associative, like the :: of list languages
 b = t & select { l = .first <> " " <> .last }
 ```
 
@@ -404,8 +404,8 @@ The conditions and the values are all expressions over the same row, and every
 value must have one type — the same rules `ifThenElse`'s three arguments obey:
 
 ```haskell
-# A condition must be a bool, and must not be nullable: a NULL cannot choose
-# an arm. Use `coalesce` or `isNotNull` first, as in `where`.
+-- A condition must be a bool, and must not be nullable: a NULL cannot choose
+-- an arm. Use `coalesce` or `isNotNull` first, as in `where`.
 bad  = orders & select { b = case { .amount => 1; true => 0 } }
 bad2 = people & select { b = case { .score > 10 => 1; true => 0 } }   # .score is maybe
 good = people & select { b = case { coalesce 0 .score > 10 => 1; true => 0 } }
@@ -528,7 +528,7 @@ So `update` is how you rename or recompute a column, and `select` is how you
 decide which columns to publish.
 
 ```haskell
-# Drop password_hash by naming what is published; give name its public label.
+-- Drop password_hash by naming what is published; give name its public label.
 public_users = schema.users & select { .id, display_name = .name }
 ```
 
@@ -690,11 +690,11 @@ whatever each dialect needs to achieve it (`NULLS LAST`, or a leading
 stages, so each one acts on what the one before it returned:
 
 ```haskell
-# Page 2, twenty per page: skip twenty, then take twenty.
+-- Page 2, twenty per page: skip twenty, then take twenty.
 page2 = orders & order [asc .id] & offset 20 & limit 20
 
-# The other order means something else: take the first twenty, then skip twenty of
-# those — which is no rows at all.
+-- The other order means something else: take the first twenty, then skip twenty of
+-- those — which is no rows at all.
 nothing = orders & order [asc .id] & limit 20 & offset 20
 ```
 
@@ -1026,7 +1026,7 @@ user_orders =
 | `antiJoin q on` | — | left rows with no match (left columns only) |
 
 ```haskell
-# The same join written with the shorthand.
+-- The same join written with the shorthand.
 user_orders = users & orders ? .<id == .>user_id
 ```
 
@@ -1101,10 +1101,10 @@ All three are optional; `{}` is a valid spec.
 
 ```haskell
 bad  = users & select {.id, ks = [asc .age]}   # field `ks` of `select` must be a
-                                               # column expression or constant, found list
+                                               -- column expression or constant, found list
 bad2 = users & where ([1, 2] == [1, 2])        # type mismatch: expected expr ?a b, found list int
 bad3 = users & select {.id, rn = rowNumber [asc .age]}
-                                               # expected winspec a, found list (sortkey ...)
+                                               -- expected winspec a, found list (sortkey ...)
 ```
 
 > Note the last one: a spec is a **record**, not a list. `rowNumber [asc .age]`
@@ -1166,15 +1166,15 @@ normalized before rows exist. These are rejected, each with a targeted message:
 
 ```haskell
 bad1 = orders & where ((rowNumber {order = [desc .amount]}) <= 3)
-# this argument contains a window function; windows cannot nest
-# (compute it in an earlier `select` stage)
+-- this argument contains a window function; windows cannot nest
+-- (compute it in an earlier `select` stage)
 
 bad2 = orders & order [asc (rowNumber {})]
-# sort and partition keys must be plain column expressions;
-# compute aggregates or windows in an earlier stage
+-- sort and partition keys must be plain column expressions;
+-- compute aggregates or windows in an earlier stage
 
 bad3 = orders & innerJoin x (.<id == (.>id + rowNumber {}))
-# join predicates cannot contain aggregates or window functions
+-- join predicates cannot contain aggregates or window functions
 ```
 
 Note that the error is about *building* a window in that position, not about
@@ -1289,7 +1289,7 @@ text `sql` reads. Nothing about it is in scope.
 A module that wants none of it puts this on the **first line**:
 
 ```haskell
-# no prelude
+-- no prelude
 table : string -> string -> query ?r = primitive "__table"
 t : query { a = int } = table "s" "t"
 ```
@@ -1349,8 +1349,8 @@ operand is a whole expression — the same as in Haskell, where `&` is `infixl 1
 and `==` is `infix 4`. Compare after applying by parenthesising:
 
 ```haskell
-# `.a & toInt` is the applied value; without the parens `&` would swallow the
-# comparison into its right operand.
+-- `.a & toInt` is the applied value; without the parens `&` would swallow the
+-- comparison into its right operand.
 is_five = users & select { ok = (.a & toInt) == 5 }
 ```
 
@@ -1544,7 +1544,7 @@ tests built on `strpos`, so `%` and `_` are literal characters there — which i
 what you want when testing for text a user typed:
 
 ```haskell
-# Finds a literal percent sign; like "%100%%" would need escaping.
+-- Finds a literal percent sign; like "%100%%" would need escaping.
 a = orders & where (contains "100%" .status)
 ```
 
@@ -1960,11 +1960,11 @@ from anywhere. Cycles and duplicate definitions are reported.
 Modules are also how you share table declarations:
 
 ```haskell
-# schema.cagara
+-- schema.cagara
 users : query { id = int, name = string, age = int, active = bool, password_hash = string } =
   table "public" "users"
 
-# public.cagara
+-- public.cagara
 import "schema.cagara" as s
 public_users = s.users & select { .id, display_name = .name }
 ```
@@ -2098,17 +2098,17 @@ and an unparseable file is left alone.
 `cagara doc` prints the documentation a file carries. Given a file whose
 definitions are documented like this:
 
-    #! The reporting file.
-    ## Adults only, with `name` relabelled for display.
+    --! The reporting file.
+    --- Adults only, with `name` relabelled for display.
     adults = users & where (.age >= 18) & select { id = .id, label = upper .name }
 
 `cagara doc q.cagara` prints:
 
-    # q.cagara
+    -- q.cagara
 
     The reporting file.
 
-    ## `adults`
+    --- `adults`
 
     ```text
     adults : query { id = int, label = string }
@@ -2122,12 +2122,12 @@ definitions are grouped by name, so an overload set is one section with one
 explanation and every signature.
 
 A table's columns are fields of one definition, so each is documented one level
-down — a `##` block above the field inside the signature that names it:
+down — a `---` block above the field inside the signature that names it:
 
     users : query {
-        ## The primary key.
+        --- The primary key.
         id = int,
-        ## Display name; two people may share one.
+        --- Display name; two people may share one.
         name = string
       } = table "public" "users"
 
@@ -2143,7 +2143,7 @@ declare no row of their own (`t = aam.users`). A column that a `select`
 computed, that `prefix` renamed, or that a join merged has no declaration to
 point at, and the hover shows only the type.
 
-`cagara doc --check` lists the top-level definitions that have no `##` block and
+`cagara doc --check` lists the top-level definitions that have no `---` block and
 exits **0** — a missing doc comment is not a compile error, and this is the
 report that says what is left to write rather than a gate that stops a build.
 `--json` prints the same content for a tool, `--prelude` documents the built-in

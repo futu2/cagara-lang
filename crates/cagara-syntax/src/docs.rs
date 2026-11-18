@@ -24,10 +24,14 @@ use crate::ast::{Module, TypeExpr};
 use std::ops::Range;
 
 /// What makes a line documentation of the definition below it.
-pub const ITEM_MARKER: &str = "##";
+///
+/// Three dashes: a line comment (`--`) with one more. The markers move with the
+/// comment spelling, because a doc block *is* a comment — the only thing that
+/// makes it documentation is the extra character.
+pub const ITEM_MARKER: &str = "---";
 
 /// What makes a line documentation of the file.
-pub const MODULE_MARKER: &str = "#!";
+pub const MODULE_MARKER: &str = "--!";
 
 /// The documentation of the item whose first token is at `offset`: the block
 /// of `##` lines directly above the line `offset` is on.
@@ -322,7 +326,7 @@ mod tests {
 
     #[test]
     fn a_doc_block_above_a_definition_belongs_to_it() {
-        let src = "## The entry point.\n##\n## It is a query.\nmain = q\n";
+        let src = "--- The entry point.\n---\n--- It is a query.\nmain = q\n";
         assert_eq!(
             item_doc(src, at(src, "main")).as_deref(),
             Some("The entry point.\n\nIt is a query.")
@@ -333,7 +337,7 @@ mod tests {
     /// makes the text attached, and a `#` comment is the file's own prose.
     #[test]
     fn an_ordinary_comment_is_not_attached() {
-        let src = "# Just prose.\nmain = q\n";
+        let src = "-- Just prose.\nmain = q\n";
         assert_eq!(item_doc(src, at(src, "main")), None);
     }
 
@@ -341,21 +345,21 @@ mod tests {
     /// definition is not silently presented as its documentation.
     #[test]
     fn a_blank_line_detaches_the_block() {
-        let src = "## Not this one.\n\nmain = q\n";
+        let src = "--- Not this one.\n\nmain = q\n";
         assert_eq!(item_doc(src, at(src, "main")), None);
     }
 
     #[test]
     fn only_the_run_directly_above_is_documentation() {
-        let src = "## Old.\n# Separator.\n## New.\nmain = q\n";
+        let src = "--- Old.\n-- Separator.\n--- New.\nmain = q\n";
         assert_eq!(item_doc(src, at(src, "main")).as_deref(), Some("New."));
     }
 
-    /// A trailing `##` documents nothing: it is on a line of code, and the
+    /// A trailing `---` documents nothing: it is on a line of code, and the
     /// definition below it was not what the writer was describing.
     #[test]
     fn a_trailing_doc_marker_attaches_to_nothing() {
-        let src = "helper = 1 ## about helper\nmain = helper\n";
+        let src = "helper = 1 --- about helper\nmain = helper\n";
         assert_eq!(item_doc(src, at(src, "main")), None);
         assert_eq!(item_doc(src, at(src, "helper")), None);
     }
@@ -365,7 +369,7 @@ mod tests {
     #[test]
     fn doc_blocks_survive_every_line_break() {
         for sep in ["\n", "\r\n", "\r"] {
-            let src = format!("## One.{sep}## Two.{sep}main = q{sep}");
+            let src = format!("--- One.{sep}--- Two.{sep}main = q{sep}");
             assert_eq!(
                 item_doc(&src, at(&src, "main")).as_deref(),
                 Some("One.\nTwo."),
@@ -376,7 +380,7 @@ mod tests {
 
     #[test]
     fn a_file_doc_is_the_last_run_before_the_first_item() {
-        let src = "# A prose header.\n#! The file.\nimport \"x.cagara\"\nmain = q\n";
+        let src = "-- A prose header.\n--! The file.\nimport \"x.cagara\"\nmain = q\n";
         assert_eq!(
             Docs::new(src).module(at(src, "import")).as_deref(),
             Some("The file.")
@@ -387,7 +391,7 @@ mod tests {
     /// describes the whole file, so it cannot come after half of it.
     #[test]
     fn a_file_doc_below_an_item_is_ignored() {
-        let src = "main = q\n#! Late.\n";
+        let src = "main = q\n--! Late.\n";
         assert_eq!(Docs::new(src).module(at(src, "main")), None);
     }
 
@@ -398,12 +402,12 @@ mod tests {
     fn a_file_doc_is_found_above_whichever_item_comes_first() {
         let (src, module) = lower("import \"x.cagara\"\nmain = q\n");
         assert_eq!(module_doc(&src, &module), None);
-        let (src, module) = lower("#! Above the import.\nimport \"x.cagara\"\nmain = q\n");
+        let (src, module) = lower("--! Above the import.\nimport \"x.cagara\"\nmain = q\n");
         assert_eq!(
             module_doc(&src, &module).as_deref(),
             Some("Above the import.")
         );
-        let (src, module) = lower("#! Above the definition.\nmain = q\n");
+        let (src, module) = lower("--! Above the definition.\nmain = q\n");
         assert_eq!(
             module_doc(&src, &module).as_deref(),
             Some("Above the definition.")
@@ -414,7 +418,7 @@ mod tests {
     /// documentation.
     #[test]
     fn a_file_with_no_items_can_still_be_documented() {
-        let (src, module) = lower("#! Only prose.\n");
+        let (src, module) = lower("--! Only prose.\n");
         assert_eq!(module_doc(&src, &module).as_deref(), Some("Only prose."));
     }
 
@@ -424,11 +428,11 @@ mod tests {
     #[test]
     fn a_field_takes_the_block_above_it_and_its_record_keeps_its_own() {
         let (src, module) = lower(
-            "## The table.\n\
+            "--- The table.\n\
              users : query {\n\
-             \x20 ## The key.\n\
+             \x20 --- The key.\n\
              \x20 id = int,\n\
-             \x20 ## Display name.\n\
+             \x20 --- Display name.\n\
              \x20 name = string,\n\
              \x20 secret = string\n\
              } = table \"s\" \"t\"\n",
@@ -490,7 +494,7 @@ mod tests {
     fn an_inline_field_does_not_take_the_entrys_block() {
         let (src, module) = lower(
             "catalog \"s\" {\n\
-             \x20 ## The users.\n\
+             \x20 --- The users.\n\
              \x20 users = { id = int, name = string }\n\
              }\n",
         );
@@ -515,13 +519,13 @@ mod tests {
     fn every_record_in_a_signature_is_reached() {
         let (src, module) = lower(
             "f : {\n\
-             \x20 ## From.\n\
+             \x20 --- From.\n\
              \x20 a = {\n\
-             \x20   ## Inner.\n\
+             \x20   --- Inner.\n\
              \x20   b = int\n\
              \x20 }\n\
              } -> {\n\
-             \x20 ## To.\n\
+             \x20 --- To.\n\
              \x20 c = string\n\
              } = primitive \"__f\"\n",
         );
@@ -539,9 +543,9 @@ mod tests {
     fn a_prefix_only_doc_marker_is_an_empty_doc() {
         // `##` with no text is a separator inside a block, but a lone one is
         // not documentation worth reporting either.
-        let src = "##\nmain = q\n";
+        let src = "---\nmain = q\n";
         assert_eq!(item_doc(src, at(src, "main")), None);
-        let src = "##  leading space kept\nmain = q\n";
+        let src = "---  leading space kept\nmain = q\n";
         assert_eq!(
             item_doc(src, at(src, "main")).as_deref(),
             Some(" leading space kept")

@@ -367,7 +367,7 @@ mod tests {
     fn edits_reproduce_what_the_formatter_wrote() {
         // Whole-file layout changes, a comment moving, and a definition left
         // alone, which is the mix a real format request sees.
-        let old = "## A table.\nusers : query { id = int } = table \"p\" \"users\"\n\n\
+        let old = "--- A table.\nusers : query { id = int } = table \"p\" \"users\"\n\n\
                    q = users & where .id > 1 & select { x = .id }\n\n\
                    already_formatted = 1\n";
         let new = cagara_fmt::format(old).expect("parses").text;

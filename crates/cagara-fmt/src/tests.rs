@@ -338,21 +338,21 @@ fn case_comments_and_trailing_semicolons_keep_their_place() {
     // Indentation follows the layout, not the input: a `case` over several
     // lines is laid out over them, here inside a two-stage pipeline.
     check(
-        "q = t & select {\n    b = case {\n        .a > 1 => 1;  # low\n        .a > 10 => 10; # high\n        true => 0\n    }\n}\n",
+        "q = t & select {\n    b = case {\n        .a > 1 => 1;  -- low\n        .a > 10 => 10; -- high\n        true => 0\n    }\n}\n",
         "q =
   t
   & select {
     b = case {
-      .a > 1 => 1; # low
-      .a > 10 => 10; # high
+      .a > 1 => 1; -- low
+      .a > 10 => 10; -- high
       true => 0
     }
   }
 ",
     );
     check(
-        "q = case {\n  # why\n  .a => 1; true => 2 }\n",
-        "q =\n  case {\n    # why\n    .a => 1;\n    true => 2\n  }\n",
+        "q = case {\n  -- why\n  .a => 1; true => 2 }\n",
+        "q =\n  case {\n    -- why\n    .a => 1;\n    true => 2\n  }\n",
     );
     // A trailing `;` on a flat case is kept, and never left to open a line
     // when the case breaks.
@@ -622,31 +622,31 @@ fn projection_and_application_keep_their_meaning() {
 #[test]
 fn comments_and_blank_lines() {
     check(
-        "# header\n\n\n\na = 1 # trailing\n# doc for b\n\n\nb = 2\n\n# end\n",
-        "# header\n\na = 1 # trailing\n# doc for b\n\nb = 2\n\n# end\n",
+        "-- header\n\n\n\na = 1 -- trailing\n-- doc for b\n\n\nb = 2\n\n-- end\n",
+        "-- header\n\na = 1 -- trailing\n-- doc for b\n\nb = 2\n\n-- end\n",
     );
     // Comments inside a pipeline force it to break and stay with their stage.
     check(
-        "a = q & where .x # only x\n  & limit 1\n",
-        "a =\n  q\n  & where .x # only x\n  & limit 1\n",
+        "a = q & where .x -- only x\n  & limit 1\n",
+        "a =\n  q\n  & where .x -- only x\n  & limit 1\n",
     );
     check(
-        "a = q\n  # keep active\n  & where .active\n",
-        "a =\n  q\n  # keep active\n  & where .active\n",
+        "a = q\n  -- keep active\n  & where .active\n",
+        "a =\n  q\n  -- keep active\n  & where .active\n",
     );
     check(
-        "r = {\n  a = 1, # one\n  b = 2\n}\n",
-        "r = {\n  a = 1, # one\n  b = 2\n}\n",
+        "r = {\n  a = 1, -- one\n  b = 2\n}\n",
+        "r = {\n  a = 1, -- one\n  b = 2\n}\n",
     );
-    check("x =\n  # why\n  1\n", "x =\n  # why\n  1\n");
+    check("x =\n  -- why\n  1\n", "x =\n  -- why\n  1\n");
     check("", "");
-    check("# only a comment", "# only a comment\n");
+    check("-- only a comment", "-- only a comment\n");
 }
 
 #[test]
 fn comments_never_push_a_name_into_column_zero() {
     // A name after an own-line comment inside a definition must stay indented.
-    let out = fmt("a = f # c\n  x\nb : # t\n  int = 1\n");
+    let out = fmt("a = f -- c\n  x\nb : -- t\n  int = 1\n");
     for line in out.lines().skip(1) {
         assert!(
             !line.starts_with(|c: char| c.is_alphabetic()) || line.starts_with("b "),
@@ -813,9 +813,9 @@ impl Gen {
             0 => {
                 self.comments += 1;
                 let c = format!(
-                    " # c{} {}\n  ",
+                    " -- c{} {}\n  ",
                     self.comments,
-                    self.rng.pick(&["", "x = 1", "#"])
+                    self.rng.pick(&["", "x = 1", "--"])
                 );
                 self.out.push_str(&c);
             }
@@ -976,7 +976,7 @@ impl Gen {
         for i in 0..1 + self.rng.below(4) {
             if i > 0 {
                 self.out
-                    .push_str(self.rng.pick(&["\n", "\n\n", "\n# own line\n"]));
+                    .push_str(self.rng.pick(&["\n", "\n\n", "\n-- own line\n"]));
             }
             if self.rng.chance(15) {
                 self.out.push_str("import");
@@ -1077,7 +1077,7 @@ fn token_soup_never_panics_and_stays_lossless() {
         "import",
         "as",
         "@",
-        "# c",
+        "-- c",
         "\n",
         "\n  ",
         " ",
@@ -1095,9 +1095,21 @@ fn token_soup_never_panics_and_stays_lossless() {
         let p = parse(&src);
         assert_eq!(p.syntax().text().to_string(), src, "seed {seed}");
         let _ = cagara_syntax::ast::lower_source(&src);
-        let out = format(&src)
-            .unwrap_or_else(|_| panic!("seed {seed}: {src:?}"))
-            .text;
+        // Token soup can contain a *lexical* error — `{-` with no `-}` is an
+        // unterminated block comment, and the formatter refuses a file it cannot
+        // read. That is the right answer and not a failure of this test, which is
+        // about not panicking and not corrupting what it does print.
+        let unterminated = cagara_syntax::lexer::lex(&src)
+            .iter()
+            .any(|l| l.kind == cagara_syntax::lexer::Token::UnterminatedComment);
+        let Ok(formatted) = format(&src) else {
+            assert!(
+                unterminated,
+                "seed {seed}: the formatter refused a readable file: {src:?}"
+            );
+            continue;
+        };
+        let out = formatted.text;
         assert_eq!(
             comment_texts(&src),
             comment_texts(&out),

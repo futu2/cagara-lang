@@ -1,15 +1,15 @@
-#! A module import, a column choice, and a published view.
-#!
-#! `select {.a, .b}` chooses columns and `update` recomputes or renames them;
-#! both are used here, and the difference between them is the difference
-#! between this file and `schema.cagara`.
+--! A module import, a column choice, and a published view.
+--!
+--! `select {.a, .b}` chooses columns and `update` recomputes or renames them;
+--! both are used here, and the difference between them is the difference
+--! between this file and `schema.cagara`.
 import "schema.cagara" as s
 
-## Drop `password_hash` by selecting only the columns that are published, and
-## give `name` its public label. Named a projection, not an update: the result
-## row is exactly the field list.
+--- Drop `password_hash` by selecting only the columns that are published, and
+--- give `name` its public label. Named a projection, not an update: the result
+--- row is exactly the field list.
 public_users = s.users & select { .id, display_name = .name }
 
-## The definition `cagara public.cagara` prints — the view this module exists
-## to publish. A file runs one query, and `main` is how it says which.
+--- The definition `cagara public.cagara` prints — the view this module exists
+--- to publish. A file runs one query, and `main` is how it says which.
 main = public_users

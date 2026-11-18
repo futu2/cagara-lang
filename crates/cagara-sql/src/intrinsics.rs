@@ -22,6 +22,7 @@
 //! | `CAGARA_LEFT(s, n)` / `CAGARA_RIGHT(s, n)` | first / last `n` characters        |
 //! | `CAGARA_STRPOS(s, sub)`             | 1-based position of `sub` in `s`, 0 if absent |
 //! | `CAGARA_LENGTH(s)`                  | length in characters (trailing spaces count) |
+//! | `CAGARA_LIKE(p, s)` / `CAGARA_ILIKE(p, s)` | SQL `LIKE` / case-insensitive `LIKE` |
 //! | `CAGARA_IDIV(a, b)` / `CAGARA_MOD(a, b)` | integer division truncated toward zero, and its remainder |
 //!
 //! `kind` is `DATE` or `TIMESTAMP`. Dialects not named below get the ANSI /
@@ -200,8 +201,18 @@ fn refusal(name: &str) -> Option<String> {
     }
     let what = match name {
         "CAGARA_REVERSE" => "`reverse`",
+        "CAGARA_LPAD" => "`lpad`",
+        "CAGARA_RPAD" => "`rpad`",
         _ => return None,
     };
+    if matches!(name, "CAGARA_LPAD" | "CAGARA_RPAD") {
+        return Some(format!(
+            "{what} is not available on this target: it has neither `LPAD`/`RPAD` nor \
+             `REPEAT`, and the fill cannot be built without a recursive query. \
+             PostgreSQL, DuckDB, MySQL, Trino, Spark, BigQuery, Snowflake and T-SQL \
+             have it. `left`/`right` and `substring` are the portable alternatives"
+        ));
+    }
     Some(format!(
         "{what} is not available on this target: it has no `REVERSE`, and no portable \
          spelling short of a subquery over the string's characters. PostgreSQL, DuckDB, \
@@ -221,6 +232,12 @@ fn refusal(name: &str) -> Option<String> {
 enum FmtStyle {
     /// `%Y %m %d %H %M %S` — DuckDB, BigQuery.
     Strftime,
+    /// SQLite's `strftime`: the same numeric specifiers as C, and **no** name
+    /// specifiers. It is a separate style rather than folded into `Strftime`
+    /// because sharing that one made `%B`/`%A` reach SQLite as-is, where `strftime`
+    /// answers NULL instead of failing — so `monthName` returned a column of NULLs
+    /// while its type said `string`.
+    Sqlite,
     /// PostgreSQL, Snowflake: `YYYY MM DD HH24 MI SS`.
     Pg,
     /// MySQL and Trino's `date_parse`: `%Y %m %d %H %i %s`.
@@ -245,47 +262,54 @@ fn translate_format(fmt: &str, style: FmtStyle) -> Result<String, String> {
         };
         let token = match (spec, style) {
             ('%', _) => "%",
-            ('Y', FmtStyle::Strftime) => "%Y",
+            ('Y', FmtStyle::Strftime | FmtStyle::Sqlite) => "%Y",
             ('Y', FmtStyle::Mysql) => "%Y",
             ('Y', FmtStyle::Pg) => "YYYY",
             ('Y', FmtStyle::Java) => "yyyy",
-            ('m', FmtStyle::Strftime | FmtStyle::Mysql) => "%m",
+            ('m', FmtStyle::Strftime | FmtStyle::Mysql | FmtStyle::Sqlite) => "%m",
             ('m', FmtStyle::Pg) => "MM",
             ('m', FmtStyle::Java) => "MM",
-            ('d', FmtStyle::Strftime | FmtStyle::Mysql) => "%d",
+            ('d', FmtStyle::Strftime | FmtStyle::Mysql | FmtStyle::Sqlite) => "%d",
             ('d', FmtStyle::Pg) => "DD",
             ('d', FmtStyle::Java) => "dd",
-            ('H', FmtStyle::Strftime | FmtStyle::Mysql) => "%H",
+            ('H', FmtStyle::Strftime | FmtStyle::Mysql | FmtStyle::Sqlite) => "%H",
             ('H', FmtStyle::Pg) => "HH24",
             ('H', FmtStyle::Java) => "HH",
-            ('M', FmtStyle::Strftime) => "%M",
+            ('M', FmtStyle::Strftime | FmtStyle::Sqlite) => "%M",
             ('M', FmtStyle::Mysql) => "%i",
             ('M', FmtStyle::Pg) => "MI",
             ('M', FmtStyle::Java) => "mm",
-            ('S', FmtStyle::Strftime) => "%S",
+            ('S', FmtStyle::Strftime | FmtStyle::Sqlite) => "%S",
             ('S', FmtStyle::Mysql) => "%s",
             ('S', FmtStyle::Pg) => "SS",
             ('S', FmtStyle::Java) => "ss",
             // Names rather than numbers. `formatDate` only: a month *name* is
             // what a report axis is labelled with, and no engine parses one back
             // the same way, so `parseDate` keeps its numeric set.
+            ('b', FmtStyle::Sqlite) => return Err(sqlite_no_names(spec, fmt)),
+            ('a', FmtStyle::Sqlite) => return Err(sqlite_no_names(spec, fmt)),
+            ('B', FmtStyle::Sqlite) => return Err(sqlite_no_names(spec, fmt)),
+            ('A', FmtStyle::Sqlite) => return Err(sqlite_no_names(spec, fmt)),
             ('b', FmtStyle::Strftime) => "%b",
             ('b', FmtStyle::Mysql) => "%b",
-            ('b', FmtStyle::Pg) => "Mon",
+            // PostgreSQL blank-pads a month or weekday name to nine characters, so
+            // `%B %d` came out `February  29` and `monthName` carried a trailing
+            // space there and nowhere else. `FM` is the unpadded form.
+            ('b', FmtStyle::Pg) => "FMMon",
             ('b', FmtStyle::Java) => "MMM",
             ('B', FmtStyle::Strftime) => "%B",
             ('B', FmtStyle::Mysql) => "%M",
-            ('B', FmtStyle::Pg) => "Month",
+            ('B', FmtStyle::Pg) => "FMMonth",
             ('B', FmtStyle::Java) => "MMMM",
             ('a', FmtStyle::Strftime) => "%a",
             ('a', FmtStyle::Mysql) => "%a",
-            ('a', FmtStyle::Pg) => "Dy",
+            ('a', FmtStyle::Pg) => "FMDy",
             ('a', FmtStyle::Java) => "EEE",
             ('A', FmtStyle::Strftime) => "%A",
             ('A', FmtStyle::Mysql) => "%W",
-            ('A', FmtStyle::Pg) => "Day",
+            ('A', FmtStyle::Pg) => "FMDay",
             ('A', FmtStyle::Java) => "EEEE",
-            ('j', FmtStyle::Strftime) => "%j",
+            ('j', FmtStyle::Strftime | FmtStyle::Sqlite) => "%j",
             ('j', FmtStyle::Mysql) => "%j",
             ('j', FmtStyle::Pg) => "DDD",
             ('j', FmtStyle::Java) => "DDD",
@@ -323,9 +347,10 @@ fn has_time_element(fmt: &str) -> bool {
 /// The style a family's parser and formatter read.
 fn fmt_style(f: Fam) -> FmtStyle {
     match f {
-        // SQLite formats with `strftime`, so it reads the C-style format even
-        // though it has no parser to read it with.
-        Fam::Duck | Fam::BigQuery | Fam::Sqlite => FmtStyle::Strftime,
+        Fam::Duck | Fam::BigQuery => FmtStyle::Strftime,
+        // SQLite formats with `strftime`, which reads the C-style *numeric*
+        // specifiers but has no name specifiers at all.
+        Fam::Sqlite => FmtStyle::Sqlite,
         Fam::Trino | Fam::Mysql => FmtStyle::Mysql,
         Fam::Spark | Fam::Tsql => FmtStyle::Java,
         Fam::Ansi | Fam::Snowflake => FmtStyle::Pg,
@@ -416,7 +441,15 @@ fn parse_or_format(name: &str, args: &[Expr], f: Fam) -> Result<Expr, String> {
         })
     } else if timestamp {
         Ok(match f {
-            Fam::Duck | Fam::Sqlite => func("STRFTIME", vec![value.clone(), f_lit()]),
+            Fam::Duck => func("STRFTIME", vec![value.clone(), f_lit()]),
+            // SQLite's `strftime(FORMAT, TIME, …)` takes the format **first**, unlike
+            // DuckDB's `strftime(TIME, FORMAT)`. Sharing DuckDB's arm passed the time
+            // as the format and the format as a bogus time, and SQLite answers NULL
+            // for an unparseable time rather than rejecting the statement — so
+            // `formatTimestamp` returned a column of NULLs while its type said
+            // `string`. It is spelled out here rather than folded into the `Duck` arm
+            // because that arm is the one that is wrong for this engine.
+            Fam::Sqlite => func("STRFTIME", vec![f_lit(), value.clone()]),
             Fam::Trino | Fam::Mysql | Fam::Spark => {
                 func("DATE_FORMAT", vec![value.clone(), f_lit()])
             }
@@ -507,6 +540,49 @@ fn list_refusal(name: &str, d: Dialect) -> Option<String> {
         _ => return None,
     };
     (!has_list(d)).then(|| no_list(list_intrinsic, d))
+}
+
+/// `LPAD(s, n, fill)` from the language's subject-last `lpad n fill s`.
+fn lpad(name: &str, a: &[Expr]) -> Expr {
+    func(name, vec![a[2].clone(), a[0].clone(), a[1].clone()])
+}
+
+/// `s LIKE p`, or `s ILIKE p` when `ci`.
+fn like(s: Expr, p: Expr, ci: bool) -> Expr {
+    let (s, p) = (Box::new(s), Box::new(p));
+    if ci {
+        Expr::ILike {
+            expr: s,
+            pattern: p,
+            negated: false,
+            escape: None,
+        }
+    } else {
+        Expr::Like {
+            expr: s,
+            pattern: p,
+            negated: false,
+            escape: None,
+        }
+    }
+}
+
+/// `s GLOB p'`, where `p'` is the `LIKE` pattern `p` with its metacharacters
+/// translated. SQLite's case-sensitive equivalent of `LIKE`.
+fn glob(subject: Expr, pattern: Expr) -> Expr {
+    // REPLACE order is load-bearing: `[` is escaped first because the escapes for
+    // `*` and `[` introduce `[`, then the literal `*`/`?` are escaped before `%`/`_`
+    // are widened into exactly those characters.
+    let mut pat = pattern;
+    for (from, to) in [("[", "[[]"), ("*", "[*]"), ("%", "*"), ("_", "?")] {
+        pat = func("REPLACE", vec![pat, s(from), s(to)]);
+    }
+    // `GLOB` exists both as an infix operator (`subject GLOB pattern`) and as a
+    // function, and the function takes the **pattern first** — `glob(pattern,
+    // subject)`, the opposite of the operator. Emitting the function with the
+    // operator's order silently answered "no match" for every pattern that was not
+    // also a valid GLOB, which is the whole reason the translation exists.
+    func("GLOB", vec![pat, subject])
 }
 
 fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
@@ -634,16 +710,46 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
                 scale: num(2),
             },
         ),
+        // `LEFT(s, n)` is the first `n` characters, and a *negative* `n` drops that
+        // many from the end (`LEFT('abcde', -1)` is `'abcd'`). SQLite has no `LEFT`,
+        // and `SUBSTR(s, 1, n)` reads a negative length as "up to n before the end",
+        // which is `''` — so the emulation answered a different question for every
+        // negative `n` while looking correct for the positive ones. The `n < 0` arm
+        // below is what `LEFT` means; `LENGTH(s) + n` is the prefix that remains.
         ("CAGARA_LEFT", 2) => match f {
-            Fam::Sqlite | Fam::Trino => func("SUBSTR", vec![a[0].clone(), n("1"), a[1].clone()]),
+            Fam::Sqlite => {
+                let (x, k) = (a[0].clone(), a[1].clone());
+                let positive = func("SUBSTR", vec![x.clone(), n("1"), k.clone()]);
+                let negative = func(
+                    "SUBSTR",
+                    vec![
+                        x.clone(),
+                        n("1"),
+                        bin(func("LENGTH", vec![x]), BinaryOperator::Plus, k.clone()),
+                    ],
+                );
+                case(bin(k, BinaryOperator::Lt, n("0")), negative, positive)
+            }
+            Fam::Trino => func("SUBSTR", vec![a[0].clone(), n("1"), a[1].clone()]),
             _ => func("LEFT", a.to_vec()),
         },
         ("CAGARA_RIGHT", 2) => match f {
-            // SUBSTR(s, 0) is the whole string, so n = 0 needs a guard.
+            // `RIGHT(s, n)` is the last `n` characters, and a negative `n` drops that
+            // many from the *front* (`RIGHT('abcde', -1)` is `'bcde'`). Both arms are
+            // needed: `SUBSTR(s, -n, n)` is the positive case, and for `n < 0` the
+            // remaining tail starts at `1 - n` (`SUBSTR(s, 2)` for `n = -1`). The old
+            // guard turned every `n <= 0` into `''`, which is `RIGHT`'s answer only
+            // at zero.
             Fam::Sqlite => {
                 let (x, k) = (a[0].clone(), a[1].clone());
-                let tail = func("SUBSTR", vec![x, neg(k.clone()), k.clone()]);
-                case(bin(k, BinaryOperator::LtEq, n("0")), s(""), tail)
+                let positive = func("SUBSTR", vec![x.clone(), neg(k.clone()), k.clone()]);
+                let negative = func(
+                    "SUBSTR",
+                    vec![x.clone(), bin(n("1"), BinaryOperator::Minus, k.clone())],
+                );
+                case(bin(k.clone(), BinaryOperator::Lt, n("0")), negative, {
+                    case(bin(k, BinaryOperator::Eq, n("0")), s(""), positive)
+                })
             }
             // No RIGHT: start n characters from the end (past it for n <= 0).
             Fam::Trino => {
@@ -676,6 +782,15 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
             }
             _ => func("LENGTH", a.to_vec()),
         },
+        // `LPAD`/`RPAD` are the same call everywhere they exist; they are named here
+        // only so that `refusal` can identify them and refuse on SQLite. Emitting
+        // `LPAD(...)` there produced `no such function: LPAD` from the engine at run
+        // time, which is a worse error than the compiler's own.
+        // `None` for SQLite hands the question to `refusal`, which names the function
+        // and the target. Emitting the call there produced `no such function: LPAD`
+        // from the engine at run time instead.
+        ("CAGARA_LPAD", 3) if f != Fam::Sqlite => lpad("LPAD", a),
+        ("CAGARA_RPAD", 3) if f != Fam::Sqlite => lpad("RPAD", a),
         ("CAGARA_STRPOS", 2) => {
             let (x, sub) = (a[0].clone(), a[1].clone());
             match f {
@@ -685,6 +800,31 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
                 _ => func("STRPOS", vec![x, sub]),
             }
         }
+        // SQLite's `LIKE` is case-insensitive for ASCII unless the connection was
+        // opened with `PRAGMA case_sensitive_like = ON`, so emitting it there makes
+        // `like` quietly mean `ilike` — the same program returns different rows on
+        // SQLite than on every other target, which is the thing the prelude is
+        // supposed to prevent. `GLOB` is the case-sensitive matcher SQLite does have,
+        // and a `LIKE` pattern maps onto it exactly once the metacharacters are
+        // translated: `%` -> `*`, `_` -> `?`, and a literal `*`, `?` or `[` in the
+        // pattern escaped so it stays literal. The escape order matters — `[` first,
+        // because the escapes themselves introduce `[`, and `*`/`?` before `%`/`_`
+        // are widened into them.
+        ("CAGARA_LIKE", 2) => match f {
+            Fam::Sqlite => glob(a[1].clone(), a[0].clone()),
+            _ => like(a[1].clone(), a[0].clone(), false),
+        },
+        // `ILIKE` is `LIKE` with both sides folded. No SQLite spelling of `LOWER`
+        // is case-insensitive beyond ASCII, so neither is `ilike` there; that limit
+        // is shared with `upper`/`lower` and stated in `docs/SQL-DIALECTS.md`.
+        ("CAGARA_ILIKE", 2) => match f {
+            Fam::Sqlite => like(
+                func("LOWER", vec![a[1].clone()]),
+                func("LOWER", vec![a[0].clone()]),
+                false,
+            ),
+            _ => like(a[1].clone(), a[0].clone(), true),
+        },
         ("CAGARA_IDIV", 2) => idiv(a[0].clone(), a[1].clone(), f),
         // The divisor is guarded for the same reason as `/`: the operator is
         // typed non-null, so a zero divisor must answer NULL everywhere rather
@@ -1434,4 +1574,20 @@ fn case(cond: Expr, then: Expr, otherwise: Expr) -> Expr {
         when_clauses: vec![(cond, then)],
         else_clause: Some(Box::new(otherwise)),
     }
+}
+
+/// SQLite's `strftime` has no specifier for a month or weekday *name*, and it answers
+/// NULL rather than failing, so emitting one produces a column of NULLs under a
+/// non-null `string` type. Refusing names the target and the alternative, which is
+/// what `parseDate` on SQLite already does.
+fn sqlite_no_names(spec: char, fmt: &str) -> String {
+    let what = match spec {
+        'b' | 'B' => "a month name",
+        _ => "a weekday name",
+    };
+    format!(
+        "`%{spec}` in `{fmt}` is {what}, and SQLite's `strftime` has no specifier for \
+         one: it would return NULL for the whole string rather than fail. Format the \
+         number with `%m`/`%W` and map it, or run this query on a dialect that has names"
+    )
 }

@@ -42,30 +42,34 @@ main =
     ),
 ];
 
-/// A definition the formatter cannot lay out is printed verbatim, so a
-/// construct it does not understand used to pass every test above: the output
-/// was stable, kept its comments, and simply never changed. This pins that
 /// A `catalog` declaration is laid out like a record, and is stable.
 ///
-/// The formatter works on the syntax tree, so a new node kind that nothing prints
-/// falls back to "print the text as written" — which compiles and looks fine in the
-/// one case a person tries. These cases are the shapes that would expose it: an entry
-/// whose columns need spacing, a multi-line declaration, and the round trip.
+/// The cases are chosen to **fail if the formatter echoes its input**. An earlier
+/// version of this test asserted `fmt(x) == x` on already-canonical input and
+/// idempotence on a round trip — both of which a formatter that never formats
+/// satisfies trivially, and that is exactly what `catalog` did: `item`'s fallback arm
+/// printed the whole declaration verbatim, so `cagara fmt` echoed every `catalog`
+/// byte for byte and `fmt --check` called it formatted. The source is deliberately
+/// misformatted here so that "prints the input back" is a failure rather than a pass.
 #[test]
 fn a_catalog_is_laid_out_and_is_stable() {
-    // The columns are spaced like any record type.
+    // Squeezed columns gain the spaces a record type's fields have.
     check(
-        "catalog \"s\" { a = { x = int }, b = { y = string } }\n",
+        "catalog \"s\" {a = {x=int},   b={y=string}}\n",
         "catalog \"s\" { a = { x = int }, b = { y = string } }\n",
     );
-    // Written one entry per line, it stays one per line.
-    let src = "catalog \"public\" {\n  users = { id = int, name = string },\n  \
-               orders = { id = int }\n}\nq = users & select { .id }\n";
-    let out = fmt(src);
-    assert_eq!(out, src, "already canonical");
-    // And a squeezed one expands, with the entries on their own lines.
-    let squeezed = "catalog \"s\" { a = { x = int }, b = { y = string } }\n";
-    assert_eq!(fmt(&fmt(squeezed)), fmt(squeezed), "not idempotent");
+    // A declaration too wide for one line breaks one entry per line, the way a
+    // record type does.
+    let wide = "catalog \"public\" {a = {x=int}, b = {y=string}, c = {z=float}, \
+                d = {w=bool}, e = {v=date}, f = {u=timestamp}, g = {t=decimal 10 2}}\n";
+    let out = fmt(wide);
+    assert!(
+        out.contains("\n  a = { x = int },\n"),
+        "a wide catalog keeps one entry per line:\n{out}"
+    );
+    assert_eq!(fmt(&out), out, "not idempotent");
+    // An empty one keeps its braces together.
+    check("catalog \"t\" {}\n", "catalog \"t\" {}\n");
 }
 
 /// Each construct is actually reformatted, by feeding it a deliberately

@@ -1587,9 +1587,13 @@ fn string_functions_per_dialect() {
             "right 2 .s",
             &[
                 ("tsql", "RIGHT(s, 2)"),
+                // A negative `n` drops that many from the front, so the emulation has
+                // an arm for it; the old spelling folded every `n <= 0` to `''`, which
+                // is `RIGHT`'s answer only at zero.
                 (
                     "sqlite",
-                    "CASE WHEN 2 <= 0 THEN '' ELSE SUBSTR(s, -2, 2) END",
+                    "CASE WHEN 2 < 0 THEN SUBSTR(s, 1 - 2) ELSE CASE WHEN 2 = 0 THEN '' \
+                     ELSE SUBSTR(s, -2, 2) END END",
                 ),
             ],
         ),
@@ -1633,6 +1637,26 @@ fn string_functions_per_dialect() {
                 ("postgres", "s ILIKE 'A%'"),
                 ("mysql", "LOWER(s) LIKE LOWER('A%')"),
             ],
+        ),
+        // SQLite's `LIKE` is case-insensitive for ASCII, so emitting it made `like`
+        // mean `ilike` there and the same program matched `"ABC"` on SQLite only.
+        // The spelling is `GLOB` with the pattern's metacharacters translated, and
+        // `GLOB` as a *function* takes the pattern first — the opposite of the
+        // operator — so the argument order is part of what this pins.
+        (
+            "like \"A%\" .s",
+            &[("postgres", "s LIKE 'A%'"), ("sqlite", "GLOB(REPLACE(")],
+        ),
+        (
+            // The subject is the *last* argument: `GLOB` the function takes the
+            // pattern first, unlike the infix operator. Getting this backwards made
+            // every `like` on SQLite answer no-match.
+            "like \"A%\" .s",
+            &[("sqlite", "'), s) AS x FROM public.ev")],
+        ),
+        (
+            "ilike \"A%\" .s",
+            &[("sqlite", "LOWER(s) LIKE LOWER('A%')")],
         ),
         (
             "toString .id",

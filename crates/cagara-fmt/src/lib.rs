@@ -483,8 +483,100 @@ impl Fmt<'_> {
         match n.kind() {
             K::ImportDecl => self.spaced(n),
             K::Definition => self.def(n),
+            K::CatalogDecl => self.catalog(n),
             _ => Err(Bail),
         }
+    }
+
+    /// `catalog "schema" { name = { columns }, … }`
+    ///
+    /// Laid out like a record, because that is what it is: a schema string and a
+    /// list of entries whose columns are record *types*. The entries break onto their
+    /// own lines when the line does not fit, which is the one line in the
+    /// `CatalogDecl` grammar that can grow.
+    ///
+    /// Until this existed the whole declaration fell through `item`'s `_ => Err(Bail)`
+    /// arm to [`verbatim`](Fmt::verbatim), so `cagara fmt` echoed a `catalog` exactly
+    /// as written — including a file of nothing but catalogs, which `fmt --check`
+    /// then reported as already formatted.
+    fn catalog(&self, n: &SyntaxNode) -> R {
+        let els = sig(n);
+        let [catalog, schema, rest @ ..] = els.as_slice() else {
+            return Err(Bail);
+        };
+        let head = concat(vec![
+            self.tok(&token(Some(catalog), K::Ident)?),
+            text(" "),
+            self.tok(&token(Some(schema), K::String)?),
+        ]);
+        // An empty `catalog "s" { }` has no entries, so there is no brace to find
+        // and nothing to lay out; `rest` is `[{, }]` in the well-formed case and
+        // shorter when the parser recovered.
+        let (Some(open), Some(close)) = (rest.first(), rest.last()) else {
+            return Err(Bail);
+        };
+        let (open, close) = (
+            token(Some(open), K::LBrace)?,
+            token(Some(close), K::RBrace)?,
+        );
+        let middle = rest
+            .get(1..rest.len().saturating_sub(1))
+            .unwrap_or_default();
+        let mut inner = vec![Doc::Line];
+        let mut count = 0;
+        for e in middle {
+            match e {
+                NodeOrToken::Node(entry) if entry.kind() == K::CatalogEntry => {
+                    inner.push(self.catalog_entry(entry)?);
+                    count += 1;
+                }
+                // The comma itself; a trailing one is written back as written so
+                // the next run sees the same tree.
+                NodeOrToken::Token(t) if t.kind() == K::Comma => {
+                    inner.push(self.tok(t));
+                    inner.push(Doc::Line);
+                }
+                _ => return Err(Bail),
+            }
+        }
+        if count == 0 {
+            return Ok(concat(vec![
+                head,
+                text(" "),
+                self.tok(&open),
+                self.tok(&close),
+            ]));
+        }
+        // A `,` before `}` leaves an empty last line; the loop pushed a `Line`
+        // after every comma, so drop the trailing one rather than print a blank.
+        if matches!(inner.last(), Some(Doc::Line)) {
+            inner.pop();
+        }
+        inner.push(Doc::Line);
+        Ok(concat(vec![
+            head,
+            text(" "),
+            group(concat(vec![
+                self.tok(&open),
+                indent(concat(inner)),
+                self.tok(&close),
+            ])),
+        ]))
+    }
+
+    /// `name = { columns }` inside a `catalog`.
+    fn catalog_entry(&self, n: &SyntaxNode) -> R {
+        let els = sig(n);
+        let [name, eq, cols] = els.as_slice() else {
+            return Err(Bail);
+        };
+        Ok(concat(vec![
+            self.tok(&token(Some(name), K::Ident)?),
+            text(" "),
+            self.tok(&token(Some(eq), K::Eq)?),
+            text(" "),
+            self.ty(&node(Some(cols))?)?,
+        ]))
     }
 
     /// A node made only of tokens, separated by single spaces.

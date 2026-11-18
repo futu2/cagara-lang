@@ -102,15 +102,15 @@ rtrim : expr ?r string -> expr ?r string = sql "RTRIM($1)"
 ---
 --- A value already at least `n` wide is returned whole, not truncated.
 ---
---- Unlike `length`, this needs no `CAGARA_*` rewrite: sqlglot passes `LPAD`
---- through unchanged for every dialect. SQLite has no `LPAD` and will reject it
---- at run time, which is the same gap `try*` has there — emitting the call is
---- more honest than guessing at a `substr`/`printf` spelling, and the engine
---- says so loudly.
-lpad : expr ?r int -> expr ?r string -> expr ?r string -> expr ?r string = sql "LPAD($3, $1, $2)"
+--- SQLite has neither `LPAD` nor `REPEAT`, and there is no spelling short of a
+--- recursive query, so `--dialect sqlite` refuses this at compile time rather than
+--- emitting a call the engine will reject at run time.
+lpad : expr ?r int -> expr ?r string -> expr ?r string -> expr ?r string =
+  sql "CAGARA_LPAD($1, $2, $3)"
 
 --- `rpad 12 "0" s`: `s` padded on the right, the mirror of `lpad`.
-rpad : expr ?r int -> expr ?r string -> expr ?r string -> expr ?r string = sql "RPAD($3, $1, $2)"
+rpad : expr ?r int -> expr ?r string -> expr ?r string -> expr ?r string =
+  sql "CAGARA_RPAD($1, $2, $3)"
 
 --- The number of characters in a string — characters, not bytes, in every
 --- dialect (`CAGARA_LENGTH`).
@@ -119,11 +119,20 @@ length : expr ?r string -> expr ?r int = sql "CAGARA_LENGTH($1)"
 --- `like "%foo%" .name`: SQL `LIKE`, so `%` and `_` are wildcards. The pattern
 --- comes first to keep the subject last; for a plain substring test use
 --- `contains`.
-like : expr ?r string -> expr ?r string -> expr ?r bool = sql "$2 LIKE $1"
+---
+--- Case-sensitive everywhere, including SQLite. SQLite's own `LIKE` is
+--- case-insensitive for ASCII unless the connection turns that off, so the
+--- template is `CAGARA_LIKE` and the SQLite spelling is a `GLOB` with the pattern's
+--- metacharacters translated. Without that, the same program matched `"ABC"`
+--- there and did not on every other engine.
+like : expr ?r string -> expr ?r string -> expr ?r bool = sql "CAGARA_LIKE($1, $2)"
 
---- Case-insensitive `like`. Not every engine has `ILIKE`; sqlglot rewrites it
---- where it can.
-ilike : expr ?r string -> expr ?r string -> expr ?r bool = sql "$2 ILIKE $1"
+--- Case-insensitive `like`. Not every engine has `ILIKE`, so the template is
+--- `CAGARA_ILIKE`: SQLite gets both sides folded through `LOWER`.
+---
+--- That fold is ASCII-only, because SQLite's case mapping is: `ilike "%é%" "É"`
+--- does not match there. `upper`/`lower` have the same limit.
+ilike : expr ?r string -> expr ?r string -> expr ?r bool = sql "CAGARA_ILIKE($1, $2)"
 
 --- `substring start len s`, 1-based as in SQL and `len` characters long.
 substring : expr ?r int -> expr ?r int -> expr ?r string -> expr ?r string =
@@ -261,9 +270,19 @@ log2 : expr ?r float -> expr ?r float = sql "CAGARA_LOG2($1)"
 logBase : expr ?r float -> expr ?r float -> expr ?r float = base => x => ln x / ln base
 
 --- Cube root. `CBRT` exists on DuckDB, Trino and MariaDB but not on SQLite, so this
---- is `exp(ln|x| / 3)` with the sign put back: measured exact on all four, where
---- `power(abs(x), 1.0/3)` is `1.9999999986` on MariaDB.
-cbrt : expr ?r float -> expr ?r float = x => toFloat (sign x) * exp (ln (abs x) / 3)
+--- is `exp(ln|x| / 3)` with the sign put back, which is what
+--- `power(abs(x), 1.0/3)` gets wrong on MariaDB (`1.9999999986` for 8). The emulation
+--- is within a float ulp of the native call — `cbrt 27.0` is `3.0000000000000004` on
+--- DuckDB — so it is exact for the values a report shows and not bit-identical to
+--- `CBRT`.
+---
+--- The `0` case is written out because `ln 0` is not a number the engines agree on:
+--- SQLite answers NULL and DuckDB and PostgreSQL raise `cannot take logarithm of
+--- zero`, so an unguarded emulation answered `0.0` on one engine and *failed the
+--- query* on the others. The answer is `0` by definition, and `cbrt` is total.
+cbrt : expr ?r float -> expr ?r float = x => ifThenElse (x == 0.0) 0.0 (
+  toFloat (sign x) * exp (ln (abs x) / 3)
+)
 
 --- Degrees from radians.
 degrees : expr ?r float -> expr ?r float = sql "DEGREES($1)"

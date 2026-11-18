@@ -1318,6 +1318,23 @@ impl<'a> Normalizer<'a, 'a> {
                 let (_, _, node, _) = expr.clone().into_parts();
                 match node {
                     CheckedExprNode::Lit(crate::ir::Lit::Int(value)) => Ok(value),
+                    // A constant expression: `limit (2 + 3)`. The arithmetic is
+                    // over literals, so it folds here rather than becoming a
+                    // parameter of the SQL — `LIMIT 5` is what the reader meant,
+                    // and a target that wants a literal gets one.
+                    CheckedExprNode::Template { sql, args } => {
+                        let values = args
+                            .iter()
+                            .map(|a| match a.node() {
+                                CheckedExprNode::Lit(crate::ir::Lit::Int(v)) => Some(*v),
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<i64>>>();
+                        let Some(values) = values else {
+                            return Err(invalid(expr.origin()));
+                        };
+                        fold_int(&sql, &values).ok_or_else(|| invalid(expr.origin()))
+                    }
                     _ => Err(invalid(expr.origin())),
                 }
             }
@@ -1327,6 +1344,60 @@ impl<'a> Normalizer<'a, 'a> {
     pub(crate) fn ty(&self, module: usize, expr: &Expr) -> Option<ScalarType> {
         self.ty_at(Origin::new(module, expr.span))
     }
+}
+
+/// Fold an integer template over literal arguments: `$1 + $2` with 2 and 3 is 5.
+///
+/// Only the four operations and negation, because those are what a count is
+/// written with and each one is exact on `i64` or checked below. A template that
+/// is anything else — a function call, a string, an operator whose arguments are
+/// not both literal — returns `None`, which the caller reports as "expects an
+/// int". Division is checked for zero rather than panicking.
+fn fold_int(sql: &str, args: &[i64]) -> Option<i64> {
+    // `-(x)` / `-$1`: a negation, which the parser writes as a template too.
+    if let Some(rest) = sql.trim().strip_prefix('-') {
+        let inner = rest.trim().trim_start_matches('(').trim_end_matches(')').trim();
+        let k: usize = inner.strip_prefix('$')?.parse().ok()?;
+        return args.get(k.checked_sub(1)?).copied().map(|v: i64| -v);
+    }
+    for op in [" + ", " - ", " * "] {
+        if let Some((l, r)) = sql.split_once(op) {
+            let la: usize = l.trim().strip_prefix('$')?.parse().ok()?;
+            let ra: usize = r.trim().strip_prefix('$')?.parse().ok()?;
+            let (lv, rv) = (
+                args.get(la.checked_sub(1)?).copied()?,
+                args.get(ra.checked_sub(1)?).copied()?,
+            );
+            return match op {
+                " + " => lv.checked_add(rv),
+                " - " => lv.checked_sub(rv),
+                _ => lv.checked_mul(rv),
+            };
+        }
+    }
+    // `a / b` reaches here as `CAGARA_IDIV($1, $2)` — the template the operator
+    // is defined with, not the surface spelling.
+    if let Some(rest) = sql.strip_prefix("CAGARA_IDIV(") {
+        let inner = rest.trim_end_matches(')');
+        let (l, r) = inner.split_once(',')?;
+        let la: usize = l.trim().strip_prefix('$')?.parse().ok()?;
+        let ra: usize = r.trim().strip_prefix('$')?.parse().ok()?;
+        let (lv, rv) = (
+            args.get(la.checked_sub(1)?).copied()?,
+            args.get(ra.checked_sub(1)?).copied()?,
+        );
+        return (rv != 0).then(|| lv / rv);
+    }
+    if let Some((l, r)) = sql.split_once(" / ") {
+        let la: usize = l.trim().strip_prefix('$')?.parse().ok()?;
+        let ra: usize = r.trim().strip_prefix('$')?.parse().ok()?;
+        let (lv, rv) = (
+            args.get(la.checked_sub(1)?).copied()?,
+            args.get(ra.checked_sub(1)?).copied()?,
+        );
+        return (rv != 0).then(|| lv / rv);
+    }
+    None
 }
 
 /// Whether expanding a definition can reach itself through resolved names.

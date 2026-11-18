@@ -868,8 +868,9 @@ main =
 - A second `order` sorts rows that are already sorted, so its keys lead and the earlier ones become
   tiebreakers: `order [asc .a] & order [desc .id]` is `ORDER BY id DESC, a`.
 - NULLs sort **last** in both directions; this is fixed by the language.
-- `limit` and `offset` take an integer literal or a definition that is an integer constant. They do
-  not order by themselves. **Their order in the pipeline matters**, because each acts on what the
+- `limit` and `offset` take an integer literal, a definition that is an integer constant, or an
+  expression over literals that folds to one — `limit (2 + 3)` is `LIMIT 5`. An expression that
+  reads a column cannot be a count. They do not order by themselves. **Their order in the pipeline matters**, because each acts on what the
   one before it returned: `& offset 40 & limit 20` skips forty rows and then takes twenty (rows 41
   to 60), while `& limit 20 & offset 40` takes twenty rows and then skips forty of those — nothing.
   The compiler folds the second into `LIMIT 0`, so the SQL says what the pipeline meant.

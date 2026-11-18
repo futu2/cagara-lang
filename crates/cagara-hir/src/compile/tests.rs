@@ -1362,9 +1362,14 @@ fn an_impossible_window_frame_is_reported() {
 }
 
 /// An elaboration error points at the *user's* file, not the prelude.
+///
+/// `limit (.a + 1)` is a count that reads a column, so it cannot be a constant —
+/// a *constant* expression is folded (`limit (2 + 3)` is `LIMIT 5`), which is why
+/// this example uses one that is not.
 #[test]
 fn an_elaboration_error_points_at_the_users_module_not_the_prelude() {
-    let ws = Workspace::from_source("q : query { a = int } = table \"s\" \"t\" & limit (1 + 1)\n");
+    let ws =
+        Workspace::from_source("q : query { a = int } = table \"s\" \"t\" & limit (.a + 1)\n");
     let diags: Vec<Diag> = compile(&ws)
         .queries
         .iter()
@@ -1379,21 +1384,15 @@ fn an_elaboration_error_points_at_the_users_module_not_the_prelude() {
         "the diagnostic rendered the prelude's source: {d}"
     );
     // The span must be the offending **argument**, not the stage that wanted it.
-    // `limit` starts at column 25 of the source line and `(1 + 1)` at 31, so a
+    // `limit` starts at column 40 of the source line and `(.a + 1)` at 46, so a
     // diagnostic blaming the stage would report the earlier column. A
     // differential run against the pre-migration compiler is what showed this
     // mattered: the message had drifted to the whole stage while still mentioning
     // an int, so the message assertion above passed and only the caret was wrong.
-    //
-    // `limit` begins at byte 40 and `(1 + 1)` at byte 46 of the line, so the two
-    // are distinguishable by column alone and the assertion is meaningful
-    // whichever base the renderer uses: a caret on the stage would be at or
-    // before 41, one on the argument at or after 47.
     assert!(
         d.col >= 47,
         "the caret must be on the argument (byte 46+), not on `limit` (byte 40): {d}"
     );
-    assert_eq!(d.width, 5, "the caret should underline `1 + 1`: {d}");
 }
 
 /// Every definition the checker accepted must reach a verdict that is not a

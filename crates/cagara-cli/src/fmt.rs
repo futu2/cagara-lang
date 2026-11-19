@@ -140,9 +140,8 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> std::io::Result<ExitC
 /// Replace `path` with `contents`, writing a sibling temporary first.
 ///
 /// A crash during a plain `fs::write` can leave a truncated source file. The
-/// rename is atomic on Unix; Windows has no portable rename-over-existing, so
-/// the old file is removed first there. The file's permissions are copied to
-/// the temporary so replacing it does not change its mode.
+/// sibling is renamed over the original without unlinking the original first.
+/// The file's permissions are copied to the temporary before replacement.
 fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     // Follow a symlink, so formatting a link updates its target rather than
     // replacing the link with a regular file.
@@ -151,7 +150,6 @@ fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let mut last = None;
     for attempt in 0..100_u32 {
         let tmp = parent.join(format!(".cagara-fmt-{}-{attempt}", std::process::id()));
         let mut file = match OpenOptions::new().write(true).create_new(true).open(&tmp) {
@@ -166,24 +164,15 @@ fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
             file.write_all(contents)?;
             file.sync_all()?;
             drop(file);
-            #[cfg(windows)]
-            if target.exists() {
-                fs::remove_file(&target)?;
-            }
             fs::rename(&tmp, &target)
         })();
-        match result {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                let _ = fs::remove_file(&tmp);
-                last = Some(e);
-            }
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
         }
+        return result;
     }
-    Err(last.unwrap_or_else(|| {
-        std::io::Error::other(format!(
-            "could not create a temporary file next to {}",
-            path.display()
-        ))
-    }))
+    Err(std::io::Error::other(format!(
+        "could not create a temporary file next to {}",
+        path.display()
+    )))
 }

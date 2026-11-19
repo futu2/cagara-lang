@@ -337,6 +337,16 @@ unicode_names : query { id = int, 总金额 = float, 数量 = int } = table \"ma
 /// `(definition, expected rows)`; a row is its columns joined by `|`, NULL
 /// as `NULL`, booleans as `1` / `0`.
 const CASES: &[(&str, &[&str])] = &[
+    ("proj_global = nums & agg { n = count } & select { x = 1 }", &["1"]),
+    ("proj_global_empty = empty & agg { n = count } & select { x = 1 }", &["1"]),
+    ("update_global = nums & agg { n = count } & update { n = 1 }", &["1"]),
+    ("omit_global = empty & agg { n = count, x = 1 } & omit \"n\"", &["1"]),
+    ("window_after_limit = nums & order [asc .id] & limit 2 & select { n = over {} count }", &["2", "2"]),
+    ("window_after_offset = nums & order [asc .id] & offset 1 & select { n = over {} count }", &["3", "3", "3"]),
+    ("shadow_sort = nums & order [asc .id] & select { id = .a }", &["7", "-7", "7", "-8"]),
+    ("shadow_sort_alias = nums & select { k = .id, v = .a } & order [asc .k] & select { k = .v }", &["7", "-7", "7", "-8"]),
+    ("shadow_sort_source = nums & select { k = .id, v = .a } & order [asc .k] & select { id = .v }", &["7", "-7", "7", "-8"]),
+    ("keep_sort_alias = nums & select { id = .a, a = .id } & order [asc .id, asc .a] & select { id = .id, a = .a, extra = 1 }", &["-8|4|1", "-7|2|1", "7|1|1", "7|3|1"]),
     // The vocabulary a report is written in. `ratio`/`percentOf` exist because
     // `100 * a / b` silently truncates on `int`; `between` because the comparison
     // chain names the column twice.
@@ -4041,6 +4051,18 @@ fn an_emulated_construct_answers_the_same_rows_as_the_native_one() {
             "rollup_with_a_plain_key",
             "q = g & agg { a = group .a, b = rollup .b, s = sum .n } \
              & select { a = .a, b = .b ?? -1, s = .s } & order [asc .a, asc .b]",
+            "duckdb",
+            "sqlite",
+        ),
+        (
+            "rollup_repeats_plain_key",
+            "q = g & agg { x = group .a, y = rollup .a, n = count } & order [asc .x, asc .y]",
+            "duckdb",
+            "sqlite",
+        ),
+        (
+            "rollup_and_cube_share_a_key",
+            "q = g & agg { x = rollup .a, y = cube .a, n = count } & order [asc .x, asc .y]",
             "duckdb",
             "sqlite",
         ),

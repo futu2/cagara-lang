@@ -141,8 +141,8 @@ impl Lowerer {
         let paged = st.limit.is_some() || st.offset.is_some();
         let mut outer_order = Vec::new();
         for k in &st.order_by {
-            let name = match st.items.iter().find(|(_, e)| *e == k.expr) {
-                Some((n, _)) => n.clone(),
+            let name = match st.sort_output_name(&k.expr) {
+                Some(name) => name.to_owned(),
                 None => {
                     let n = self.hidden(&st);
                     st.items.push((n.clone(), k.expr.clone()));
@@ -641,29 +641,8 @@ impl Lowerer {
         let new_win = fs
             .iter()
             .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
-        // What a projection can and cannot fold over, in two parts.
-        //
-        // A `DISTINCT` below it is the one that always needs the barrier: dropping
-        // a column there changes how many rows are deduped. `(1,'a'), (1,'b')` is
-        // two rows after `distinct`, and two rows after projecting `id`; folded it
-        // would be one.
-        //
-        // A `LIMIT` or an `OFFSET` below it does not: those pick *which* rows the
-        // stage returns, by an `ORDER BY` whose keys were already resolved to
-        // expressions over the input columns — SQL lets an `ORDER BY` name a
-        // column the projection does not output, as long as the query is not
-        // `DISTINCT`. So the projection may fold whatever it drops.
-        //
-        // Everything else `needs_barrier` refuses (a window a later stage would
-        // have to see, an aggregate) is untouched: `keeps_every_column` only
-        // widens the paging case.
-        let paged = st.limit.is_some() || st.offset.is_some();
-        let shadows = self.shadows_a_sort_key(&st, fs);
-        let barrier = if paged && !st.distinct {
-            (new_win && (st.has_agg || st.has_win)) || shadows
-        } else {
-            st.needs_barrier(Fuse::Project, new_win) && (!st.keeps_every_column(fs) || shadows)
-        };
+        let barrier = self.shadows_a_sort_key(&st, fs)
+            || (st.needs_barrier(Fuse::Project, new_win) && !st.keeps_every_column(fs));
         if barrier {
             st = self.wrap(st);
         }
@@ -708,20 +687,17 @@ impl Lowerer {
             else {
                 continue;
             };
-            let same = matches!(
-                st.items.iter().find(|(n, _)| n == name),
-                Some((_, Expr::Column { name: c, table: None, .. })) if c == name
-            );
-            if same {
-                continue;
-            }
-            if st.items.iter().any(|(n, _)| n == name) {
+            let original = before.iter().find(|(output, _)| output == name);
+            if let Some((_, value)) = st.items.iter().find(|(output, _)| output == name) {
+                if original.map_or(&k.expr, |(_, old)| old) == value {
+                    continue;
+                }
                 if let Some(alias) = &alias {
                     k.expr = col(Some(alias), name);
                     continue;
                 }
             }
-            if let Some((_, old)) = before.iter().find(|(n, _)| n == name) {
+            if let Some((_, old)) = original {
                 k.expr = old.clone();
             }
         }
@@ -734,8 +710,8 @@ impl Lowerer {
     /// shares the same `SELECT`, an `ORDER BY name` binds to the *output* `name`
     /// when there is one — so a projection that puts a different column under a
     /// name a sort key uses changes the ordering. `select { name = .id }` under
-    /// `order [asc .name]` is exactly that, and it is why the paging fold has to
-    /// ask.
+    /// `order [asc .name]` is exactly that. If the old alias is dropped, also
+    /// check the source name that `retarget_order` would use in its place.
     fn shadows_a_sort_key(&self, st: &Stage, fs: &[(String, IrExpr)]) -> bool {
         st.order_by.iter().any(|k| {
             let Expr::Column {
@@ -744,9 +720,18 @@ impl Lowerer {
             else {
                 return false;
             };
-            fs.iter()
-                .find(|(n, _)| n == name)
-                .is_some_and(|(_, e)| !matches!(e, IrExpr::Col(Side::Single, c) if c == name))
+            let field = |output: &str| fs.iter().find(|(field, _)| field == output);
+            let replacement = field(name).or_else(|| match st.item(name).ok()? {
+                Expr::Column {
+                    table: None,
+                    name: source,
+                    ..
+                } => field(&source),
+                _ => None,
+            });
+            replacement.is_some_and(
+                |(_, value)| !matches!(value, IrExpr::Col(Side::Single, column) if column == name),
+            )
         })
     }
 
@@ -759,7 +744,7 @@ impl Lowerer {
         let new_win = fs
             .iter()
             .any(|(_, e)| e.any(&|x| matches!(x, IrExpr::Win(..))));
-        if st.needs_barrier(Fuse::Project, new_win) {
+        if st.needs_barrier(Fuse::Project, new_win) || self.shadows_a_sort_key(&st, fs) {
             st = self.wrap(st);
         }
         let input: Vec<(String, ())> = st.names().into_iter().map(|c| (c, ())).collect();
@@ -1020,7 +1005,7 @@ impl Lowerer {
         if st
             .order_by
             .iter()
-            .any(|k| !st.items.iter().any(|(_, e)| *e == k.expr))
+            .any(|key| st.sort_output_name(&key.expr).is_none())
         {
             // The location is already set here: `rel` restored it on success, so
             // this stage's own `At` was consumed below. Re-enter it from the node

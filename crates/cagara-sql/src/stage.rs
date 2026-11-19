@@ -212,6 +212,21 @@ pub enum Fuse {
 }
 
 impl Stage {
+    fn global_aggregate(&self) -> bool {
+        self.has_agg && self.group_by.is_empty()
+    }
+
+    /// The output carrying this sort key. A bare `ORDER BY` name binds to
+    /// an output alias before it binds to a column of the same name in `FROM`.
+    pub fn sort_output_name(&self, key: &Expr) -> Option<&str> {
+        let named = self.items.iter().find(|(name, _)| {
+            matches!(key, Expr::Column { table: None, name: alias, .. } if alias == name)
+        });
+        named
+            .or_else(|| self.items.iter().find(|(_, value)| value == key))
+            .map(|(name, _)| name.as_str())
+    }
+
     /// May `kind`'s clause be folded into this stage, or must the stage be
     /// wrapped in a derived table first?
     ///
@@ -223,8 +238,8 @@ impl Stage {
     /// | consumer | blocked by |
     /// |---|---|
     /// | filter | aggregate, window, limit, offset |
-    /// | project / update | limit, offset, distinct, and (only when the projection adds a window) aggregate or window |
-    /// | omit | distinct |
+    /// | project / update | global aggregate, distinct, and (when adding a window) paging, aggregate or window |
+    /// | omit | distinct or global aggregate |
     /// | aggregate | aggregate, window, distinct, limit, offset |
     /// | sort | limit, offset, distinct |
     /// | limit | limit |
@@ -238,9 +253,11 @@ impl Stage {
         match kind {
             Fuse::Filter => paged || self.has_agg || self.has_win,
             Fuse::Project => {
-                paged || self.distinct || (new_window && (self.has_agg || self.has_win))
+                self.distinct
+                    || self.global_aggregate()
+                    || (new_window && (paged || self.has_agg || self.has_win))
             }
-            Fuse::Omit => self.distinct,
+            Fuse::Omit => self.distinct || self.global_aggregate(),
             Fuse::Aggregate => paged || self.distinct || self.has_agg || self.has_win,
             Fuse::Sort => paged || self.distinct,
             Fuse::Limit => self.limit.is_some(),
@@ -291,21 +308,9 @@ impl Stage {
     /// column present exactly once, each one as itself, under any names and in
     /// any order?
     ///
-    /// Such a projection cannot change which rows a clause below it selects: it
-    /// renames and reorders values, and every `ORDER BY` key was already resolved
-    /// to an expression over the *input* columns (SQL lets an `ORDER BY` name a
-    /// column the projection does not output). So it may fold into a stage that a
-    /// general projection may not — one with a `LIMIT`, an `OFFSET` or a
-    /// `DISTINCT` — and the derived table it used to force disappears:
-    ///
-    /// ```text
-    /// order [asc .id] & limit 3 & select { x = .id, y = .name, z = .age }
-    ///   SELECT id AS x, name AS y, age AS z FROM t ORDER BY id LIMIT 3
-    /// ```
-    ///
-    /// A projection that *drops* a column does not qualify: dropping after a
-    /// `DISTINCT` changes the number of rows, and after a `LIMIT` it is only
-    /// safe when the sort keys survive, which this does not try to prove.
+    /// A permutation preserves both the row used by `DISTINCT` and the
+    /// aggregate expressions that make a global aggregate return one row.
+    /// The caller checks sort-key shadowing separately.
     pub fn keeps_every_column(&self, fs: &[(String, cagara_hir::ir::Expr)]) -> bool {
         use cagara_hir::ir::{Expr as IrExpr, Side};
         if fs.len() != self.items.len() {

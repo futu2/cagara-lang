@@ -480,6 +480,26 @@ fn fmt_rewrites_in_place_and_is_idempotent() {
     assert!(!once.contains("select{x=.a}"), "still unformatted: {once}");
 }
 
+#[cfg(windows)]
+#[test]
+fn fmt_preserves_the_original_when_replacement_is_denied() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let dir = TempDir::new("fmt-replace");
+    let original = "main   =   1\n";
+    let path = dir.write("locked.cagara", original);
+    const FILE_SHARE_READ: u32 = 1;
+    let _reader = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&path)
+        .unwrap();
+    let output = cagara([OsStr::new("fmt"), path.as_os_str()]);
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    assert_eq!(std::fs::read_dir(dir.0.path()).unwrap().count(), 1);
+}
+
 /// `fmt` on a directory formats the sources under it, as `check` reads them.
 ///
 /// `cagara fmt examples/` used to fail with `Is a directory (os error 21)` while

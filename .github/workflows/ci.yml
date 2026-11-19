@@ -185,6 +185,13 @@ jobs:
       # not install; `cargo test` skips absent engines, but compiling every
       # target is the part that catches path and platform assumptions here.
       - run: cargo check --workspace --all-targets --locked
+      - uses: taiki-e/install-action@v2
+        if: runner.os == 'Windows'
+        with:
+          tool: nextest
+      - name: Test formatter file replacement on Windows
+        if: runner.os == 'Windows'
+        run: cargo nextest run -p cagara-cli --test cli --locked -E 'test(/^fmt_/)'
 
   vscode:
     name: VS Code extension

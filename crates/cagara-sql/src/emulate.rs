@@ -190,15 +190,13 @@ fn grouping_sets(input: &Rel, fs: &[(String, Expr)]) -> Rel {
     })
 }
 
-/// Every grouping set the clause names, as the marked keys each one keeps.
+/// Every grouping set the clause names, as the key expressions each one keeps.
 ///
 /// The first set is the full key list, so the emitted `UNION ALL` starts with the
 /// rows the plain `GROUP BY` would have produced; the coarser sets follow. That
 /// order is not semantically required — `UNION ALL` has no row order — but it
 /// makes the generated SQL read like the clause.
-fn grouping_set_list<'a>(
-    keys: &[(Option<GroupingShape>, &'a Expr)],
-) -> Vec<Vec<(GroupingShape, &'a Expr)>> {
+fn grouping_set_list<'a>(keys: &[(Option<GroupingShape>, &'a Expr)]) -> Vec<Vec<&'a Expr>> {
     // One entry per shape, in the order the shapes were written; `push_group` has
     // already deduplicated each (shape, key) pair.
     let mut shapes: Vec<(GroupingShape, Vec<&Expr>)> = Vec::new();
@@ -231,14 +229,18 @@ fn grouping_set_list<'a>(
         })
         .collect();
     // The clause's sets are the cross product of its shapes' families.
-    let mut sets: Vec<Vec<(GroupingShape, &Expr)>> = vec![Vec::new()];
+    let plain = keys
+        .iter()
+        .filter_map(|(shape, key)| shape.is_none().then_some(*key))
+        .collect();
+    let mut sets: Vec<Vec<&Expr>> = vec![plain];
     for (shape_index, family) in families.iter().enumerate() {
-        let (shape, list) = &shapes[shape_index];
+        let (_, list) = &shapes[shape_index];
         let mut next = Vec::with_capacity(sets.len() * family.len());
         for set in &sets {
             for keep in family {
                 let mut with = set.clone();
-                with.extend(keep.iter().map(|&i| (*shape, list[i])));
+                with.extend(keep.iter().map(|&index| list[index]));
                 next.push(with);
             }
         }
@@ -254,13 +256,10 @@ fn grouping_set_list<'a>(
 /// an excluded one becomes a NULL literal, which is the subtotal row's value. The
 /// substitution happens inside the expression, not only at its root, because a key
 /// can be used in arithmetic (`n2 = count * rollup .k` is unusual but legal).
-fn select_groups(e: &Expr, included: &[(GroupingShape, &Expr)]) -> Expr {
+fn select_groups(e: &Expr, included: &[&Expr]) -> Expr {
     match e {
-        Expr::Grouping(shape, key) => {
-            if included
-                .iter()
-                .any(|(s, k)| s == shape && *k == key.as_ref())
-            {
+        Expr::Grouping(_, key) => {
+            if included.contains(&key.as_ref()) {
                 Expr::Group(Box::new(select_groups(key, included)))
             } else {
                 null()

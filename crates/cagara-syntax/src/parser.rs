@@ -56,13 +56,14 @@ pub fn parse_with(input: &str, ops: &Ops) -> Parse {
     // comments became the Haskell pair (`--`, `{- … -}`), so every file written
     // before that change has one, and "unexpected tokens after definition" at the
     // first `#` is the least useful thing that could be said about it.
+    let mut lexical = Vec::new();
     for lexeme in &p.toks {
         match lexeme.kind {
-            Token::UnterminatedComment => p.errors.push(ParseError {
+            Token::UnterminatedComment => lexical.push(ParseError {
                 offset: lexeme.offset,
                 message: "unterminated block comment: `{-` must be closed by `-}`".to_string(),
             }),
-            Token::Error if lexeme.text == "#" => p.errors.push(ParseError {
+            Token::Error if lexeme.text == "#" => lexical.push(ParseError {
                 offset: lexeme.offset,
                 message: "`#` is not a comment: a comment starts with `--`, and a block \
                           comment is `{- … -}`"
@@ -70,6 +71,21 @@ pub fn parse_with(input: &str, ops: &Ops) -> Parse {
             }),
             _ => {}
         }
+    }
+    // These go **first**. A `#` at the top of a file makes the first line an error
+    // token, so the parser's own report is "expected a definition or import" at the
+    // same offset — true, and useless: it describes the symptom rather than the cause,
+    // and `#` comments are what every file written before 0.5.0 is full of. Leading with
+    // the explanation is the difference between a migration and a puzzle.
+    if !lexical.is_empty() {
+        // A parse error at the *same* offset is the parser reacting to this very
+        // lexeme, so it adds nothing beside the explanation — two errors on one
+        // character reads as two problems. Errors elsewhere are kept: a `#` in the
+        // middle of a file can have a real mistake after it.
+        let explained: Vec<usize> = lexical.iter().map(|e| e.offset).collect();
+        p.errors.retain(|e| !explained.contains(&e.offset));
+        lexical.extend(std::mem::take(&mut p.errors));
+        p.errors = lexical;
     }
     Parse {
         green: p.b.finish(),
@@ -1339,6 +1355,11 @@ mod tests {
     }
 
     /// A `#` is no longer a comment, and saying so beats "unexpected tokens".
+    ///
+    /// It is also the **first** thing said. Every file written before 0.5.0 is full of
+    /// `#` comments, and the parser's own report at that offset is "expected a
+    /// definition or import" — true, and useless to someone migrating. Two errors on
+    /// one character also read as two problems, so the redundant one is dropped.
     #[test]
     fn a_hash_is_reported_as_the_old_comment_spelling() {
         let p = parse("x : int = 1 # nope\n");
@@ -1348,6 +1369,16 @@ mod tests {
             "{msgs:?}"
         );
         assert!(msgs.iter().any(|m| m.contains("`--`")), "{msgs:?}");
+        assert!(
+            msgs[0].contains("`#` is not a comment"),
+            "the explanation leads: {msgs:?}"
+        );
+
+        // At the top of a file the parser would also complain "expected a definition or
+        // import" at the same offset; that is the symptom, and it is dropped.
+        let p = parse("# nope\nq = 1\n");
+        assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+        assert!(p.errors[0].message.contains("`#` is not a comment"));
     }
 
     /// An unclosed `{-` is reported, with the spelling it is looking for.

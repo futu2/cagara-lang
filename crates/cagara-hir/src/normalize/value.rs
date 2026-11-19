@@ -16,7 +16,7 @@ use super::{
     StageSpec, Value,
 };
 use crate::check::NodeRef;
-use crate::check::Resolved;
+use crate::check::{Resolved, TypedExpr};
 use crate::checked::{CheckedExpr, CheckedExprNode};
 use crate::core::{Error, Origin, ScalarType};
 
@@ -249,63 +249,53 @@ impl<'a> Normalizer<'a, 'a> {
             }
             return Ok(value.clone());
         }
-        match self.resolution(module, expr) {
-            Some(Resolved::Def((target_module, target_def))) => {
-                self.definition(target_module, target_def, origin)
+        match self.typed(module, expr) {
+            Some(TypedExpr {
+                resolved: Some(Resolved::Def((target_module, target_def))),
+                choices,
+                instance,
+                ..
+            }) => {
+                let count = self.input.type_check().holes(target_module, target_def);
+                let instance = instance.at_use(&env.instance);
+                let callee_env = env.instantiate(&choices, count, instance).ok_or_else(|| {
+                    Control::unsupported(
+                        origin,
+                        "missing overload choice for an instantiated helper",
+                    )
+                })?;
+                self.definition(target_module, target_def, origin, &callee_env)
             }
-            Some(Resolved::Overloads {
-                module: target_module,
-                defs,
-            }) => self.overloads(target_module, module, expr, &defs),
+            Some(TypedExpr {
+                resolved:
+                    Some(Resolved::Overloads {
+                        module: target_module,
+                        defs,
+                    }),
+                choices,
+                ..
+            }) => {
+                // A direct overload set uses slot zero. Never try templates
+                // until one lowers: equally shaped SQL templates can implement
+                // different operations, e.g. integer and decimal averages.
+                let Some(choice) = choices.first().filter(|u| u.hole == 0) else {
+                    return Err(Control::unsupported(origin, "missing overload choice"));
+                };
+                let ((module, def), instance) = env
+                    .resolve(choice)
+                    .filter(|((m, d), _)| *m == target_module && defs.contains(d))
+                    .ok_or_else(|| Control::unsupported(origin, "unresolved overload choice"))?;
+                self.definition(module, def, origin, &Env::with_instance(instance))
+            }
             // A body no use reaches — a primitive definition's own — has no
             // recorded resolution, so the name is looked up in the scope of the
             // definition being normalized, which is the scope it was written in.
-            // The first definition of that name is enough: narrowing the
-            // overloads is a *use* site's job, and there is none here.
-            None => match self.scope_definition(module, label) {
+            _ => match self.scope_definition(module, label) {
                 Some((target_module, target_def)) => {
-                    self.definition(target_module, target_def, origin)
+                    self.definition(target_module, target_def, origin, &Env::default())
                 }
                 None => Ok(Value::Name(label.clone())),
             },
-        }
-    }
-
-    /// The candidates of an overloaded name: the one the checker selected at
-    /// this use, or — when the use site itself is still open — each candidate,
-    /// filtered by whichever one applies.
-    fn overloads(
-        &mut self,
-        target_module: usize,
-        use_module: usize,
-        expr: &'a Expr,
-        defs: &[usize],
-    ) -> Result<Value<'a>, Control> {
-        let origin = Origin::new(use_module, expr.span);
-        if let Some(node) = self.typed(use_module, expr) {
-            for (_, choice) in &node.choices {
-                if let crate::check::Choice::Def(choice_module, target_def) = choice {
-                    if target_module == *choice_module && defs.contains(target_def) {
-                        return self.definition(*choice_module, *target_def, origin);
-                    }
-                }
-            }
-        }
-        let mut values = Vec::with_capacity(defs.len());
-        for def in defs {
-            match self.definition(target_module, *def, origin) {
-                Ok(value) => values.push(value),
-                Err(Control::Unsupported { .. }) => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        match values.len() {
-            0 => Err(Control::unsupported(
-                origin,
-                "no overload candidate applies",
-            )),
-            1 => Ok(values.remove(0)),
-            _ => Ok(Value::Overloads(values)),
         }
     }
 
@@ -318,11 +308,12 @@ impl<'a> Normalizer<'a, 'a> {
     /// a primitive's stage, a lambda, an alias's target — and applying that
     /// value is something the calling expression does. Leaving the callee's sites
     /// current would stamp the call in the caller with the callee's
-    pub(crate) fn definition(
+    fn definition(
         &mut self,
         module: usize,
         def: usize,
         use_origin: Origin,
+        env: &Env<'a>,
     ) -> Result<Value<'a>, Control> {
         let key = (module, def);
         if self.active.contains(&key) {
@@ -340,7 +331,7 @@ impl<'a> Normalizer<'a, 'a> {
         let previous_site = self.definition_site;
         self.definition_site = self.application_site(use_origin);
         let body = &self.input.module(module).def(def).body;
-        let result = self.body_value(module, def, body, &Env::default());
+        let result = self.body_value(module, def, body, env);
         self.definition_site = previous_site;
         self.defining = previous;
         self.active.pop();
@@ -371,7 +362,9 @@ impl<'a> Normalizer<'a, 'a> {
         });
         let result = match &body.kind {
             ExprKind::Primitive(name) => scalar::primitive(self, module, body, name),
-            ExprKind::Sql(sql) => scalar::template_value(self, module, body, sql, def),
+            ExprKind::Sql(sql) => {
+                scalar::template_value(self, module, body, sql, def, env.instance.result())
+            }
             // Any other body is an ordinary expression: an alias follows, a
             // lambda is a function value, an application is reduced.
             _ => self.value(module, body, env),
@@ -533,17 +526,6 @@ impl<'a> Normalizer<'a, 'a> {
                 origin,
                 format!("`{label}` was applied before it was given a value"),
             )),
-            Value::Overloads(candidates) => {
-                for candidate in candidates {
-                    if let Ok(applied) = self.apply(candidate, arg.clone()) {
-                        return Ok(applied);
-                    }
-                }
-                Err(Control::unsupported(
-                    origin,
-                    "no overload candidate accepts this argument",
-                ))
-            }
             other => Err(Control::unsupported(
                 origin,
                 format!("this is not a function: it is {}", value_class(&other)),
@@ -1633,7 +1615,6 @@ pub(crate) fn own(value: &Value<'_>) -> Value<'static> {
             origin: *origin,
             spec: *spec,
         },
-        Value::Overloads(values) => Value::Overloads(values.iter().map(own).collect()),
         Value::Tuple { items, names } => Value::Tuple {
             items: items.iter().map(own).collect(),
             names: names.clone(),
@@ -1669,7 +1650,6 @@ pub(crate) fn value_class(value: &Value<'_>) -> &'static str {
         Value::Frame(_) => "a row frame",
         Value::Bound(_) => "a frame bound",
         Value::Fold { .. } => "a frame or offset",
-        Value::Overloads(_) => "an overloaded name",
         Value::Tuple { .. } => "a record or list",
     }
 }

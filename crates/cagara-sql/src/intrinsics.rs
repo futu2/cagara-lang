@@ -70,6 +70,26 @@ fn node(e: Expr, to: Dialect) -> Result<Expr, String> {
             within_group,
         });
     }
+    if upper == "CAGARA_EXACT_AVG" {
+        let [value, Expr::Number(s)] = args.as_slice() else {
+            return Err("decimal avg requires a value and its scale".into());
+        };
+        let scale = s
+            .parse::<u32>()
+            .ok()
+            .filter(|s| *s <= 38)
+            .ok_or("decimal avg requires a scale from 0 to 38")?;
+        let aggregate = |name: &str| Expr::Function {
+            name: name.into(),
+            args: vec![value.clone()],
+            distinct,
+            filter: filter.clone(),
+            over: over.clone(),
+            order_by: vec![],
+            within_group: false,
+        };
+        return exact_decimal_avg(to, scale, aggregate("SUM"), aggregate("COUNT")).map(atomic);
+    }
     if let Some(msg) = list_refusal(&upper, to) {
         return Err(msg);
     }
@@ -124,6 +144,73 @@ fn node(e: Expr, to: Dialect) -> Result<Expr, String> {
             ),
         }),
     }
+}
+
+/// Test divisibility *before* producing a fixed-scale quotient. SUM and COUNT
+/// have identical DISTINCT/FILTER/OVER clauses. NULLIF also protects an empty
+/// window frame. Neither implementation divides using a floating-point type.
+fn exact_decimal_avg(to: Dialect, scale: u32, sum: Expr, count: Expr) -> Result<Expr, String> {
+    use BinaryOperator::{Eq, Multiply};
+    if support(Cap::ExactDecimalAvg, to) == crate::dialect::Support::Unsupported {
+        return Err("exact decimal avg is implemented for PostgreSQL and DuckDB only; convert the input to float first if approximation is intended".into());
+    }
+    // SUM and COUNT must see the same sample, including FILTER and OVER keys.
+    let sum = crate::stage::try_transform_deep(sum, &|e| match &e {
+        Expr::Function { name, .. }
+            if name.eq_ignore_ascii_case("random") || name.eq_ignore_ascii_case("rand") =>
+        {
+            Err("project random into a column before using it in an exact decimal avg".into())
+        }
+        _ => Ok(e),
+    })?;
+    let decimal = |s| DataType::Decimal {
+        precision: Some(38),
+        scale: Some(s),
+    };
+    let unit = if scale == 0 {
+        "1".into()
+    } else {
+        format!("0.{}1", "0".repeat(scale as usize - 1))
+    };
+    let unit = cast(s(&unit), decimal(scale));
+    let divisor = func("NULLIF", vec![count.clone(), n("0")]);
+    let step = bin(divisor.clone(), Multiply, unit.clone());
+    let remainder = func("MOD", vec![sum.clone(), step]);
+    let quotient = if to == Dialect::DuckDb {
+        // Decimal `/` returns DOUBLE. Read the fixed-scale sum as integer
+        // minor units without multiplying a 38-digit value by 10^scale.
+        let text = cast(cast(sum.clone(), decimal(scale)), DataType::Varchar(None));
+        let digits = func("REPLACE", vec![text, s("."), s("")]);
+        let units = cast(
+            digits,
+            DataType::Dialect {
+                kind: sqlglot_rust::ast::DataTypeKind::Int128,
+                sql: "HUGEINT".into(),
+            },
+        );
+        cast(func("DIVIDE", vec![units, divisor]), decimal(0))
+    } else {
+        // PostgreSQL NUMERIC can hold the scaled numerator without a 38-digit cap.
+        let factor = n(&format!("1{}", "0".repeat(scale as usize)));
+        func("DIV", vec![bin(sum.clone(), Multiply, factor), divisor])
+    };
+    // The invalid cast depends on the group; a constant error could fail at
+    // planning time even for exact or empty groups.
+    let inexact = cast(
+        func("CONCAT", vec![s("inexact decimal avg: "), sum]),
+        decimal(scale),
+    );
+    Ok(cast(
+        Expr::Case {
+            operand: None,
+            when_clauses: vec![
+                (bin(count, Eq, n("0")), Expr::Null),
+                (bin(remainder, Eq, n("0")), bin(quotient, Multiply, unit)),
+            ],
+            else_clause: Some(Box::new(inexact)),
+        },
+        decimal(scale),
+    ))
 }
 
 /// Put `DISTINCT` and a `FILTER` back on a call that `intrinsic` rebuilt.

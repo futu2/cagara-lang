@@ -72,7 +72,6 @@ apply (Group, v)            = a grouping key
 apply (Membership, v)       = accumulate; build `in` when saturated
 apply (Fold, v)             = accumulate; build a frame bound or Frame
 apply (Table|Label, v)      = a table leaf, or a symbol argument
-apply (Overloads cs, v)     = the first candidate that applies
 ```
 
 A local `let name = value in body` is parsed as `(name => body) value`, so it is
@@ -111,10 +110,13 @@ the stack to stamp a constructed node with the application it belongs to.
 to (`Normalizer::name` → `Normalizer::definition`). An alias *is* its target, so
 following it is that call rather than a separate `follow_alias` walk.
 
-**Overload selection** (`Normalizer::overloads`). The checker records a `Choice`
-per use site (`TypedExpr::choices`); a resolved choice is the one whose
-definition is normalized. When the use site itself is still open, every candidate
-is tried and the first that applies wins.
+**Overload selection** (`Normalizer::name`). The checker records a `Choice` per
+use site (`TypedExpr::choices`). A concrete choice names the definition to
+normalize. A hole refers to an overload argument in the enclosing definition's
+environment: each caller fills those slots, and closures capture them. The
+chosen implementation carries its instantiated scalar type arguments, so a
+template can still read a decimal scale inside a polymorphic helper. The
+normalizer never picks a SQL template by trying candidates in source order.
 
 **Helpers.** A helper is an ordinary definition, so applying one is β-reduction:
 its parameters are bound in the environment and its body is normalized under the
@@ -147,7 +149,7 @@ The constructors are the single statement of relational validity:
 
 | Constructor | Rule it enforces | Output row |
 |---|---|---|
-| `Builder::table` | the columns must be known | the table's columns |
+| `Builder::table` | closed columns with concrete SQL value types | the table's columns |
 | `Builder::rewrite` (`prefix`, `suffix`, `omit`, `mapValue`) | the affix/column/wrapper applies; `omit` of a missing column is a program error | computed by the operation from the input row |
 | `rename "to" "from"` | no rule of its own: it desugars to `project(Update)` then `rewrite(Omit)`, so its SQL needs no new lowering | the two stages' rows |
 | `Builder::keep_row` (`where`, `order`, `limit`, `offset`, `distinct`) | predicates are `bool` and row-phase and read only input columns; keys are row-phase and read only input columns; counts are non-negative | the input's row |

@@ -58,7 +58,9 @@ pub struct TypedExpr {
     /// written at — which is why the map this replaces needed the site *and*
     /// the definition to be named before it could answer. Empty for the many
     /// nodes that are not a use site.
-    pub choices: Vec<(usize, Choice)>,
+    pub choices: Vec<OverloadUse>,
+    /// The scalar type arguments supplied to a named helper at this use.
+    pub(crate) instance: Instance,
     /// The query stage this node applied, if it is one.
     ///
     /// A stage is a *function value* — `prefix "u_"` has the type
@@ -225,7 +227,8 @@ pub(crate) struct NodeFacts<'a> {
     /// What a module-scope name occurrence resolved to.
     pub(crate) resolved: &'a dyn Fn(u32) -> Option<Resolved>,
     /// The overload choices recorded at the node, by hole.
-    pub(crate) choices: &'a dyn Fn(u32) -> Vec<(usize, Choice)>,
+    pub(crate) choices: &'a dyn Fn(u32) -> Vec<OverloadUse>,
+    pub(crate) instance: &'a dyn Fn(u32) -> Instance,
 }
 
 /// Build a definition's typed tree.
@@ -266,6 +269,7 @@ pub(crate) fn build(root_expr: &ast::Expr, holes: usize, facts: &NodeFacts<'_>) 
             shown: (facts.shown)(e.id).unwrap_or_default(),
             resolved: (facts.resolved)(e.id),
             choices: (facts.choices)(e.id),
+            instance: (facts.instance)(e.id),
             stage: stage.map(|(_, stage)| stage.clone()),
             combine: combine_at.get(&e.id).cloned(),
             children: Vec::new(),
@@ -328,6 +332,7 @@ mod tests {
                 recorded: &|_| None,
                 resolved: &|_| None,
                 choices: &|_| Vec::new(),
+                instance: &|_| Instance::default(),
             },
         );
 
@@ -383,6 +388,7 @@ mod tests {
                 },
                 resolved: &|_| None,
                 choices: &|_| Vec::new(),
+                instance: &|_| Instance::default(),
             },
         );
 

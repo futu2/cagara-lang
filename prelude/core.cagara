@@ -107,8 +107,8 @@ id : ?a -> ?a = x => x
 -- ── query pipeline ─────────────────────────────────────────────────────────
 
 --- A table: `table "schema" "name"` (the schema may be `""`). The row type is
---- inferred from use — the projection stages decide the columns — so a
---- definition of a table usually carries a signature naming them:
+--- a closed row of concrete SQL value types. Open rows and type variables
+--- are for query helpers, not physical columns:
 ---
 --- ```
 --- users : query { id = int, name = string } = table "public" "users"
@@ -168,7 +168,7 @@ update : expr ?r (row ?s) -> query ?r -> query (merge ?r ?s) = primitive "__upda
 omit : symbol ?k -> query ?r -> query (removeKey ?k ?r) = primitive "__omit"
 
 --- `mapValue "w"` transforms all field types using a wrapper:
---- `"nullable"` wraps each in `maybe`, `"list"` wraps each in `list`.
+--- `"nullable"` widens each type; `"list"` constructs a singleton list per field.
 ---
 --- The wrapper is a label, like `omit`'s column name: `valueLabel w` is the
 --- parameter, the literal at the application binds `w`, and the result names the
@@ -317,6 +317,7 @@ arrayAggBy : list (sortkey ?r) -> expr ?r ?a -> agg (expr ?r (list ?a)) = primit
 --- `listLength xs` — how many elements a list has. `CAGARA_LIST_LENGTH` is
 --- `cardinality` on PostgreSQL and `len` on DuckDB.
 listLength : expr ?r (list ?a) -> expr ?r int = sql "CAGARA_LIST_LENGTH($1)"
+listLength : expr ?r (list (maybe ?a)) -> expr ?r int = sql "CAGARA_LIST_LENGTH($1)"
 
 --- `listContains xs x` — whether the list holds `x`. `CAGARA_LIST_CONTAINS` is
 --- `x = ANY(xs)` on PostgreSQL and `list_contains(xs, x)` on DuckDB, and it takes
@@ -602,14 +603,17 @@ sum : expr ?r (maybe float) -> agg (expr ?r (maybe float)) = sql "SUM($1)"
 sum : expr ?r (decimal ?p ?s) -> agg (expr ?r (maybe (decimal 38 ?s))) = sql "SUM($1)"
 sum : expr ?r (maybe (decimal ?p ?s)) -> agg (expr ?r (maybe (decimal 38 ?s))) = sql "SUM($1)"
 
---- Arithmetic mean, overloading `int` and `float`; always a `float`, NULL for
---- an empty group.
+--- Arithmetic mean, skipping NULLs; an empty/all-NULL input returns NULL.
+--- Integers and floats give a float. A decimal mean is exact at its input
+--- scale: a fractional minor unit is an arithmetic error, not a rounded answer.
+--- Implemented for decimals on PostgreSQL and DuckDB.
 avg : expr ?r int -> agg (expr ?r (maybe float)) = sql "AVG($1)"
 avg : expr ?r float -> agg (expr ?r (maybe float)) = sql "AVG($1)"
 avg : expr ?r (maybe int) -> agg (expr ?r (maybe float)) = sql "AVG($1)"
 avg : expr ?r (maybe float) -> agg (expr ?r (maybe float)) = sql "AVG($1)"
-avg : expr ?r (decimal ?p ?s) -> agg (expr ?r (maybe (decimal 38 ?s))) = sql "AVG($1)"
-avg : expr ?r (maybe (decimal ?p ?s)) -> agg (expr ?r (maybe (decimal 38 ?s))) = sql "AVG($1)"
+avg : expr ?r (decimal ?p ?s) -> agg (expr ?r (maybe (decimal 38 ?s))) = sql "CAGARA_EXACT_AVG($1)"
+avg : expr ?r (maybe (decimal ?p ?s)) -> agg (expr ?r (maybe (decimal 38 ?s))) =
+  sql "CAGARA_EXACT_AVG($1)"
 
 --- Smallest value in the group; NULL for an empty group.
 min : expr ?r ?a -> agg (expr ?r (maybe ?a)) = sql "MIN($1)"
@@ -823,23 +827,22 @@ _%_ : expr ?r int -> expr ?r int -> expr ?r int = sql "CAGARA_MOD($1, $2)"
 
 -- ── nulls: operators need non-null arguments, so nulls are handled here ────
 
---- `coalesce default x`, like Haskell's `fromMaybe`: `x` if it is not NULL, the
---- default otherwise. Default first and subject last, so `coalesce 0` is a
---- reusable "or zero".
----
---- The infix form is `x ?? default` (right-associative, tighter than arithmetic:
---- `.a ?? .b ?? 0`, `.n ?? 0 + 1`).
+--- `coalesce fallback x` returns `x` when present, otherwise `fallback`.
+--- The subject comes last, so `orZero = coalesce 0` is a reusable function.
+--- A nullable fallback leaves the result nullable.
 coalesce : expr ?r ?a -> expr ?r (maybe ?a) -> expr ?r ?a = sql "COALESCE($2, $1)"
-coalesce : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r ?a = sql "COALESCE($2, $1)"
+coalesce : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r (maybe ?a) = sql "COALESCE($2, $1)"
 
---- `x ?? default` is `coalesce default x`, written with the nullable value
---- first. Right-associative, so `.a ?? .b ?? 0` chains.
-_??_ : expr ?r (maybe ?a) -> expr ?r ?a -> expr ?r ?a = sql "COALESCE($1, $2)"
+--- `x ?? fallback` is `coalesce fallback x`. It associates to the right, so
+--- `x ?? y ?? 0` uses zero only when both `x` and `y` are NULL.
+_??_ : expr ?r (maybe ?a) -> expr ?r ?a -> expr ?r ?a = x => fallback => coalesce fallback x
+_??_ : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r (maybe ?a) = x => fallback =>
+  coalesce fallback x
 
---- Lift a non-null value into `maybe`. It does not create NULL — that is
---- `nothing` — so `just x` is the "this one is present" spelling in a record of
---- optional fields.
+--- Lift a value into SQL nullability. Lifting an already nullable value
+--- changes nothing: SQL has one NULL, not a separate `just nothing` value.
 just : expr ?r ?a -> expr ?r (maybe ?a) = sql "$1"
+just : expr ?r (maybe ?a) -> expr ?r (maybe ?a) = sql "$1"
 
 --- A SQL NULL at any nullable type, in any phase. The only way to write NULL:
 --- every other expression is non-null by its signature.

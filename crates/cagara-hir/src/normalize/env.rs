@@ -7,6 +7,8 @@
 //! representation rather than requiring syntax substitution.
 
 use super::Value;
+use crate::check::{Choice, DefId, Instance, OverloadUse};
+use std::sync::Arc;
 
 /// The arguments bound so far, innermost last.
 ///
@@ -15,7 +17,11 @@ use super::Value;
 /// only the chain of pointers below it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Env<'a> {
-    frames: Option<std::sync::Arc<Frame<'a>>>,
+    frames: Option<Arc<Frame<'a>>>,
+    // Overload arguments are lexical, just like value arguments: two closures
+    // made from the same helper may call different SQL templates.
+    holes: Arc<[(DefId, Instance)]>,
+    pub(crate) instance: Instance,
 }
 
 /// One binding and the frame it was pushed onto.
@@ -23,10 +29,42 @@ pub(crate) struct Env<'a> {
 struct Frame<'a> {
     name: String,
     value: Value<'a>,
-    outer: Option<std::sync::Arc<Frame<'a>>>,
+    outer: Option<Arc<Frame<'a>>>,
 }
 
 impl<'a> Env<'a> {
+    pub(crate) fn with_instance(instance: Instance) -> Self {
+        Self {
+            instance,
+            ..Self::default()
+        }
+    }
+
+    /// A fresh definition scope. Its hole k is the choice recorded at k of
+    /// this particular use, resolved in the *caller's* scope.
+    pub(crate) fn instantiate(
+        &self,
+        choices: &[OverloadUse],
+        count: usize,
+        instance: Instance,
+    ) -> Option<Self> {
+        let holes = (0..count)
+            .map(|k| self.resolve(choices.get(k).filter(|u| u.hole == k)?))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            frames: None,
+            holes: holes.into(),
+            instance,
+        })
+    }
+
+    pub(crate) fn resolve(&self, u: &OverloadUse) -> Option<(DefId, Instance)> {
+        match u.choice {
+            Choice::Def(module, def) => Some(((module, def), u.instance.at_use(&self.instance))),
+            Choice::Hole(k) => self.holes.get(k).cloned(),
+        }
+    }
+
     /// The value bound to `name`, innermost binding first.
     pub(crate) fn lookup(&self, name: &str) -> Option<&Value<'a>> {
         let mut frame = self.frames.as_deref();
@@ -42,7 +80,9 @@ impl<'a> Env<'a> {
     /// This environment with one more binding.
     pub(crate) fn bind(&self, name: &str, value: Value<'a>) -> Env<'a> {
         Env {
-            frames: Some(std::sync::Arc::new(Frame {
+            holes: self.holes.clone(),
+            instance: self.instance.clone(),
+            frames: Some(Arc::new(Frame {
                 name: name.to_string(),
                 value,
                 outer: self.frames.clone(),

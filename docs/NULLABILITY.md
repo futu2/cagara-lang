@@ -25,7 +25,7 @@ is a different query: over `[NULL, 5]`, `avg .amount` is `5` but
 
 Use these helpers to handle nullable values:
 
-- `coalesce default value` and `value ?? default` produce a non-null value.
+- `coalesce fallback value` and `value ?? fallback` return `value` when present, otherwise `fallback`. Only a non-null fallback guarantees a non-null result.
 - `nothing` is SQL `NULL` at any nullable type.
 - `just value` marks a non-null value as nullable; it does not create `NULL`.
 - `nullIf value other` produces `NULL` when two non-null values are equal.

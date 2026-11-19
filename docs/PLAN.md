@@ -94,6 +94,14 @@ scale of zero is a whole number of units and is allowed: `1 ≤ p ≤ 38` and
 agg (expr r (maybe (decimal 38 s)))`, because the width is a constant in the
 portable family.
 
+For a decimal input, `avg` returns `maybe (decimal 38 s)` without rounding.
+It skips NULLs; an empty/all-NULL input returns NULL. If the mean has a fraction
+of a minor unit, the database reports an arithmetic error. To request more
+fractional digits, widen the input scale explicitly before aggregating. The
+PostgreSQL and DuckDB lowerings use exact sums, counts and integer division;
+other dialects are refused rather than using a floating-point `AVG`. Intermediate
+overflow is an arithmetic error too.
+
 The same-type rule is a real limitation, not a formality: a sum can outgrow its
 operand type, and `a_decimal_sum_outgrows_its_operand_type` pins the engine
 behaviour that makes it one. Widening was attempted and reverted; the blocker is

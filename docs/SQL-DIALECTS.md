@@ -47,6 +47,7 @@ inherits whichever family happened to claim it. That is not hypothetical: the
 
 | capability | native | emulated | unsupported |
 |---|---|---|---|
+| exact decimal `avg` | — | PostgreSQL, DuckDB | other targets (including generic ANSI) |
 | `FULL [OUTER] JOIN` | everything else | MySQL, Doris, SingleStore, StarRocks | — |
 | `ROLLUP` / `CUBE` | everything else | SQLite, MySQL, Doris, SingleStore, StarRocks | — |
 | `GROUPS` frame | ANSI, PostgreSQL, DuckDB, SQLite, Trino, Presto, Athena, Oracle, Spark, Databricks | — | MySQL family, T-SQL, Fabric, BigQuery, Snowflake, Redshift, Teradata, Hive |
@@ -170,17 +171,18 @@ equivalent exists, so the language does not change with `--dialect`. Two are:
 Both rewrites are in [`crates/cagara-sql/src/emulate.rs`](../crates/cagara-sql/src/emulate.rs)
 and produce ordinary relational algebra, so the lowerer sees nothing new.
 
-**Nothing is refused.** Every construct Cagara can write compiles for every target,
-because a function that works on one `--dialect` and not another makes the language's
-surface depend on the target — which is the thing this whole file exists to prevent.
-Where a target cannot spell something directly, the spelling is rewritten:
+Prefer an equivalent spelling; refuse an operation rather than silently changing
+its result type or losing precision:
 
 - An empty `inList []` lowers to a constant `FALSE` (or `TRUE` when negated), because
   SQL has no empty `IN ()` anywhere.
-- A `decimal` on SQLite, which has no exact numeric type, is the one construct still
+- A `decimal` on SQLite, which has no exact numeric type, is
   refused rather than rewritten — a binary float wearing the type's name would be the
   exact failure the type exists to prevent, and there is no fixed-point representation to
   emit instead. That refusal names the target and the alternative.
+- Decimal `avg` must fit the input scale exactly. DuckDB and PostgreSQL check this
+  with exact arithmetic; other targets refuse it. A half cent at scale 2 is an
+  error, not NULL (which means no non-NULL inputs).
 
 The remaining gap in the *emulation* is a format *name* in `parseDate` on SQLite and
 T-SQL, where the decomposition has no width to slice; that is a limitation of the

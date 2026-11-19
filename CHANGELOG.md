@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- `coalesce fallback value` and `value ?? fallback` now both accept a nullable fallback
+  and give a nullable result in that case. `coalesce 0` still works as a reusable default.
+  Applying `just` to an already nullable value leaves it unchanged.
+- Physical table columns require concrete SQL value types, including inside lists and `maybe`.
+- `mapValue "list"` constructs singleton lists rather than just changing field types.
+- Decimal `avg` is exact at the input scale on PostgreSQL and DuckDB.
+  An unrepresentable mean raises an error; other targets refuse decimal `avg`.
+
 ## 0.5.0 — 2026-11-18
 
 **This release renames things, so it is a minor bump rather than a patch.** Three

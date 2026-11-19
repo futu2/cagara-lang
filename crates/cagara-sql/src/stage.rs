@@ -881,9 +881,16 @@ fn lit(l: &ir::Lit) -> Expr {
 /// frameless and their SQL stays short.
 fn frame_sensitive(sql: &str) -> bool {
     let head = sql.trim_start().to_ascii_uppercase();
-    ["SUM(", "AVG(", "COUNT(", "MIN(", "MAX("]
-        .iter()
-        .any(|f| head.starts_with(f))
+    [
+        "SUM(",
+        "AVG(",
+        "CAGARA_EXACT_AVG(",
+        "COUNT(",
+        "MIN(",
+        "MAX(",
+    ]
+    .iter()
+    .any(|f| head.starts_with(f))
 }
 
 /// Set the frame kind on the window function in `e`.

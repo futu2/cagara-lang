@@ -15,8 +15,8 @@ pub(crate) struct DefinitionFacts {
     holes: usize,
     scheme: Option<SchemeView>,
     result: Option<(Phase, ScalarType)>,
-    choices: Vec<(u32, usize, Choice)>,
-    uses: Vec<(u32, Option<ScalarType>)>,
+    choices: Vec<(u32, OverloadUse)>,
+    uses: Vec<(u32, Option<ScalarType>, Instance)>,
     bindings: Vec<Option<Binding>>,
     pub dependencies: Vec<DefinitionId>,
 }
@@ -63,16 +63,12 @@ pub(crate) fn definition_facts(
     // Both facts come off the definition's typed tree: the choices recorded at
     // each node's site, and the count of overloads it leaves open.
     let typed = checked.typed.get(&(module, def));
-    let mut choices: Vec<(u32, usize, Choice)> = typed
+    let mut choices: Vec<(u32, OverloadUse)> = typed
         .into_iter()
         .flat_map(|body| body.nodes())
-        .flat_map(|node| {
-            node.choices
-                .iter()
-                .map(move |(hole, choice)| (node.id, *hole, *choice))
-        })
+        .flat_map(|node| node.choices.iter().cloned().map(move |u| (node.id, u)))
         .collect();
-    choices.sort_by_key(|&(site, hole, _)| (site, hole));
+    choices.sort_by_key(|(site, u)| (*site, u.hole));
     let mut facts = DefinitionFacts {
         source: file.text(db)[definition.span.start as usize..definition.span.end as usize].into(),
         failed: scheme.is_none_or(|s| s.failed),
@@ -88,10 +84,12 @@ pub(crate) fn definition_facts(
     while let Some(e) = pending.pop() {
         // The node's own classification, so the reuse proof and elaboration
         // read one account of what an expression got.
-        let ty = typed
-            .and_then(|body| body.node(e.id))
-            .and_then(|node| node.ty());
-        facts.uses.push((e.id, ty));
+        let node = typed.and_then(|body| body.node(e.id));
+        facts.uses.push((
+            e.id,
+            node.and_then(TypedExpr::ty),
+            node.map(|n| n.instance.clone()).unwrap_or_default(),
+        ));
         match &e.kind {
             ExprKind::Name(name) => facts.binding(scope.get(name)),
             ExprKind::Proj(base, field) => {

@@ -1217,6 +1217,39 @@ fn overloads_dispatch_to_sql() {
 }
 
 #[test]
+fn a_generic_aggregate_keeps_the_overload_and_scale_of_each_use() {
+    let src = r#"t : query { i = int, d = decimal 8 2, e = maybe (decimal 12 5) } = table "" "t"
+mean = avg
+presentMean = x => mean (just x)
+doubledMean = x => filtered true (mean (x + x))
+signed : expr ?r (decimal ?p ?s) -> agg (expr ?r (maybe (decimal 38 ?s))) = x => avg (just x)
+colMean = avg .d
+wrapped = t & agg { a = presentMean .i, b = presentMean .d, c = presentMean .e, d = doubledMean .d, e = signed .d, f = colMean }
+direct = t & agg { a = avg (just .i), b = avg (just .d), c = avg (just .e), d = filtered true (avg (.d + .d)), e = avg .d, f = avg .d }
+"#;
+    let q = dialect(src, "wrapped", "duckdb").unwrap();
+    assert_eq!(q, dialect(src, "direct", "duckdb").unwrap());
+    assert!(q.contains("AVG(i)") && q.contains("DECIMAL(38, 5)"), "{q}");
+    assert!(dialect(src, "wrapped", "sqlite")
+        .unwrap_err()
+        .contains("exact decimal avg"));
+}
+
+#[test]
+fn a_volatile_exact_mean_needs_one_projected_sample() {
+    let src = r#"t : query { d = decimal 8 2 } = table "" "t"
+bad = t & agg { a = filtered (random < 0.5) (avg .d) }
+good = t & update { keep = random < 0.5 } & agg { a = filtered .keep (avg .d) }
+"#;
+    for engine in ["duckdb", "postgres"] {
+        assert!(dialect(src, "bad", engine)
+            .unwrap_err()
+            .contains("project random"));
+        assert!(dialect(src, "good", engine).is_ok());
+    }
+}
+
+#[test]
 fn nulls_and_outer_joins() {
     let s = sql(
         "q = orders & leftJoin (users & select { u_id = .id, name = .name, age = .age, active = .active }) (.<user_id == .>u_id)\n  & select { id = .id, who = coalesce \"?\" .name, known = isNotNull .name }\n",

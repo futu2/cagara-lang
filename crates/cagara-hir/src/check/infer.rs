@@ -207,6 +207,7 @@ impl<'w> Checker<'w> {
         self.depth += 1;
         let saved = std::mem::take(&mut self.pending);
         let saved_uses = std::mem::take(&mut self.uses);
+        let saved_instances = std::mem::take(&mut self.instances);
         let saved_stages = std::mem::take(&mut self.row_stages);
         let saved_combines = std::mem::take(&mut self.combines);
         let saved_combine_partials = std::mem::take(&mut self.combine_partials);
@@ -264,6 +265,7 @@ impl<'w> Checker<'w> {
         let stages = self.finish_row_stages();
         let combines = self.finish_combines();
         let succeeded = r.is_ok();
+        let mut gen_map = HashMap::new();
         let scheme = match r {
             Ok(t) => {
                 // Constraints can bind the row after inference has built a
@@ -279,7 +281,13 @@ impl<'w> Checker<'w> {
                     if let Cons::Overload { origin, .. } = &mut c {
                         if let Origin::Site(site) = *origin {
                             let (use_site, hk) = decode(site);
-                            self.record((m, i), use_site, hk, Choice::Hole(k));
+                            self.record(
+                                (m, i),
+                                use_site,
+                                hk,
+                                Choice::Hole(k),
+                                PendingInstance::default(),
+                            );
                         }
                         *origin = Origin::Hole(k);
                         k += 1;
@@ -289,7 +297,7 @@ impl<'w> Checker<'w> {
                 if k > 0 {
                     self.holes.insert((m, i), k);
                 }
-                let mut scheme = self.generalize(&t, cons);
+                let mut scheme = self.generalize_with(&t, cons, &mut gen_map);
                 scheme.stage = self.def_stage(i);
                 scheme.combine = self.def_combine(i);
                 scheme
@@ -344,10 +352,27 @@ impl<'w> Checker<'w> {
         // A definition that failed contributes no stage nodes, exactly as it
         // contributes none to the tree's stages: the chain is closed only when
         // the definition's rows are solved.
+        let instances = std::mem::replace(&mut self.instances, saved_instances);
         if !typed_facts.is_empty() {
             let body = &self.defs.get(i).body;
             let holes = self.holes.get(&(m, i)).copied().unwrap_or(0);
-            let recorded = self.choices.get(&(m, i)).cloned().unwrap_or_default();
+            let mut by_site: HashMap<u32, Vec<OverloadUse>> = HashMap::new();
+            for ((site, hole), (choice, instance)) in
+                self.choices.remove(&(m, i)).unwrap_or_default()
+            {
+                by_site.entry(site).or_default().push(OverloadUse {
+                    hole,
+                    choice,
+                    instance: instance.finish(self, &gen_map),
+                });
+            }
+            for uses in by_site.values_mut() {
+                uses.sort_by_key(|u| u.hole);
+            }
+            let instances: HashMap<_, _> = instances
+                .into_iter()
+                .map(|(id, inst)| (id, inst.finish(self, &gen_map)))
+                .collect();
             let tree = crate::check::typed::build(
                 body,
                 holes,
@@ -358,16 +383,8 @@ impl<'w> Checker<'w> {
                     shown: &|id| shown_by_id.get(&id).cloned(),
                     recorded: &|id| recorded_by_id.get(&id).copied(),
                     resolved: &|id| self.resolutions.get(&(m, id)).cloned(),
-                    choices: &|id| {
-                        // The choices recorded *at* this node's site, by hole.
-                        let mut at: Vec<(usize, Choice)> = recorded
-                            .iter()
-                            .filter(|((site, _), _)| *site == id)
-                            .map(|((_, hole), choice)| (*hole, *choice))
-                            .collect();
-                        at.sort_unstable_by_key(|(hole, _)| *hole);
-                        at
-                    },
+                    choices: &|id| by_site.get(&id).cloned().unwrap_or_default(),
+                    instance: &|id| instances.get(&id).cloned().unwrap_or_default(),
                 },
             );
             self.typed_bodies.insert((m, i), tree);
@@ -620,7 +637,10 @@ impl<'w> Checker<'w> {
                 } = c
                 {
                     let fits = self.fitting(module, &cands, &target);
-                    let ranked = self.prefer(module, &fits, &target, false);
+                    // A function's caller supplies its arguments: don't default
+                    // an open one to non-null before the function is applied.
+                    let function = matches!(self.resolve(&t), Ty::Fun(..));
+                    let ranked = self.prefer(module, &fits, &target, function);
                     if ranked.len() == 1 {
                         self.choose(module, ranked[0], &target, &origin, &name, sp)
                             .map_err(|fail| TyErr {
@@ -1354,7 +1374,7 @@ impl<'w> Checker<'w> {
         s: &Scheme,
         span: Span,
         site: Option<u32>,
-    ) -> Result<Ty, Fail> {
+    ) -> Result<(Ty, PendingInstance), Fail> {
         let mut map = HashMap::new();
         let t = self.inst(&s.ty, &mut map, &s.gens);
         for c in &s.cons {
@@ -1372,7 +1392,15 @@ impl<'w> Checker<'w> {
             }
             self.pending.push((c, span));
         }
-        Ok(t)
+        let mut result = &t;
+        while let Ty::Fun(_, rest) = result {
+            result = rest;
+        }
+        let result = match result {
+            Ty::Con("expr", args) => args.last().cloned(),
+            _ => None,
+        };
+        Ok((t, PendingInstance { args: map, result }))
     }
 
     /// Fresh arena variables for a scheme's `Gen` variables.
@@ -1424,11 +1452,15 @@ impl<'w> Checker<'w> {
     /// free variable becomes a `Gen` index carrying its flags, so the scheme
     /// no longer refers to this checker's variable arena.
     pub(crate) fn generalize(&self, ty: &Ty, cons: Vec<Cons>) -> Scheme {
-        let (mut map, mut gens) = (HashMap::new(), Vec::new());
-        let ty = self.gen(ty, &mut map, &mut gens);
+        self.generalize_with(ty, cons, &mut HashMap::new())
+    }
+
+    fn generalize_with(&self, ty: &Ty, cons: Vec<Cons>, map: &mut HashMap<u32, u32>) -> Scheme {
+        let mut gens = Vec::new();
+        let ty = self.gen(ty, map, &mut gens);
         let mut out = Vec::new();
         for c in &cons {
-            out.push(c.map(&mut |t| self.gen(t, &mut map, &mut gens)));
+            out.push(c.map(&mut |t| self.gen(t, map, &mut gens)));
         }
         Scheme {
             ty,
@@ -2551,7 +2583,11 @@ impl<'w> Checker<'w> {
     pub(crate) fn def_type(&mut self, m: usize, i: usize, site: u32, sp: Span) -> Result<Ty, Fail> {
         match self.def_scheme(m, i) {
             Some(s) if s.failed => Err(self.failed_use(m, i)),
-            Some(s) => self.instantiate(&s, sp, Some(site)),
+            Some(s) => {
+                let (ty, instance) = self.instantiate(&s, sp, Some(site))?;
+                self.instances.insert(site, instance);
+                Ok(ty)
+            }
             None => Ok(self.fresh()),
         }
     }
@@ -3593,7 +3629,7 @@ impl<'w> Checker<'w> {
         if s.failed {
             return Err(self.failed_use(module, i));
         }
-        let t = self.instantiate(&s, sp, None)?;
+        let (t, instance) = self.instantiate(&s, sp, None)?;
         self.unify(&t, target)?;
         let Origin::Site(site) = *origin else {
             return Err(Fail::from(format!(
@@ -3603,7 +3639,7 @@ impl<'w> Checker<'w> {
         };
         let (use_site, k) = decode(site);
         let key = *self.active.last().expect("solving inside a definition");
-        self.record(key, use_site, k, Choice::Def(module, i));
+        self.record(key, use_site, k, Choice::Def(module, i), instance);
         Ok(())
     }
 

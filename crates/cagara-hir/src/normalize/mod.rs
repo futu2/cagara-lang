@@ -48,7 +48,6 @@
 //!                             saturated
 //! apply (Fold f, v)         = accumulate; build a frame bound, or a Frame
 //! apply (Table/Label, v)    = a table leaf, or a symbol argument
-//! apply (Overloads cands, v)= the first candidate that applies
 //! ```
 //!
 //! Two properties of this definition are load-bearing:
@@ -248,9 +247,6 @@ pub(crate) enum Value<'a> {
         origin: Origin,
         spec: frame::FoldSpec,
     },
-    /// The candidates of an overloaded name, when the use site itself recorded
-    /// no choice.
-    Overloads(Vec<Value<'a>>),
     /// A record or a list: its values in source order, and — for a record — its
     /// field names, because a projection's output row is stated by the checker
     /// in record order and the two must not drift.
@@ -642,23 +638,14 @@ impl<'i, 'a> Normalizer<'i, 'a> {
     /// spelling has no resolution — so this is the fallback: the scope the body
     /// was written in says what the name means.
     ///
-    /// The first definition of the name answers. Narrowing overloads is a use
-    /// site's job, and this path exists precisely where there is no use site.
+    /// Only unambiguous definitions have a meaning without a use-site choice.
     pub(crate) fn scope_definition(&self, module: usize, name: &str) -> Option<(usize, usize)> {
         match self.input.module(module).scope().get(name)? {
             crate::workspace::Binding::Def(target_module, target_def) => {
                 Some((*target_module, *target_def))
             }
-            crate::workspace::Binding::Overloads(target_module, defs) => {
-                Some((*target_module, *defs.first()?))
-            }
-            crate::workspace::Binding::Module(_) => None,
+            crate::workspace::Binding::Overloads(..) | crate::workspace::Binding::Module(_) => None,
         }
-    }
-
-    /// The resolution the checker recorded at a name occurrence.
-    pub(crate) fn resolution(&self, module: usize, expr: &Expr) -> Option<crate::check::Resolved> {
-        self.typed(module, expr).and_then(|node| node.resolved)
     }
 
     /// The checker's scalar type for the expression whose frame is innermost.

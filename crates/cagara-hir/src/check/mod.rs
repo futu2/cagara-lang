@@ -50,6 +50,8 @@
 mod core_facts;
 mod facts;
 mod infer;
+mod instance;
+pub(crate) use instance::{Instance, PendingInstance};
 mod overload;
 mod print;
 mod reduce;
@@ -82,7 +84,6 @@ pub(crate) use facts::{child_exprs, definition_facts, DefinitionFacts};
 pub(crate) use stage::NodeRef;
 /// The query stage a definition is, and one stage application's rows.
 pub use stage::{CombineKind, CombineView, RowStage, RowStageView};
-pub use ty::Choice;
 /// What shape a definition's scheme has.
 ///
 /// Public because [`TypeCheck::scheme_view`] returns it and a caller outside
@@ -93,6 +94,7 @@ pub use ty::Choice;
 pub use ty::SchemeView;
 /// Scalar-type views of a `Ty`, for the checked layer (`crate::checked`).
 pub(crate) use ty::{scheme_result_expr, scheme_result_scalar, scheme_view};
+pub use ty::{Choice, OverloadUse};
 /// A definition's body as a typed tree, and one node of it.
 pub use typed::{TypedBody, TypedExpr};
 
@@ -229,8 +231,8 @@ impl TypeCheck {
         self.typed_node(module, site)?
             .choices
             .iter()
-            .find(|(hole, _)| *hole == k)
-            .map(|(_, choice)| *choice)
+            .find(|u| u.hole == k)
+            .map(|u| u.choice)
     }
 
     /// Every resolved overload choice of a definition, as
@@ -253,7 +255,7 @@ impl TypeCheck {
             .flat_map(|node| {
                 node.choices
                     .iter()
-                    .map(move |(hole, choice)| (node.id, *hole, *choice))
+                    .map(move |u| (node.id, u.hole, u.choice))
             })
             .collect();
         out.sort_by_key(|&(site, k, _)| (site, k));

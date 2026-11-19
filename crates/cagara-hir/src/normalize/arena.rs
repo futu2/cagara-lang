@@ -192,6 +192,12 @@ impl Builder {
             )
             .at(origin));
         };
+        if let Some((field, _)) = row.iter().find(|(_, ty)| !ty.is_concrete()) {
+            return Err(Error::new(format!(
+                "column `{field}` of table `{name}` needs a concrete SQL value type"
+            ))
+            .at(origin));
+        }
         let row = RowType::new(row);
         let names = row.names();
         Ok(self.push(RelNode {
@@ -260,15 +266,28 @@ impl Builder {
                 let row = match map {
                     crate::check::ValueMap::Id => input_row.clone(),
                     crate::check::ValueMap::AsNullable => input_row.map_value_nullable(),
-                    crate::check::ValueMap::AsList => RowType::new(
-                        input_row
+                    crate::check::ValueMap::AsList => {
+                        let fields = input_row
                             .columns()
                             .iter()
                             .map(|(name, ty)| {
-                                (name.clone(), ScalarType::List(Box::new(ty.clone())))
+                                let col = CheckedExpr::column(
+                                    cagara_syntax::ast::Side::Single,
+                                    name,
+                                    ty.clone(),
+                                    origin,
+                                );
+                                let singleton = CheckedExpr::template(
+                                    "CAGARA_LIST($1)",
+                                    vec![col],
+                                    ScalarType::List(Box::new(ty.clone())),
+                                    origin,
+                                )?;
+                                Ok((name.clone(), singleton))
                             })
-                            .collect(),
-                    ),
+                            .collect::<Result<_, Error>>()?;
+                        return self.project(site, origin, input, Projection::Select, fields);
+                    }
                 };
                 (QueryNodeKind::MapValue, Payload::Wrapper(wrapper), row)
             }
@@ -757,8 +776,7 @@ impl CompiledQuery {
                 }
             }
             (Payload::Key(key), _) => crate::ir::Rel::Omit(child(0)?, key.clone()),
-            // A value wrapper changes the checked row and has no SQL
-            // representation, so erasure walks through it.
+            // Only identity and nullable widening reach here; list wrapping is a projection.
             (Payload::Wrapper(_), _) => {
                 return self.erase_at(node.inputs[0]);
             }

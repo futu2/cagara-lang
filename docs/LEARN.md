@@ -122,7 +122,8 @@ orders : query { id = int, user_id = int, amount = float, status = string, creat
 ```
 
 `table "schema" "name"` takes two string literals. The annotation is mandatory:
-without a row type, the compiler could not check anything downstream.
+every physical column needs a concrete SQL value type, recursively through `list`
+and `maybe`. Type variables and open rows remain available in query helpers.
 
 The scalar types are:
 

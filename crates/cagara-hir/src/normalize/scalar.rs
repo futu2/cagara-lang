@@ -153,6 +153,7 @@ pub(crate) fn template_value<'a>(
     expr: &'a Expr,
     sql: &str,
     def: usize,
+    instance_result: Option<ScalarType>,
 ) -> Result<Value<'a>, Control> {
     let origin = Origin::new(module, expr.span);
     let kind = ev.declared_template_kind(module, def);
@@ -161,8 +162,8 @@ pub(crate) fn template_value<'a>(
     // declared type includes it as the first arrow, while `TemplateFn::arity`
     // counts only the values that become `$n` placeholders.
     let arity = ev.declared_arity(module, def) - usize::from(kind == TemplateKind::Win);
-    let ty = ev
-        .result_scalar(module, def)
+    let ty = instance_result
+        .or_else(|| ev.result_scalar(module, def))
         .or_else(|| ev.ty(module, expr))
         .unwrap_or(ScalarType::Unknown);
     if arity == 0 && kind != TemplateKind::Win {
@@ -430,9 +431,14 @@ fn distinct_template(sql: &str) -> String {
 
 /// Build the checked expression a saturated template denotes.
 fn saturated<'a>(ev: &Normalizer<'a, 'a>, template: TemplateFn) -> Result<Value<'a>, Control> {
-    let ty = match template.ty {
-        ScalarType::Unknown => ev.ty_at(template.origin).unwrap_or(ScalarType::Unknown),
-        known => known,
+    // A polymorphic template can also be partially known (`maybe Unknown`).
+    // Prefer the instantiated call type in that case, not the open signature.
+    let ty = if template.ty.is_concrete() {
+        template.ty
+    } else {
+        ev.ty_at(template.origin)
+            .filter(ScalarType::is_concrete)
+            .unwrap_or(template.ty)
     };
     build(
         &template.sql,
@@ -509,6 +515,30 @@ fn build<'a>(
             return Ok(Value::Scalar(rewritten));
         }
     }
+    // Carry the declared decimal scale through erasure. It is a SQL literal,
+    // not a second value argument to filtered/distinct/window combinators.
+    let scaled;
+    let sql = if sql == "CAGARA_EXACT_AVG($1)" {
+        fn scale(ty: &ScalarType) -> Option<u32> {
+            match ty {
+                ScalarType::Decimal { scale, .. } => Some(*scale),
+                ScalarType::Maybe(inner) => scale(inner),
+                _ => None,
+            }
+        }
+        let s = scale(&ty)
+            .or_else(|| args.first().and_then(|x| scale(x.ty())))
+            .ok_or_else(|| {
+                Control::Program(
+                    crate::core::Error::new("decimal avg requires a concrete input scale")
+                        .at(origin),
+                )
+            })?;
+        scaled = format!("CAGARA_EXACT_AVG($1, {s})");
+        &scaled
+    } else {
+        sql
+    };
     let built = match kind {
         TemplateKind::Scalar => CheckedExpr::template(sql, args, ty, origin),
         TemplateKind::Agg => CheckedExpr::agg_template(sql, args, ty, origin),

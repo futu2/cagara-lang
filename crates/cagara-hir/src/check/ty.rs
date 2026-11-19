@@ -409,6 +409,17 @@ pub enum Choice {
     Hole(usize),
 }
 
+/// The implementation chosen for a use and its instantiated result. For a
+/// hole, both pieces of evidence are supplied by the caller.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverloadUse {
+    pub hole: usize,
+    pub choice: Choice,
+    pub(crate) instance: Instance,
+}
+
+type PendingChoices = HashMap<(u32, usize), (Choice, PendingInstance)>;
+
 /// Scalar-type mirror of a `Ty`, for the checked layer.
 ///
 /// `Ty` is the *inference* representation: variables, rigids, schemes, and
@@ -850,6 +861,7 @@ impl<'w> Checker<'w> {
             combine_partials: HashMap::new(),
             holes: HashMap::new(),
             choices: HashMap::new(),
+            instances: HashMap::new(),
             typed_bodies: HashMap::new(),
             unify_depth: 0,
             par_ann: false,
@@ -933,7 +945,8 @@ pub(crate) struct Checker<'w> {
     pub(crate) trail: Vec<(u32, VarInfo)>,
     pub(crate) fit_cache: HashMap<(usize, Vec<usize>, String), Vec<usize>>,
     pub(crate) holes: HashMap<(usize, usize), usize>,
-    pub(crate) choices: HashMap<(usize, usize), HashMap<(u32, usize), Choice>>,
+    pub(crate) choices: HashMap<(usize, usize), PendingChoices>,
+    pub(crate) instances: HashMap<u32, PendingInstance>,
     /// Input row of the `PROBE_FIELD` column being checked, and the definition
     /// that referenced it. The probe is text the LSP spliced in, so it can
     /// only appear in one definition; recording it once at the end would let

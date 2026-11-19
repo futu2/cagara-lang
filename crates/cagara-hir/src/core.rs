@@ -56,6 +56,15 @@ pub enum ScalarType {
 }
 
 impl ScalarType {
+    /// A physical column cannot be polymorphic, including inside a list or maybe.
+    pub(crate) fn is_concrete(&self) -> bool {
+        match self {
+            Self::Unknown => false,
+            Self::List(inner) | Self::Maybe(inner) => inner.is_concrete(),
+            _ => true,
+        }
+    }
+
     /// Is this type not known? Only meaningful to the constructors that
     /// cannot decide without one (`where` needs a bool, joins need rows).
     #[cfg(test)]

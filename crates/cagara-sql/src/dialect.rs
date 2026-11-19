@@ -61,6 +61,8 @@ pub(crate) enum Cap {
     Arrays,
     /// An exact `DECIMAL(p, s)`.
     ExactDecimal,
+    /// A decimal mean computed without floating point or silent rounding.
+    ExactDecimalAvg,
 }
 
 /// What a target can do with one construct.
@@ -114,6 +116,7 @@ pub(crate) fn support(cap: Cap, d: Dialect) -> Support {
         Cap::Filter => filter(d),
         Cap::Arrays => arrays(d),
         Cap::ExactDecimal => exact_decimal(d),
+        Cap::ExactDecimalAvg => exact_decimal_avg(d),
     }
 }
 
@@ -321,6 +324,18 @@ fn exact_decimal(d: Dialect) -> Support {
         | DuckDb | Exasol | Fabric | Hive | Materialize | Mysql | Oracle | Postgres | Presto
         | Prql | Redshift | RisingWave | SingleStore | Snowflake | Spark | StarRocks | Tableau
         | Teradata | Trino | Tsql => Support::Native,
+    }
+}
+
+/// These two lowerings have exact integer quotient/remainder and an engine test.
+fn exact_decimal_avg(d: Dialect) -> Support {
+    use Dialect::*;
+    match d {
+        DuckDb | Postgres => Support::Emulated,
+        Ansi | Materialize | RisingWave | Athena | BigQuery | ClickHouse | Databricks | Dremio
+        | Drill | Druid | Doris | Exasol | Fabric | Hive | Mysql | Oracle | Presto | Prql
+        | Redshift | SingleStore | Snowflake | Spark | Sqlite | StarRocks | Tableau | Teradata
+        | Trino | Tsql => Support::Unsupported,
     }
 }
 
@@ -1112,6 +1127,7 @@ mod tests {
             Cap::Filter,
             Cap::Arrays,
             Cap::ExactDecimal,
+            Cap::ExactDecimalAvg,
         ];
         for d in Dialect::all() {
             for cap in caps {

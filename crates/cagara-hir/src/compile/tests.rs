@@ -668,7 +668,7 @@ fn the_accessors_answer_what_the_typed_nodes_hold() {
                 .flat_map(|node| {
                     node.choices
                         .iter()
-                        .map(move |(hole, choice)| (node.id, *hole, *choice))
+                        .map(move |u| (node.id, u.hole, u.choice))
                 })
                 .collect();
             from_nodes.sort_by_key(|&(site, hole, _)| (site, hole));
@@ -683,15 +683,15 @@ fn the_accessors_answer_what_the_typed_nodes_hold() {
             for node in tree.nodes() {
                 // The choices recorded at this node's site, which is what
                 // `choice` and `choices_of` read.
-                for (hole, choice) in &node.choices {
+                for u in &node.choices {
                     assert_eq!(
-                        tc.choice(ws.root, i, node.id, *hole),
-                        Some(*choice),
+                        tc.choice(ws.root, i, node.id, u.hole),
+                        Some(u.choice),
                         "{} / `{}`: node {} hole {}",
                         path.display(),
                         def.name,
                         node.id,
-                        hole
+                        u.hole
                     );
                 }
                 assert_eq!(

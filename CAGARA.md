@@ -373,6 +373,7 @@ combine only when they are the **same** type, and nothing converts.
 | `decimal 10 2 * decimal 10 2` | `decimal 10 2` — the product is exact, and its scale is the engine's (`toDecimal 10 2` brings it back) |
 | `decimal 10 2 / decimal 10 2` | **refused**: DuckDB promotes a decimal quotient to `DOUBLE`, so no same-type rule stays exact on every target |
 | `decimal 10 2 == decimal 10 2` | `bool` |
+| `avg` of `decimal 10 2` | `maybe (decimal 38 2)`; no rounding. An inexact mean raises an error; supported on DuckDB and PostgreSQL. |
 | `decimal 10 2 == decimal 12 2` | **compile error**: one type everywhere, so convert both |
 
 The width a declaration states is the promise about how large the value can be, so
@@ -398,8 +399,8 @@ decimals with `toDecimal` when the scale matters. To change a scale, say so:
   **checked**, not documentation: the body is typed with `x` at `ty`, and a call site must supply it.
   The parentheses are required — `x : ty => body` is a syntax error, since a `:` cannot otherwise
   say how far it reaches.
-- Functions take their **subject last**: `upper .name`, `substring 1 3 .s`, `coalesce 0 .score`,
-  `addDays 7 .d`. This is what makes partial application a reusable stage.
+- Most functions take their **subject last**: `upper .name`, `substring 1 3 .s`,
+  `coalesce 0 .score`, `addDays 7 .d`. This is what makes partial application a reusable stage.
 - `q & stage` means `stage q`. The pipeline's right operand is a whole expression.
 
 ```cagara
@@ -746,7 +747,7 @@ main = users
 ```
 
 Two string literals: schema and table. The annotation is not checked against a live database; it is
-the source of truth. A table without a closed annotation fails with “the columns ... are unknown”.
+the source of truth. Each field must have a concrete SQL value type, including inside `maybe` and `list`. A table without a closed annotation fails with “the columns ... are unknown”.
 
 ### 5.2 `where`
 
@@ -1473,9 +1474,12 @@ main = orders & select {
 
 ```text
 coalesce   : expr ?r ?a -> expr ?r (maybe ?a) -> expr ?r ?a
+coalesce   : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r (maybe ?a)
 ??         : expr ?r (maybe ?a) -> expr ?r ?a -> expr ?r ?a
+??         : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r (maybe ?a)
 nothing    : expr ?r (maybe ?a)
 just       : expr ?r ?a -> expr ?r (maybe ?a)
+just       : expr ?r (maybe ?a) -> expr ?r (maybe ?a)
 nullIf     : expr ?r ?a -> expr ?r ?a -> expr ?r (maybe ?a)
 isNull     : expr ?r (maybe ?a) -> expr ?r bool
 isNotNull  : expr ?r (maybe ?a) -> expr ?r bool
@@ -1484,8 +1488,9 @@ eqMaybe    : expr ?r (maybe ?a) -> expr ?r (maybe ?a) -> expr ?r bool
 whereTrue  : expr ?r (maybe bool) -> query ?r -> query ?r     (the same filter as `where`)
 ```
 
-`coalesce` takes the default **first**; `??` takes the value first: `coalesce 0 .score` and
-`.score ?? 0` mean the same. `coalesce` requires a `maybe` input; do not wrap a non-null value in it.
+`coalesce fallback value` takes the nullable value **last**: `coalesce 0 .score`,
+`.score & coalesce 0`, and `.score ?? 0` all return `.score` when present and `0` otherwise.
+With a nullable fallback, the result stays nullable: `coalesce .backup .score` is `.score ?? .backup`.
 
 `nothing` is SQL `NULL` at any nullable type; `just x` marks a non-null `x` as nullable and emits
 `x`. A value also becomes `NULL` through a nullable column, an outer join, `nullIf`, a `try*` cast,
@@ -1687,7 +1692,7 @@ line disables the prelude and requires redefining `table` with `primitive "__tab
 unless the task asks.
 
 `mapValue` is a real stage (`q & mapValue "nullable"`, `"list"`, `"id"`), but it is not the way to
-handle nulls: it only rewraps the row's types, and the wrapped value has no operators to use.
+handle nulls: `"nullable"` widens types without changing values; `"list"` constructs a singleton list per column.
 Nullability comes from an outer join or from a `maybe` annotation.
 
 ### 8.6 Tooling

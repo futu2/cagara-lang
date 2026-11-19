@@ -1805,6 +1805,37 @@ fn deep_forward_reference_chains_are_reported_not_a_crash() {
 const NULLABLE: &str = "people : query { id = int, email = maybe string, score = maybe int } = table \"p\" \"people\"\n";
 
 #[test]
+fn only_physical_table_fields_must_be_concrete_sql_types() {
+    for bad in ["?a", "maybe (list ?a)", "(int -> int)", "query { n = int }"] {
+        let src = format!("t : query {{ x = {bad} }} = table \"s\" \"t\"\n");
+        let msg = compiles(&src, "t").unwrap_err();
+        assert!(
+            msg.contains("column `x`") && msg.contains("concrete SQL value type"),
+            "{bad}: {msg}"
+        );
+    }
+    compiles("t : query { x = list (maybe int) } = table \"s\" \"t\"\nh = q => q & select {.x}\nmain = h t\n", "main").unwrap();
+}
+
+#[test]
+fn nullable_coalesce_takes_its_result_nullability_from_the_fallback() {
+    let t = "t : query { a = maybe int, b = maybe int } = table \"s\" \"t\"\n";
+    let src = format!(
+        "{t}orZero = coalesce 0\n\
+         q = t & select {{ a = coalesce (just .a) .b, b = .b ?? .a, c = .b ?? .a ?? 0, d = orZero .a, e = .b & orZero }}\n"
+    );
+    assert_eq!(
+        ty(&src, "q"),
+        "query { a = maybe int, b = maybe int, c = int, d = int, e = int }"
+    );
+    assert!(ty_err(
+        &format!("{t}q = t & select {{ x = coalesce .a .b + 1 }}\n"),
+        "q"
+    )
+    .is_some());
+}
+
+#[test]
 fn nullable_columns_are_explicit() {
     let q = |body: &str| format!("{NULLABLE}q = people & {body}\n");
     assert_eq!(
@@ -1829,12 +1860,10 @@ fn nullable_columns_are_explicit() {
         ty(&q("select { m = just .id }"), "q"),
         "query { m = maybe int }"
     );
-    // `coalesce` takes a non-null default, or two nullables — both answer with
-    // a non-null value, and a literal default still widens (`coalesce 0` over a
-    // `maybe float` is `float`, not "no overload").
+    // A nullable fallback cannot prove the result present. Literal fallbacks still widen.
     assert_eq!(
         ty(&q("select { m = coalesce (just .id) .score }"), "q"),
-        "query { m = int }"
+        "query { m = maybe int }"
     );
     let widened = ty(
         "orders2 : query { a = maybe float } = table \"p\" \"o\"\n\
@@ -1842,7 +1871,7 @@ fn nullable_columns_are_explicit() {
         "q",
     );
     assert_eq!(widened, "query { v = float }");
-    // Neither argument may be a non-null value where a `maybe` is required.
+    // The subject (last argument) must be nullable.
     let e = err(&q("select { m = coalesce 0 .id }"), "q");
     assert!(e.contains("one side is nullable"), "{e}");
     // `where` takes a `bool` or a `maybe bool`: a NULL condition drops the row,

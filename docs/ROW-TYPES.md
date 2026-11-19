@@ -112,9 +112,10 @@ with a join or a set operation, which is why `primitive "__merge"`
 
 `mapValue` is the exception: the prelude exposes it as a stage, so
 `q & mapValue "nullable"` and `q & mapValue "list"` are writable and lower
-through `Builder::rewrite` like `prefix` and `omit`. It changes the row's types
-and emits the same SQL, because the wrapped types are carried by the checked row
-and no operator reads them at runtime.
+through `Builder::rewrite`. Widening a field to `maybe` (or applying `"id"`)
+needs no SQL. `"list"` projects a singleton list for **each field of each row**;
+a NULL field produces a one-element list containing NULL, not a missing list.
+Targets without list support refuse this projection.
 
 The user-facing spelling of `keyMap` is `prefix` / `suffix` / `rename`, and the
 spelling of the *row former* `merge` is `update` — all of them are stages;

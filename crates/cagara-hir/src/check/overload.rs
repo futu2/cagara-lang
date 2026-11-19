@@ -445,8 +445,18 @@ impl<'w> Checker<'w> {
         }
     }
 
-    pub(crate) fn record(&mut self, key: (usize, usize), site: u32, k: usize, c: Choice) {
-        self.choices.entry(key).or_default().insert((site, k), c);
+    pub(crate) fn record(
+        &mut self,
+        key: (usize, usize),
+        site: u32,
+        k: usize,
+        choice: Choice,
+        instance: PendingInstance,
+    ) {
+        self.choices
+            .entry(key)
+            .or_default()
+            .insert((site, k), (choice, instance));
     }
 }
 

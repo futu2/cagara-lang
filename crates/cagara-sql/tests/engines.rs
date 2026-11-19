@@ -337,6 +337,10 @@ unicode_names : query { id = int, 总金额 = float, 数量 = int } = table \"ma
 /// `(definition, expected rows)`; a row is its columns joined by `|`, NULL
 /// as `NULL`, booleans as `1` / `0`.
 const CASES: &[(&str, &[&str])] = &[
+    (
+        "coalesce_order = nums & order [asc .id] & select { named = coalesce (just .id) .v, infix = .v ?? just .id, both = coalesce .v .v, piped = .v & coalesce 0 }",
+        &["10|10|10|10", "2|2|NULL|0", "30|30|30|30", "20|20|20|20"],
+    ),
     ("proj_global = nums & agg { n = count } & select { x = 1 }", &["1"]),
     ("proj_global_empty = empty & agg { n = count } & select { x = 1 }", &["1"]),
     ("update_global = nums & agg { n = count } & update { n = 1 }", &["1"]),
@@ -2048,6 +2052,105 @@ fn a_parsed_and_printed_date_agrees_on_the_engines() {
     let sql = compile(rel, opts).expect("postgres");
     let blocks = pg_batch(harness, &setup, std::slice::from_ref(&sql));
     assert_eq!(blocks[0], want, "{sql}");
+}
+
+/// Exercise representation changes with real consumers, not just SQL spellings.
+#[test]
+fn singleton_lists_and_exact_decimal_means_match_their_types() {
+    let src = r#"t : query { id = int, x = maybe (decimal 38 2) } = table "" "vals"
+wrap = q => q & mapValue "list"
+lists = t & order [asc .id] & wrap & select { n = listLength .x, first = listAt 1 .id }
+means = t & agg { x = filtered (.id != 4) (distinctAgg (avg .x)), none = filtered (.id == 1) (avg .x) }
+empty = t & where false & agg { x = avg .x }
+windowed = t & select { id = .id, x = over { partition = [.id] } (avg (just .x)) } & order [asc .id]
+mean = avg
+nullableMean = x => mean (just x)
+bad = t & where (.id == 3 || .id == 4) & agg { x = nullableMean .x }
+"#;
+    let setup = "CREATE TABLE vals(id INTEGER, x DECIMAL(38,2));\n                 INSERT INTO vals VALUES (1,NULL), (2,-9007199254740993.01), (3,-9007199254740993.03), (4,-9007199254740993.04), (5,-9007199254740993.01);\n";
+    let ws = Workspace::from_source(src);
+    let queries = root_queries(&ws);
+    let duck = Engine {
+        shell: "duckdb",
+        args: &["-batch", "-list", "-noheader", "-nullvalue", "NULL"],
+        dialect: "duckdb",
+    };
+    for d in [Dialect::DuckDb, Dialect::Postgres] {
+        let sql = |name: &str| {
+            let (_, rel) = queries.iter().find(|(n, _)| n == name).unwrap();
+            compile(
+                rel.as_ref().unwrap(),
+                Options {
+                    dialect: d,
+                    ..Options::default()
+                },
+            )
+            .unwrap()
+        };
+        for (name, expected) in [
+            ("lists", &["1|1", "1|2", "1|3", "1|4", "1|5"][..]),
+            ("means", &["-9007199254740993.02|NULL"]),
+            ("empty", &["NULL"]),
+            (
+                "windowed",
+                &[
+                    "1|NULL",
+                    "2|-9007199254740993.01",
+                    "3|-9007199254740993.03",
+                    "4|-9007199254740993.04",
+                    "5|-9007199254740993.01",
+                ],
+            ),
+        ] {
+            let sql = sql(name);
+            let rows = if d == Dialect::DuckDb {
+                rows_or_skip(&duck, setup, &sql)
+            } else {
+                pg_rows_or_skip(setup, &sql)
+            };
+            if let Some(rows) = rows {
+                assert_eq!(rows, expected, "{d:?}: {sql}");
+            }
+        }
+        let bad = sql("bad");
+        let failed = match d {
+            Dialect::DuckDb if engine_enabled("duckdb") => run_setup(&duck, setup, &bad),
+            Dialect::Postgres if engine_enabled("postgres") && pg_ready() => run_script(
+                "node",
+                &[std::ffi::OsStr::new(pg_harness())],
+                "",
+                &format!("{setup}\x1e{bad}"),
+            ),
+            _ => None,
+        };
+        if let Some(result) = failed {
+            let message = result.expect_err("a half cent must not be rounded");
+            assert!(
+                message
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .contains("inexact decimal avg:"),
+                "{message}"
+            );
+        }
+    }
+    let rel = queries
+        .iter()
+        .find(|(n, _)| n == "means")
+        .unwrap()
+        .1
+        .as_ref()
+        .unwrap();
+    assert!(compile(
+        rel,
+        Options {
+            dialect: Dialect::Sqlite,
+            ..Options::default()
+        }
+    )
+    .unwrap_err()
+    .contains("exact decimal avg"));
 }
 
 /// Money on the engines: the sum of three 19.99s is 59.97 exactly, and

@@ -723,11 +723,8 @@ toBool : expr ?r string -> expr ?r bool = s =>
 --- (whose type variable is non-null, so it cannot join a `just` with a `nothing`).
 tryBool : expr ?r string -> expr ?r (maybe bool) = s => tryBoolOr (tryBoolTrue s) (tryBoolFalse s)
 
---- `COALESCE(a, b)` over two `maybe bool`s: the first present one. A template
---- because `coalesce` takes a `maybe` and a non-null default, and both halves here
---- are nullable.
-tryBoolOr : expr ?r (maybe bool) -> expr ?r (maybe bool) -> expr ?r (maybe bool) =
-  sql "COALESCE($1, $2)"
+--- The first present `maybe bool`, still nullable when both are NULL.
+tryBoolOr : expr ?r (maybe bool) -> expr ?r (maybe bool) -> expr ?r (maybe bool) = _??_
 
 --- The true half of `tryBool`: `just true`, or NULL.
 tryBoolTrue : expr ?r string -> expr ?r (maybe bool) =

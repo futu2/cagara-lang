@@ -221,6 +221,45 @@ a name.
   frame syntax is `{ ROWS | RANGE }`. `Unverified` is a distinct answer from `Native`
   — it means the spelling is intended and no run has shown the target accepts it.
 
+- **No function depends on `--dialect`.** Six of them used to be a compile error on some
+  targets — so a program's meaning depended on a flag, which is the one thing the prelude
+  exists to prevent. Each has a spelling, and each is checked by running the same program
+  on SQLite, DuckDB and PostgreSQL and diffing the rows:
+  - `lpad`/`rpad` on SQLite, which has neither `LPAD` nor `REPEAT`. `HEX(ZEROBLOB(n))` is
+    the character `0` repeated `2n` times, so replacing each `0` with the fill gives the
+    padding and `SUBSTR` takes the missing part. DuckDB *raises* on an empty fill where
+    the others return the string unpadded, so that is guarded too.
+  - `reverse` on SQLite, as a scalar subquery carrying its own `WITH RECURSIVE`: the
+    characters are walked from the end into an accumulator. The loop condition is
+    `i >= 1` — with `i > 1` the first character is dropped, which the first version did.
+  - `random` on SQLite, whose `random()` is a signed 64-bit integer rather than a double
+    in `[0, 1)`. `RANDOM() & 2147483647` is non-negative, and dividing by that mask's
+    range is exactly `[0, 1)`.
+  - `monthName`/`dayName`/`monthAbbrev`/`dayAbbrev`, and any `formatDate` with a name, on
+    SQLite — whose `strftime` has no name specifiers and answers NULL rather than
+    failing, which was a column of NULLs under a non-null `string` type. The format is a
+    compile-time literal, so it is decomposed: one single-specifier call per numeric
+    field, a `CASE` per name.
+  - `parseDate` on SQLite and T-SQL, which have no format parser. The same technique in
+    reverse — the ISO string is rebuilt from fixed-width slices, `%Y%m%d` becoming three
+    `SUBSTR`s joined with `-`.
+  - `tryInt`/`tryFloat`/`tryDate` on SQLite and PostgreSQL. SQLite's `CAST('abc' AS INT)`
+    is `0`, a silent wrong answer, and PostgreSQL raises. The guard is a validation
+    before the cast, so the cast never sees a value that would fail. Two details
+    measurement forced: the cast applies to a *substituted* value,
+    `CAST(if(ok, x, '0'))`, because PostgreSQL constant-folds
+    `CASE WHEN 'abc' ~ … THEN 'abc'::BIGINT END` and raises during planning; and DuckDB
+    is guarded as well despite having `TRY_CAST`, because `TRY_CAST('1.5' AS BIGINT)` is
+    `2` there and `' 42 '` parses.
+  - `listAt` on PostgreSQL, which has the subscript and a real array type — the only
+    obstacle was that `ARRAY_AGG(id)[2]` is a syntax error and the aggregate needs
+    parentheses around it.
+
+  Two refusals remain, both type-level rather than spelling-level, and both documented:
+  `decimal` on SQLite (no exact numeric type — a binary float wearing the name is the
+  failure the type exists to prevent) and `list` on targets with no array type (JSON text
+  wearing the name would change the type without saying so).
+
 - **`fullJoin` and `rollup`/`cube` are emulated instead of refused.** The language no
   longer changes with `--dialect`:
   - `fullJoin` on the MySQL family becomes `(l LEFT JOIN r ON p) UNION ALL` the right

@@ -527,12 +527,15 @@ not a prelude addition.
   `textDocument/documentColor` stays refused on purpose — the language has no colour type.
 - Dependencies updated: `sqlglot-rust` 0.11.2, `logos` 0.16.1, `serde_json` 1.0.154.
   `rowan` stays at 0.17 (0.18 is an alpha). The new sqlglot still does not parse `GROUPS`
-  and still swaps two-argument `LOG`'s arguments; it adds `Expr::ArrayIndex`, which cannot
-  be used for `listAt` because the generator omits the parentheses an aggregate needs.
+  and still swaps two-argument `LOG`'s arguments; it adds `Expr::ArrayIndex`, which needed
+  `Expr::Nested` around the aggregate to be usable — `ARRAY_AGG(id)[2]` is a syntax error
+  and `(ARRAY_AGG(id))[2]` is not. Both exist, so `listAt` works on PostgreSQL now.
 
-- `random`, refused on SQLite: its `random()` is a signed 64-bit integer, and
-  `random() / 2^63` landed outside `[0, 1)` in 490 of 1000 measured draws. It is also the
-  one prelude function the differential suite cannot check by rows, which its test says.
+- `random` on SQLite: its `random()` is a signed 64-bit integer, and `random() / 2^63`
+  landed outside `[0, 1)` in 490 of 1000 measured draws — so dividing is wrong, but
+  *masking* is not: `RANDOM() & 2147483647` is non-negative and dividing by that mask's
+  range is exactly `[0, 1)`. It stays the one prelude function the differential suite
+  cannot check by rows, which its test says.
 
 - A stage given no argument says what it needs. `q = u & where` reported
   `expected query {…}, found expr ?a b`; the check had to go in `unify_inner`'s `Fun`/`Fun`

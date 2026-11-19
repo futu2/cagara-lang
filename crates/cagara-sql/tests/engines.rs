@@ -3694,22 +3694,19 @@ q = f & select { s = over { order = [asc .k], frame = groups (preceding 1) curre
         }
     }
 }
-/// `random` is refused on SQLite, because its `random()` is not the same function.
-///
-/// Every other target returns a float in `[0, 1)`. SQLite returns a **signed 64-bit
-/// integer**, and `random() / 9223372036854775808.0` is negative about half the time —
-/// measured over 1000 draws: 490 were outside `[0, 1)`. So there is no portable
-/// rewrite, and emitting `RANDOM()` there would give the column a type the signature
-/// does not promise.
-///
-/// It is also the one prelude function the differential suite cannot check by rows: a
-/// query whose answer changes every run cannot be compared. The *shape* is asserted
+
 /// SQLite's `random()` is the float form too, by masking and scaling.
 ///
-/// SQLite's builtin returns a signed 64-bit integer, which is why this used to be
-/// refused rather than emitted. `RANDOM() & 2147483647` is non-negative and dividing
-/// by that mask's range gives exactly `[0, 1)`, so the language's `random` means the
-/// same thing on every target. Measured over ten rows: every value in range, all
+/// Every other target returns a float in `[0, 1)`; SQLite returns a **signed 64-bit
+/// integer**, and `random() / 2^63` is negative about half the time — measured over 1000
+/// draws, 490 were outside `[0, 1)`. Dividing is therefore wrong, but *masking* is not:
+/// `RANDOM() & 2147483647` is non-negative, and dividing by that mask's range is exactly
+/// `[0, 1)`. So the language's `random` means the same thing on every target, rather than
+/// being a compile error on one of them.
+///
+/// It is also the one prelude function the differential suite cannot check by *rows*: a
+/// query whose answer changes every run cannot be compared. The shape is asserted here
+/// instead, and the range was measured over ten rows — every value in range, all
 /// distinct.
 #[test]
 fn sqlite_random_is_the_float_form_too() {

@@ -371,10 +371,11 @@ group : expr ?r (maybe ?a) -> agg (expr ?r (maybe ?a)) = primitive "__group"
 --- value to give — `?? "-"` or `lift` is how a caller says what a subtotal is
 --- called. A key that is already `maybe` stays one layer, not two.
 ---
---- Not every target has the clause: SQLite has no grouping sets at all, and
---- MySQL's `WITH ROLLUP` rolls up its *whole* key list and cannot combine with
---- `ORDER BY`, which is not the same operation. Both refuse it rather than
---- silently dropping subtotals.
+--- SQLite has no grouping sets at all, and MySQL's `WITH ROLLUP` rolls up its *whole*
+--- key list and cannot combine with `ORDER BY` — which is not the same operation. On
+--- both, the compiler enumerates the sets instead: one `agg` per set over the same
+--- input, `UNION ALL`ed, with the excluded keys written as NULL. So this is available on
+--- every target rather than a compile error on two of them.
 rollup : expr ?r ?a -> agg (expr ?r (maybe ?a)) = primitive "__rollup"
 rollup : expr ?r (maybe ?a) -> agg (expr ?r (maybe ?a)) = primitive "__rollup"
 

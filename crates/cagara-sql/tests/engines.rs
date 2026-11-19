@@ -1848,6 +1848,40 @@ fn strip_literals(sql: &str) -> String {
 }
 
 #[test]
+fn keyword_columns_read_stored_values() {
+    let source = "t : query { transaction = int, pivot = int, current_schema = int, current_catalog = int } = table \"\" \"transaction\"\n\
+                  main = t & select { commit = .transaction, unpivot = .pivot, role = .current_schema, catalog = .current_catalog }\n";
+    let setup = "CREATE TABLE \"transaction\" (\"transaction\" INTEGER, \"pivot\" INTEGER, \"current_schema\" INTEGER, \"current_catalog\" INTEGER);\n\
+                 INSERT INTO \"transaction\" VALUES (11, 22, 33, 44);\n";
+    let workspace = Workspace::from_source(source);
+    let (_, query) = root_queries(&workspace)
+        .into_iter()
+        .find(|(name, _)| name == "main")
+        .unwrap();
+    let relation = query.unwrap();
+    let sql = |dialect| {
+        compile(
+            &relation,
+            Options {
+                dialect,
+                ..Options::default()
+            },
+        )
+        .unwrap()
+    };
+    for engine in ENGINES {
+        let statement = sql(Dialect::from_str(engine.dialect).unwrap());
+        if let Some(rows) = rows_or_skip(engine, setup, &statement) {
+            assert_eq!(rows, ["11|22|33|44"], "{statement}");
+        }
+    }
+    let statement = sql(Dialect::Postgres);
+    if let Some(rows) = pg_rows_or_skip(setup, &statement) {
+        assert_eq!(rows, ["11|22|33|44"], "{statement}");
+    }
+}
+
+#[test]
 fn engines_agree() {
     if !engine_enabled("sqlite") && !engine_enabled("duckdb") {
         eprintln!("skipping: this test's engines are not in CAGARA_ENGINES");

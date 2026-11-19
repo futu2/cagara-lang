@@ -598,8 +598,33 @@ fn analytic_and_try_date_helpers_are_available() {
         "q = users & select { d = tryDate .name, ts = tryTimestamp .name }\n",
         "q",
     );
-    assert!(casts.contains("TRY_CAST(name AS DATE)"), "{casts}");
-    assert!(casts.contains("TRY_CAST(name AS TIMESTAMP)"), "{casts}");
+    // The default dialect is ANSI, which guards instead of casting loosely; each guard
+    // is the shape a value of that type has.
+    assert!(
+        casts.contains("REGEXP_LIKE(name, '^[0-9]{4}-[0-9]{2}-[0-9]{2}$')")
+            && casts.contains("AS DATE)"),
+        "{casts}"
+    );
+    assert!(
+        casts.contains("^[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}$")
+            && casts.contains("AS TIMESTAMP)"),
+        "{casts}"
+    );
+    // The cast is applied to a value the guard accepted, so PostgreSQL cannot fold it
+    // into a planning-time failure — `CASE WHEN 'abc' ~ … THEN 'abc'::DATE END` raises
+    // before the condition runs.
+    assert!(
+        casts.contains("THEN CASE WHEN REGEXP_LIKE") || casts.contains("ELSE '0' END AS DATE"),
+        "the cast is guarded against constant folding: {casts}"
+    );
+    // A target with `TRY_CAST` keeps it.
+    let duck = dialect(
+        "q = users & select { d = tryDate .name, ts = tryTimestamp .name }\n",
+        "q",
+        "duckdb",
+    )
+    .expect("duckdb");
+    assert!(duck.contains("TRY_CAST(name AS DATE)"), "{duck}");
 }
 
 #[test]
@@ -3078,13 +3103,21 @@ fn a_decimal_cast_carries_its_precision() {
 /// reason, and this asserts the two spellings do not collapse into one.
 #[test]
 fn try_cast_is_not_a_plain_cast() {
-    let s = sql(
-        "t : query { a = string } = table \"s\" \"t\"\n\
-         q = t & select { v = tryInt .a }\n",
-        "q",
+    const SRC: &str = "t : query { a = string } = table \"s\" \"t\"\n\
+                       q = t & select { v = tryInt .a }\n";
+    // A target whose own `try` agrees with the language emits `TRY_CAST`, never a bare
+    // `CAST`.
+    let duck = dialect(SRC, "q", "spark").expect("spark");
+    assert!(duck.contains("TRY_CAST(a AS BIGINT)"), "{duck}");
+    // A target without one guards the cast — the cast is still there, but it cannot be
+    // reached with a value the guard rejected, which is what "try" means. A bare
+    // `CAST` on its own would have been the bug.
+    let s = sql(SRC, "q");
+    assert!(s.contains("REGEXP_LIKE"), "{s}");
+    assert!(
+        !s.contains("SELECT CAST(a AS BIGINT)"),
+        "an unguarded cast is the bug: {s}"
     );
-    assert!(s.contains("TRY_CAST(a AS BIGINT)"), "{s}");
-    assert!(!s.contains("SELECT CAST(a AS BIGINT)"), "{s}");
 }
 
 /// A cast that fails is worth failing on; a `try*` cast is not.
@@ -3095,15 +3128,27 @@ fn try_cast_is_not_a_plain_cast() {
 /// has to handle.
 #[test]
 fn a_try_cast_yields_a_maybe() {
-    let s = sql(
-        "t : query { a = string } = table \"s\" \"t\"\n\
-         q = t & select { v = coalesce 0 (tryInt .a) }\n",
-        "q",
-    );
+    const SRC: &str = "t : query { a = string } = table \"s\" \"t\"\n\
+                       q = t & select { v = coalesce 0 (tryInt .a) }\n";
+    // The default dialect is ANSI, which has no `TRY_CAST` — so it gets the guard.
+    let s = sql(SRC, "q");
+    assert!(s.contains("REGEXP_LIKE"), "{s}");
+    assert!(s.contains("COALESCE"), "{s}");
+    // A target whose own `try` already agrees with the language keeps it.
+    let spark = dialect(SRC, "q", "spark").expect("spark");
     assert!(
-        s.contains("COALESCE((TRY_CAST(a AS BIGINT)), 0) AS v"),
-        "{s}"
+        spark.contains("COALESCE((TRY_CAST(a AS BIGINT)), 0) AS v"),
+        "{spark}"
     );
+    // The targets without one still answer `maybe`: the guard yields NULL, which the
+    // `coalesce` then replaces — so the shape of the result is the same everywhere even
+    // though the spelling is not.
+    let pg = dialect(SRC, "q", "postgres").expect("postgres");
+    assert!(pg.contains("REGEXP_LIKE"), "{pg}");
+    assert!(pg.contains("COALESCE"), "{pg}");
+    let sqlite = dialect(SRC, "q", "sqlite").expect("sqlite");
+    assert!(sqlite.contains("'0123456789'"), "{sqlite}");
+    assert!(sqlite.contains("COALESCE"), "{sqlite}");
 }
 
 // ---------------------------------------------------------------- correctness
@@ -3430,20 +3475,29 @@ fn a_timestamp_format_is_written_once_too() {
     assert!(dialect(src, "q", "bigquery").is_ok());
 }
 
-/// PostgreSQL has no `TRY_CAST`, so a `try*` cast is refused for it instead of
-/// compiling into SQL the server rejects at run time.
+/// PostgreSQL has no `TRY_CAST`, so the cast is guarded rather than refused.
+///
+/// The guard is a regex test beside the cast, not `pg_input_is_valid`: that function
+/// arrived in PostgreSQL 16 and this project does not require it, while `~` has been
+/// there since 7.4.
 #[test]
-fn a_try_cast_is_refused_on_postgres() {
+fn a_try_cast_is_guarded_on_postgres() {
     let src = "t : query { a = string } = table \"s\" \"t\"\n\
                q = t & select { v = tryInt .a }\n";
-    let e = dialect(src, "q", "postgres").unwrap_err();
-    assert!(e.contains("PostgreSQL has no `TRY_CAST`"), "{e}");
-    assert!(e.contains("pg_input_is_valid"), "{e}");
-    // The generic target keeps the loose spelling; a target that has the
-    // clause emits it.
-    assert!(dialect(src, "q", "duckdb")
-        .expect("duckdb")
-        .contains("TRY_CAST(a AS BIGINT)"));
+    let pg = dialect(src, "q", "postgres").expect("postgres");
+    assert!(
+        pg.contains("REGEXP_LIKE(TRIM(a), '^[+-]?[0-9]+$')"),
+        "the guard is a regex on the integer shape, over the trimmed input: {pg}"
+    );
+    assert!(pg.contains("ELSE NULL"), "a failure is NULL: {pg}");
+    // DuckDB *has* `TRY_CAST` and is guarded anyway: `TRY_CAST('1.5' AS BIGINT)` is `2`
+    // there (it rounds) and `' 42 '` parses, so the engine's own answer is not the
+    // language's. The guard is what makes `tryInt` mean one thing everywhere.
+    let duck = dialect(src, "q", "duckdb").expect("duckdb");
+    assert!(
+        duck.contains("regexp_matches(TRIM(a), '^[+-]?[0-9]+$')"),
+        "{duck}"
+    );
 }
 
 /// The decimal cast is spelled the same way in every backend that has the type,
@@ -3560,15 +3614,29 @@ fn a_date_format_is_written_once_and_spelled_per_target() {
     let snow = dialect(src, "q", "snowflake").expect("snowflake");
     assert!(snow.contains("TO_DATE(s, 'YYYYMMDD')"), "{snow}");
 
-    // SQLite and T-SQL can print by format but not parse one; the refusal names
-    // both, and prints the SQL of neither.
-    let e = dialect(src, "q", "sqlite").unwrap_err();
-    assert!(e.contains("need a dialect with a format parser"), "{e}");
-    // Formatting alone still compiles there.
+    // SQLite has no format *parser* and its `strftime` has no *name* specifiers, but
+    // the format is compiled in, so neither is a refusal: the call is decomposed into
+    // one call per field. Parsing rebuilds the ISO string from fixed-width slices;
+    // formatting concatenates literal text with single-specifier calls.
+    let sqlite = dialect(src, "q", "sqlite").expect("sqlite");
+    assert!(
+        sqlite.contains("SUBSTR(s, 1, 4)") && sqlite.contains("SUBSTR(s, 5, 2)"),
+        "the date is rebuilt from fixed-width slices: {sqlite}"
+    );
+    assert!(
+        sqlite.contains("STRFTIME('%Y', d)") && sqlite.contains("STRFTIME('%H', d)"),
+        "one call per numeric field: {sqlite}"
+    );
     let src = "t : query { d = date } = table \"s\" \"t\"\n\
-               q = t & select { f = formatDate \"%Y-%m\" .d }\n";
+               q = t & select { f = formatDate \"%Y-%m\" .d, n = monthName .d }\n";
     let sqlite = dialect(src, "q", "sqlite").expect("sqlite format");
-    assert!(sqlite.contains("STRFTIME('%Y-%m', d)"), "{sqlite}");
+    assert!(sqlite.contains("STRFTIME('%Y', d)"), "{sqlite}");
+    // A name has no `strftime` specifier, so it becomes a `CASE` over the month
+    // number — the same table every other dialect prints.
+    assert!(
+        sqlite.contains("WHEN '2' THEN 'February'"),
+        "the month name is a CASE: {sqlite}"
+    );
     let tsql = dialect(src, "q", "tsql").expect("tsql format");
     assert!(tsql.contains("FORMAT(d, 'yyyy-MM')"), "{tsql}");
 

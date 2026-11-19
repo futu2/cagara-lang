@@ -99,7 +99,7 @@ the backend spells both the function and the format per family —
 | DuckDB, BigQuery | `STRPTIME` / `PARSE_DATE` | `STRFTIME` / `FORMAT_DATE` | `%Y %m %d %H %M %S` |
 | Trino, MySQL | `DATE_PARSE` / `STR_TO_DATE` | `DATE_FORMAT` | `%Y %m %d %H %i %s` |
 | Spark | `TO_DATE(s, fmt)` | `DATE_FORMAT` | `yyyy MM dd HH mm ss` |
-| SQLite, T-SQL | *refused* | `STRFTIME` / `FORMAT` | `%Y…` / `yyyy…` |
+| SQLite, T-SQL | `DATE()`/`CAST` on a rebuilt ISO string | `STRFTIME` / `FORMAT` | `%Y…` / `yyyy…` |
 
 The middle column differs for a reason worth stating: MySQL's format language
 (which Trino's `date_parse` follows) reads `%i` for minutes and `%M` for the
@@ -109,25 +109,37 @@ mean one thing everywhere. A specifier the language does not define is a compile
 error, and the format must be a literal — it is compiled in.
 
 SQLite and T-SQL have no format *parser* (SQLite reads ISO strings only, T-SQL's
-`PARSE` is culture-driven), so `parseDate` is refused there; both can still print
-by format.
+`PARSE` is culture-driven) — and the language does not follow them, because a function
+that compiles on one `--dialect` and not another makes the language's surface depend on
+the target. The format is a compile-time literal, so it is **decomposed** instead of
+refused:
 
-SQLite's `strftime` is also a *subset* of C's, and the missing part is exactly the
-name specifiers: `%b %B %a %A` have no spelling there and answer NULL rather than
-failing, so a `formatDate "%B"` under a non-null `string` type would be a column of
-NULLs. Those specifiers are refused on SQLite, which makes `monthName`, `dayName`,
-`monthAbbrev` and `dayAbbrev` unavailable there. PostgreSQL's `TO_CHAR` is the other
-direction of the same problem: `Month`/`Day` blank-pad to nine characters, so the
-translation uses the unpadded `FMMonth`/`FMDay` — otherwise `formatDate "%B %d"`
-would be `February  29` on PostgreSQL alone.
+- **Parsing** rebuilds the ISO string from fixed-width slices of the input. `%Y%m%d`
+  becomes `SUBSTR(s,1,4) || '-' || SUBSTR(s,5,2) || '-' || SUBSTR(s,7,2)`, handed to
+  `DATE()`/`DATETIME()` on SQLite and to `CAST(… AS DATE)` on T-SQL. That covers the
+  numeric vocabulary, which is what a machine-written date uses; a *name* has no fixed
+  width and is the one thing still refused, with a message saying so.
+- **Formatting** on SQLite concatenates literal text with one single-specifier
+  `strftime` per numeric field, and a `CASE` per name — SQLite's `strftime` has no
+  `%b %B %a %A` and answers NULL rather than failing, so `monthName`/`dayName`/
+  `monthAbbrev`/`dayAbbrev` are a `CASE` over the month or weekday number. Every other
+  target prints the name directly.
 
-Two more functions hide an engine rule behind one spelling, and the prelude does not
-follow the engine:
+PostgreSQL's `TO_CHAR` is the other direction of the same problem: `Month`/`Day`
+blank-pad to nine characters, so the translation uses the unpadded `FMMonth`/`FMDay` —
+otherwise `formatDate "%B %d"` would be `February  29` on PostgreSQL alone.
+
+Other functions that hide an engine rule behind one spelling, none of which the language
+follows:
 
 | function | the divergence | what the language does |
 |---|---|---|
-| `like` | SQLite's `LIKE` is case-insensitive for ASCII unless the connection sets `PRAGMA case_sensitive_like` | emits a `GLOB` with the pattern translated (`%`→`*`, `_`→`?`, literal `*`/`?`/`[` escaped), because `GLOB` is the case-sensitive matcher SQLite has |
-| `lpad`, `rpad` | SQLite has neither `LPAD` nor `REPEAT` | refused at compile time; `left`/`right`/`substring` are the portable alternatives |
+| `like` | SQLite's `LIKE` is case-insensitive for ASCII unless the connection sets `PRAGMA case_sensitive_like` | a `GLOB` with the pattern translated (`%`→`*`, `_`→`?`, literal `*`/`?`/`[` escaped), because `GLOB` is the case-sensitive matcher SQLite has |
+| `lpad`, `rpad` | SQLite has neither `LPAD` nor `REPEAT` | `HEX(ZEROBLOB(n))` is `0` repeated `2n` times, so replacing each `0` with the fill gives the padding; `SUBSTR` takes the missing part |
+| `random` | SQLite's `random()` is a signed 64-bit integer, so dividing by `2^63` is negative half the time | `RANDOM() & 2147483647` masked and scaled, which is exactly `[0, 1)` |
+| `reverse` | SQLite has no `REVERSE` | a scalar subquery carrying its own `WITH RECURSIVE`, walking the characters from the end |
+| `try*` | SQLite's `CAST('abc' AS INT)` is `0`, not an error; PostgreSQL has no `TRY_CAST` and raises | a validation before the cast — `TRIM(x,'0123456789')` on SQLite, a regex on PostgreSQL |
+| `listAt` | PostgreSQL needs `(ARRAY_AGG(id))[2]`, and unparenthesised `[2]` is a syntax error there | the subscript is built around a parenthesised inner expression |
 
 ## Rewritten instead of refused
 
@@ -152,10 +164,21 @@ equivalent exists, so the language does not change with `--dialect`. Two are:
 Both rewrites are in [`crates/cagara-sql/src/emulate.rs`](../crates/cagara-sql/src/emulate.rs)
 and produce ordinary relational algebra, so the lowerer sees nothing new.
 
-One construct is refused rather than emitted in a dialect that cannot mean it:
+**Nothing is refused.** Every construct Cagara can write compiles for every target,
+because a function that works on one `--dialect` and not another makes the language's
+surface depend on the target — which is the thing this whole file exists to prevent.
+Where a target cannot spell something directly, the spelling is rewritten:
 
-- An empty `inList []` lowers to a constant `FALSE` (or `TRUE` when negated),
-  because SQL has no empty `IN ()`. The target never sees an empty list.
+- An empty `inList []` lowers to a constant `FALSE` (or `TRUE` when negated), because
+  SQL has no empty `IN ()` anywhere.
+- A `decimal` on SQLite, which has no exact numeric type, is the one construct still
+  refused rather than rewritten — a binary float wearing the type's name would be the
+  exact failure the type exists to prevent, and there is no fixed-point representation to
+  emit instead. That refusal names the target and the alternative.
+
+The remaining gap in the *emulation* is a format *name* in `parseDate` on SQLite and
+T-SQL, where the decomposition has no width to slice; that is a limitation of the
+technique, stated in the message, rather than a target being unable.
 
 `toInt`, `toFloat`, `tryInt`, and `tryFloat` cast to the language's widths
 rather than the engine's default `INT`/`FLOAT`: the integer target is `BIGINT`

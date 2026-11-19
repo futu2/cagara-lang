@@ -3704,9 +3704,15 @@ q = f & select { s = over { order = [asc .k], frame = groups (preceding 1) curre
 ///
 /// It is also the one prelude function the differential suite cannot check by rows: a
 /// query whose answer changes every run cannot be compared. The *shape* is asserted
-/// instead — the call reaches the SQL — and the type is the checker's business.
+/// SQLite's `random()` is the float form too, by masking and scaling.
+///
+/// SQLite's builtin returns a signed 64-bit integer, which is why this used to be
+/// refused rather than emitted. `RANDOM() & 2147483647` is non-negative and dividing
+/// by that mask's range gives exactly `[0, 1)`, so the language's `random` means the
+/// same thing on every target. Measured over ten rows: every value in range, all
+/// distinct.
 #[test]
-fn sqlite_refuses_random() {
+fn sqlite_random_is_the_float_form_too() {
     const DEFS: &str = "\
 t : query { id = int } = table \"main\" \"users\"\n\
 r = t & select { v = random }\n";
@@ -3715,20 +3721,18 @@ r = t & select { v = random }\n";
     let rels = root_queries(&ws);
     let (_, r) = rels.iter().find(|(n, _)| n == "r").expect("r");
     let rel = r.as_ref().expect("r type-checks");
-    let err = compile(
+    let sqlite = compile(
         rel,
         Options {
             dialect: Dialect::Sqlite,
             ..Options::default()
         },
     )
-    .expect_err("SQLite's random is an integer");
-    assert!(err.contains("`random`"), "{err}");
-    assert!(err.contains("signed 64-bit integer"), "{err}");
-    // The targets that have the float form compile. Which spelling reaches the SQL is
-    // the generator's business — it rewrites `RANDOM()` to `RAND()` for Trino, and both
-    // mean the same thing there — so the assertion is that *a* random call is present,
-    // not that a particular word is.
+    .expect("SQLite masks the integer form");
+    assert!(
+        sqlite.contains("RANDOM() & 2147483647") && sqlite.contains("/ 2147483647.0"),
+        "{sqlite}"
+    );
     for d in [
         Dialect::DuckDb,
         Dialect::Postgres,
@@ -3750,15 +3754,18 @@ r = t & select { v = random }\n";
     }
 }
 
-/// SQLite has no `REVERSE`, and the refusal says so instead of emitting a call.
+/// SQLite's `reverse` is a recursive CTE, so the language has one meaning.
 ///
-/// This is the shape the whole "no fake fixes" rule takes for a prelude function: a
-/// target that cannot express one is refused with a message naming what it lacks,
-/// rather than given a template that produces SQL the engine rejects — the engine's
-/// own error would be `no such function: REVERSE`, which does not say the author
-/// wrote something the *language* offers.
+/// SQLite has no `REVERSE`, which is why this used to be refused. A scalar subquery
+/// may carry its own `WITH RECURSIVE`, though, so the characters are walked from the
+/// end and accumulated — the same answer every other target gives.
+///
+/// Two details is the test pins because both were wrong on the first attempt: the
+/// recursion condition is `i >= 1` (`i > 1` drops the first character and answers
+/// `edcb` for `abcde`), and the result is the row where `i = 0`, since the seed row's
+/// `i` is the string's length.
 #[test]
-fn sqlite_refuses_reverse() {
+fn sqlite_reverse_is_a_recursive_cte() {
     const DEFS: &str = "\
 t : query { id = int, s = string } = table \"main\" \"users\"\n\
 r = t & select { v = reverse .s }\n";
@@ -3767,20 +3774,23 @@ r = t & select { v = reverse .s }\n";
     let rels = root_queries(&ws);
     let (_, r) = rels.iter().find(|(n, _)| n == "r").expect("r");
     let rel = r.as_ref().expect("r type-checks");
-    let err = compile(
+    let sqlite = compile(
         rel,
         Options {
             dialect: Dialect::Sqlite,
             ..Options::default()
         },
     )
-    .expect_err("SQLite has no REVERSE");
-    assert!(err.contains("`reverse`"), "{err}");
-    assert!(err.contains("no `REVERSE`"), "{err}");
-    // And the targets that do have it compile.
+    .expect("SQLite walks the characters");
+    assert!(
+        sqlite.contains("WITH RECURSIVE reversed(i, acc)"),
+        "{sqlite}"
+    );
+    assert!(sqlite.contains("WHERE i >= 1"), "{sqlite}");
+    assert!(sqlite.contains("WHERE i = 0"), "{sqlite}");
     for d in [
-        Dialect::DuckDb,
         Dialect::Postgres,
+        Dialect::DuckDb,
         Dialect::Mysql,
         Dialect::Trino,
     ] {

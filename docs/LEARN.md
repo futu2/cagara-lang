@@ -1916,10 +1916,13 @@ needed adjusting, that document says so. `ilike` is another example: SQLite has 
 `ILIKE`, so it lowers to `LOWER(s) LIKE LOWER(pattern)` — and `like` itself becomes a
 `GLOB`, because SQLite's `LIKE` folds case.
 
-Two functions are refused rather than spelled differently, because the engine cannot
-mean what the language says: `lpad`/`rpad` on SQLite (it has neither `LPAD` nor
-`REPEAT`), and `monthName`/`dayName` there too (its `strftime` has no name
-specifiers). Both are compile errors that name the dialect, not wrong answers.
+No *function* is refused: each one has a spelling for every target, even where the
+engine has neither the builtin nor an obvious equivalent. `lpad`/`rpad` on SQLite build
+their padding from `ZEROBLOB`, `reverse` there is a recursive CTE, `random` is the
+engine's integer masked and scaled, and `monthName`/`dayName` are a `CASE` over the
+month number. What *is* refused is a `list` on a target with no array type — a type-level
+gap, not a spelling one: JSON text wearing an array's name would change the type without
+saying so.
 
 ---
 

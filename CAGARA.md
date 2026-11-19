@@ -1338,18 +1338,18 @@ Argument order is subject-last, which is the reverse of the SQL spelling:
 Positions and lengths are 1-based. `contains`/`startsWith`/`endsWith` treat `%` and `_` literally;
 `like` does not. `length` counts characters, including trailing spaces.
 
-Four cases where an engine's own rule would differ, and the language does not follow it:
+**Every function here compiles for every `--dialect`.** Where an engine's own rule would differ, the
+backend emits the spelling that agrees, so one program means one thing:
 
 - `like` is **case-sensitive** everywhere. SQLite's `LIKE` is case-insensitive for ASCII unless the
   connection turns that off, so it is spelled as a `GLOB` with the pattern translated instead.
 - `ilike` folds case, but only ASCII does that on SQLite — its case mapping is ASCII-only, and
   `upper`/`lower` have the same limit there.
-- `lpad`/`rpad` are a compile error on SQLite: it has neither `LPAD` nor `REPEAT` and the fill
-  cannot be built without a recursive query. Use `left`/`right` or `substring`.
-- `roundTo` on an exact half is **the engine's own rule**, and the engines do not agree: SQLite has
-  no decimal type, so `roundTo 1 0.35` is `0.3` there and `0.4` on DuckDB and PostgreSQL. The
-  emitted SQL is identical, so nothing in the compiler can reconcile them. Round half away from
-  zero explicitly if the value matters.
+- `lpad`/`rpad` work on SQLite despite it having neither `LPAD` nor `REPEAT`: the padding is built
+  from `ZEROBLOB`, which every SQLite has.
+- `roundTo` on an exact half is the one case the compiler cannot reconcile, because SQLite has no
+  decimal type: `roundTo 1 0.35` is `0.3` there and `0.4` on DuckDB and PostgreSQL, from identical
+  SQL. Round half away from zero explicitly if the value matters.
 
 ```cagara
 orders : query { id = int, email = string, name = string } = table "public" "orders"
@@ -1438,13 +1438,14 @@ label rather than a number.
   (month name), `%a`/`%A` (weekday name), `%j` (day of year) and `%%`, and the backend translates
   it (`YYYYMMDD` for PostgreSQL, `%Y%m%d` for MySQL, `yyyyMMdd` for Spark, …). The format must be
   a literal.
-- Two dialect gaps, both compile errors rather than wrong answers:
-  - SQLite and T-SQL can print by format but have no format *parser*, so `parseDate` is a compile
-    error there — parse an ISO string with `toDate` instead.
-  - SQLite's `strftime` has no specifier for a month or weekday **name**, and answers NULL rather
-    than failing, so `%b %B %a %A` are compile errors on SQLite. That makes `monthName`, `dayName`,
-    `monthAbbrev` and `dayAbbrev` — which are `formatDate "%B"` and friends — unavailable there;
-    format `%m` and map it, or run the query on a dialect that has names.
+- These work on every dialect, including SQLite and T-SQL, which have no format *parser*. Because
+  the format is a literal it is decomposed at compile time: parsing rebuilds the ISO string from
+  fixed-width slices of the input, and SQLite's formatting becomes one single-specifier `strftime`
+  per field with a `CASE` for a month or weekday name. `monthName`, `dayName`, `monthAbbrev` and
+  `dayAbbrev` are therefore available everywhere.
+- The one exception is a **name in a parse format** (`parseDate "%B %d" s`): a name has no fixed
+  width to slice, so it is refused with a message saying so. Use the numeric specifiers, or
+  `toDate` on a string that is already ISO.
 - `date` has no hour; `hour`/`truncHour`/`addHours` require `timestamp`. Convert with `toTimestamp`.
 - `daysBetween start end` is positive when `end` is later; use `toDate` on a timestamp first.
 - `dayOfWeek` is 0 for Sunday; `truncWeek` starts on Monday (ISO).
@@ -1539,7 +1540,10 @@ over        : winspec ?r -> agg (expr ?r (maybe ?a)) -> win (expr ?r (maybe ?a))
 directly — `COUNT(x)` skips NULLs by definition, which is what counting a nullable column *is* — so
 their `maybe` overloads are the same function, and `countOfMaybe`/`countDistinctMaybe` are aliases
 kept for queries written against them.
-`arrayAgg` needs a dialect with an array type (PostgreSQL, DuckDB); the others refuse it.
+`arrayAgg` needs a dialect with a real array type (PostgreSQL, DuckDB). The others refuse it with
+a message naming the target: a `list` there would have to be JSON text wearing the array's name,
+which changes the type without saying so — the one thing a refusal is *for*. This is a type-level
+gap rather than a spelling one, so there is no emulation to emit.
 
 The nullable overloads keep SQL's own semantics: the column passes straight through, so `sum .x`
 over a `maybe` column emits `SUM(x)`, not `SUM(COALESCE(x, 0))`. This matters for `avg`/`min`/`max`:

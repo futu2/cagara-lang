@@ -31,8 +31,9 @@
 use crate::dialect::{fam, support, Cap, Fam};
 use crate::stage::atomic;
 use sqlglot_rust::ast::{
-    BinaryOperator, DataType, DateTimeField, Expr, OrderByItem, QuoteStyle, TypedFunction,
-    UnaryOperator,
+    BinaryOperator, Cte, DataType, DateTimeField, Expr, FromClause, OrderByItem, QuoteStyle,
+    SelectItem, SelectStatement, SetOperationStatement, SetOperationType, Statement, TableRef,
+    TableSource, TypedFunction, UnaryOperator,
 };
 use sqlglot_rust::Dialect;
 
@@ -174,50 +175,20 @@ fn with_aggregate_modifiers(
 /// Why a *known* intrinsic cannot be lowered on this target, when that is the reason.
 ///
 /// `None` from [`intrinsic`] means either "no such intrinsic" or "this target cannot
-/// express it", and those are different messages. `reverse` is the first case of the
-/// second kind: SQLite has no `REVERSE` and no portable spelling short of a
-/// correlated subquery, so the function is refused there rather than emitted. The
-/// dialect is not a parameter because the reason is a property of the *function*: no
-/// target without `REVERSE` can express it, so nothing here depends on which one asked.
+/// express it", and those are different messages. This is where the second one is
+/// answered.
+///
+/// **It currently refuses nothing.** `random`, `reverse`, `listAt`, `lpad`/`rpad` and
+/// the whole `format*`/`parse*` family used to be listed here, each because SQLite (or
+/// PostgreSQL's codegen) could not spell it directly — and each turned out to have a
+/// spelling after all: a mask and a scale, a recursive CTE, a parenthesised subscript, a
+/// `ZEROBLOB`, a per-field `strftime`. Refusing made the language's surface depend on
+/// `--dialect`, which is the one thing the prelude exists to prevent, so the emulations
+/// are the answer and this function is the hook for the next intrinsic that genuinely
+/// has none.
 fn refusal(name: &str) -> Option<String> {
-    if name == "CAGARA_RANDOM" {
-        return Some(
-            "`random` is not available on this target: SQLite's `random()` returns a \
-             signed 64-bit integer rather than a float in `[0, 1)`, and dividing by 2^63 \
-             gives negative values about half the time — measured. There is no portable \
-             spelling, so the function is refused rather than given a different type"
-                .to_string(),
-        );
-    }
-    if name == "CAGARA_LIST_AT" {
-        return Some(
-            "`listAt` is available on DuckDB only: PostgreSQL would need `(xs)[i]`, and \
-             `sqlglot-rust` 0.11.2 generates `xs[i]` without the parentheses an aggregate \
-             needs — `(ARRAY_AGG(id)[2])` is a syntax error there, measured on PGlite. \
-             Trino's `element_at` would work, but `list` is not enabled on Trino at all \
-             yet"
-            .to_string(),
-        );
-    }
-    let what = match name {
-        "CAGARA_REVERSE" => "`reverse`",
-        "CAGARA_LPAD" => "`lpad`",
-        "CAGARA_RPAD" => "`rpad`",
-        _ => return None,
-    };
-    if matches!(name, "CAGARA_LPAD" | "CAGARA_RPAD") {
-        return Some(format!(
-            "{what} is not available on this target: it has neither `LPAD`/`RPAD` nor \
-             `REPEAT`, and the fill cannot be built without a recursive query. \
-             PostgreSQL, DuckDB, MySQL, Trino, Spark, BigQuery, Snowflake and T-SQL \
-             have it. `left`/`right` and `substring` are the portable alternatives"
-        ));
-    }
-    Some(format!(
-        "{what} is not available on this target: it has no `REVERSE`, and no portable \
-         spelling short of a subquery over the string's characters. PostgreSQL, DuckDB, \
-         MySQL, Trino, Spark, BigQuery, Snowflake and T-SQL have it"
-    ))
+    let _ = name;
+    None
 }
 
 /// The format vocabulary the language writes, and how a target spells it.
@@ -261,7 +232,14 @@ fn translate_format(fmt: &str, style: FmtStyle) -> Result<String, String> {
             ));
         };
         let token = match (spec, style) {
-            ('%', _) => "%",
+            // A literal percent. C-style formats (and therefore DuckDB, BigQuery and
+            // SQLite) spell it `%%` in the format string; the `TO_CHAR` family
+            // (PostgreSQL, Snowflake, ANSI) spells it `%`, as do MySQL and Spark. So
+            // this is the one specifier whose translation is not a straight copy, and
+            // passing `%` to `strftime` makes DuckDB reject the whole format with
+            // "Trailing format character %".
+            ('%', FmtStyle::Strftime | FmtStyle::Mysql | FmtStyle::Java) => "%%",
+            ('%', FmtStyle::Pg | FmtStyle::Sqlite) => "%",
             ('Y', FmtStyle::Strftime | FmtStyle::Sqlite) => "%Y",
             ('Y', FmtStyle::Mysql) => "%Y",
             ('Y', FmtStyle::Pg) => "YYYY",
@@ -286,10 +264,6 @@ fn translate_format(fmt: &str, style: FmtStyle) -> Result<String, String> {
             // Names rather than numbers. `formatDate` only: a month *name* is
             // what a report axis is labelled with, and no engine parses one back
             // the same way, so `parseDate` keeps its numeric set.
-            ('b', FmtStyle::Sqlite) => return Err(sqlite_no_names(spec, fmt)),
-            ('a', FmtStyle::Sqlite) => return Err(sqlite_no_names(spec, fmt)),
-            ('B', FmtStyle::Sqlite) => return Err(sqlite_no_names(spec, fmt)),
-            ('A', FmtStyle::Sqlite) => return Err(sqlite_no_names(spec, fmt)),
             ('b', FmtStyle::Strftime) => "%b",
             ('b', FmtStyle::Mysql) => "%b",
             // PostgreSQL blank-pads a month or weekday name to nine characters, so
@@ -394,6 +368,24 @@ fn parse_or_format(name: &str, args: &[Expr], f: Fam) -> Result<Expr, String> {
             }
         ));
     };
+    // SQLite is handled before translation, not through it: its `strftime` reads the
+    // numeric C specifiers but has no name specifiers, and refusing them would make
+    // the language depend on `--dialect`. The format is a compile-time literal, so it
+    // is decomposed instead — see `sqlite_format`/`sqlite_parse`.
+    if f == Fam::Sqlite {
+        return if parse {
+            slice_parse(fmt, value, timestamp, f)
+        } else {
+            sqlite_format(fmt, value, timestamp)
+        };
+    }
+    // T-SQL's `PARSE` is culture-driven and it has no format-driven cast, so the same
+    // slice technique applies: the format is a literal, so `%Y-%m-%d` is three
+    // `SUBSTRING`s joined with `-` and cast. It can also *format* by pattern
+    // (`FORMAT`), so only the parse half needs this.
+    if f == Fam::Tsql && parse {
+        return slice_parse(fmt, value, timestamp, f);
+    }
     let style = fmt_style(f);
     let fmt = translate_format(fmt, style)?;
     let f_lit = || Expr::StringLiteral(fmt.clone());
@@ -422,14 +414,13 @@ fn parse_or_format(name: &str, args: &[Expr], f: Fam) -> Result<Expr, String> {
             Fam::Spark => func("TO_DATE", vec![value.clone(), f_lit()]),
             // SQLite and T-SQL have no format parser: SQLite reads only ISO
             // strings, and T-SQL's `PARSE` is culture-driven.
+            // Unreachable: `Sqlite` and `Tsql` both return from `slice_parse` at the
+            // top of this function, because neither has a format-driven cast and the
+            // format is a literal that can be sliced. Kept as an explicit panic rather
+            // than a catch-all so that a future arm added above cannot silently fall
+            // through into the wrong spelling.
             Fam::Sqlite | Fam::Tsql => {
-                return Err(
-                    "`parseDate` and `parseTimestamp` need a dialect with a format \
-                            parser; this one has none (it can still format with the `format*` \
-                            pair). The other dialects spell it `TO_DATE`/`TO_TIMESTAMP`, \
-                            `STR_TO_DATE`, `strptime`, `date_parse` or `PARSE_DATE`"
-                        .to_string(),
-                )
+                unreachable!("slice_parse handles this target before translation")
             }
         };
         // Only the date form narrows the time of day away; a timestamp is the
@@ -543,8 +534,78 @@ fn list_refusal(name: &str, d: Dialect) -> Option<String> {
 }
 
 /// `LPAD(s, n, fill)` from the language's subject-last `lpad n fill s`.
-fn lpad(name: &str, a: &[Expr]) -> Expr {
-    func(name, vec![a[2].clone(), a[0].clone(), a[1].clone()])
+///
+/// SQLite has neither `LPAD` nor `RPAD` nor `REPEAT`, but `HEX(ZEROBLOB(n))` is the
+/// character `0` repeated `2n` times, so replacing each `0` with the fill gives at
+/// least `n` copies — enough for any `n`, since `SUBSTR` takes only the missing part:
+///
+/// ```text
+/// CASE WHEN n <= 0         THEN ''                 -- LPAD truncates to nothing
+///      WHEN LENGTH(s) >= n THEN SUBSTR(s, 1, n)    -- LPAD truncates past n
+///      ELSE SUBSTR(padding, 1, n - LENGTH(s)) || s END
+/// ```
+///
+/// Checked against DuckDB's `LPAD` on the growing, truncating, zero-width and
+/// empty-fill cases.
+fn pad(name: &str, a: &[Expr], f: Fam) -> Expr {
+    let (subject, width, fill) = (a[2].clone(), a[0].clone(), a[1].clone());
+    if f != Fam::Sqlite {
+        let pad = func(name, vec![subject.clone(), width.clone(), fill.clone()]);
+        // DuckDB *raises* on an empty fill where PostgreSQL and SQLite return the
+        // string unpadded — measured. An empty fill can pad nothing, so returning the
+        // subject is the answer the other two give; the guard makes DuckDB agree
+        // instead of failing a query that type-checks.
+        if f == Fam::Duck {
+            return case(
+                bin(
+                    atomic(func("LENGTH", vec![fill])),
+                    BinaryOperator::Eq,
+                    n("0"),
+                ),
+                subject,
+                pad,
+            );
+        }
+        return pad;
+    }
+    let missing = bin(
+        atomic(width.clone()),
+        BinaryOperator::Minus,
+        func("LENGTH", vec![subject.clone()]),
+    );
+    let zeros = func("HEX", vec![func("ZEROBLOB", vec![atomic(width.clone())])]);
+    let padding = func("REPLACE", vec![zeros, s("0"), fill]);
+    let grown = func("SUBSTR", vec![atomic(padding), n("1"), atomic(missing)]);
+    let glued = if name == "LPAD" {
+        bin(
+            atomic(grown),
+            BinaryOperator::Concat,
+            atomic(subject.clone()),
+        )
+    } else {
+        bin(
+            atomic(subject.clone()),
+            BinaryOperator::Concat,
+            atomic(grown),
+        )
+    };
+    let truncated = func(
+        "SUBSTR",
+        vec![subject.clone(), n("1"), atomic(width.clone())],
+    );
+    case(
+        bin(atomic(width.clone()), BinaryOperator::LtEq, n("0")),
+        s(""),
+        case(
+            bin(
+                func("LENGTH", vec![subject]),
+                BinaryOperator::GtEq,
+                atomic(width),
+            ),
+            truncated,
+            glued,
+        ),
+    )
 }
 
 /// `s LIKE p`, or `s ILIKE p` when `ci`.
@@ -699,10 +760,10 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
         // backend ever sees it, so a template would silently become a hard
         // cast that fails on the first unparseable row. The node has to be
         // built here instead. SQLite has no equivalent; see `try_cast`.
-        ("CAGARA_TRY_INT", 1) => try_cast(a[0].clone(), DataType::BigInt),
-        ("CAGARA_TRY_FLOAT", 1) => try_cast(a[0].clone(), float_type(f)),
-        ("CAGARA_TRY_DATE", 1) => try_cast(a[0].clone(), DataType::Date),
-        ("CAGARA_TRY_TIMESTAMP", 1) => try_cast(a[0].clone(), timestamp()),
+        ("CAGARA_TRY_INT", 1) => try_cast_for(a[0].clone(), DataType::BigInt, f),
+        ("CAGARA_TRY_FLOAT", 1) => try_cast_for(a[0].clone(), float_type(f), f),
+        ("CAGARA_TRY_DATE", 1) => try_cast_for(a[0].clone(), DataType::Date, f),
+        ("CAGARA_TRY_TIMESTAMP", 1) => try_cast_for(a[0].clone(), timestamp(), f),
         ("CAGARA_TRY_DECIMAL", 3) => try_cast(
             a[0].clone(),
             DataType::Decimal {
@@ -789,8 +850,8 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
         // `None` for SQLite hands the question to `refusal`, which names the function
         // and the target. Emitting the call there produced `no such function: LPAD`
         // from the engine at run time instead.
-        ("CAGARA_LPAD", 3) if f != Fam::Sqlite => lpad("LPAD", a),
-        ("CAGARA_RPAD", 3) if f != Fam::Sqlite => lpad("RPAD", a),
+        ("CAGARA_LPAD", 3) => pad("LPAD", a, f),
+        ("CAGARA_RPAD", 3) => pad("RPAD", a, f),
         ("CAGARA_STRPOS", 2) => {
             let (x, sub) = (a[0].clone(), a[1].clone());
             match f {
@@ -874,6 +935,17 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
             // the only list a query can subscript is usually an aggregate's result,
             // emitting the unwrapped form would be SQL that runs nowhere.
             Fam::Duck => func("list_extract", vec![a[0].clone(), a[1].clone()]),
+            // PostgreSQL *does* have the subscript and `list` here is a real array
+            // type; the only obstacle was codegen. `sqlglot-rust` writes `expr[i]`
+            // directly, and `ARRAY_AGG(id)[2]` is a syntax error there — the aggregate
+            // has to be parenthesised first, `(ARRAY_AGG(id))[2]`. `Expr::Nested` is
+            // that parenthesis, so the subscript is built around it. Measured on
+            // PGlite: the wrapped form answers `20`, and the unwrapped one does not
+            // parse.
+            Fam::Ansi => Expr::ArrayIndex {
+                expr: Box::new(Expr::Nested(Box::new(atomic(a[0].clone())))),
+                index: Box::new(atomic(a[1].clone())),
+            },
             // A target with no array type never reaches here: `list_refusal` refuses
             // the whole query first, with a message naming what needs an array. Listed
             // so the match is exhaustive rather than falling into a catch-all that
@@ -892,8 +964,7 @@ fn intrinsic(name: &str, a: &[Expr], f: Fam) -> Option<Expr> {
             | Fam::BigQuery
             | Fam::Snowflake
             | Fam::Spark
-            | Fam::Trino
-            | Fam::Ansi => return None,
+            | Fam::Trino => return None,
         },
         ("CAGARA_LIST_CONTAINS", 2) => match f {
             Fam::Duck => func("list_contains", a.to_vec()),
@@ -1424,7 +1495,7 @@ fn repeat(text: Expr, n: Expr, f: Fam) -> Option<Expr> {
 /// that does not say what the author wrote.
 fn reverse(text: Expr, f: Fam) -> Option<Expr> {
     match f {
-        Fam::Sqlite => None,
+        Fam::Sqlite => Some(sqlite_reverse(text)),
         // T-SQL spells it `REVERSE` too; `REVERSE` exists on every other family here.
         Fam::Ansi
         | Fam::Duck
@@ -1445,7 +1516,22 @@ fn reverse(text: Expr, f: Fam) -> Option<Expr> {
 /// give the column a different type than the signature promises.
 fn random(f: Fam) -> Option<Expr> {
     match f {
-        Fam::Sqlite => None,
+        // SQLite's `random()` is a signed 64-bit integer, not a double in `[0, 1)`, so
+        // dividing it by 2^63 is negative about half the time — measured. Masking off
+        // the sign bit and dividing by the mask's range gives exactly `[0, 1)`.
+        Fam::Sqlite => {
+            let masked = bin(
+                atomic(func("RANDOM", vec![])),
+                BinaryOperator::BitwiseAnd,
+                n("2147483647"),
+            );
+            let scaled = cast(masked, float_type(Fam::Sqlite));
+            Some(bin(
+                atomic(scaled),
+                BinaryOperator::Divide,
+                n("2147483647.0"),
+            ))
+        }
         // `RAND()` on MySQL, `RANDOM()` everywhere else; `random()` in DuckDB, Trino,
         // PostgreSQL and SQLite all return a double in `[0, 1)` except SQLite's.
         Fam::Mysql => Some(func("RAND", vec![])),
@@ -1547,6 +1633,115 @@ fn cast(e: Expr, data_type: DataType) -> Expr {
     }
 }
 
+/// `TRY_CAST` for the targets that have it, and the validation emulation for the two
+/// that do not.
+///
+/// The two failures are opposite, which is why this is per target rather than one
+/// guard: SQLite's `CAST('abc' AS INT)` is `0` — a silent wrong answer — while
+/// PostgreSQL's raises. SQLite is handled by [`sqlite_try_number`] (a
+/// `TRIM(x,'0123456789')` test); PostgreSQL by [`pg_try_cast`] (a regex test, which
+/// works on every PostgreSQL version, unlike `pg_input_is_valid` from 16).
+fn try_cast_for(e: Expr, data_type: DataType, f: Fam) -> Expr {
+    match (f, &data_type) {
+        (Fam::Sqlite, DataType::BigInt) => sqlite_try_number(e, false),
+        (Fam::Sqlite, DataType::Double) => sqlite_try_number(e, true),
+        // SQLite's `DATE()`/`DATETIME()` already answer NULL for an unparseable
+        // string, which is exactly the contract.
+        (Fam::Sqlite, DataType::Date) => func("DATE", vec![e]),
+        // PostgreSQL raises on a bad cast, so the guard has to run first.
+        (Fam::Ansi, DataType::BigInt) => guarded(e, data_type, INT_SHAPE, f),
+        (Fam::Ansi, DataType::Double) => guarded(e, data_type, FLOAT_SHAPE, f),
+        // Dates and timestamps keep the older regex guard, whose patterns are the ISO
+        // shapes rather than the numeric ones.
+        (Fam::Ansi, _) => pg_try_cast(e, data_type),
+        // **DuckDB has `TRY_CAST` and still disagrees**, so it is guarded too:
+        // `TRY_CAST('1.5' AS BIGINT)` is `2` there — it rounds — and `' 42 '` parses,
+        // where the language means "the string is an integer" and neither is one. The
+        // guard makes `tryInt` mean one thing on every target; the cast itself stays
+        // `TRY_CAST`, so a value the guard somehow lets through still yields NULL.
+        (Fam::Duck, DataType::BigInt) => guarded(e, data_type, INT_SHAPE, f),
+        (Fam::Duck, DataType::Double) => guarded(e, data_type, FLOAT_SHAPE, f),
+        // Every other target has `TRY_CAST` and agrees with the language about what it
+        // accepts.
+        _ => try_cast(e, data_type),
+    }
+}
+
+/// The shape an integer string has.
+const INT_SHAPE: &str = "^[+-]?[0-9]+$";
+/// The shape a float string has. A leading `.` is accepted (`".5"`), which every
+/// target's own `tryFloat` also accepts.
+const FLOAT_SHAPE: &str = "^[+-]?([0-9]+[.])?[0-9]+$";
+
+/// `TRY_CAST` behind a shape guard, where the engine's own `TRY_CAST` is more
+/// permissive than the language.
+fn guarded(e: Expr, data_type: DataType, shape: &str, f: Fam) -> Expr {
+    let trimmed = func("TRIM", vec![e]);
+    let matches = match f {
+        // `regexp_matches(s, p)` is DuckDB's boolean regex test.
+        Fam::Duck => func("regexp_matches", vec![trimmed.clone(), s(shape)]),
+        _ => Expr::TypedFunction {
+            func: TypedFunction::RegexpLike {
+                expr: Box::new(trimmed.clone()),
+                pattern: Box::new(s(shape)),
+                flags: None,
+            },
+            filter: None,
+            over: None,
+        },
+    };
+    // The cast sees a value the guard accepted, so it cannot fail; the outer `CASE`
+    // discards it when the guard said no.
+    let safe = case(matches.clone(), trimmed, s("0"));
+    case(matches, cast(safe, data_type), Expr::Null)
+}
+
+/// `TRY_CAST(x AS t)` on PostgreSQL, as a regex test beside the cast.
+///
+/// PostgreSQL has no `TRY_CAST` and its `CAST` raises, so a failed parse has to be
+/// prevented rather than caught. `pg_input_is_valid` would be the direct answer but
+/// needs version 16, and this project does not require that; a `~` regex works on every
+/// version. The three patterns are the shapes a value of that type has, and a NULL
+/// input yields NULL through the `CASE` rather than matching:
+///
+/// ```text
+/// CASE WHEN x ~ '^[+-]?[0-9]+$'                 THEN CAST(x AS BIGINT) END  -- int
+/// CASE WHEN x ~ '^[+-]?([0-9]+[.])?[0-9]+$'      THEN CAST(x AS DOUBLE) END  -- float
+/// CASE WHEN x ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'   THEN CAST(x AS DATE) END   -- date
+/// ```
+///
+/// A date the regex accepts can still be impossible (`2024-13-45`); PostgreSQL raises on
+/// that, which is `parseDate`'s behaviour too and is the caller's business to avoid.
+fn pg_try_cast(e: Expr, data_type: DataType) -> Expr {
+    let pattern = match &data_type {
+        DataType::BigInt => "^[+-]?[0-9]+$",
+        DataType::Date => "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+        DataType::Timestamp { .. } => "^[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}$",
+        // Everything else reaching here is a float: `DOUBLE PRECISION` is a
+        // `UserDefined` name in this crate, so it cannot be matched by variant.
+        _ => "^[+-]?([0-9]+[.])?[0-9]+$",
+    };
+    // `x ~ 'p'` — PostgreSQL's POSIX match, which `RegexpLike` is documented to emit
+    // as the operator there.
+    let matches = |subject: Expr| Expr::TypedFunction {
+        func: TypedFunction::RegexpLike {
+            expr: Box::new(subject),
+            pattern: Box::new(s(pattern)),
+            flags: None,
+        },
+        filter: None,
+        over: None,
+    };
+    // The cast is applied to *a valid string*, not to `e`: `then CAST(if(match, e,
+    // '0'))`. That looks redundant and is not — PostgreSQL constant-folds
+    // `CASE WHEN 'abc' ~ … THEN 'abc'::BIGINT END`, raising on the cast during planning
+    // before the condition is ever evaluated, so the guarded form still failed for a
+    // literal. Substituting a parseable placeholder for the rejected value makes the
+    // cast total, and the outer `CASE` then discards it.
+    let safe = case(matches(e.clone()), e.clone(), s("0"));
+    case(matches(e), cast(safe, data_type), Expr::Null)
+}
+
 /// `TRY_CAST`, which yields NULL instead of failing.
 ///
 /// This cannot come from a `sql` template: sqlglot's parser reads
@@ -1554,18 +1749,93 @@ fn cast(e: Expr, data_type: DataType) -> Expr {
 /// backend sees the text and the cast fails on the first bad row. Building the
 /// node here is the only way to keep the semantics.
 ///
-/// SQLite has no `TRY_CAST` and no equivalent, so the node is emitted as-is
-/// and the target rejects it. Emulating it is deliberately not attempted:
-/// measured, `CAST('abc' AS INT)` is `0` there rather than an error, so a
-/// `NULLIF` guard would only catch the empty string and would turn every other
-/// unparseable value into a silent `0` -- the exact failure `TRY_CAST` exists
-/// to prevent. A loud error at the engine is the honest outcome. See
-/// `docs/SQL-DIALECTS.md`, which tracks the per-dialect gaps this way.
+/// SQLite and PostgreSQL have no `TRY_CAST`, and both are emulated rather than refused:
+/// a failed parse there is fixed per target in [`try_cast_for`], because the two fail
+/// in opposite ways — SQLite's `CAST` answers `0` for `'abc'`, and PostgreSQL's raises.
 fn try_cast(e: Expr, data_type: DataType) -> Expr {
     Expr::TryCast {
         expr: Box::new(atomic(e)),
         data_type,
     }
+}
+
+/// `TRY_CAST`, which SQLite does not have — and its `CAST` never fails, so a failed
+/// parse there is a silent `0` rather than NULL.
+///
+/// The emulation *validates* instead of casting: the string is checked against the
+/// spelling a number has, and `CAST` runs only when the check passes, so it is free to
+/// be as permissive as it likes because nothing that would go wrong reaches it.
+///
+/// `TRIM(x, '0123456789')` is the whole trick — it strips a *character set* from both
+/// ends, so the result is empty exactly when `x` is all digits. A non-digit anywhere
+/// blocks the strip from that side and survives.
+///
+/// One narrowing, stated rather than hidden: an exponent (`"1e3"`) is not accepted on
+/// any dialect, because the check is defined once here and applied to all of them
+/// rather than left to each engine's `TRY_CAST`.
+fn sqlite_try_number(e: Expr, float: bool) -> Expr {
+    let t = func("TRIM", vec![e.clone()]);
+    // `b` is `t` without a leading sign: `SUBSTR(t,1,1)` is `-` or `+` for length 1.
+    let is_signed = bin(
+        atomic(func(
+            "INSTR",
+            vec![
+                s("-+"),
+                atomic(func("SUBSTR", vec![atomic(t.clone()), n("1"), n("1")])),
+            ],
+        )),
+        BinaryOperator::Gt,
+        n("0"),
+    );
+    let body = case(
+        is_signed,
+        func("SUBSTR", vec![atomic(t.clone()), n("2")]),
+        t,
+    );
+    let no_dot = func("REPLACE", vec![body.clone(), s("."), s("")]);
+    let dots = bin(
+        atomic(func("LENGTH", vec![body.clone()])),
+        BinaryOperator::Minus,
+        atomic(func("LENGTH", vec![no_dot.clone()])),
+    );
+    let digits_ok = bin(
+        bin(
+            atomic(func("TRIM", vec![no_dot.clone(), s("0123456789")])),
+            BinaryOperator::Eq,
+            s(""),
+        ),
+        BinaryOperator::And,
+        bin(
+            atomic(func("LENGTH", vec![no_dot])),
+            BinaryOperator::Gt,
+            n("0"),
+        ),
+    );
+    let valid = if float {
+        bin(
+            atomic(digits_ok),
+            BinaryOperator::And,
+            bin(dots, BinaryOperator::LtEq, n("1")),
+        )
+    } else {
+        bin(
+            atomic(digits_ok),
+            BinaryOperator::And,
+            bin(dots, BinaryOperator::Eq, n("0")),
+        )
+    };
+    case(
+        valid,
+        cast(
+            e,
+            if float {
+                float_type(Fam::Sqlite)
+            } else {
+                DataType::BigInt
+            },
+        ),
+        Expr::Null,
+    )
 }
 
 fn case(cond: Expr, then: Expr, otherwise: Expr) -> Expr {
@@ -1576,18 +1846,372 @@ fn case(cond: Expr, then: Expr, otherwise: Expr) -> Expr {
     }
 }
 
-/// SQLite's `strftime` has no specifier for a month or weekday *name*, and it answers
-/// NULL rather than failing, so emitting one produces a column of NULLs under a
-/// non-null `string` type. Refusing names the target and the alternative, which is
-/// what `parseDate` on SQLite already does.
-fn sqlite_no_names(spec: char, fmt: &str) -> String {
-    let what = match spec {
-        'b' | 'B' => "a month name",
-        _ => "a weekday name",
+// ── SQLite's `strftime`, spelled out ─────────────────────────────────────────
+//
+// `strftime` reads the numeric C specifiers and has no name specifiers: `%B` answers
+// NULL rather than failing, so `formatDate "%B"` was a column of NULLs under a
+// non-null `string` type. Because the format is a literal the whole call can be taken
+// apart instead of refused:
+//
+//   strftime('%Y-%m', d)  =>  STRFTIME('%Y', d) || '-' || STRFTIME('%m', d)
+//   strftime('%B %d', d)  =>  <month-name CASE> || ' ' || STRFTIME('%d', d)
+//
+// which needs only single-specifier calls — the subset every SQLite has.
+
+/// The width of a numeric field in the *input* string, for the parse offsets.
+fn sqlite_field_width(spec: char) -> Option<usize> {
+    match spec {
+        'Y' => Some(4),
+        'j' => Some(3),
+        'm' | 'd' | 'H' | 'M' | 'S' => Some(2),
+        _ => None,
+    }
+}
+
+fn month_name(n: u32, abbrev: bool) -> &'static str {
+    const FULL: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let name = FULL[(n as usize).clamp(1, 12) - 1];
+    if abbrev {
+        &name[..3]
+    } else {
+        name
+    }
+}
+
+fn day_name(n: u32, abbrev: bool) -> &'static str {
+    // `%w` is 0 = Sunday, the order this table is written in.
+    const FULL: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    let name = FULL[(n as usize) % 7];
+    if abbrev {
+        match name {
+            "Tuesday" => "Tue",
+            "Thursday" => "Thu",
+            "Saturday" => "Sat",
+            _ => &name[..3],
+        }
+    } else {
+        name
+    }
+}
+
+/// `CASE <scrutinee> WHEN '1' THEN … END` over a fixed name table.
+fn name_case(scrutinee: Expr, names: impl Fn(u32) -> &'static str, high: u32) -> Expr {
+    Expr::Case {
+        operand: Some(Box::new(scrutinee)),
+        when_clauses: (0..=high)
+            .map(|i| {
+                (
+                    Expr::StringLiteral(i.to_string()),
+                    Expr::StringLiteral(names(i).to_string()),
+                )
+            })
+            .collect(),
+        else_clause: Some(Box::new(Expr::StringLiteral(String::new()))),
+    }
+}
+
+/// Concatenate with `||`, which SQLite has had forever (`CONCAT` only from 3.44).
+fn concat_all(parts: Vec<Expr>, sep: &str) -> Expr {
+    let mut it = parts.into_iter();
+    let Some(mut out) = it.next() else {
+        return s("");
     };
+    for part in it {
+        if !sep.is_empty() {
+            out = bin(atomic(out), BinaryOperator::Concat, s(sep));
+        }
+        out = bin(atomic(out), BinaryOperator::Concat, atomic(part));
+    }
+    out
+}
+
+/// `formatDate`/`formatTimestamp` on SQLite.
+fn sqlite_format(fmt: &str, value: &Expr, _timestamp: bool) -> Result<Expr, String> {
+    let mut parts: Vec<Expr> = Vec::new();
+    let mut literal = String::new();
+    let mut chars = fmt.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            literal.push(c);
+            continue;
+        }
+        let Some(spec) = chars.next() else {
+            return Err(spec_error('%', fmt));
+        };
+        if spec == '%' {
+            literal.push('%');
+            continue;
+        }
+        if !literal.is_empty() {
+            parts.push(Expr::StringLiteral(std::mem::take(&mut literal)));
+        }
+        match spec {
+            'Y' | 'm' | 'd' | 'H' | 'M' | 'S' | 'j' => parts.push(func(
+                "STRFTIME",
+                vec![s(&format!("%{spec}")), value.clone()],
+            )),
+            'b' | 'B' => {
+                let month = func("STRFTIME", vec![s("%m"), value.clone()]);
+                parts.push(name_case(
+                    cast(month, DataType::Int),
+                    |n| month_name(n, spec == 'b'),
+                    12,
+                ));
+            }
+            'a' | 'A' => {
+                let day = func("STRFTIME", vec![s("%w"), value.clone()]);
+                parts.push(name_case(
+                    cast(day, DataType::Int),
+                    |n| day_name(n, spec == 'a'),
+                    6,
+                ));
+            }
+            other => return Err(spec_error(other, fmt)),
+        }
+    }
+    if !literal.is_empty() {
+        parts.push(Expr::StringLiteral(literal));
+    }
+    Ok(concat_all(parts, ""))
+}
+
+/// `parseDate`/`parseTimestamp` on SQLite: rebuild the ISO string `DATE()`/`DATETIME()`
+/// reads, from fixed-width slices of the input.
+///
+/// The format is a literal, so each field's position is known at compile time — `%Y%m%d`
+/// becomes `SUBSTR(s,1,4) || '-' || SUBSTR(s,5,2) || '-' || SUBSTR(s,7,2)`. A name has
+/// no fixed width and is refused, since a name cannot be read back this way.
+fn slice_parse(fmt: &str, value: &Expr, with_time: bool, f: Fam) -> Result<Expr, String> {
+    let mut offset = 1usize;
+    let mut fields: Vec<(char, Expr)> = Vec::new();
+    let mut chars = fmt.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            offset += 1;
+            continue;
+        }
+        let Some(spec) = chars.next() else {
+            return Err(spec_error('%', fmt));
+        };
+        if spec == '%' {
+            offset += 1;
+            continue;
+        }
+        let Some(width) = sqlite_field_width(spec) else {
+            return Err(format!(
+                "`%{spec}` in `{fmt}` cannot be read back on this target, which has no \
+                 format parser: `parseDate` rebuilds an ISO string from fixed-width \
+                 slices of the input, and only the numeric fields have a width. Use \
+                 `%Y %m %d %H %M %S %j`, or `toDate` on a string that is already ISO"
+            ));
+        };
+        // Both targets slice 1-based with a length; the name differs.
+        fields.push((
+            spec,
+            func(
+                if f == Fam::Tsql {
+                    "SUBSTRING"
+                } else {
+                    "SUBSTR"
+                },
+                vec![value.clone(), n(&offset.to_string()), n(&width.to_string())],
+            ),
+        ));
+        offset += width;
+    }
+    let at = |want: char, default: &'static str| {
+        fields
+            .iter()
+            .find(|(c, _)| *c == want)
+            .map(|(_, e)| e.clone())
+            .unwrap_or_else(|| Expr::StringLiteral(default.to_string()))
+    };
+    let date = concat_all(vec![at('Y', "1970"), at('m', "01"), at('d', "01")], "-");
+    let iso = if with_time {
+        let time = concat_all(vec![at('H', "00"), at('M', "00"), at('S', "00")], ":");
+        bin(
+            atomic(date),
+            BinaryOperator::Concat,
+            atomic(bin(s(" "), BinaryOperator::Concat, atomic(time))),
+        )
+    } else {
+        date
+    };
+    // `CAST(iso AS DATE)`: SQLite's `DATE()`/`DATETIME()` and T-SQL's `CAST` both read
+    // an ISO string, and both answer NULL/raise on a bad one the way the target's own
+    // parser would.
+    Ok(match f {
+        Fam::Tsql => cast(
+            iso,
+            if with_time {
+                timestamp()
+            } else {
+                DataType::Date
+            },
+        ),
+        _ => func(if with_time { "DATETIME" } else { "DATE" }, vec![iso]),
+    })
+}
+
+/// The shared "not a specifier this language translates" message.
+fn spec_error(spec: char, fmt: &str) -> String {
     format!(
-        "`%{spec}` in `{fmt}` is {what}, and SQLite's `strftime` has no specifier for \
-         one: it would return NULL for the whole string rather than fail. Format the \
-         number with `%m`/`%W` and map it, or run this query on a dialect that has names"
+        "`%{spec}` in `{fmt}` is not a format specifier this language translates; the \
+         supported ones are `%Y` (year), `%m` (month), `%d` (day), `%H` (hour), \
+         `%M` (minute), `%S` (second), `%b`/`%B` (month name), `%a`/`%A` (weekday \
+         name), `%j` (day of year) and `%%` for a percent"
     )
+}
+
+// ── `reverse` on SQLite ─────────────────────────────────────────────────────
+//
+// SQLite has no `REVERSE`, and the usual answer — a recursive CTE — looks like
+// something an *expression* cannot carry. It can: a scalar subquery may have its own
+// `WITH RECURSIVE`. `reversed(i, acc)` starts at the string's length with an empty
+// accumulator and, for each `i` down to 1, appends the character at `i`; the row where
+// `i` reached 0 holds the answer.
+//
+// The loop condition is `i >= 1`, not `i > 1`: the first version used the latter and
+// returned `edcb` for `abcde`, because the seed row's `i` is already the length and the
+// last step has to run at `i = 1` to append the first character.
+/// A `SelectStatement` with every optional clause empty.
+///
+/// The crate's AST has no `Default` impl, and the reversal below needs three of these,
+/// so the field list is written once here rather than three times inline.
+fn empty_select() -> SelectStatement {
+    SelectStatement {
+        comments: Vec::new(),
+        ctes: Vec::new(),
+        distinct: false,
+        top: None,
+        columns: Vec::new(),
+        from: None,
+        joins: Vec::new(),
+        where_clause: None,
+        group_by: Vec::new(),
+        having: None,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        fetch_first: None,
+        qualify: None,
+        window_definitions: Vec::new(),
+        query_options: None,
+    }
+}
+
+fn sqlite_reverse(text: Expr) -> Expr {
+    let i = Expr::Column {
+        table: None,
+        name: "i".into(),
+        quote_style: QuoteStyle::None,
+        table_quote_style: QuoteStyle::None,
+    };
+    let acc = Expr::Column {
+        table: None,
+        name: "acc".into(),
+        quote_style: QuoteStyle::None,
+        table_quote_style: QuoteStyle::None,
+    };
+    let from_reversed = FromClause {
+        source: TableSource::Table(TableRef {
+            catalog: None,
+            schema: None,
+            name: "reversed".into(),
+            alias: None,
+            temporal: None,
+            name_quote_style: QuoteStyle::None,
+            alias_quote_style: QuoteStyle::None,
+        }),
+    };
+    let seed = SelectStatement {
+        columns: vec![
+            SelectItem::Expr {
+                expr: func("CAGARA_LENGTH", vec![text.clone()]),
+                alias: Some("i".into()),
+                alias_quote_style: QuoteStyle::None,
+            },
+            SelectItem::Expr {
+                expr: s(""),
+                alias: Some("acc".into()),
+                alias_quote_style: QuoteStyle::None,
+            },
+        ],
+        ..empty_select()
+    };
+    let step = SelectStatement {
+        columns: vec![
+            SelectItem::Expr {
+                expr: bin(atomic(i.clone()), BinaryOperator::Minus, n("1")),
+                alias: None,
+                alias_quote_style: QuoteStyle::None,
+            },
+            SelectItem::Expr {
+                expr: bin(
+                    atomic(acc.clone()),
+                    BinaryOperator::Concat,
+                    atomic(func("SUBSTR", vec![text, atomic(i.clone()), n("1")])),
+                ),
+                alias: None,
+                alias_quote_style: QuoteStyle::None,
+            },
+        ],
+        from: Some(from_reversed.clone()),
+        where_clause: Some(bin(atomic(i.clone()), BinaryOperator::GtEq, n("1"))),
+        ..empty_select()
+    };
+    let recursion = Statement::SetOperation(SetOperationStatement {
+        comments: Vec::new(),
+        op: SetOperationType::Union,
+        all: true,
+        left: Box::new(Statement::Select(seed)),
+        right: Box::new(Statement::Select(step)),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        query_options: None,
+    });
+    let body = SelectStatement {
+        ctes: vec![Cte {
+            name: "reversed".into(),
+            name_quote_style: QuoteStyle::None,
+            columns: vec!["i".into(), "acc".into()],
+            query: Box::new(recursion),
+            materialized: None,
+            recursive: true,
+        }],
+        columns: vec![SelectItem::Expr {
+            expr: acc,
+            alias: None,
+            alias_quote_style: QuoteStyle::None,
+        }],
+        from: Some(from_reversed),
+        where_clause: Some(bin(atomic(i), BinaryOperator::Eq, n("0"))),
+        ..empty_select()
+    };
+    // An empty string has no characters to walk, and `LENGTH('') = 0` would seed
+    // `i = 0` and return the empty accumulator anyway — but the subquery is skipped
+    // for it rather than executed, which keeps a `'' -> ''` case cheap and obvious.
+    Expr::Subquery(Box::new(Statement::Select(body)))
 }

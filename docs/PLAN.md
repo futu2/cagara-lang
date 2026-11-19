@@ -534,8 +534,8 @@ not a prelude addition.
 - `random` on SQLite: its `random()` is a signed 64-bit integer, and `random() / 2^63`
   landed outside `[0, 1)` in 490 of 1000 measured draws — so dividing is wrong, but
   *masking* is not: `RANDOM() & 2147483647` is non-negative and dividing by that mask's
-  range is exactly `[0, 1)`. It stays the one prelude function the differential suite
-  cannot check by rows, which its test says.
+  range size (`2^31`) gives `[0, 1)`. The engine tests check the endpoints and that
+  two reads of one projected sample agree, without expecting any particular draw.
 
 - A stage given no argument says what it needs. `q = u & where` reported
   `expected query {…}, found expr ?a b`; the check had to go in `unify_inner`'s `Fun`/`Fun`

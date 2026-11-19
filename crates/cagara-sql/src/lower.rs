@@ -51,6 +51,7 @@ pub struct Lowerer {
     /// over a window folds into the clause when it does, and into a derived table
     /// when it does not.
     has_qualify: bool,
+    volatile_offset: bool,
     /// The `At` of the stage being lowered, innermost last.
     ///
     /// A lowering failure used to reach the user as `0:0`, because `Rel` is built
@@ -63,11 +64,7 @@ pub struct Lowerer {
 }
 
 impl Lowerer {
-    /// `has_qualify` is a *capability*, not a dialect: the lowerer never matches
-    /// on a target, it is told whether this one has the clause. That keeps the
-    /// rule "a dialect rule lives in `dialect.rs`" true — `dialect::supports_qualify`
-    /// is the only place the list is written.
-    pub fn for_rel(rel: &Rel, has_qualify: bool) -> Self {
+    pub fn for_rel(rel: &Rel, dialect: sqlglot_rust::Dialect) -> Self {
         let mut counts = Vec::new();
         count_rel(rel, &mut counts);
         let mut tables = HashSet::new();
@@ -81,7 +78,8 @@ impl Lowerer {
             ctes: Vec::new(),
             tables,
             depth: 0,
-            has_qualify,
+            has_qualify: crate::dialect::supports_qualify(dialect),
+            volatile_offset: crate::dialect::needs_volatile_offset(dialect),
             loc: None,
         }
     }
@@ -277,7 +275,7 @@ impl Lowerer {
     /// never hoisted; it is lowered in place. `count_rel` records, per node,
     /// whether any use fuses into it, and `is_cte_candidate` requires that
     /// none does.
-    pub fn rel(&mut self, rel: &Rel) -> Result<Stage, String> {
+    pub fn query(&mut self, rel: &Rel) -> Result<Stage, String> {
         if self.building.is_empty() && self.is_cte_candidate(rel) {
             if let Some(name) = self.cte_names.get(rel).cloned() {
                 return self.cte_stage(&name, rel);
@@ -305,6 +303,17 @@ impl Lowerer {
             return self.cte_stage(&name, rel);
         }
         self.rel_inner(rel)
+    }
+
+    fn rel(&mut self, rel: &Rel) -> Result<Stage, String> {
+        let mut stage = self.query(rel)?;
+        if projects_random(rel) {
+            if self.volatile_offset {
+                stage.offset.get_or_insert(0);
+            }
+            stage = self.wrap(stage);
+        }
+        Ok(stage)
     }
 
     fn rel_inner(&mut self, rel: &Rel) -> Result<Stage, String> {
@@ -1262,6 +1271,16 @@ impl Lowerer {
             columns.iter().map(|n| (n.clone(), col(None, n))).collect(),
         ))
     }
+}
+
+fn projects_random(rel: &Rel) -> bool {
+    let fields = match rel.bare() {
+        Rel::Select(_, fields) | Rel::Update(_, fields) | Rel::Agg(_, fields) => fields,
+        _ => return false,
+    };
+    fields.iter().any(|(_, value)| value.any(&|expr| {
+        matches!(expr, IrExpr::Tpl(sql, args) if args.is_empty() && sql.eq_ignore_ascii_case("CAGARA_RANDOM()"))
+    }))
 }
 
 /// The expression of column `n` in a join input, or an internal error: a

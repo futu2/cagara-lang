@@ -1509,11 +1509,6 @@ fn reverse(text: Expr, f: Fam) -> Option<Expr> {
 }
 
 /// A float in `[0, 1)`, on the targets that spell it that way.
-///
-/// SQLite's `random()` is a *signed 64-bit integer*, not a float — measured, and
-/// `random() / 9223372036854775808.0` is negative about half the time, so there is no
-/// portable rewrite. Refusing is the honest outcome: emitting `RANDOM()` there would
-/// give the column a different type than the signature promises.
 fn random(f: Fam) -> Option<Expr> {
     match f {
         // SQLite's `random()` is a signed 64-bit integer, not a double in `[0, 1)`, so
@@ -1529,7 +1524,7 @@ fn random(f: Fam) -> Option<Expr> {
             Some(bin(
                 atomic(scaled),
                 BinaryOperator::Divide,
-                n("2147483647.0"),
+                n("2147483648.0"),
             ))
         }
         // `RAND()` on MySQL, `RANDOM()` everywhere else; `random()` in DuckDB, Trino,

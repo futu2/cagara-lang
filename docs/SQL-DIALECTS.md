@@ -136,10 +136,16 @@ follows:
 |---|---|---|
 | `like` | SQLite's `LIKE` is case-insensitive for ASCII unless the connection sets `PRAGMA case_sensitive_like` | a `GLOB` with the pattern translated (`%`→`*`, `_`→`?`, literal `*`/`?`/`[` escaped), because `GLOB` is the case-sensitive matcher SQLite has |
 | `lpad`, `rpad` | SQLite has neither `LPAD` nor `REPEAT` | `HEX(ZEROBLOB(n))` is `0` repeated `2n` times, so replacing each `0` with the fill gives the padding; `SUBSTR` takes the missing part |
-| `random` | SQLite's `random()` is a signed 64-bit integer, so dividing by `2^63` is negative half the time | `RANDOM() & 2147483647` masked and scaled, which is exactly `[0, 1)` |
+| `random` | SQLite's `random()` returns an integer | mask to 31 bits and divide by `2147483648.0`; even the largest masked value is strictly below `1` |
 | `reverse` | SQLite has no `REVERSE` | a scalar subquery carrying its own `WITH RECURSIVE`, walking the characters from the end |
 | `try*` | SQLite's `CAST('abc' AS INT)` is `0`, not an error; PostgreSQL has no `TRY_CAST` and raises | a validation before the cast — `TRIM(x,'0123456789')` on SQLite, a regex on PostgreSQL |
 | `listAt` | PostgreSQL needs `(ARRAY_AGG(id))[2]`, and unparenthesised `[2]` is a syntax error there | the subscript is built around a parenthesised inner expression |
+
+When a later stage reads a projected `random`, it reads a column of a derived
+table rather than substituting the draw into every use. SQLite and the MySQL
+family get a zero offset if there is no offset already: this keeps the engine
+from merging the derived table back into the outer query. A final projection
+with no consumer needs no such boundary.
 
 ## Rewritten instead of refused
 
@@ -240,4 +246,3 @@ So the prelude names a `CAGARA_*` function and
 builds the target's expression tree directly, per dialect family. A
 `CAGARA_*` call the backend does not recognize is a compile error rather than
 SQL that the engine would reject.
-

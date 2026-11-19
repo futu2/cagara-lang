@@ -1319,6 +1319,11 @@ chr ascii              : expr ?r int -> expr ?r string / expr ?r string -> expr 
 random                 : expr ?r float
 ```
 
+`select { r = random } & select { a = .r, b = .r }` returns the same draw in
+both columns of each row. Write `select { a = random, b = random }` for two
+draws. This applies to projected columns, not to arbitrary SQL functions in a
+`sql` template.
+
 Argument order is subject-last, which is the reverse of the SQL spelling:
 
 | Call | Meaning | Emitted |
@@ -1809,7 +1814,7 @@ If a request needs one of these, say so or write a `sql` template; do not guess 
   `HAVING`).
   SQL's `FILTER (WHERE ...)` clause is not syntax; write `filtered p agg`, or spell `CASE` in a
   custom aggregate template.
-- **Functions not in §7:** `random`, more aggregates (`median`, `stddev`, `string_agg`,
+- **Functions not in §7:** more aggregates (`median`, `stddev`, `string_agg`,
   `bool_and`/`bool_or`; `array_agg` is `arrayAgg`), `split`, `regexp_*`. These may be added as `sql` templates,
   but only with a signature.
 - **Language features:** user types, record values as data, arrays/maps, `if` statements, loops,

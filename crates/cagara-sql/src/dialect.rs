@@ -367,6 +367,10 @@ fn mysql(d: Dialect) -> bool {
     fam(d) == Fam::Mysql
 }
 
+pub(crate) fn needs_volatile_offset(dialect: Dialect) -> bool {
+    dialect == Dialect::Sqlite || mysql(dialect)
+}
+
 fn concat_as_function(d: Dialect) -> bool {
     matches!(fam(d), Fam::Mysql | Fam::Tsql)
 }

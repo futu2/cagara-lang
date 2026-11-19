@@ -106,8 +106,8 @@ pub fn compile_located(
     // The `Rel -> Rel` pass. `rewrite` has no dialect in it; see its module doc.
     let rewritten = rewrite::rewrite(rel);
     let rel = &rewritten;
-    let mut lowerer = lower::Lowerer::for_rel(rel, dialect::supports_qualify(opts.dialect));
-    let st = lowerer.rel(rel).map_err(|m| (lowerer.failed_at(), m))?;
+    let mut lowerer = lower::Lowerer::for_rel(rel, opts.dialect);
+    let st = lowerer.query(rel).map_err(|m| (lowerer.failed_at(), m))?;
     let at = lowerer.failed_at();
     let mut select = st.into_statement();
     select.ctes = lowerer.take_ctes();

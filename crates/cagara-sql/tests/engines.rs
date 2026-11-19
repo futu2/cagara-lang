@@ -3748,6 +3748,58 @@ q = f & select { s = over { order = [asc .k], frame = groups (preceding 1) curre
     }
 }
 
+#[test]
+fn a_projected_random_sample_is_reused_per_row() {
+    let source = format!("{TABLES}\n\
+        main = nums & order [desc .id] \
+        & select {{ id = .id, sample = random }} \
+        & update {{ other = random + 1.0 }} & where (.sample == .sample) \
+        & select {{ id = .id, a = .sample, b = .sample, c = .other, d = .other }} & offset 1 & limit 2\n");
+    let workspace = Workspace::from_source(&source);
+    let (_, query) = root_queries(&workspace)
+        .into_iter()
+        .find(|(name, _)| name == "main")
+        .unwrap();
+    let relation = query.unwrap();
+    for dialect in [
+        Dialect::Sqlite,
+        Dialect::DuckDb,
+        Dialect::Postgres,
+        Dialect::Mysql,
+    ] {
+        for optimize in [false, true] {
+            let sql = compile(
+                &relation,
+                Options {
+                    dialect,
+                    optimize,
+                    ..Options::default()
+                },
+            )
+            .unwrap();
+            let draws = sql.matches("RANDOM()").count() + sql.matches("RAND()").count();
+            assert_eq!(draws, 2, "{dialect:?} optimize={optimize}: {sql}");
+            let rows = match dialect {
+                Dialect::Postgres => pg_rows_or_skip(&pg_setup(SETUP), &sql),
+                _ => ENGINES
+                    .iter()
+                    .find(|engine| Dialect::from_str(engine.dialect) == Some(dialect))
+                    .and_then(|engine| rows_or_skip(engine, SETUP, &sql)),
+            };
+            if let Some(rows) = rows {
+                assert_eq!(rows.len(), 2, "{sql}: {rows:?}");
+                for (row, expected_id) in rows.iter().zip(["3", "2"]) {
+                    let values: Vec<_> = row.split('|').collect();
+                    assert_eq!(values.len(), 5);
+                    assert_eq!(values[0], expected_id, "{sql}: {row}");
+                    assert_eq!(values[1], values[2], "{sql}: {row}");
+                    assert_eq!(values[3], values[4], "{sql}: {row}");
+                }
+            }
+        }
+    }
+}
+
 /// SQLite's `random()` is the float form too, by masking and scaling.
 ///
 /// Every other target returns a float in `[0, 1)`; SQLite returns a **signed 64-bit
@@ -3756,11 +3808,6 @@ q = f & select { s = over { order = [asc .k], frame = groups (preceding 1) curre
 /// `RANDOM() & 2147483647` is non-negative, and dividing by that mask's range is exactly
 /// `[0, 1)`. So the language's `random` means the same thing on every target, rather than
 /// being a compile error on one of them.
-///
-/// It is also the one prelude function the differential suite cannot check by *rows*: a
-/// query whose answer changes every run cannot be compared. The shape is asserted here
-/// instead, and the range was measured over ten rows — every value in range, all
-/// distinct.
 #[test]
 fn sqlite_random_is_the_float_form_too() {
     const DEFS: &str = "\
@@ -3780,9 +3827,26 @@ r = t & select { v = random }\n";
     )
     .expect("SQLite masks the integer form");
     assert!(
-        sqlite.contains("RANDOM() & 2147483647") && sqlite.contains("/ 2147483647.0"),
+        sqlite.contains("RANDOM() & 2147483647") && sqlite.contains("/ 2147483648.0"),
         "{sqlite}"
     );
+    let engine = ENGINES
+        .iter()
+        .find(|engine| engine.dialect == "sqlite")
+        .unwrap();
+    for (raw, expected) in [("0", 0.0), ("-1", 2147483647.0 / 2147483648.0)] {
+        let boundary = sqlite.replace("RANDOM()", raw);
+        if let Some(rows) = rows_or_skip(engine, SETUP, &boundary) {
+            assert_eq!(rows.len(), 3);
+            for row in rows {
+                let value: f64 = row.parse().unwrap();
+                assert!(
+                    (0.0..1.0).contains(&value) && (value - expected).abs() < 1e-14,
+                    "{boundary}: {row}"
+                );
+            }
+        }
+    }
     for d in [
         Dialect::DuckDb,
         Dialect::Postgres,

@@ -752,16 +752,13 @@ const CASES: &[(&str, &[&str])] = &[
         "math_cbrt_negative = nums & select { id = .id, c = cbrt (0.0 - 8.0) } & order [asc .id] & limit 1",
         &["1|-2.0"],
     ),
-    // `listAt` is DuckDB-only, and this is the one place `list` values are read by
-    // position. 1-based, NULL out of range.
     (
-        // `dupes` has ids 1, 1, 2, 3: the second element is 1 and the ninth is NULL.
-        "list_at = (dupes & agg { xs = arrayAgg .id }) & select { a = listAt 2 .xs, b = listAt 9 .xs }",
-        &["1|NULL"],
+        "list_at = (dupes & agg { xs = arrayAggBy [desc .id] .id }) & select { a = listAt 2 .xs, b = listAt 9 .xs }",
+        &["2|NULL"],
     ),
     // The first element, so a 1-based/0-based mistake would show.
     (
-        "list_at_first = (dupes & agg { xs = arrayAgg .id }) & select { a = listAt 1 .xs, b = listAt 4 .xs }",
+        "list_at_first = (dupes & agg { xs = arrayAggBy [asc .id] .id }) & select { a = listAt 1 .xs, b = listAt 4 .xs }",
         &["1|3"],
     ),
     // The string functions the prelude gained. Each was checked on four engines
@@ -1915,17 +1912,29 @@ fn engines_agree() {
             // this suite exists to catch.
             for optimize in [false, true] {
                 let opts = Options { optimize, ..base };
-                // A refusal is a decision about the target — `rollup` on SQLite
-                // and MySQL, `fullJoin` on MySQL — not a failure: nothing is
-                // emitted, so there is nothing to run. Every case that compiles is
-                // still checked, and `refusals_are_the_ones_we_mean` pins which.
-                let Ok(sql) = compile(rel, opts) else {
-                    break;
-                };
                 let label = if optimize {
                     format!("{} (optimized)", e.shell)
                 } else {
                     e.shell.to_string()
+                };
+                let expects_array_refusal =
+                    opts.dialect == Dialect::Sqlite && matches!(name, "list_at" | "list_at_first");
+                let sql = match compile(rel, opts) {
+                    Err(message)
+                        if expects_array_refusal
+                            && message.contains("needs a dialect with an array type") =>
+                    {
+                        continue
+                    }
+                    Err(message) => {
+                        failures.push(format!("`{name}` on {label} failed to compile: {message}"));
+                        continue;
+                    }
+                    Ok(_) if expects_array_refusal => {
+                        failures.push(format!("`{name}` on {label} compiled despite its expected array refusal; review its expected rows"));
+                        continue;
+                    }
+                    Ok(sql) => sql,
                 };
                 match run(e, &sql) {
                     None if must_run(engine_name(e)) => {

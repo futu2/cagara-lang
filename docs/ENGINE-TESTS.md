@@ -62,6 +62,11 @@ when their shells happen to be installed. `CAGARA_REQUIRE_ENGINES=1` then means 
 engines in the list must be present", so a failed install fails the job instead of
 silently turning the whole suite into skips.
 
+The SQLite/DuckDB row comparison requires every shared case to compile with and
+without `--optimize`. The two `listAt` cases on SQLite must instead report that
+the target lacks an array type. A different compiler error fails the test; if
+SQLite support is added, replace the expected refusal with a row check.
+
 Pinning is not decoration. The runner ships its own `sqlite3`, older than the 3.46 that
 the `floor` date modifier needs, so the engine is present and wrong rather than absent —
 it would fail instead of skipping. That is also why the `rust` job sets
